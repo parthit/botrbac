@@ -8,6 +8,7 @@ on create (see drive_client.check_create_metadata / check_update_metadata).
 
 import base64
 import binascii
+import logging
 import posixpath
 import re
 from typing import Any
@@ -20,6 +21,7 @@ from .drive_client import (
     DriveClient,
     DriveNotFoundError,
 )
+from .extract import ExtractError, document_kind, extract_text
 from .scope import (
     FileRef,
     InvalidInputError,
@@ -123,6 +125,12 @@ TOP_LEVEL_NOTE = (
     "These are the items the owner shared with you. Call list_folder with a folder's id to "
     "see inside it."
 )
+
+# MCP returns the payload twice (text content and structured content), and base64 grows by
+# 4/3. 1 MiB of raw bytes stays under the 4.5 MB response limit on the current host.
+DOWNLOAD_BYTE_CAP = 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 def public_meta(data: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +287,8 @@ class DriveService:
             result["note"] = "shortcuts are not followed; ask the owner to share the target"
             return result
 
+        name = str(meta.get("name", ""))
+        kind = document_kind(mime, name)
         if mime in EXPORT_FORMATS:
             export_mime = EXPORT_FORMATS[mime]
             data = self.drive.export(file_id, export_mime)
@@ -286,10 +296,15 @@ class DriveService:
         elif mime.startswith(GOOGLE_APPS_PREFIX):
             result["note"] = f"{mime} cannot be exported as text"
             return result
-        elif is_text_like(mime, meta.get("name", "")):
+        elif kind is not None:
+            return self._read_extracted(file_id, result, kind)
+        elif is_text_like(mime, name):
             data = self.drive.download(file_id, self.max_bytes + 1)
         else:
-            result["note"] = f"binary file ({mime or 'unknown type'}); content not returned"
+            shown = mime or "unknown type"
+            result["note"] = (
+                f"binary file ({shown}); text not available. Use download_file for the bytes."
+            )
             return result
 
         if len(data) > self.max_bytes:
@@ -303,6 +318,69 @@ class DriveService:
             text = text[: self.max_chars]
             result["truncated"] = True
         result["content"] = text
+        return result
+
+    def _read_extracted(self, file_id: str, result: dict[str, Any], kind: str) -> dict[str, Any]:
+        data = self.drive.download(file_id, self.max_bytes + 1)
+        source_truncated = len(data) > self.max_bytes
+        if source_truncated:
+            data = data[: self.max_bytes]
+            result["truncated"] = True
+        try:
+            text = extract_text(data, kind, char_limit=self.max_chars)
+        except ExtractError as exc:
+            logger.info("text extraction failed for %s: %s", kind, exc)
+            if source_truncated:
+                result["note"] = (
+                    f"file exceeds the {self.max_bytes}-byte limit; text could not be extracted. "
+                    "Use download_file for the leading bytes."
+                )
+            else:
+                result["note"] = f"{exc}. Use download_file for the bytes."
+            return result
+        except Exception:
+            logger.exception("text extraction failed for %s", kind)
+            result["note"] = "text could not be extracted. Use download_file for the bytes."
+            return result
+        if not text.strip():
+            result["note"] = (
+                "no extractable text (the file may be a scan or image-only). "
+                "Use download_file for the bytes."
+            )
+            return result
+        if len(text) > self.max_chars:
+            text = text[: self.max_chars]
+            result["truncated"] = True
+        result["content"] = text
+        result["extracted_as"] = "text/plain"
+        return result
+
+    def download_file(self, file_id: str) -> dict[str, Any]:
+        """Raw bytes for a file inside the share. Google Workspace files have no media body."""
+        meta = self._get_in_scope(file_id)
+        mime = meta.get("mimeType", "")
+        result: dict[str, Any] = {
+            "file": self._public(meta),
+            "content_base64": None,
+            "byte_count": 0,
+            "truncated": False,
+        }
+        if mime == FOLDER_MIME:
+            raise InvalidInputError("this is a folder; use list_folder")
+        if mime == SHORTCUT_MIME:
+            result["note"] = "shortcuts are not followed; ask the owner to share the target"
+            return result
+        if mime.startswith(GOOGLE_APPS_PREFIX):
+            result["note"] = "Google Workspace files have no raw bytes; use read_file"
+            return result
+        limit = min(self.max_bytes, DOWNLOAD_BYTE_CAP)
+        data = self.drive.download(file_id, limit + 1)
+        if len(data) > limit:
+            data = data[:limit]
+            result["truncated"] = True
+            result["note"] = f"returned the first {limit} bytes"
+        result["content_base64"] = base64.b64encode(data).decode("ascii")
+        result["byte_count"] = len(data)
         return result
 
     # ---- editor tools ----------------------------------------------------
