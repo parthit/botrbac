@@ -122,11 +122,17 @@ def _sniff_kind(kind: str, data: bytes) -> str:
 
 
 def _clip(parts: list[str], limit: int) -> str:
+    """Join sections with a newline so the next page, slide, or sheet does not run on."""
     out: list[str] = []
     size = 0
     for part in parts:
+        if not part:
+            continue
         if size >= limit:
             break
+        if out:
+            out.append("\n")
+            size += 1
         out.append(part)
         size += len(part)
     return "".join(out)

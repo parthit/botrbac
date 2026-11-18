@@ -6,19 +6,32 @@ import zipfile
 from xml.sax.saxutils import escape
 
 
-def minimal_pdf(text: str) -> bytes:
+def _pdf_literal(text: str) -> bytes:
     safe = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    stream = f"BT /F1 24 Tf 36 120 Td ({safe}) Tj ET".encode("latin-1")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] "
-            b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"
-        ),
-        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ]
+    return f"BT /F1 24 Tf 36 120 Td ({safe}) Tj ET".encode("latin-1")
+
+
+def minimal_pdf(*pages: str) -> bytes:
+    if not pages:
+        pages = ("",)
+    font_id = 3 + 2 * len(pages)
+    kids: list[str] = []
+    objects: list[bytes] = []
+    for index, text in enumerate(pages):
+        page_id = 3 + 2 * index
+        content_id = page_id + 1
+        kids.append(f"{page_id} 0 R")
+        stream = _pdf_literal(text)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] "
+                f"/Contents {content_id} 0 R /Resources << /Font << /F1 {font_id} 0 R >> >> >>"
+            ).encode()
+        )
+        objects.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.insert(0, f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(pages)} >>".encode())
+    objects.insert(0, b"<< /Type /Catalog /Pages 2 0 R >>")
     out = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for index, obj in enumerate(objects, start=1):
@@ -107,7 +120,11 @@ def minimal_pptx(*slides: str) -> bytes:
     return _zip(parts)
 
 
-def minimal_xlsx(rows: list[list[object]], sheet: str = "Resume") -> bytes:
+def minimal_xlsx(
+    rows: list[list[object]],
+    sheet: str = "Resume",
+    more: list[tuple[str, list[list[object]]]] | None = None,
+) -> bytes:
     import openpyxl
 
     workbook = openpyxl.Workbook()
@@ -116,6 +133,10 @@ def minimal_xlsx(rows: list[list[object]], sheet: str = "Resume") -> bytes:
     worksheet.title = sheet
     for row in rows:
         worksheet.append(row)
+    for title, sheet_rows in more or []:
+        extra = workbook.create_sheet(title)
+        for row in sheet_rows:
+            extra.append(row)
     buf = io.BytesIO()
     workbook.save(buf)
     workbook.close()

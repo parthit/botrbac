@@ -35,8 +35,7 @@ def test_docx_includes_body_table_and_header() -> None:
     data = minimal_docx("Quarter plan", header="Confidential")
     text = extract_text(data, "docx", char_limit=1000)
     assert "Quarter plan" in text
-    assert "cell text" in text
-    assert "Confidential" in text
+    assert "cell text\nConfidential" in text
 
 
 def test_mislabeled_doc_that_is_really_a_zip_is_read_as_docx() -> None:
@@ -46,14 +45,20 @@ def test_mislabeled_doc_that_is_really_a_zip_is_read_as_docx() -> None:
 
 def test_pptx_slides_stay_in_order() -> None:
     text = extract_text(minimal_pptx("First slide", "Second slide"), "pptx", char_limit=1000)
-    assert text.index("First slide") < text.index("Second slide")
+    assert "First slide\nSecond slide" in text
 
 
 def test_xlsx_cells() -> None:
-    data = minimal_xlsx([["Name", "Role"], ["Ada", "Labs"]])
+    data = minimal_xlsx([["Name", "Role"], ["Ada", "Labs"]], more=[("Costs", [["GPU"]])])
     text = extract_text(data, "xlsx", char_limit=1000)
     assert "Name\tRole" in text
-    assert "Ada\tLabs" in text
+    assert "Ada\tLabs\n# Costs\nGPU" in text
+
+
+def test_pdf_pages_are_separated() -> None:
+    text = extract_text(minimal_pdf("Page one", "Page two"), "pdf", char_limit=1000)
+    assert "Page one" in text and "Page two" in text
+    assert "onePage" not in text.replace(" ", "")
 
 
 def test_rtf_and_legacy_doc() -> None:
