@@ -18,7 +18,7 @@
   <button type="submit">Search</button>
   {% if q %}<a href="/browse?folder=root{{ keep('') }}">Clear search</a>{% endif %}
   {% if picker_ready %}
-  <button type="button" class="primary" id="pick-drive">Add from Google Drive</button>
+  <button type="button" class="primary" id="pick-drive" data-next="{{ here }}"{% if picking %} data-request="{{ picking.id }}"{% endif %}>Add from Google Drive</button>
   {% endif %}
 </form>
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>

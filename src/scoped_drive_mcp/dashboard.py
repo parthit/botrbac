@@ -98,7 +98,6 @@ SECURITY_HEADERS = [
 ]
 
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_PAGE_TOKEN = re.compile(r"^[A-Za-z0-9_\-+/=.]{1,512}$")
 
 
 class OwnerNotConnectedError(Exception):
@@ -1105,7 +1104,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
 
 def normalize_page_token(value: str | None) -> str | None:
-    if not value or not _PAGE_TOKEN.fullmatch(value):
+    """Keep an opaque Drive page token.
+
+    Google's tokens are not a fixed alphabet (`~`, `!`, `*`, `|` all show up).
+    Drop only blank, huge, or control-character values so a real Next link
+    still addresses the same page.
+    """
+    if not value or len(value) > 1024:
+        return None
+    if any(ord(ch) < 33 or ord(ch) == 127 for ch in value):
         return None
     return value
 

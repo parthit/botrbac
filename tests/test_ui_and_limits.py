@@ -2,14 +2,16 @@
 
 import re
 from html import unescape
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from scoped_drive_mcp.dashboard import browse_href, normalize_page_token
 from scoped_drive_mcp.oauth import GoogleOAuthClient
 from scoped_drive_mcp.server import build_app
 from tests.conftest import OWNER_EMAIL, make_settings
-from tests.dash import MCP_HEADERS, client, login
+from tests.dash import MCP_HEADERS, client, login, mcp_call
 
 
 @pytest.fixture
@@ -53,6 +55,75 @@ def test_privacy_describes_drive_file(c) -> None:
     assert page.status_code == 200
     assert "https://www.googleapis.com/auth/drive.file" in page.text
     assert "https://www.googleapis.com/auth/drive</code>" not in page.text
+
+
+def test_opaque_drive_page_token_round_trips() -> None:
+    token = "Cjx~!*|token"
+    assert normalize_page_token(token) == token
+    assert normalize_page_token("has space") is None
+    assert normalize_page_token("line\nbreak") is None
+    assert normalize_page_token("x" * 1025) is None
+    href = browse_href("proj", q=None, request_id=None, page=token, prev=["prev~!*"])
+    query = parse_qs(urlparse(href).query)
+    assert query["page"] == [token]
+    assert query["prev"] == ["prev~!*"]
+    assert query["folder"] == ["proj"]
+
+
+def test_browse_sends_opaque_page_token(owner_c, monkeypatch) -> None:
+    from tests.fake_drive import FakeDrive
+
+    seen: list[str | None] = []
+    original = FakeDrive.list_files
+
+    def wrapped(self, q, fields, page_size, page_token=None):
+        seen.append(page_token)
+        return original(self, q, fields, page_size, None)
+
+    monkeypatch.setattr(FakeDrive, "list_files", wrapped)
+    monkeypatch.setattr("scoped_drive_mcp.dashboard.BROWSE_PAGE_SIZE", 1)
+    token = "Cjx~!*|token"
+    page = owner_c.get("/browse", params={"folder": "root", "page": token})
+    assert page.status_code == 200
+    assert token in seen
+    nxt = re.search(r'href="([^"]+)">Next</a>', page.text)
+    assert nxt, page.text
+    query = parse_qs(urlparse(unescape(nxt.group(1))).query)
+    assert query["prev"] == [token]
+
+
+def test_picker_button_keeps_folder_and_request(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            google_picker_api_key="AIzaSyTestKeyValue",
+            google_cloud_project_number="123456789012",
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    signed_in = client(app)
+    assert login(signed_in).status_code == 303
+    denied = mcp_call(signed_in, "read_file", file_id="priv-secret")
+    request_id = denied["structuredContent"]["request_id"]
+    page = signed_in.get("/browse", params={"folder": "proj", "request": request_id})
+    assert page.status_code == 200
+    button = re.search(r"<button[^>]*id=\"pick-drive\"[^>]*>", page.text)
+    assert button, page.text
+    tag = button.group(0)
+    assert f'data-request="{request_id}"' in tag
+    nxt = unescape(re.search(r'data-next="([^"]*)"', tag).group(1))
+    query = parse_qs(urlparse(nxt).query)
+    assert query["folder"] == ["proj"]
+    assert query["request"] == [request_id]
+    script_path = Path(__file__).resolve().parents[1] / "src/scoped_drive_mcp/templates/ui.js"
+    script = script_path.read_text()
+    assert 'getAttribute("data-next")' in script
+    assert 'getAttribute("data-request")' in script
+    assert "/approve" in script
 
 
 def test_browse_previous_and_next(owner_c, monkeypatch) -> None:

@@ -54,17 +54,33 @@
     });
   }
 
+  function safeBrowsePath(value) {
+    if (!value || value.charAt(0) !== "/" || value.indexOf("//") === 0 || value.indexOf("\\") !== -1) {
+      return "/browse";
+    }
+    return value;
+  }
+
   function grantPicked(docs) {
     var csrf = document.querySelector('meta[name="csrf"]');
     var token = csrf ? csrf.getAttribute("content") : "";
+    var next = safeBrowsePath(pick.getAttribute("data-next"));
+    var requestId = pick.getAttribute("data-request") || "";
+    if (!/^[A-Za-z0-9_-]{22,64}$/.test(requestId)) requestId = "";
     var chain = Promise.resolve();
-    docs.forEach(function (doc) {
+    docs.forEach(function (doc, index) {
       chain = chain.then(function () {
         var body = new URLSearchParams();
         body.set("csrf", token || "");
-        body.set("file_id", doc.id);
-        body.set("next", "/browse");
-        return fetch("/grant", {
+        var path = "/grant";
+        if (requestId && index === 0) {
+          body.set("target_id", doc.id);
+          path = "/requests/" + requestId + "/approve";
+        } else {
+          body.set("file_id", doc.id);
+          body.set("next", next);
+        }
+        return fetch(path, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: body.toString(),
@@ -73,7 +89,8 @@
         });
       });
     });
-    return chain.then(function () { window.location.assign("/browse"); });
+    var done = requestId ? "/requests/" + requestId : next;
+    return chain.then(function () { window.location.assign(done); });
   }
 
   function openPicker(cfg) {
