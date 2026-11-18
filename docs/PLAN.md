@@ -88,8 +88,8 @@ flowchart LR
   - Folder mode: list all subfolders (cached), build a query of the form `('id1' in parents or ...)` split into chunks, and run the scope guard again on every result.
 - **Tokens:** set in `API_TOKENS` as SHA-256 hash and role pairs, compared with a timing-safe check. The role is passed to tools through a `contextvars.ContextVar`.
 - **Output limits and logging:**
-  - Google Docs, Sheets and Slides are exported as text or CSV.
-  - Downloads are capped at `MAX_BYTES` and text output at `MAX_CHARS`.
+  - Google Docs, Sheets and Slides are exported as text or CSV. PDF and Office files are extracted to text. Other binaries are available from `download_file` as size-capped base64.
+  - Downloads are capped at `MAX_BYTES` and text output at `MAX_CHARS`. `download_file` also caps returned bytes at 1 MiB.
   - Every call is written to stdout as a JSON audit line with token ID, tool name, file ID, decision and timestamp.
 
 ## Project layout (`~/Projects/scoped-drive-mcp`)

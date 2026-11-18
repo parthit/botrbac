@@ -28,6 +28,10 @@ cryptography==50.0.2
     #   google-auth
     #   pyjwt
     #   scoped-drive-mcp
+defusedxml==0.7.1
+    # via scoped-drive-mcp
+et-xmlfile==2.0.0
+    # via openpyxl
 google-api-core==2.43.2
     # via google-api-python-client
 google-api-python-client==2.201.0
@@ -80,6 +84,10 @@ mcp==1.30.0
     # via scoped-drive-mcp
 oauthlib==4.0.1
     # via requests-oauthlib
+olefile==0.47
+    # via scoped-drive-mcp
+openpyxl==3.1.5
+    # via scoped-drive-mcp
 opentelemetry-api==1.45.2
     # via google-api-core
 proto-plus==1.29.0
@@ -113,6 +121,8 @@ pyjwt==2.15.1
     # via mcp
 pyparsing==3.3.3
     # via httplib2
+pypdf==7.1.1
+    # via scoped-drive-mcp
 python-dotenv==1.2.4
     # via pydantic-settings
 python-multipart==0.0.33
@@ -142,6 +152,8 @@ starlette==1.10.0
     #   mcp
     #   scoped-drive-mcp
     #   sse-starlette
+striprtf==0.0.35
+    # via scoped-drive-mcp
 typing-extensions==4.16.0
     # via
     #   anyio

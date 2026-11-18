@@ -24,6 +24,7 @@ VIEWER_TOOLS: frozenset[str] = frozenset(
         "list_folder",
         "get_metadata",
         "read_file",
+        "download_file",
         "request_access",
         "check_access_request",
         "request_link",

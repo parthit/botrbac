@@ -20,6 +20,7 @@ VALID_ARGS = {
     "list_folder": {},
     "get_metadata": {"file_id": "notes-txt"},
     "read_file": {"file_id": "notes-txt"},
+    "download_file": {"file_id": "notes-txt"},
     "create_folder": {"name": "New folder"},
     "create_doc": {"title": "New doc", "content": "hello"},
     "upload_file": {"name": "a.txt", "mime_type": "text/plain", "content_text": "x"},
@@ -47,6 +48,7 @@ VIEWER_EXPECTED = {
     "list_folder",
     "get_metadata",
     "read_file",
+    "download_file",
     "request_access",
     "check_access_request",
 } | MAILBOX_TOOLS
