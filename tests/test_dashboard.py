@@ -62,9 +62,10 @@ def test_login_page_is_public(c) -> None:
     assert r.status_code == 200 and "Sign in with Google" in r.text
     assert r.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert "apis.google.com" in r.headers["content-security-policy"]
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
     # Google requires the data disclosure immediately before the consent button.
-    assert r.text.index("Full access to Google Drive") < r.text.index("Sign in with Google")
+    assert r.text.index("files and folders you pick") < r.text.index("Sign in with Google")
 
 
 def test_public_home_is_the_consent_screen_page(c) -> None:
@@ -101,7 +102,7 @@ def test_owner_login(c, oauth, memstore, p2_app) -> None:
     cookie = r.headers["set-cookie"].lower()
     assert SESSION_COOKIE in cookie
     assert "httponly" in cookie and "secure" in cookie and "samesite=lax" in cookie
-    assert oauth.hints[-1] == OWNER_EMAIL
+    assert oauth.hints[-1] is None
     assert c.get("/").status_code == 200
     # the refresh token is stored encrypted
     raw = memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY)
@@ -172,7 +173,27 @@ def test_google_error_param(c) -> None:
 def test_drive_scope_required(c, oauth) -> None:
     oauth.scopes = frozenset({"openid", "email"})
     r = login(c)
-    assert r.status_code == 400 and "Drive access was not granted" in r.text
+    assert r.status_code == 400 and "file access was not granted" in r.text
+
+
+def test_full_drive_scope_is_rejected(c, oauth) -> None:
+    oauth.scopes = frozenset(
+        {"openid", "email", "https://www.googleapis.com/auth/drive"}
+    )
+    r = login(c)
+    assert r.status_code == 400
+    assert "no longer accepts full Google Drive access" in r.text
+
+
+def test_login_hint_is_only_the_visitors(c, oauth) -> None:
+    start_oauth(c, "/auth/login")
+    assert oauth.hints[-1] is None
+    start_oauth(c, "/auth/login?login_hint=visitor@example.com")
+    assert oauth.hints[-1] == "visitor@example.com"
+    start_oauth(c, "/auth/login?login_hint=not-an-email")
+    assert oauth.hints[-1] is None
+    start_oauth(c, f"/auth/login?login_hint={OWNER_EMAIL}")
+    assert oauth.hints[-1] == OWNER_EMAIL
 
 
 def test_logout(owner_c) -> None:
@@ -276,10 +297,7 @@ def test_sign_in_is_the_only_drive_token(no_env_bot_app, memstore, world) -> Non
     assert "Connect bot" not in text
 
     login(c)
-    health = c.get("/health").json()
-    assert health["bot_connected"] is True and health["bot_source"] == "owner"
-    assert health["owner_connected"] is True
-    assert health["mode"] == "same_account"
+    assert c.get("/health").json() == {"status": "ok"}
     post(c, "/grant", file_id="loose-doc")
     assert world.files["loose-doc"].permissions == []
     result = mcp_call(c, "read_file", file_id="loose-doc")
@@ -436,7 +454,7 @@ def test_overview_and_health_report_status(owner_c) -> None:
     assert "UPSTASH_REDIS_REST_URL" in page
     assert f"{BASE_URL}/mcp" in page
     assert "uses your Google account" in page
-    assert "whole Drive" in page
+    assert "files and folders you pick" in page
     assert "Assistant acts as" not in page
     assert "make_token.py" in page  # admin-only operator note
 
@@ -445,7 +463,7 @@ def test_non_admin_overview_hides_operator_notes(c) -> None:
     login(c, "eve-code")
     page = c.get("/").text
     assert "uses your Google account" in page
-    assert "whole Drive" in page
+    assert "files and folders you pick" in page
     assert f"{BASE_URL}/mcp" in page
     assert "make_token.py" not in page
     assert "UPSTASH_REDIS_REST_URL" not in page
@@ -479,7 +497,7 @@ def test_requests_nav_counts_pending(owner_c) -> None:
     mcp_call(owner_c, "read_file", file_id="priv-secret")
     page = owner_c.get("/browse").text
     start = page.index("Requests")
-    assert 'class="pill pending">1<' in page[start : start + 160]
+    assert "1 waiting" in page[start : start + 220]
 
 
 def test_confirm_script_is_served(c) -> None:
@@ -518,4 +536,5 @@ def test_dashboard_not_configured(world) -> None:
     assert c.get("/terms").status_code == 200
     assert c.get("/privacy").status_code == 200
     health = c.get("/health").json()
-    assert {"SESSION_SECRET", "OWNER_EMAIL"} <= set(health["missing"])
+    assert health == {"status": "ok"}
+    assert "SESSION_SECRET" not in str(health)

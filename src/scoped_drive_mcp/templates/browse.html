@@ -2,19 +2,26 @@
 {% block title %}Browse{% endblock %}
 {% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
-<h1>Browse My Drive</h1>
+<h1>Files this app can see</h1>
+<p class="muted">Allow the items your assistant may use. Add from Google Drive opens the picker, which is how a file becomes visible under per-file access. Picking a folder shares that folder. Files already inside it may still need to be picked one by one. Files the assistant creates in an allowed folder are included.</p>
 {% if picking %}
-<div class="warn">Picking an item for the request:
-  <b>{{ picking.description or picking.file_id }}</b>
-  {% if picking.reason %}<span class="muted">({{ picking.reason }})</span>{% endif %}.
-  Click <b>Share for this request</b> next to the right item. <a href="/requests/{{ picking.id }}">Back to the request</a></div>
+<div class="warn">Choosing an item for this request:
+  <b>{{ picking.description or picking.file_name or "a file the assistant asked for" }}</b>.
+  Choose <b>Share for this request</b> next to the right item.
+  <a href="/requests/{{ picking.id }}">Back to the request</a>
+</div>
 {% endif %}
-<form method="get" action="/browse" style="margin-bottom:14px">
+<form method="get" action="/browse" class="actions" role="search">
   {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
-  <input type="search" name="q" value="{{ q or '' }}" placeholder="Search names in your Drive">
+  <label class="sr-only" for="q" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Search names</label>
+  <input id="q" type="search" name="q" value="{{ q or '' }}" placeholder="Search names in your Drive">
   <button type="submit">Search</button>
-  {% if q %}<a href="/browse?folder=root{{ keep('') }}">Clear</a>{% endif %}
+  {% if q %}<a href="/browse?folder=root{{ keep('') }}">Clear search</a>{% endif %}
+  {% if picker_ready %}
+  <button type="button" class="primary" id="pick-drive">Add from Google Drive</button>
+  {% endif %}
 </form>
+<p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>
 
 {% if not q %}
 <p class="crumbs">
@@ -23,38 +30,32 @@
     {% else %}<b>{{ c.name }}</b>{% endif %}
   {% endfor %}
   {% if current and not is_root %}
-    &nbsp;
-      {% if current_granted %}
-      <span class="pill ok">allowed</span>
-    {% elif covered_by %}
-      <span class="pill ok">allowed through {{ covered_by }}</span>
-    {% endif %}
+    {% if current_granted %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
+    {% elif covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed through {{ covered_by }}</span>{% endif %}
   {% endif %}
 </p>
-{% if covered_by %}<p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed.</p>{% endif %}
+{% if covered_by %}<p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed. Google may still hide files this app has not opened.</p>{% endif %}
 {% else %}
 <p class="muted">Search results for “{{ q }}”.</p>
 {% endif %}
 
-<div class="scroll-x">
-<table>
-  <thead><tr><th>Name</th><th>Type</th><th>Assistant access</th><th></th></tr></thead>
-  <tbody>
+{% if rows %}
+<ul class="files">
   {% for r in rows %}
-  <tr>
-    <td>
-      <span class="icon">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
+  <li class="file">
+    <div class="file-name">
+      <span class="file-icon" aria-hidden="true">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
       {% if r.is_folder %}<a href="/browse?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}</a>
       {% elif r.link %}<a href="{{ r.link }}" target="_blank" rel="noopener noreferrer">{{ r.name }}</a>
       {% else %}{{ r.name }}{% endif %}
-    </td>
-    <td class="muted">{{ r.kind }}</td>
-    <td>
-      {% if r.granted %}<span class="pill ok">allowed</span>
-      {% elif r.covered %}<span class="pill ok">via folder</span>
-      {% else %}<span class="pill">not allowed</span>{% endif %}
-    </td>
-    <td style="text-align:right">
+    </div>
+    <div class="file-meta">
+      <span>{{ r.kind }}</span>
+      {% if r.granted %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
+      {% elif r.covered %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed via folder</span>
+      {% else %}<span class="pill"><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
+    </div>
+    <div class="file-actions">
       {% if picking %}
         <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
           <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -73,18 +74,35 @@
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
-          <button type="submit" title="{{ 'Allows the shortcut target' if r.is_shortcut else 'Allow for the assistant' }}">{{ "Allow the target" if r.is_shortcut else "Allow" }}</button>
+          <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}</button>
         </form>
       {% endif %}
-    </td>
-  </tr>
-  {% else %}
-  <tr><td colspan="4" class="muted">Nothing here.</td></tr>
+    </div>
+  </li>
   {% endfor %}
-  </tbody>
-</table>
+</ul>
+{% elif q %}
+<div class="card empty">
+  <h2>No names match “{{ q }}”</h2>
+  <p>Try a shorter name, or clear the search and pick a file from Google Drive.</p>
+  <p><a class="btn" href="/browse?folder=root{{ keep('') }}">Clear search</a></p>
 </div>
-{% if next_token %}
-<p><a href="/browse?folder={{ folder | urlencode }}&page={{ next_token | urlencode }}{{ keep('') }}">Next page →</a></p>
+{% else %}
+<div class="card empty">
+  <h2>Nothing here yet</h2>
+  <p>This folder has no files this app can open. Add files with the Google picker above, or create them with an assistant inside a folder you have allowed.</p>
+  {% if not picker_ready %}
+  <p>The file picker is not set up on this server yet. Files the assistant creates in an allowed folder will show up here.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if prev_href or next_href %}
+<nav class="pager" aria-label="Pages">
+  {% if prev_href %}<a class="btn" href="{{ prev_href }}">Previous</a>
+  {% else %}<span class="btn" aria-disabled="true">Previous</span>{% endif %}
+  {% if next_href %}<a class="btn" href="{{ next_href }}">Next</a>
+  {% else %}<span class="btn" aria-disabled="true">Next</span>{% endif %}
+</nav>
 {% endif %}
 {% endblock %}

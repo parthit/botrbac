@@ -1,0 +1,164 @@
+"""Login hint, OAuth scopes, public assets, picker session, pagination, and rate limits."""
+
+import re
+from html import unescape
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+from scoped_drive_mcp.oauth import GoogleOAuthClient
+from scoped_drive_mcp.server import build_app
+from tests.conftest import OWNER_EMAIL, make_settings
+from tests.dash import MCP_HEADERS, client, login
+
+
+@pytest.fixture
+def c(p2_app):
+    return client(p2_app)
+
+
+@pytest.fixture
+def owner_c(c):
+    assert login(c).status_code == 303
+    return c
+
+
+def test_authorization_url_uses_drive_file_scope() -> None:
+    oauth = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
+    query = parse_qs(urlparse(oauth.authorization_url("state-token")).query)
+    scopes = query["scope"][0].split()
+    assert scopes == ["openid", "email", "https://www.googleapis.com/auth/drive.file"]
+    assert "login_hint" not in query
+    hinted = parse_qs(urlparse(oauth.authorization_url("state-token", "visitor@example.com")).query)
+    assert hinted["login_hint"] == ["visitor@example.com"]
+
+
+def test_favicon_and_robots_do_not_redirect(c) -> None:
+    icon = c.get("/favicon.ico")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"].startswith("image/svg+xml")
+    assert "🤖" in icon.text
+    assert "location" not in {name.lower() for name in icon.headers}
+    robots = c.get("/robots.txt")
+    assert robots.status_code == 200
+    assert robots.headers["content-type"].startswith("text/plain")
+    assert "User-agent: *" in robots.text
+    assert "Disallow: /" in robots.text
+    css = c.get("/app.css")
+    assert css.status_code == 200 and ".skip" in css.text
+
+
+def test_privacy_describes_drive_file(c) -> None:
+    page = c.get("/privacy")
+    assert page.status_code == 200
+    assert "https://www.googleapis.com/auth/drive.file" in page.text
+    assert "https://www.googleapis.com/auth/drive</code>" not in page.text
+
+
+def test_browse_previous_and_next(owner_c, monkeypatch) -> None:
+    monkeypatch.setattr("scoped_drive_mcp.dashboard.BROWSE_PAGE_SIZE", 1)
+    first = owner_c.get("/browse")
+    assert first.status_code == 200
+    assert 'aria-disabled="true">Previous' in first.text
+    match = re.search(r'href="([^"]+)">Next</a>', first.text)
+    assert match, first.text
+    second = owner_c.get(unescape(match.group(1)))
+    assert second.status_code == 200
+    back = re.search(r'href="([^"]+)">Previous</a>', second.text)
+    assert back, second.text
+    returned = owner_c.get(unescape(back.group(1)))
+    assert returned.status_code == 200
+    assert 'aria-disabled="true">Previous' in returned.text
+
+
+def test_legacy_token_shows_reconsent(owner_c, p2_app) -> None:
+    vault = p2_app.state.dashboard.vault
+    record = vault.owner()
+    vault.set_owner(record["t"], record["email"])
+    page = owner_c.get("/").text
+    assert 'id="reconsent"' in page
+    assert "Sign in again" in page
+
+
+def test_picker_session_hidden_until_configured(owner_c) -> None:
+    denied = owner_c.get("/picker/session")
+    assert denied.status_code == 404
+    assert "access_token" not in denied.text
+
+
+def test_picker_session_returns_access_token_not_refresh(
+    world, memstore, oauth, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "scoped_drive_mcp.dashboard.refresh_access_token",
+        lambda *_args, **_kwargs: "ya29-test-token",
+    )
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            google_picker_api_key="AIzaSyTestKeyValue",
+            google_cloud_project_number="123456789012",
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    signed_in = client(app)
+    assert login(signed_in).status_code == 303
+    body = signed_in.get("/picker/session")
+    assert body.status_code == 200, body.text
+    payload = body.json()
+    assert payload["access_token"] == "ya29-test-token"
+    assert payload["api_key"] == "AIzaSyTestKeyValue"
+    assert payload["app_id"] == "123456789012"
+    assert "rt-" not in body.text
+
+
+def test_login_is_rate_limited(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            login_rate_limit=2,
+            login_rate_window_seconds=600,
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    assert c.get("/auth/login").status_code == 303
+    assert c.get("/auth/login").status_code == 303
+    blocked = c.get("/auth/login")
+    assert blocked.status_code == 429
+    assert "Too many sign-in attempts" in blocked.text
+    assert blocked.headers["retry-after"] == "600"
+
+
+def test_mcp_is_rate_limited_per_token(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(
+            root_folder_id=None, allowlist_cache_ttl=0, mcp_rate_limit=2, mcp_rate_window_seconds=60
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+
+    def post(token: str):
+        headers = {**MCP_HEADERS, "Authorization": f"Bearer {token}"}
+        return c.post("/mcp", json=payload, headers=headers)
+
+    assert post("nope").status_code == 401
+    assert post("nope").status_code == 401
+    blocked = post("nope")
+    assert blocked.status_code == 429
+    assert blocked.json() == {"error": "rate_limited"}
+    assert blocked.headers["retry-after"] == "60"
+    assert post("someone-else").status_code == 401

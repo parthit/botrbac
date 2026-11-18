@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Problem{% endblock %}
 {% block content %}
-<div class="card">
+<div class="card empty" role="alert">
   <h1>Something went wrong</h1>
   <p>{{ message }}</p>
-  <p><a href="/">Back to the dashboard</a>{% if not owner %} · <a href="/login">Sign in</a>{% endif %}</p>
+  <div class="actions">
+    <a class="btn primary" href="/">Back to home</a>
+    {% if not owner %}<a class="btn" href="/login">Sign in</a>{% endif %}
+  </div>
 </div>
 {% endblock %}

@@ -1,9 +1,9 @@
 # scoped-drive-mcp
 
 A small [MCP](https://modelcontextprotocol.io) server that sits between **Grok** (xAI) and **Google Drive**.
-You open a web dashboard, sign in with your own Google account, browse your whole My Drive and **tick the
-files and folders Grok may use**. Grok can reach only those (and whatever is inside ticked folders). If it
-tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
+You open a web dashboard, sign in with your own Google account, and **pick the files and folders an assistant
+may use** (Google Picker, scope `drive.file`). The assistant can reach only those, plus files it creates
+inside a folder you allowed. If it tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
 you can untick (revoke) anything at any time. Each access token you hand out also has a **role** that
 decides which tools it may use. It runs as a single Python function on **Vercel** (the free Hobby plan is
 enough), with Upstash Redis (free tier) for storage.
@@ -15,9 +15,9 @@ You  ──browser + Google sign-in──▶ Vercel dashboard ──▶ allowlis
 
 Every call checks the token's role and confirms the file is on the allowlist, or inside an allowlisted
 folder, before anything is sent to Google. The Drive call uses the Google account that signed in. There
-is no second Gmail. Google does not hide the rest of that Drive from this sign-in, so the allowlist is
-the limit. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
-the whole Drive rather than only what was ticked.
+is no second Gmail. New sign-ins use per-file Google access, and the allowlist is checked before
+every call. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
+more of that Drive than the list you ticked, until you sign in again under the per-file scope.
 
 ## More than one person
 
@@ -129,10 +129,13 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
    `GOOGLE_OAUTH_CLIENT_SECRET`.
    (If you set up phase 1 with a *Desktop* client, create this new *Web* client anyway; Desktop clients
    don't accept these redirect URIs.)
-5. **Publish:** back on the consent screen (**Audience**), click **Publish app** so the status is **In
-   production**. While an app is in *Testing*, Google expires its sign-ins after 7 days. You don't need to
-   submit for verification. When you sign in, Google will show **"Google hasn't verified this app"**: that's
-   expected for a personal app. Click **Advanced → Go to … (unsafe)**.
+5. **Publish and verify:** the consent screen should request `openid`, `email`, and
+   `https://www.googleapis.com/auth/drive.file` (not the full Drive scope). Enable the **Google Picker API**,
+   create a browser API key, and set `GOOGLE_PICKER_API_KEY` plus `GOOGLE_CLOUD_PROJECT_NUMBER`.
+   The remaining clicks in Google Cloud and Search Console (custom domain, a separate production project,
+   brand verification, publishing **In production**) are listed in
+   [docs/google-verification.md](docs/google-verification.md). While the app is in *Testing*, Google expires
+   sign-ins after 7 days.
 
 ### 2. Vercel: project, Redis and environment variables
 
@@ -154,7 +157,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | step 1.4 |
 | `OWNER_EMAIL` | yes | the admin's Google address (the only account that can open `/admin`; other people can sign in too) |
 | `ALLOWED_EMAILS` | no | comma-separated Google addresses allowed to sign in. Leave unset and any verified Google account can sign in. `OWNER_EMAIL` is always allowed |
-| `APP_BASE_URL` | yes | your Vercel domain, e.g. `https://scoped-drive-mcp.vercel.app` (no trailing `/`) |
+| `APP_BASE_URL` | yes | the public origin users open, with no trailing `/`. A custom domain replaces the Vercel host here and in the OAuth redirect URI (`APP_BASE_URL/auth/callback`) |
 | `SESSION_SECRET` | yes | step 2.3 |
 | `ENCRYPTION_KEY` | yes | step 2.3 |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | one store | added by the Upstash integration (or `KV_REST_API_URL` / `KV_REST_API_TOKEN`). On Vercel the app needs Redis **or** Postgres |
@@ -163,20 +166,19 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `ROOT_FOLDER_ID` | no | a folder that is always allowed in addition to your ticks |
 | `MAX_BYTES`, `MAX_CHARS`, `SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL` | no | limits; defaults 5 MB, 100000, 60 s, 2 s |
 | `AUTH_MODE` | no | `oauth_bot` (default and only mode) |
+| `GOOGLE_PICKER_API_KEY` | no | browser API key for the Google Picker. Restrict it by HTTP referrer. Public in the signed-in page |
+| `GOOGLE_CLOUD_PROJECT_NUMBER` | no | numeric Cloud project number. The Picker needs it so a chosen file is granted to this app |
+| `LOGIN_RATE_LIMIT`, `LOGIN_RATE_WINDOW_SECONDS` | no | sign-in attempts per IP. Defaults 30 per 600 seconds |
+| `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | no | `/mcp` calls per bearer token. Defaults 300 per 60 seconds |
 
 ### 3. Deploy
 
 Redeploy (**Deployments → … → Redeploy**, or push to `main`). Then open `https://<project>.vercel.app/health`.
-It never shows values, only names:
-
-- `"status": "ok"` with `"missing": []` means every required setting is present.
-- `"status": "incomplete"` lists the `missing` names. `owner_connected` and `bot_connected` tell you whether
-  step 4 is done. `bot_connected` means the assistant can call Drive as the signed-in user. `"mode"` is
-  `same_account`.
-- HTTP 503 `"misconfigured"` means a value is malformed (e.g. a bad `ENCRYPTION_KEY`); `problems` names it.
-- HTTP 503 `"misconfigured"` with `"store_error": "redis_not_configured"` means the Redis variables are missing.
-  On Vercel the server then refuses to serve the dashboard and the tools (each instance has its own memory, so
-  grants and sign-ins would silently disappear). Connect Upstash (step 2.2) and redeploy.
+The public body is only `{"status":"ok"}` or, on HTTP 503, `{"status":"unavailable"}`. It does not list
+settings, the store, or whether an account is connected. A bad `ENCRYPTION_KEY` or a missing store is in
+the host logs. If Redis or Postgres is missing on Vercel, the site itself explains that and refuses to
+serve the dashboard (each instance has its own memory, so grants and sign-ins would silently disappear).
+Connect Upstash (step 2.2) and redeploy. The signed-in admin overview still names missing settings.
 
 Preview deployments are usually behind Vercel's login, so use the production URL for everything below.
 
@@ -544,8 +546,10 @@ After changing dependencies, regenerate Vercel's requirements file:
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
-- The stored refresh token can reach the signed-in account's whole Drive. The allowlist is the limit, not a
-  second Google account.
+- New sign-ins request `drive.file`. The stored refresh token can call Drive for files this app was granted,
+  and the allowlist is still checked first. A token saved before that change keeps its older scopes until
+  that person signs in again. Remove `GOOGLE_OAUTH_REFRESH_TOKEN` if it was minted with full Drive access,
+  or replace it with `scripts/bootstrap_oauth.py`. See [docs/google-verification.md](docs/google-verification.md).
 
 ## How the restriction works
 

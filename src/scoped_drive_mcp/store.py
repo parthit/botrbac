@@ -838,11 +838,13 @@ class TokenVault:
     def enabled(self) -> bool:
         return self._fernet is not None
 
-    def _put(self, key: str, token: str, email: str) -> None:
+    def _put(self, key: str, token: str, email: str, scopes: str | None = None) -> None:
         if self._fernet is None:
             raise RuntimeError("ENCRYPTION_KEY is not set")
-        payload = json.dumps({"t": token, "email": email, "at": utc_now()})
-        self.store.set(key, self._fernet.encrypt(payload.encode()).decode())
+        payload: dict[str, str] = {"t": token, "email": email, "at": utc_now()}
+        if scopes:
+            payload["scopes"] = scopes
+        self.store.set(key, self._fernet.encrypt(json.dumps(payload).encode()).decode())
 
     def _take(self, key: str) -> dict[str, str] | None:
         if self._fernet is None:
@@ -857,8 +859,8 @@ class TokenVault:
         except (InvalidToken, ValueError):
             return None
 
-    def set_owner(self, token: str, email: str) -> None:
-        self._put(OWNER_TOKEN_KEY, token, email)
+    def set_owner(self, token: str, email: str, scopes: str | None = None) -> None:
+        self._put(OWNER_TOKEN_KEY, token, email, scopes)
 
     def owner(self) -> dict[str, str] | None:
         return self._take(OWNER_TOKEN_KEY)

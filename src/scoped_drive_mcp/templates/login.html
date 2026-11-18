@@ -1,21 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Sign in{% endblock %}
 {% block content %}
-<div class="card" style="max-width:520px;margin:40px auto;">
+<div class="card hero" style="margin:24px auto;">
+  <p class="logo-lockup" aria-hidden="true">🤖🌉</p>
   <h1>Sign in to Scoped Drive</h1>
-  <p>Sign in with your own Google account. You tick your own files, and the assistant
-     uses this same account. Each person’s files stay separate.</p>
-  <p>Scoped Drive will ask Google for:</p>
-  <ul>
-    <li>Your email address, so this server knows which list of files is yours.</li>
-    <li>Full access to Google Drive (<code>https://www.googleapis.com/auth/drive</code>).
-        Drive cannot limit an app to selected files and folders, so Scoped Drive uses
-        that access only to enforce the list you tick and to let an assistant you connect
-        read or change those items. File contents go to that assistant for those items
-        only. They are not sold, not used for advertising, and not used to train a model.</li>
-  </ul>
-  <p>This is described in the <a href="/privacy">privacy policy</a> and the
-     <a href="/terms">terms of service</a>.</p>
-  <p><a class="btn primary" href="/auth/login?next={{ next | urlencode }}">Sign in with Google</a></p>
+  <p>Sign in with your own Google account. You pick your own files, and the assistant uses this same account. Each person’s files stay separate.</p>
+  <p class="disclosure">Scoped Drive will ask Google for your email address, so this server knows which list is yours, and for access to the files and folders you pick in Google Drive. File contents of those items go only to an assistant you connect. They are not sold, not used for advertising, and not used to train a model.</p>
+  <p>This is described in the <a href="/privacy">privacy policy</a> and the <a href="/terms">terms of service</a>.</p>
+  {% with href="/auth/login?next=" ~ (next | urlencode) %}{% include "_google_button.html" %}{% endwith %}
 </div>
 {% endblock %}
