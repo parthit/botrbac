@@ -56,6 +56,7 @@ With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wa
 | `list_folder(folder_id?)` (no folder_id: the items you shared) | ✓ | ✓ | ✓ |
 | `get_metadata(file_id)` | ✓ | ✓ | ✓ |
 | `read_file(file_id)` | ✓ | ✓ | ✓ |
+| `download_file(file_id)` | ✓ | ✓ | ✓ |
 | `request_access(description, reason, file_id?)` | ✓ | ✓ | ✓ |
 | `check_access_request(request_id)` | ✓ | ✓ | ✓ |
 | `request_link(invite_code?)` | ✓ | ✓ | ✓ |
@@ -74,6 +75,15 @@ With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wa
 | `update_file_content(file_id, content)` |  | ✓ | ✓ |
 | `rename_file(file_id, new_name)` |  | ✓ | ✓ |
 | `trash_file(file_id)` (recoverable from Drive's trash for 30 days) |  |  | ✓ |
+
+`read_file` returns text for files inside the owner's share, including files nested in a shared folder.
+Google Docs and Slides are exported as plain text and Google Sheets as CSV (first sheet only). PDF, Word
+(`.docx` and legacy `.doc`), PowerPoint (`.pptx`), Excel (`.xlsx`), RTF, CSV, Markdown, JSON, and other
+text files are extracted to plain text in the server process. Scanned PDFs and other files with no text
+layer come back empty of content, with a note to call `download_file`. Images, archives, and anything else
+that cannot be turned into text are not inlined; `download_file` returns those bytes as base64, capped at
+1 MiB (and never above `MAX_BYTES`) so the response fits the host's body limit. `truncated` is true when
+either tool stops early. Text output is also capped by `MAX_CHARS`. Shortcuts are never followed.
 
 There are deliberately **no** tools to move files, share files, change permissions or permanently delete.
 A client only sees the tools its role allows (`tools/list` is filtered), and calls to anything else are refused.
@@ -99,9 +109,6 @@ The same `/mcp` connection can carry short text between two people. Each person 
 4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person turns the mailbox off on `/bridge`. There is no revoke tool for the assistant.
 
 `list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
-
-`read_file` exports Google Docs and Slides as plain text and Google Sheets as CSV (first sheet only), downloads
-text-like files, and refuses binary files (PDFs, images, ...). Output is capped by `MAX_BYTES` and `MAX_CHARS`.
 
 ## Phase 2 setup and test walkthrough
 
@@ -373,7 +380,7 @@ values in yourself.** They are never stored in this repo.
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | yes (phase 1) | from step (c); your own account. Optional once the dashboard sign-in is stored, and it overrides that sign-in if set |
 | `API_TOKENS` | yes | from step (d) |
 | `AUTH_MODE` | no | `oauth_bot` (the default and only mode) |
-| `MAX_BYTES` | no | max bytes downloaded per read (default `5242880`, 5 MB) |
+| `MAX_BYTES` | no | max bytes fetched per read (default `5242880`, 5 MB). `download_file` also caps the returned bytes at 1 MiB |
 | `MAX_CHARS` | no | max characters returned per read (default `100000`) |
 | `SCOPE_CACHE_TTL` | no | seconds to cache folder lookups (default `60`) |
 
@@ -405,7 +412,7 @@ Add the server as a remote MCP tool in `POST https://api.x.ai/v1/responses`:
       "server_url": "https://<project>.vercel.app/mcp",
       "server_label": "drive",
       "authorization": "<token from step d>",
-      "allowed_tools": ["search_files", "list_folder", "get_metadata", "read_file"]
+      "allowed_tools": ["search_files", "list_folder", "get_metadata", "read_file", "download_file"]
     }
   ]
 }
@@ -431,7 +438,13 @@ chat = client.chat.create(
             server_url="https://<project>.vercel.app/mcp",
             server_label="drive",
             authorization=os.environ["DRIVE_MCP_TOKEN"],
-            allowed_tool_names=["search_files", "list_folder", "get_metadata", "read_file"],
+            allowed_tool_names=[
+                "search_files",
+                "list_folder",
+                "get_metadata",
+                "read_file",
+                "download_file",
+            ],
         )
     ],
 )
