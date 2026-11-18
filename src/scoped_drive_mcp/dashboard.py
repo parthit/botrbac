@@ -657,8 +657,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            if not crumbs or crumbs[0]["id"] not in {root_id, "root"}:
-                crumbs.insert(0, {"id": "root", "name": "My Drive"})
             if folder_id == "root":
                 query = "'root' in parents and trashed=false"
             else:

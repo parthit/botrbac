@@ -5,7 +5,7 @@ import re
 import pytest
 
 from scoped_drive_mcp.dashboard import SESSION_COOKIE
-from scoped_drive_mcp.drive_client import DriveNotFoundError
+from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveNotFoundError
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import BOT_TOKEN_KEY, KEY_PREFIX, OWNER_TOKEN_KEY, MemoryStore
 from tests.conftest import BASE_URL, OWNER_EMAIL, TOKENS, make_settings
@@ -415,6 +415,15 @@ def test_browse_when_my_drive_root_is_hidden(owner_c, monkeypatch) -> None:
     assert page.status_code == 200
     assert "Something went wrong" not in page.text
     assert "My Drive" in page.text
+
+
+def test_browse_does_not_invent_a_my_drive_parent(owner_c, world) -> None:
+    """A folder whose parent this app cannot see is not shown under My Drive."""
+    world.add("specs", "Specs", FOLDER_MIME, ["shared-drive-root"], owner=OWNER_EMAIL)
+    page = owner_c.get("/browse?folder=specs")
+    assert page.status_code == 200
+    assert "Specs" in page.text
+    assert 'href="/browse?folder=root"' not in page.text
 
 
 def test_browse_stays_up_when_drive_list_fails(owner_c, monkeypatch) -> None:
