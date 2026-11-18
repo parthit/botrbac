@@ -71,6 +71,10 @@ class GrantService:
         item_id = str(meta["id"])
         existing = self.allowlist.get(item_id)
         if existing is not None:
+            if request_id and not existing.request_id:
+                updated = replace(existing, request_id=request_id)
+                self.allowlist.add(updated)
+                return updated
             return existing
         if item_id == self.my_drive_root_id():
             raise GrantError("Your whole My Drive cannot be shared; pick folders or files in it.")

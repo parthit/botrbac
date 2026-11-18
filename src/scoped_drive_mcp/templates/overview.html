@@ -4,48 +4,71 @@
 <h1>Overview</h1>
 {% include "_mode.html" %}
 {% if not bot.connected %}
-<div class="warn">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
-  Sign out and sign in again.</div>
+<div class="warn" role="status">Your Google sign-in is not stored yet, so the assistant cannot reach Drive. Sign out and sign in again.</div>
 {% endif %}
 <div class="grid">
-  <div class="card stat"><span class="muted">Allowed items</span><b>{{ allow_count }}</b><a href="/access">Manage</a></div>
-  <div class="card stat"><span class="muted">Pending requests</span><b>{{ pending_count }}</b><a href="/requests">Review</a></div>
-  <div class="card stat"><span class="muted">Your Google account</span>
-    <b style="font-size:16px">{% if bot.connected %}<span class="pill ok">connected</span>{% else %}<span class="pill bad">not connected</span>{% endif %}</b>
-    <span class="muted">{{ owner }}</span></div>
+  <div class="card stat">
+    <span class="muted">Allowed items</span>
+    <b>{{ allow_count }}</b>
+    <a href="/access">Manage</a>
+  </div>
+  <div class="card stat">
+    <span class="muted">Pending requests</span>
+    <b>{{ pending_count }}</b>
+    {% if pending_count %}<span class="pill pending"><span aria-hidden="true">●</span> Waiting</span>{% else %}<span class="pill"><span aria-hidden="true">✓</span> None waiting</span>{% endif %}
+    <a href="/requests">Review</a>
+  </div>
+  <div class="card stat">
+    <span class="muted">Your Google account</span>
+    <p>
+      {% if bot.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
+      {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
+    </p>
+    <span class="muted">{{ owner }}</span>
+  </div>
 </div>
 
-<h2>Get started</h2>
-<ol class="steps">
-  <li class="done">Signed in as {{ owner }}. Tick folders before you connect an assistant.</li>
-  <li{% if allow_count %} class="done"{% endif %}>
-    Tick at least one folder. <a href="/browse">Browse your Drive</a>
-    {% if allow_count %}<span class="pill ok">{{ allow_count }} allowed</span>{% endif %}
-  </li>
-  <li{% if grants %} class="done"{% endif %}>
-    Connect the assistant, then come back here and click Allow.
-    <ol>
-      <li>In Grok, add a connector and use this server address: <code>{{ mcp_url }}</code></li>
-      <li>In Muse, add a custom connector with that same address. Leave the client id empty.</li>
-      <li>In Cursor, add that same address as an MCP server.</li>
-      <li>When this site asks, click Allow. You can disconnect the app later on this page.</li>
-    </ol>
-  </li>
-</ol>
+<h2>Connect an assistant</h2>
+<p class="muted">Copy the server address into the client, then come back here and choose Allow. You can disconnect an app later on this page.</p>
+<div class="grid">
+  <article class="card">
+    <h2>Grok</h2>
+    <p>Add a connector and paste this server address.</p>
+    <div class="copy-row">
+      <code>{{ mcp_url }}</code>
+      <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
+    </div>
+  </article>
+  <article class="card">
+    <h2>Muse</h2>
+    <p>Add a custom connector with this address. Leave the client id empty.</p>
+    <div class="copy-row">
+      <code>{{ mcp_url }}</code>
+      <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
+    </div>
+  </article>
+  <article class="card">
+    <h2>Cursor</h2>
+    <p>Add an MCP server with this same address.</p>
+    <div class="copy-row">
+      <code>{{ mcp_url }}</code>
+      <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
+    </div>
+  </article>
+</div>
 
 <h2>Connected apps</h2>
-<p class="muted">Apps such as Grok that signed in here. Disconnecting stops that app immediately.</p>
+<p class="muted">Apps that signed in here. Disconnecting stops that app immediately.</p>
 {% if grants %}
-<div class="scroll-x">
-<table>
-  <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th></th></tr></thead>
+<table class="cards">
+  <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th>Action</th></tr></thead>
   <tbody>
   {% for grant in grants %}
   <tr>
-    <td>{{ grant.client_name }}</td>
-    <td class="muted">{{ grant.created_at }}</td>
-    <td class="muted">{{ grant.last_used or "never" }}</td>
-    <td style="text-align:right">
+    <td data-label="App">{{ grant.client_name }}</td>
+    <td data-label="Connected" class="muted">{{ grant.created_at }}</td>
+    <td data-label="Last used" class="muted">{{ grant.last_used or "Never" }}</td>
+    <td data-label="Action">
       <form class="inline" method="post" action="/oauth/grants/revoke" data-confirm="Disconnect this app? It loses access immediately.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="grant_id" value="{{ grant.id }}">
@@ -56,9 +79,11 @@
   {% endfor %}
   </tbody>
 </table>
-</div>
 {% else %}
-<div class="card"><p>No apps connected.</p></div>
+<div class="card empty">
+  <h2>No apps connected</h2>
+  <p>Use one of the setup cards above, then approve the connection when you are asked.</p>
+</div>
 {% endif %}
 
 {% if is_admin %}
@@ -69,9 +94,15 @@
     {% if store_kind == "memory" %}Without Redis or Postgres, grants and requests are kept in memory and are lost when the server restarts.{% endif %}
   </div>
   {% endif %}
+  {% if not picker_ready %}
+  <p>The Google Picker needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before people can add files the app has not already opened.</p>
+  {% endif %}
+  {% if env_token_set %}
+  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with full Drive access, remove it or replace it using <code>scripts/bootstrap_oauth.py</code>, which now requests per-file access.</p>
+  {% endif %}
   <p>Server address: <code>{{ mcp_url }}</code></p>
   {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}
-  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with connected apps.</p>
+  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with connected apps. The public site address is <code>APP_BASE_URL</code>.</p>
 </div>
 {% endif %}
 {% endblock %}

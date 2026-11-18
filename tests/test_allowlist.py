@@ -58,6 +58,10 @@ def test_grant_updates_the_allowlist_without_sharing(world, owner, grants, allow
     assert entry.mime_type == FOLDER_MIME and entry.name == "Projects"
     assert grants.grant("proj") == entry
     assert owner.permission_calls == []
+    linked = grants.grant("proj", request_id="req-already-allowed")
+    assert linked.request_id == "req-already-allowed"
+    assert allowlist.get("proj").request_id == "req-already-allowed"
+    assert grants.grant("proj", request_id="other-request") == linked
 
 
 def test_revoke_removes_the_entry_and_an_old_share(world, owner, allowlist, kv) -> None:

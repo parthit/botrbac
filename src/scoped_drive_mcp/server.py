@@ -50,6 +50,7 @@ from .drive_client import (
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .oauth import GoogleOAuthClient, OAuthClient
 from .policy import is_allowed, require
+from .ratelimit import RateLimitApp
 from .scope import ScopeGuard
 from .service import DriveService
 from .store import (
@@ -441,10 +442,10 @@ def _misconfigured_app(exc: ValidationError) -> Starlette:
         for err in exc.errors(include_input=False, include_url=False)
     ]
     logger.error("scoped-drive-mcp is misconfigured: %s", problems)
-    body = {"status": "misconfigured", "problems": problems}
 
     async def health(_: Request) -> JSONResponse:
-        return JSONResponse(body, status_code=503)
+        # Names and messages stay in the log. The public body is only a status.
+        return JSONResponse({"status": "unavailable"}, status_code=503)
 
     async def unavailable(_: Request) -> JSONResponse:
         return JSONResponse({"error": "server misconfigured"}, status_code=503)
@@ -478,17 +479,9 @@ STORAGE_MISSING = (
 def _storage_missing_app(settings: Settings) -> Starlette:
     """On Vercel without Redis: refuse to serve instead of silently using per-instance memory."""
     logger.error("scoped-drive-mcp: %s", STORAGE_MISSING)
-    body = {
-        "status": "misconfigured",
-        "mode": settings.mode,
-        "store": None,
-        "store_error": "redis_not_configured",
-        "missing": settings.missing_settings(),
-        "detail": STORAGE_MISSING,
-    }
 
     async def health(_: Request) -> JSONResponse:
-        return JSONResponse(body, status_code=503)
+        return JSONResponse({"status": "unavailable"}, status_code=503)
 
     async def unavailable(_: Request) -> JSONResponse:
         return JSONResponse(
@@ -655,34 +648,24 @@ def build_app(
     dashboard = build_dashboard(ctx)
 
     async def health(_: Request) -> JSONResponse:
-        missing = settings.missing_settings()
-        body: dict[str, Any] = {
-            "status": "ok" if not missing else "incomplete",
-            "mode": settings.mode,
-            "missing": missing,
-            "store": kv.kind,
-        }
-        try:
-            bot = await anyio.to_thread.run_sync(ctx.bot_status)
-            body["owner_connected"] = await anyio.to_thread.run_sync(ctx.owner_connected)
-            body["bot_connected"] = bot["connected"]
-            body["bot_source"] = bot["source"]
-        except Exception as exc:
-            # Driver errors can include a database URL. Log the type only.
-            logger.warning("health: store unavailable (%s)", type(exc).__name__)
-            body["status"] = "degraded"
-            body["store_error"] = True
-        return JSONResponse(body)
+        # Liveness only. Configuration and connection flags stay off this public route.
+        return JSONResponse({"status": "ok"})
 
-    mcp_endpoint = BearerAuthMiddleware(
-        StatelessMCPEndpoint(mcp),
-        tokens=settings.api_tokens,
-        exempt_paths=(),
-        oauth_resolve=None if mcp_oauth is None else mcp_oauth.resolve_access,
-        resource_metadata=(
-            None if mcp_oauth is None else protected_resource_metadata_url(base_url)
+    mcp_endpoint = RateLimitApp(
+        BearerAuthMiddleware(
+            StatelessMCPEndpoint(mcp),
+            tokens=settings.api_tokens,
+            exempt_paths=(),
+            oauth_resolve=None if mcp_oauth is None else mcp_oauth.resolve_access,
+            resource_metadata=(
+                None if mcp_oauth is None else protected_resource_metadata_url(base_url)
+            ),
+            owner_email=settings.owner_email,
         ),
-        owner_email=settings.owner_email,
+        kv,
+        name="mcp",
+        limit=settings.mcp_rate_limit,
+        window=settings.mcp_rate_window_seconds,
     )
     routes: list[Any] = [
         Route(HEALTH_PATH, health, methods=["GET"]),

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint
 
@@ -56,7 +56,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    flow = InstalledAppFlow.from_client_config(_client_config(args), scopes=[DRIVE_SCOPE])
+    flow = InstalledAppFlow.from_client_config(
+        _client_config(args), scopes=["openid", "email", DRIVE_SCOPE]
+    )
     print("A browser window will open. Sign in as the BOT Gmail account, not your own.\n")
     creds = flow.run_local_server(
         port=args.port,

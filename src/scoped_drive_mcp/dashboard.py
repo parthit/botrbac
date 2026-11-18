@@ -11,6 +11,7 @@ a cross-origin `Origin` is refused.
 import hmac
 import html
 import logging
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -38,14 +39,17 @@ from .config import Settings
 from .drive_client import (
     DRIVE_SCOPE,
     FOLDER_MIME,
+    FULL_DRIVE_SCOPE,
     SHORTCUT_MIME,
     DriveNotFoundError,
     LazyBotDriveClient,
     OwnerDriveClient,
 )
+from .errors import report_exception
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
-from .oauth import OAuthClient, OAuthError
+from .oauth import OAuthClient, OAuthError, refresh_access_token
+from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
 
@@ -78,11 +82,22 @@ SECURITY_HEADERS = [
     (b"cache-control", b"no-store"),
     (
         b"content-security-policy",
-        b"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        b"form-action 'self' https://accounts.google.com; frame-ancestors 'none'; "
-        b"base-uri 'none'",
+        # Google Picker loads api.js from apis.google.com (that script evaluates code),
+        # then opens Drive in a frame. frame-ancestors stays none so this site is not embedded.
+        b"default-src 'self'; "
+        b"script-src 'self' https://apis.google.com https://www.gstatic.com 'unsafe-eval'; "
+        b"style-src 'self' 'unsafe-inline'; "
+        b"img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; "
+        b"connect-src 'self' https://www.googleapis.com https://content.googleapis.com; "
+        b"frame-src https://docs.google.com https://drive.google.com https://accounts.google.com "
+        b"https://content.googleapis.com https://*.google.com https://*.googleusercontent.com; "
+        b"worker-src 'self' blob:; "
+        b"form-action 'self' https://accounts.google.com; "
+        b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
     ),
 ]
+
+_LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class OwnerNotConnectedError(Exception):
@@ -159,6 +174,16 @@ class DashboardContext:
     def owner_connected(self) -> bool:
         return bool(self.vault.enabled and self.vault.owner())
 
+    def reconsent_needed(self) -> bool:
+        """True when the stored sign-in predates drive.file (no scope stamp, or the old scope)."""
+        if not self.vault.enabled:
+            return False
+        record = self.vault.owner()
+        if not record or not record.get("t"):
+            return False
+        scopes = set(str(record.get("scopes") or "").split())
+        return DRIVE_SCOPE not in scopes or FULL_DRIVE_SCOPE in scopes
+
 
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
@@ -218,6 +243,9 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     pending_count = ctx.pop("pending_count", None)
     if pending_count is None:
         pending_count = getattr(request.state, "pending_count", 0)
+    reconsent = ctx.pop("reconsent", None)
+    if reconsent is None:
+        reconsent = getattr(request.state, "reconsent", False)
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -226,13 +254,16 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         flashes=request.session.pop("flash", []) if owner else [],
         nav=request.url.path,
         pending_count=pending_count,
+        reconsent=reconsent,
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)
 
 
 def render_plain(template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
-    html = _env.get_template(template).render(owner=None, csrf=None, flashes=[], nav="", **ctx)
+    html = _env.get_template(template).render(
+        owner=None, csrf=None, flashes=[], nav="", reconsent=False, pending_count=0, **ctx
+    )
     return HTMLResponse(html, status_code=status_code)
 
 
@@ -244,11 +275,50 @@ async def privacy_page(_: Request) -> Response:
     return render_plain("privacy.html")
 
 
+def _file_response(name: str, media: str) -> Response:
+    return Response((TEMPLATES_DIR / name).read_bytes(), media_type=media)
+
+
+def favicon(_: Request) -> Response:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+        '<rect width="64" height="64" rx="12" fill="#f4f6f8"/>'
+        '<text x="32" y="44" text-anchor="middle" font-size="28">🤖🌉</text>'
+        "</svg>"
+    )
+    return Response(svg, media_type="image/svg+xml")
+
+
+def robots(_: Request) -> Response:
+    body = (
+        "User-agent: *\n"
+        "Allow: /$\n"
+        "Allow: /login\n"
+        "Allow: /privacy\n"
+        "Allow: /terms\n"
+        "Disallow: /\n"
+    )
+    return Response(body, media_type="text/plain; charset=utf-8")
+
+
+def stylesheet(_: Request) -> Response:
+    return _file_response("app.css", "text/css; charset=utf-8")
+
+
+def ui_script(_: Request) -> Response:
+    return _file_response("ui.js", "text/javascript; charset=utf-8")
+
+
 def legal_routes() -> list[Route]:
-    """Public /terms and /privacy. Google's OAuth screen links here with no session."""
+    """Public pages and assets. Google's OAuth screen links to /terms and /privacy."""
     return [
         Route("/terms", terms_page, methods=["GET"]),
         Route("/privacy", privacy_page, methods=["GET"]),
+        Route("/favicon.ico", favicon, methods=["GET"]),
+        Route("/favicon.svg", favicon, methods=["GET"]),
+        Route("/robots.txt", robots, methods=["GET"]),
+        Route("/app.css", stylesheet, methods=["GET"]),
+        Route("/ui.js", ui_script, methods=["GET"]),
     ]
 
 
@@ -283,6 +353,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except Exception:
             logger.exception("pending request count failed")
             request.state.pending_count = 0
+        try:
+            request.state.reconsent = await blocking(ctx.reconsent_needed)
+        except Exception:
+            logger.exception("reconsent check failed")
+            request.state.reconsent = False
 
     def session_user(request: Request) -> str | None:
         """Signed-in email, only if that tenant still has a stored owner refresh token."""
@@ -312,8 +387,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return RedirectResponse("/login", status_code=303)
             except InvalidInputError as exc:
                 return render(request, "error.html", 400, message=str(exc))
-            except Exception:
-                logger.exception("dashboard request failed")
+            except Exception as exc:
+                report_exception(exc, where="dashboard")
                 return render(
                     request, "error.html", 502, message="A Google Drive request failed. Try again."
                 )
@@ -358,9 +433,43 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
         return render(request, "login.html", next=safe_next(request.query_params.get("next")))
 
+    def supplied_login_hint(request: Request) -> str | None:
+        """A hint only when this visitor typed one. Never the server's owner address."""
+        raw = request.query_params.get("login_hint")
+        if not isinstance(raw, str):
+            return None
+        raw = raw.strip().lower()
+        if not raw or len(raw) > 254 or not _LOGIN_HINT.fullmatch(raw):
+            return None
+        return raw
+
     async def auth_login(request: Request) -> Response:
+        ip = client_ip(
+            [(k.encode(), v.encode()) for k, v in request.headers.items()],
+            request.client.host if request.client else "unknown",
+        )
+        allowed = await blocking(
+            allow,
+            ctx.store,
+            "login",
+            "ip:" + ip,
+            settings.login_rate_limit,
+            settings.login_rate_window_seconds,
+        )
+        if not allowed:
+            page = render(
+                request,
+                "error.html",
+                429,
+                message=(
+                    "Too many sign-in attempts from this network. "
+                    "Wait a few minutes and try again."
+                ),
+            )
+            page.headers["retry-after"] = str(settings.login_rate_window_seconds)
+            return page
         request.session["oauth_next"] = safe_next(request.query_params.get("next"))
-        return start_oauth(request, "owner", settings.owner_email)
+        return start_oauth(request, "owner", supplied_login_hint(request))
 
     async def auth_callback(request: Request) -> Response:
         params = request.query_params
@@ -400,14 +509,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 403,
                 message="This Google account is not allowed to use this dashboard.",
             )
+        if FULL_DRIVE_SCOPE in tokens.scopes:
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            return render(
+                request,
+                "error.html",
+                400,
+                message="This app no longer accepts full Google Drive access. Remove it at "
+                "myaccount.google.com/permissions, then sign in again and allow access "
+                "only to the files you pick.",
+            )
         if DRIVE_SCOPE not in tokens.scopes:
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             return render(
                 request,
                 "error.html",
                 400,
-                message="Google Drive access was not granted. Sign in again and tick the "
-                "Drive checkbox on Google's consent screen.",
+                message="Google Drive file access was not granted. Sign in again and allow "
+                "access to the files you pick.",
             )
         if not tokens.refresh_token:
             return render(
@@ -420,7 +539,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         reset = current_actor.set(email)
         try:
-            await blocking(ctx.vault.set_owner, tokens.refresh_token, email)
+            scope_stamp = " ".join(sorted(tokens.scopes))
+            await blocking(ctx.vault.set_owner, tokens.refresh_token, email, scope_stamp)
             if ctx.directory is not None:
                 await blocking(ctx.directory.remember_user, email)
         finally:
@@ -473,6 +593,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             store_kind=getattr(ctx.store, "kind", "custom"),
             root_folder_id=ctx.visible_root_folder_id(),
             mcp_url=f"{settings.app_base_url}/mcp",
+            picker_ready=settings.picker_configured,
+            env_token_set=bool(
+                settings.env_bot_refresh_token and session_user(request) == settings.owner_email
+            ),
             **data,
         )
 
@@ -551,7 +675,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def browse(request: Request) -> Response:
         folder = request.query_params.get("folder") or "root"
         q = (request.query_params.get("q") or "").strip()[:200] or None
-        page_token = request.query_params.get("page") or None
+        page_token = normalize_page_token(request.query_params.get("page"))
+        prev = [
+            token
+            for token in (
+                normalize_page_token(item) for item in request.query_params.getlist("prev")
+            )
+            if token
+        ]
         request_id = request.query_params.get("request") or None
         picking = None
         if request_id:
@@ -560,8 +691,50 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 picking = None
         data = await blocking(browse_data, folder, q, page_token)
         here = request.url.path + ("?" + request.url.query if request.url.query else "")
+        pager = browse_pager(
+            folder,
+            q=q,
+            request_id=picking.id if picking else None,
+            page=page_token,
+            prev=prev,
+            next_token=data.get("next_token"),
+        )
         return render(
-            request, "browse.html", q=q, folder=folder, picking=picking, here=here, **data
+            request,
+            "browse.html",
+            q=q,
+            folder=folder,
+            picking=picking,
+            here=here,
+            picker_ready=settings.picker_configured,
+            **pager,
+            **data,
+        )
+
+    async def picker_session(request: Request) -> Response:
+        if not settings.picker_configured:
+            return JSONResponse({"error": "picker_not_configured"}, status_code=404)
+        record = await blocking(ctx.vault.owner)
+        if not record or not record.get("t"):
+            return JSONResponse({"error": "sign_in_required"}, status_code=401)
+        assert settings.google_oauth_client_id is not None
+        assert settings.google_oauth_client_secret is not None
+        try:
+            token = await blocking(
+                refresh_access_token,
+                settings.google_oauth_client_id.get_secret_value(),
+                settings.google_oauth_client_secret.get_secret_value(),
+                record["t"],
+            )
+        except OAuthError as exc:
+            logger.warning("picker token refresh failed")
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        return JSONResponse(
+            {
+                "access_token": token,
+                "api_key": settings.google_picker_api_key,
+                "app_id": settings.google_cloud_project_number,
+            }
         )
 
     async def grant(request: Request, form: dict[str, str]) -> Response:
@@ -890,6 +1063,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", home, methods=["GET"]),
         Route("/browse", owner_only(browse), methods=["GET"]),
+        Route("/picker/session", owner_only(picker_session), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
         Route("/access", owner_only(access), methods=["GET"]),
@@ -929,6 +1103,127 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     return app
 
 
+def normalize_page_token(value: str | None) -> str | None:
+    """Keep an opaque Drive page token.
+
+    Google's tokens are not a fixed alphabet (`~`, `!`, `*`, `|` all show up).
+    Drop only blank, huge, or control-character values so a real Next link
+    still addresses the same page.
+    """
+    if not value or len(value) > 1024:
+        return None
+    if any(ord(ch) < 33 or ord(ch) == 127 for ch in value):
+        return None
+    return value
+
+
+def browse_href(
+    folder: str,
+    *,
+    q: str | None,
+    request_id: str | None,
+    page: str | None,
+    prev: list[str],
+) -> str:
+    pairs: list[tuple[str, str]] = []
+    if q:
+        pairs.append(("q", q))
+    else:
+        pairs.append(("folder", folder or "root"))
+        if page:
+            pairs.append(("page", page))
+        for item in prev:
+            pairs.append(("prev", item))
+    if request_id:
+        pairs.append(("request", request_id))
+    return "/browse?" + urlencode(pairs)
+
+
+def browse_pager(
+    folder: str,
+    *,
+    q: str | None,
+    request_id: str | None,
+    page: str | None,
+    prev: list[str],
+    next_token: str | None,
+) -> dict[str, str | None]:
+    """Previous/Next links. Drive tokens are not reversible, so the previous stack is in the URL."""
+    prev_href = None
+    if page and not q:
+        if prev:
+            prev_href = browse_href(
+                folder, q=None, request_id=request_id, page=prev[-1], prev=prev[:-1]
+            )
+        else:
+            prev_href = browse_href(folder, q=None, request_id=request_id, page=None, prev=[])
+    next_href = None
+    if next_token and not q:
+        nxt_prev = [*prev, page] if page else list(prev)
+        next_href = browse_href(
+            folder, q=None, request_id=request_id, page=next_token, prev=nxt_prev
+        )
+    return {"prev_href": prev_href, "next_href": next_href}
+
+
+def request_headline(req: Any, owner_meta: dict[str, Any] | None = None) -> str:
+    """Plain-language summary of an access request. Technical fields stay out of this sentence."""
+    who = str(getattr(req, "token_name", None) or "").strip() or "An assistant"
+    name = None
+    if owner_meta and owner_meta.get("name"):
+        name = str(owner_meta["name"])
+    elif getattr(req, "file_name", None):
+        name = str(req.file_name)
+    elif getattr(req, "description", None):
+        name = str(req.description)
+    item = name or "something in your Drive"
+    tool = str(getattr(req, "tool", "") or "")
+    sentences = {
+        "read_file": f"{who} wants to read {item}.",
+        "get_metadata": f"{who} wants to see the details of {item}.",
+        "list_folder": f"{who} wants to list {item}.",
+        "search_files": f"{who} wants to search your Drive.",
+        "create_folder": f"{who} wants to create a folder in {item}.",
+        "create_doc": f"{who} wants to create a document in {item}.",
+        "upload_file": f"{who} wants to upload a file in {item}.",
+        "update_file_content": f"{who} wants to edit {item}.",
+        "rename_file": f"{who} wants to rename {item}.",
+        "trash_file": f"{who} wants to move {item} to trash.",
+        "request_access": f"{who} is asking to use {item}.",
+    }
+    return sentences.get(tool, f"{who} wants to use {item}.")
+
+
+def status_label(status: str | None) -> str:
+    if not status:
+        return ""
+    labels = {
+        "pending": "Waiting for you",
+        "approved": "Approved",
+        "denied": "Denied",
+        "allow": "Allowed",
+        "deny": "Denied",
+        "error": "Error",
+    }
+    return labels.get(status, status.replace("_", " "))
+
+
+def tool_label(tool: str) -> str:
+    return {
+        "read_file": "Read a file",
+        "get_metadata": "See file details",
+        "list_folder": "List a folder",
+        "search_files": "Search",
+        "create_folder": "Create a folder",
+        "create_doc": "Create a document",
+        "upload_file": "Upload a file",
+        "update_file_content": "Edit a file",
+        "rename_file": "Rename a file",
+        "trash_file": "Move to trash",
+        "request_access": "Ask for access",
+    }.get(tool, "Use a file")
+
+
 def describe_mime(mime: str) -> str:
     known = {
         FOLDER_MIME: "Folder",
@@ -945,3 +1240,9 @@ def describe_mime(mime: str) -> str:
     if mime.startswith("text/"):
         return "Text"
     return mime.rsplit("/", 1)[-1] or "File"
+
+
+_env.globals["request_headline"] = request_headline
+_env.globals["status_label"] = status_label
+_env.globals["tool_label"] = tool_label
+_env.globals["describe_mime"] = describe_mime

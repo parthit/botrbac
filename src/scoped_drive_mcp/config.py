@@ -2,7 +2,8 @@
 
 Only malformed values (and a missing API_TOKENS) make the settings fail to load. Settings the
 dashboard or the bot connection need are optional at load time; `missing_settings()` reports
-which ones are absent so /health can list them (names only, never values).
+which ones are absent so the signed-in admin overview can list them (names only, never values).
+The public /health route stays a liveness check and does not repeat that list.
 """
 
 import re
@@ -17,6 +18,7 @@ _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PROJECT_NUMBER = re.compile(r"^[0-9]{6,20}$")
 _LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 
@@ -118,12 +120,26 @@ class Settings(BaseSettings):
     # How long the allowlist is cached per instance; bounds how fast a revoke takes effect.
     allowlist_cache_ttl: float = Field(default=2.0, ge=0, le=10)
 
+    # Browser key and Cloud project number for the Google Picker. Both are public
+    # in the signed-in page (restrict the key by HTTP referrer). Not required to boot.
+    google_picker_api_key: str | None = None
+    google_cloud_project_number: str | None = None
+
+    # Fixed-window counters. Login is per IP. /mcp is per bearer token, or per IP
+    # when the request has no token. High defaults so normal use is unaffected.
+    login_rate_limit: int = Field(default=30, ge=1, le=10_000)
+    login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
+    mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)
+    mcp_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
+
     @field_validator(
         "root_folder_id",
         "owner_email",
         "bot_email",
         "app_base_url",
         "redis_rest_url",
+        "google_picker_api_key",
+        "google_cloud_project_number",
         "google_oauth_client_id",
         "google_oauth_client_secret",
         "google_oauth_refresh_token",
@@ -178,6 +194,26 @@ class Settings(BaseSettings):
         value = value.strip().lower()
         if not _EMAIL.fullmatch(value):
             raise ValueError("must be an email address")
+        return value
+
+    @field_validator("google_cloud_project_number")
+    @classmethod
+    def _check_project_number(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not _PROJECT_NUMBER.fullmatch(value):
+            raise ValueError("GOOGLE_CLOUD_PROJECT_NUMBER must be the numeric project number")
+        return value
+
+    @field_validator("google_picker_api_key")
+    @classmethod
+    def _check_picker_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if len(value) < 10 or any(ch.isspace() for ch in value):
+            raise ValueError("GOOGLE_PICKER_API_KEY does not look like an API key")
         return value
 
     @field_validator("app_base_url")
@@ -314,3 +350,7 @@ class Settings(BaseSettings):
     @property
     def secure_cookies(self) -> bool:
         return not (self.app_base_url or "").startswith("http://")
+
+    @property
+    def picker_configured(self) -> bool:
+        return bool(self.google_picker_api_key and self.google_cloud_project_number)

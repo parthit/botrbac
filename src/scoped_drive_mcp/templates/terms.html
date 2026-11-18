@@ -6,18 +6,15 @@
   <p>These are the terms of service linked from the Google sign-in screen for Scoped Drive.
      The <a href="/privacy">privacy policy</a> describes what Google data the app uses.</p>
   <p>Scoped Drive is a gateway that sits in front of Google Drive.</p>
-  <p>Drive’s API does not give an app a fine-grained way to share only certain files and
-     folders. An app that signs in is handed a broad Drive permission: the whole Drive of
-     the account that approved it, or only files that app itself created. There is no
-     Drive setting for “this app may use these folders through the API, and nothing else.”</p>
-  <p>This server is that control. You sign in with your own Google account, tick the files
-     and folders an assistant may use, and every API call is checked against your list
-     before it reaches Drive. Anything else is refused. If the assistant asks for something
-     you have not allowed, you get an approval link and can allow or deny it. You can
-     remove an item at any time. Another person’s list is not yours, and they cannot see
-     your files through this server.</p>
-  <p>The assistant uses the Google account you sign in with. Items you have not ticked
-     are refused by this server. Google does not enforce that list.</p>
+  <p>Google can limit an app to the files you pick and the files that app creates. Scoped
+     Drive asks for that permission. This server is a second check: you sign in with your
+     own Google account, choose the files and folders an assistant may use, and every API
+     call is checked against your list before it reaches Drive. Anything else is refused.
+     If the assistant asks for something you have not allowed, you get an approval link
+     and can allow or deny it. You can remove an item at any time. Another person’s list
+     is not yours, and they cannot see your files through this server.</p>
+  <p>The assistant uses the Google account you sign in with. Items you have not allowed
+     are refused by this server.</p>
   <h2>Using it</h2>
   <p>Signing in, or connecting an assistant, means you are using your own Google account on
      this deployment. Use it for your own Drive. Do not use it to reach files that are
@@ -33,6 +30,6 @@
      copy of them.</p>
   <p>Scoped Drive is not made by Google, and these terms are not Google’s terms.
      <a href="/privacy">Privacy</a> describes what is stored.</p>
-  <p class="muted">Last updated November 10, 2026.</p>
+  <p class="muted">Last updated November 18, 2026.</p>
 </div>
 {% endblock %}

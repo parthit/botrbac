@@ -74,7 +74,7 @@ flowchart LR
 - **Which Google identity the server uses (set by `AUTH_MODE`):**
   - `service_account`: use with a **Shared Drive** (needs Google Workspace). Add the service account as a Content manager. Writes need a Shared Drive because service accounts have no storage quota of their own, so uploads into a My Drive folder fail.
   - `oauth_bot`: use a dedicated bot Gmail account with a stored refresh token, and share the target folder with it as Editor. Works on personal Gmail, and new files count against the bot account's storage.
-- **OAuth scope:** full `https://www.googleapis.com/auth/drive`. `drive.file` can't see shared folders. The actual limit comes from what's shared with the bot plus the scope guard.
+- **OAuth scope:** `openid`, `email`, and `https://www.googleapis.com/auth/drive.file`. The owner picks files in the Google Picker. The allowlist is still the server-side limit. See [google-verification.md](google-verification.md). Older full-Drive tokens keep working until that person signs in again.
 - **Roles, mapped to tools:**
   - `viewer`: `search_files`, `list_folder`, `get_metadata`, `read_file`
   - `editor`: everything `viewer` has, plus `create_folder`, `create_doc`, `upload_file`, `update_file_content`, `rename_file`

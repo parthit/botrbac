@@ -16,6 +16,8 @@ from .drive_client import DRIVE_SCOPE, TOKEN_URI
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+# openid + email identify the person. drive.file is the non-restricted Drive scope:
+# files they pick in the Google Picker, and files this app creates.
 SCOPES = ("openid", "email", DRIVE_SCOPE)
 
 
@@ -99,3 +101,33 @@ class GoogleOAuthClient:
     def revoke(self, token: str) -> None:
         with contextlib.suppress(httpx.HTTPError):
             httpx.post(REVOKE_URL, data={"token": token}, timeout=self.timeout)
+
+
+def refresh_access_token(
+    client_id: str, client_secret: str, refresh_token: str, timeout: float = 15
+) -> str:
+    """Mint a short-lived access token for the Google Picker.
+
+    The scope parameter is omitted on purpose: Google returns the scopes that
+    already belong to this refresh token. A drive.file sign-in and an older
+    full-Drive sign-in both refresh. The new access token is not stored.
+    """
+    try:
+        resp = httpx.post(
+            TOKEN_URI,
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=timeout,
+        )
+    except httpx.HTTPError:
+        raise OAuthError("could not reach Google") from None
+    if resp.status_code != 200:
+        raise OAuthError("Google did not refresh the sign-in")
+    token = resp.json().get("access_token")
+    if not isinstance(token, str) or not token:
+        raise OAuthError("Google did not refresh the sign-in")
+    return token

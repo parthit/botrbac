@@ -50,11 +50,8 @@ async def test_health_needs_no_auth(client, drive) -> None:
     r = await client.get("/health")
     assert r.status_code == 200
     body = r.json()
-    # only Redis is missing in the test settings (an in-memory store is injected)
-    assert body["status"] == "incomplete"
-    assert body["missing"] == ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"]
-    assert body["bot_connected"] is True and body["bot_source"] == "env"
-    assert body["owner_connected"] is False
+    assert body == {"status": "ok"}
+    assert "missing" not in body and "mode" not in body and "store" not in body
     assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
     assert drive.get_calls == [] and drive.queries == []
 
@@ -153,10 +150,9 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.get("/health")
         assert r.status_code == 503
-        assert r.json()["status"] == "misconfigured"
+        assert r.json() == {"status": "unavailable"}
         assert "do-not-leak-this" not in r.text
-        settings = {p["setting"] for p in r.json()["problems"]}
-        assert settings == {"API_TOKENS"}
+        assert "API_TOKENS" not in r.text and "problems" not in r.text
         assert (await c.post("/mcp", json=INIT)).status_code == 503
         assert (await c.get("/browse")).status_code == 503
         assert (await c.get("/terms")).status_code == 200
@@ -203,9 +199,8 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
         r = await c.get("/health")
         assert r.status_code == 503
         body = r.json()
-        assert body["status"] == "misconfigured"
-        assert body["store_error"] == "redis_not_configured"
-        assert "UPSTASH_REDIS_REST_URL" in body["missing"] and "Redis" in body["detail"]
+        assert body == {"status": "unavailable"}
+        assert "redis" not in r.text.lower() and "missing" not in body
         assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
         r = await c.post("/mcp", json=INIT, headers=auth("admin"))
         assert r.status_code == 503 and "storage" in r.json()["error"]
