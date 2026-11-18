@@ -5,6 +5,7 @@ import re
 import pytest
 
 from scoped_drive_mcp.dashboard import SESSION_COOKIE
+from scoped_drive_mcp.drive_client import DriveNotFoundError
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import BOT_TOKEN_KEY, KEY_PREFIX, OWNER_TOKEN_KEY, MemoryStore
 from tests.conftest import BASE_URL, OWNER_EMAIL, TOKENS, make_settings
@@ -396,6 +397,38 @@ def test_browse_my_drive(owner_c) -> None:
     assert "Loose memo" in r.text and "Second memo" in r.text and "Projects" not in r.text
     assert owner_c.get("/browse?folder=bad id").status_code == 400
     assert owner_c.get("/browse?folder=proj-notes").status_code == 400
+
+
+def test_browse_when_my_drive_root_is_hidden(owner_c, monkeypatch) -> None:
+    """drive.file often 404s files.get('root'). Browse still has to render."""
+    from tests.fake_drive import FakeDrive
+
+    real = FakeDrive.get_file
+
+    def get_file(self, file_id, fields):
+        if file_id == "root":
+            raise DriveNotFoundError(file_id)
+        return real(self, file_id, fields)
+
+    monkeypatch.setattr(FakeDrive, "get_file", get_file)
+    page = owner_c.get("/browse")
+    assert page.status_code == 200
+    assert "Something went wrong" not in page.text
+    assert "My Drive" in page.text
+
+
+def test_browse_stays_up_when_drive_list_fails(owner_c, monkeypatch) -> None:
+    from tests.fake_drive import FakeDrive
+
+    def boom(self, q, fields, page_size, page_token=None):
+        raise RuntimeError("drive list refused")
+
+    monkeypatch.setattr(FakeDrive, "list_files", boom)
+    page = owner_c.get("/browse")
+    assert page.status_code == 200
+    assert "Google Drive did not return files" in page.text
+    assert "Something went wrong" not in page.text
+    assert "The file picker is not set up" in page.text
 
 
 def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
