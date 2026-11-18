@@ -67,30 +67,61 @@
     var next = safeBrowsePath(pick.getAttribute("data-next"));
     var requestId = pick.getAttribute("data-request") || "";
     if (!/^[A-Za-z0-9_-]{22,64}$/.test(requestId)) requestId = "";
+
+    function postForm(path, fields) {
+      var body = new URLSearchParams();
+      body.set("csrf", token || "");
+      Object.keys(fields).forEach(function (key) { body.set(key, fields[key]); });
+      return fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        redirect: "manual",
+        credentials: "same-origin"
+      });
+    }
+
+    function httpError(response) {
+      return response.type !== "opaqueredirect" && response.status >= 400;
+    }
+
+    function showServerPage(response) {
+      return response.text().then(function (html) {
+        document.open();
+        document.write(html);
+        document.close();
+      });
+    }
+
     var chain = Promise.resolve();
-    docs.forEach(function (doc, index) {
+    docs.forEach(function (doc) {
       chain = chain.then(function () {
-        var body = new URLSearchParams();
-        body.set("csrf", token || "");
-        var path = "/grant";
-        if (requestId && index === 0) {
-          body.set("target_id", doc.id);
-          path = "/requests/" + requestId + "/approve";
-        } else {
-          body.set("file_id", doc.id);
-          body.set("next", next);
-        }
-        return fetch(path, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: body.toString(),
-          redirect: "manual",
-          credentials: "same-origin"
+        return postForm("/grant", { file_id: doc.id, next: next }).then(function (response) {
+          if (httpError(response)) {
+            return showServerPage(response).then(function () { throw new Error("shown"); });
+          }
         });
       });
     });
+    if (requestId && docs.length) {
+      chain = chain.then(function () {
+        return postForm("/requests/" + requestId + "/approve", {
+          target_id: docs[0].id
+        }).then(function (response) {
+          if (httpError(response)) {
+            return showServerPage(response).then(function () { throw new Error("shown"); });
+          }
+        });
+      });
+    }
     var done = requestId ? "/requests/" + requestId : next;
-    return chain.then(function () { window.location.assign(done); });
+    return chain.then(function () {
+      window.location.assign(done);
+    }).catch(function (err) {
+      if (err && err.message === "shown") return;
+      var note = document.getElementById("pick-error");
+      if (note) note.hidden = false;
+    });
   }
 
   function openPicker(cfg) {

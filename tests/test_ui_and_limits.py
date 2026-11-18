@@ -123,7 +123,8 @@ def test_picker_button_keeps_folder_and_request(world, memstore, oauth) -> None:
     script = script_path.read_text()
     assert 'getAttribute("data-next")' in script
     assert 'getAttribute("data-request")' in script
-    assert "/approve" in script
+    assert script.index('postForm("/grant"') < script.index('"/approve"')
+    assert "response.status >= 400" in script
 
 
 def test_browse_previous_and_next(owner_c, monkeypatch) -> None:
