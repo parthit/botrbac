@@ -232,12 +232,18 @@ button.primary, .btn.primary {
   color: var(--on-accent);
 }
 button.primary:hover, .btn.primary:hover { background: #a53a17; color: var(--on-accent); filter: none; }
+button:hover, .btn:hover { background: var(--wash); color: var(--ink); filter: none; }
 button.danger, .btn.danger {
   color: var(--bad);
   border-color: var(--line2);
   background: transparent;
 }
-button:hover, .btn:hover { background: var(--wash); color: var(--ink); filter: none; }
+button.danger:hover, .btn.danger:hover {
+  background: #f8e6df;
+  color: var(--bad);
+  border-color: var(--bad);
+  filter: none;
+}
 .btn.ghost { background: transparent; }
 .btn[aria-disabled="true"], button:disabled { opacity: 0.45; pointer-events: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
