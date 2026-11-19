@@ -32,9 +32,11 @@
   {% if current and not is_root %}
     {% if current_granted %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
     {% elif covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed through {{ covered_by }}</span>{% endif %}
+    {% if shared_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared with paired people through {{ shared_by }}</span>{% endif %}
   {% endif %}
 </p>
 {% if covered_by %}<p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed. Google may still hide files this app has not opened.</p>{% endif %}
+{% if shared_by %}<p class="muted">Everything in this folder can be read by the assistants of people you are paired with, because “{{ shared_by }}” is on your <a href="/sharing">Sharing</a> list.</p>{% endif %}
 {% else %}
 <p class="muted">Search results for “{{ q }}”.</p>
 {% endif %}
@@ -63,7 +65,8 @@
       {% if r.granted %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
       {% elif r.covered %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed via folder</span>
       {% else %}<span class="pill"><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
-      {% if r.ext_shared %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared with paired people</span>{% endif %}
+      {% if r.ext_shared %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared with paired people</span>
+      {% elif r.ext_covered %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared via folder</span>{% endif %}
     </div>
     <div class="file-actions">
       {% if picking %}
@@ -95,7 +98,7 @@
           <input type="hidden" name="next" value="{{ here }}">
           <button class="danger" type="submit">Stop sharing</button>
         </form>
-        {% else %}
+        {% elif not r.ext_covered %}
         <form class="inline" method="post" action="/sharing/add">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">

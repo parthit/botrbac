@@ -282,3 +282,32 @@ def test_guest_tools_are_listed_for_every_role(people) -> None:
             ).json()["result"]["tools"]
         }
         assert {"list_shared_with_me", "read_shared_file"} <= names, role
+
+
+def test_guest_hints_name_the_shared_tools(people) -> None:
+    app, owner, eve, token = people
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+
+    top = _mcp(eve, token, "list_shared_folder", owner=OWNER_EMAIL)["structuredContent"]
+    assert "list_shared_folder (with owner)" in top["note"]
+    assert "Call list_folder" not in top["note"]
+
+    folder = _error(_mcp(eve, token, "read_shared_file", owner=OWNER_EMAIL, file_id="proj-sub"))
+    assert folder["error"] == "invalid_input"
+    assert "list_shared_folder" in folder["message"]
+    assert "use list_folder" not in folder["message"]
+
+
+def test_browse_marks_items_inside_a_shared_folder(people) -> None:
+    _app_, owner, _eve, _token = people
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    inside = owner.get("/browse?folder=proj").text
+    assert "Shared with paired people through Projects" in inside
+    assert inside.count("Shared via folder") >= 3  # proj-sub, proj-notes, proj-shortcut
+    # Items already covered by the folder do not offer a separate share button.
+    assert 'action="/sharing/add"' not in inside
+    # Outside the shared folder nothing changes.
+    other = owner.get("/browse?folder=priv").text
+    assert "Shared via folder" not in other
+    assert 'action="/sharing/add"' in other

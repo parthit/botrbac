@@ -808,6 +808,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
         covered_by: str | None = None
+        # The nearest folder on the Sharing list above the one being browsed. Everything
+        # inside it is readable by paired people's assistants, as the guest guard allows.
+        shared_by: str | None = None
         next_token: str | None = None
         current: dict[str, Any] | None = None
         if q:
@@ -845,6 +848,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 crumbs.insert(0, {"id": "root" if nid == root_id else nid, "name": name})
                 if covered_by is None and nid in entries:
                     covered_by = name
+                if shared_by is None and nid in shared:
+                    shared_by = name
                 parents = node.get("parents") or []
                 if nid == root_id or nid == "root" or not parents:
                     break
@@ -882,12 +887,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "granted": iid in entries,
                     "covered": covered_by is not None and iid not in entries,
                     "ext_shared": iid in shared,
+                    "ext_covered": shared_by is not None and iid not in shared,
                 }
             )
         return {
             "rows": rows,
             "crumbs": crumbs,
             "covered_by": covered_by,
+            "shared_by": shared_by,
             "current": current,
             "current_granted": current is not None and str(current["id"]) in entries,
             "is_root": current is not None

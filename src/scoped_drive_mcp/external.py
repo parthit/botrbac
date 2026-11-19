@@ -31,7 +31,7 @@ from typing import Any, TypeVar
 from .audit import audit
 from .auth import current_actor
 from .drive_client import BotNotConnectedError
-from .scope import ForbiddenError, OutOfScopeError
+from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 from .service import DriveService
 from .store import Allowlist
 
@@ -48,6 +48,27 @@ SHARED_HANDLING = (
 )
 
 _EMAIL = re.compile(r"^[^@\s]{1,100}@[^@\s]{1,100}$")
+
+# DriveService notes and errors name the caller's own-Drive tools. A guest following those
+# would act on their own Drive (and could file an access request there), so guest results
+# name the shared tool instead.
+_GUEST_TOOL_NAMES = {
+    "list_folder": "list_shared_folder",
+    "read_file": "read_shared_file",
+    "download_file": "download_shared_file",
+}
+_OWN_TOOL = re.compile(r"\b(" + "|".join(_GUEST_TOOL_NAMES) + r")\b")
+
+
+def guest_text(text: str) -> str:
+    """Point a DriveService note or error at the guest tools (which also need `owner`)."""
+    return _OWN_TOOL.sub(lambda m: f"{_GUEST_TOOL_NAMES[m.group(1)]} (with owner)", text)
+
+
+def _guest_notes(result: Any) -> Any:
+    if isinstance(result, dict) and isinstance(result.get("note"), str):
+        result["note"] = guest_text(result["note"])
+    return result
 
 
 class SharedAccessError(Exception):
@@ -203,6 +224,9 @@ class ExternalShares:
                     "to add it on their Sharing page.",
                     owner=them,
                 ) from None
+            except InvalidInputError as exc:
+                audit(tool=tool, decision="error", reason="invalid_input", file_id=file_id, **who)
+                raise SharedAccessError("invalid_input", guest_text(str(exc)), owner=them) from None
             except BotNotConnectedError:
                 audit(tool=tool, decision="error", reason="owner_not_signed_in", **who)
                 raise SharedAccessError(
@@ -211,4 +235,4 @@ class ExternalShares:
                     owner=them,
                 ) from None
             audit(tool=tool, decision="allow", reason="ok", file_id=file_id, **who)
-            return result
+            return _guest_notes(result)
