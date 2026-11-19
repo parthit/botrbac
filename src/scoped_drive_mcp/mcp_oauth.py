@@ -64,6 +64,9 @@ ALLOWED_REDIRECT_URIS = frozenset(
         # brokered by Anthropic and always send one of these callbacks.
         "https://claude.ai/api/mcp/auth_callback",
         "https://claude.com/api/mcp/auth_callback",
+        # ChatGPT apps/connectors, which OpenAI dots also use. ChatGPT sends this stable
+        # callback because the metadata below advertises RFC 9207 `iss` support.
+        "https://chatgpt.com/connector_platform_oauth_redirect",
         "http://localhost:8787/callback",
         "http://127.0.0.1:8787/callback",
     }
@@ -405,6 +408,8 @@ class McpOAuth:
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": [SCOPE],
             "response_modes_supported": ["query"],
+            # Every authorization response (success or error) carries `iss`.
+            "authorization_response_iss_parameter_supported": True,
         }
 
     def routes(self) -> list[Route]:
