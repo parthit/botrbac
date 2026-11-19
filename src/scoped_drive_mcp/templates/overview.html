@@ -95,10 +95,10 @@
   </div>
   {% endif %}
   {% if not picker_ready %}
-  <p>The Google Picker needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before people can add files the app has not already opened.</p>
+  <p>The Google Picker is optional. It needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before the picker button appears. Browse and approval work from the signed-in Drive without it.</p>
   {% endif %}
   {% if env_token_set %}
-  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with full Drive access, remove it or replace it using <code>scripts/bootstrap_oauth.py</code>, which now requests per-file access.</p>
+  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with only per-file access, replace it with <code>scripts/bootstrap_oauth.py</code> so this server can see that Drive. The allowlist still limits assistants.</p>
   {% endif %}
   <p>Server address: <code>{{ mcp_url }}</code></p>
   {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}

@@ -1,25 +1,25 @@
 {% extends "base.html" %}
-{% block title %}Share only the files you pick{% endblock %}
+{% block title %}Share only the files you allow{% endblock %}
 {% block content %}
 <section class="card hero">
   <p class="logo-lockup" aria-hidden="true">🤖🌉</p>
   <h1>Give an assistant only the Drive files you choose</h1>
   <p class="lede">Scoped Drive is a gateway that sits in front of Google Drive. You sign in with your own Google account, pick the files and folders an assistant may use, and this server refuses the rest.</p>
-  <p class="disclosure">Signing in asks Google for your email and for access to the files and folders you pick. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
+  <p class="disclosure">Signing in asks Google for your email and for access to your Drive. This server then lets an assistant use only the files and folders you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
   {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
   <p><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
 </section>
 <h2>How it works</h2>
 <ol class="step-grid">
   <li><span class="step-num">1</span> <b>Sign in</b> with your own Google account. Each person’s files stay separate.</li>
-  <li><span class="step-num">2</span> <b>Pick</b> the files and folders an assistant may use. Remove one whenever you want.</li>
+  <li><span class="step-num">2</span> <b>Allow</b> the files and folders an assistant may use. Remove one whenever you want.</li>
   <li><span class="step-num">3</span> <b>Connect</b> Grok, Muse, or Cursor, then approve the connection when this site asks.</li>
 </ol>
 <h2>Why you can trust the boundary</h2>
 <div class="grid">
   <article class="card">
-    <h2>Only what you pick</h2>
-    <p>Google grants this app the files you choose in the picker, plus files an assistant creates here. This server still checks every call against your list.</p>
+    <h2>Only what you allow</h2>
+    <p>Sign-in can see your Drive. An assistant cannot, until you allow a file or folder. This server checks every call against that list.</p>
   </article>
   <article class="card">
     <h2>Encrypted tokens</h2>

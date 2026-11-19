@@ -49,7 +49,7 @@
     {% elif owner_meta %}
     <p>Your whole My Drive can't be shared from this request. Deny it, or <a href="/browse?request={{ req.id }}">pick a different item</a>.</p>
     {% else %}
-    <p>Its name is listed because {{ req.token_name or "the assistant" }} asked for it. Creating it in Google Docs, or with another connector, leaves it closed to this app. Choose the file to allow it and approve the request.</p>
+    <p>This sign-in could not open that file, so it cannot be approved from here yet. Sign in again if the banner asks you to. You can also choose the file below when the picker is available.</p>
     {% if picker_ready %}
     <p><button type="button" class="primary" id="pick-drive" data-next="/requests/{{ req.id }}" data-request="{{ req.id }}">Choose the file to approve</button></p>
     <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>

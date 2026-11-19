@@ -16,8 +16,8 @@ from .drive_client import DRIVE_SCOPE, TOKEN_URI
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
-# openid + email identify the person. drive.file is the non-restricted Drive scope:
-# files they pick in the Google Picker, and files this app creates.
+# openid + email identify the person. DRIVE_SCOPE is the signed-in account's Drive.
+# The allowlist is what limits an assistant.
 SCOPES = ("openid", "email", DRIVE_SCOPE)
 
 
@@ -109,8 +109,8 @@ def refresh_access_token(
     """Mint a short-lived access token for the Google Picker.
 
     The scope parameter is omitted on purpose: Google returns the scopes that
-    already belong to this refresh token. A drive.file sign-in and an older
-    full-Drive sign-in both refresh. The new access token is not stored.
+    already belong to this refresh token. A full-Drive sign-in and a leftover
+    drive.file sign-in both refresh. The new access token is not stored.
     """
     try:
         resp = httpx.post(
