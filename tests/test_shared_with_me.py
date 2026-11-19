@@ -236,10 +236,13 @@ def test_search_across_everything_shared_with_me(pair, world, oauth) -> None:
     assert "Loose memo" in eve.get("/shared/search?q=Loose").text
 
     # Nothing outside the shared list: not the own-bot list, not other private files.
-    for term in ("gamma", "payroll", "Second"):
+    for term in ("gamma", "Second"):
         res = eve.get(f"/shared/search?q={term}").text
         assert "No matches" in res, term
-        assert SECRET_TEXT not in res
+    # The shortcut "link to payroll" sits in the shared folder and may match by name;
+    # the private file it points to must never be listed or linked.
+    res = eve.get("/shared/search?q=payroll").text
+    assert "priv-secret" not in res and SECRET_TEXT not in res
 
     # Empty search goes back; too long is refused.
     r = eve.get("/shared/search?q=")

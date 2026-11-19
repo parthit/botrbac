@@ -336,10 +336,12 @@ def test_assistant_searches_everything_shared_with_it(people) -> None:
     folder = _mcp(eve, token, "search_shared_files", query="PROJECTS")["structuredContent"]
     assert folder["results"][0]["files"][0]["id"] == "proj"
 
-    for term in ("gamma", "payroll"):
-        miss = _mcp(eve, token, "search_shared_files", query=term)["structuredContent"]
-        assert miss["results"] == [], term
-        assert SECRET_TEXT not in json.dumps(miss)
+    miss = _mcp(eve, token, "search_shared_files", query="gamma")["structuredContent"]
+    assert miss["results"] == []  # on the owner's own-bot list only
+    # "link to payroll" is a shortcut inside the shared folder, so its name may match.
+    # Its target, a private file, must never appear or be followed.
+    payroll = json.dumps(_mcp(eve, token, "search_shared_files", query="payroll"))
+    assert "priv-secret" not in payroll and SECRET_TEXT not in payroll
 
     bad = _mcp(eve, token, "search_shared_files", query="   ")
     assert _error(bad)["error"] == "invalid_input"

@@ -1151,12 +1151,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except SharedAccessError as exc:
             return shared_error(request, exc)
         # Never served inline: the bytes come from another person and this is our origin.
+        # Cache-Control: no-store and nosniff come from the security headers middleware.
         return Response(
             got.data,
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": attachment_disposition(got.filename),
-                "Cache-Control": "no-store",
                 "X-Download-Truncated": "1" if got.truncated else "0",
             },
         )
