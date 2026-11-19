@@ -17,10 +17,10 @@ from typing import Any, Protocol
 
 from .config import Settings
 
-# Per-file access: files the user picks (Google Picker) and files this app creates.
-# The old full-Drive scope is restricted and triggers Google's unverified-app warning.
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
-FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+# The signed-in account's Drive. The server allowlist, not this scope, decides
+# what an assistant can open. A stored token that only has drive.file cannot see
+# files this app did not create or the user did not pick, so those people sign in again.
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint, not a secret
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -134,10 +134,9 @@ def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
     """Build user credentials without pinning a scope on refresh.
 
     Google binds a refresh token to the scopes granted when it was issued. Sending
-    a different `scope` on refresh rejects older full-Drive tokens and would also
-    reject a drive.file token if we ever changed the list again. Omitting `scopes`
-    keeps whichever grant that token already has. New sign-ins request `DRIVE_SCOPE`
-    (`drive.file`) in the authorization URL.
+    a different `scope` on refresh would reject a token that still has only
+    `drive.file`. Omitting `scopes` keeps whichever grant that token already has.
+    New sign-ins request `DRIVE_SCOPE` (full Drive) in the authorization URL.
     """
     from google.oauth2.credentials import Credentials
 

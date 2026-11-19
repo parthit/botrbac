@@ -66,7 +66,7 @@ def test_login_page_is_public(c) -> None:
     assert "apis.google.com" in r.headers["content-security-policy"]
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
     # Google requires the data disclosure immediately before the consent button.
-    assert r.text.index("files and folders you pick") < r.text.index("Sign in with Google")
+    assert r.text.index("files and folders you allow") < r.text.index("Sign in with Google")
 
 
 def test_public_home_is_the_consent_screen_page(c) -> None:
@@ -174,16 +174,13 @@ def test_google_error_param(c) -> None:
 def test_drive_scope_required(c, oauth) -> None:
     oauth.scopes = frozenset({"openid", "email"})
     r = login(c)
-    assert r.status_code == 400 and "file access was not granted" in r.text
+    assert r.status_code == 400 and "Drive access was not granted" in r.text
 
 
-def test_full_drive_scope_is_rejected(c, oauth) -> None:
-    oauth.scopes = frozenset(
-        {"openid", "email", "https://www.googleapis.com/auth/drive"}
-    )
+def test_full_drive_scope_is_accepted(c, oauth) -> None:
+    oauth.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
     r = login(c)
-    assert r.status_code == 400
-    assert "no longer accepts full Google Drive access" in r.text
+    assert r.status_code == 303
 
 
 def test_login_hint_is_only_the_visitors(c, oauth) -> None:
@@ -496,7 +493,7 @@ def test_overview_and_health_report_status(owner_c) -> None:
     assert "UPSTASH_REDIS_REST_URL" in page
     assert f"{BASE_URL}/mcp" in page
     assert "uses your Google account" in page
-    assert "files and folders you pick" in page
+    assert "files and folders you allow" in page
     assert "Assistant acts as" not in page
     assert "make_token.py" in page  # admin-only operator note
 
@@ -505,7 +502,7 @@ def test_non_admin_overview_hides_operator_notes(c) -> None:
     login(c, "eve-code")
     page = c.get("/").text
     assert "uses your Google account" in page
-    assert "files and folders you pick" in page
+    assert "files and folders you allow" in page
     assert f"{BASE_URL}/mcp" in page
     assert "make_token.py" not in page
     assert "UPSTASH_REDIS_REST_URL" not in page

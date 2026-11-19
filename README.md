@@ -1,8 +1,8 @@
 # scoped-drive-mcp
 
 A small [MCP](https://modelcontextprotocol.io) server that sits between **Grok** (xAI) and **Google Drive**.
-You open a web dashboard, sign in with your own Google account, and **pick the files and folders an assistant
-may use** (Google Picker, scope `drive.file`). The assistant can reach only those, plus files it creates
+You open a web dashboard, sign in with your own Google account, and **tick the files and folders an assistant
+may use**. Sign-in can see that Drive. The assistant can reach only what you ticked, plus files it creates
 inside a folder you allowed. If it tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
 you can untick (revoke) anything at any time. Each access token you hand out also has a **role** that
 decides which tools it may use. It runs as a single Python function on **Vercel** (the free Hobby plan is
@@ -15,9 +15,9 @@ You  ──browser + Google sign-in──▶ Vercel dashboard ──▶ allowlis
 
 Every call checks the token's role and confirms the file is on the allowlist, or inside an allowlisted
 folder, before anything is sent to Google. The Drive call uses the Google account that signed in. There
-is no second Gmail. New sign-ins use per-file Google access, and the allowlist is checked before
+is no second Gmail. Sign-in uses full Drive access, and the allowlist is checked before
 every call. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
-more of that Drive than the list you ticked, until you sign in again under the per-file scope.
+more of that Drive than the list you ticked.
 
 ## More than one person
 
@@ -137,12 +137,13 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
    (If you set up phase 1 with a *Desktop* client, create this new *Web* client anyway; Desktop clients
    don't accept these redirect URIs.)
 5. **Publish and verify:** the consent screen should request `openid`, `email`, and
-   `https://www.googleapis.com/auth/drive.file` (not the full Drive scope). Enable the **Google Picker API**,
-   create a browser API key, and set `GOOGLE_PICKER_API_KEY` plus `GOOGLE_CLOUD_PROJECT_NUMBER`.
-   The remaining clicks in Google Cloud and Search Console (custom domain, a separate production project,
-   brand verification, publishing **In production**) are listed in
+   `https://www.googleapis.com/auth/drive`. That scope is restricted. The Google Picker is optional:
+   enable the **Google Picker API**, create a browser API key, and set `GOOGLE_PICKER_API_KEY` plus
+   `GOOGLE_CLOUD_PROJECT_NUMBER` only if you want the picker button. The remaining clicks in Google
+   Cloud and Search Console (custom domain, a separate production project, brand verification,
+   publishing **In production**) are listed in
    [docs/google-verification.md](docs/google-verification.md). While the app is in *Testing*, Google expires
-   sign-ins after 7 days.
+   sign-ins after 7 days. A saved sign-in that only has `drive.file` must sign in again.
 
 ### 2. Vercel: project, Redis and environment variables
 
@@ -559,10 +560,10 @@ After changing dependencies, regenerate Vercel's requirements file:
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
-- New sign-ins request `drive.file`. The stored refresh token can call Drive for files this app was granted,
-  and the allowlist is still checked first. A token saved before that change keeps its older scopes until
-  that person signs in again. Remove `GOOGLE_OAUTH_REFRESH_TOKEN` if it was minted with full Drive access,
-  or replace it with `scripts/bootstrap_oauth.py`. See [docs/google-verification.md](docs/google-verification.md).
+- New sign-ins request full Drive access (`https://www.googleapis.com/auth/drive`). The allowlist is still
+  checked first. A token saved with only `drive.file` keeps that narrower grant until that person signs in
+  again. Replace `GOOGLE_OAUTH_REFRESH_TOKEN` with `scripts/bootstrap_oauth.py` if it was minted with
+  `drive.file`. See [docs/google-verification.md](docs/google-verification.md).
 
 ## How the restriction works
 

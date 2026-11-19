@@ -5,10 +5,10 @@
   <h1>Privacy policy</h1>
   <p>This is the privacy policy for Scoped Drive, linked from the Google sign-in screen
      and from the <a href="/">home page</a>.</p>
-  <p>Scoped Drive is a gateway in front of Google Drive. You pick the files and folders
-     an assistant may use. Google’s per-file permission covers those picks and files this
-     app creates. This server then checks every call against the list you keep. That list,
-     and the assistant you connect, are the features of the app.</p>
+  <p>Scoped Drive is a gateway in front of Google Drive. Sign-in can see the same Drive
+     you can. You then choose the files and folders an assistant may use. This server
+     checks every call against that list. The list, and the assistant you connect, are
+     the features of the app.</p>
   <p>This deployment is run by the person who set it up. Any verified Google account can
      sign in, unless that person limited sign-in to a list of addresses. You sign in with
      your own Google account and tick your own files. The assistant uses that same account.
@@ -20,13 +20,11 @@
   <ul>
     <li><code>openid</code> and <code>email</code>, to read the account’s email address and
         whether Google has verified it. We use that to tell signed-in people apart.</li>
-    <li><code>https://www.googleapis.com/auth/drive.file</code>, which can see, create,
-        edit, and trash the files and folders you pick in the Google Picker, and files
-        this app creates. It does not grant the rest of your Drive. This server still
-        limits the assistant to items you have allowed. A folder you pick covers that
-        folder on this server. Files that were already inside it may need to be picked
-        too, because Google does not always open every existing file in a picked folder.
-        Files the assistant creates inside an allowed folder are included.</li>
+    <li><code>https://www.googleapis.com/auth/drive</code>, which can see, create,
+        edit, and trash files and folders in the Google account you sign in with.
+        This server still limits the assistant to items you have allowed. A folder you
+        allow covers files inside it. Files the assistant creates inside an allowed
+        folder are included.</li>
   </ul>
   <p>We do not ask for your name, contacts, Gmail, or other Google products.</p>
   <p>What an assistant can do depends on the role of the connection you gave it: search,
@@ -39,15 +37,14 @@
      dashboard:</p>
   <ul>
     <li>Confirm the signed-in account.</li>
-    <li>Show the files this app can open so you can allow them, and open the Google
-        Picker so you can choose more.</li>
+    <li>Show files in your Drive so you can allow them for an assistant.</li>
     <li>Check each assistant request against that list.</li>
     <li>Call Drive for an allowed item and return the result to the assistant you connected.</li>
   </ul>
   <p>Those Drive calls use the Google account you signed in with. Allowing an item adds it
-     to this server’s list. Google’s per-file permission and that list are both limits.
-     A sign-in saved before this change may still carry the older broader permission
-     until you sign in again.</p>
+     to this server’s list, and that list is what an assistant can reach. A sign-in saved
+     when this app asked only for files it created or you picked cannot see the rest of
+     your Drive until you sign in again.</p>
   <p>File contents are read from Drive only to answer that request. This server does not
      keep a copy, does not build a database of your files, and does not write contents,
      file names, or search text to the activity log.</p>
@@ -116,6 +113,6 @@
   <p>Scoped Drive is not directed at children under 13 and does not knowingly collect
      their information.</p>
   <p>See also the <a href="/terms">terms of service</a>.</p>
-  <p class="muted">Last updated November 18, 2026.</p>
+  <p class="muted">Last updated November 19, 2026.</p>
 </div>
 {% endblock %}
