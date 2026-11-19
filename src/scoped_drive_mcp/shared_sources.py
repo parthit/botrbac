@@ -34,6 +34,7 @@ from typing import Any, Protocol
 
 from .drive_client import FOLDER_MIME, GOOGLE_APPS_PREFIX, SHORTCUT_MIME
 from .external import (
+    SKIPPABLE_IN_SEARCH,
     ExternalShares,
     SharedAccessError,
     acting_as,
@@ -199,9 +200,10 @@ class SharedWithMe:
                 try:
                     hits = source.search(you, peer, text, limit)
                 except SharedAccessError as exc:
-                    if exc.code != "owner_unavailable":
+                    # One owner who is down, or whose pairing just ended, is skipped.
+                    if exc.code not in SKIPPABLE_IN_SEARCH:
                         raise
-                    if peer not in unavailable:
+                    if exc.code == "owner_unavailable" and peer not in unavailable:
                         unavailable.append(peer)
                     continue
                 if hits:

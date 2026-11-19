@@ -103,6 +103,8 @@ SECURITY_HEADERS = [
 ]
 
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Searches per person per minute on "Shared with me". Each one reads every sharer's Drive.
+SHARED_SEARCH_LIMIT = 20
 # Item ids in "Shared with me" links. Drive ids fit; other sources must too.
 _SHARED_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,200}")
 
@@ -1066,7 +1068,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "owner_unavailable": 503,
             "no_bytes": 404,
         }.get(exc.code, 403)
-        return render(request, "shared_error.html", status, message=exc.message, code=exc.code)
+        message = exc.message
+        if exc.code == "invalid_input" and ("_shared_" in message or "read_file" in message):
+            # Drive's wording for an assistant (it names tools). Say it for a person.
+            message = (
+                "This item can't be opened that way. If it is a folder, open it from the list."
+            )
+        return render(request, "shared_error.html", status, message=message, code=exc.code)
 
     def shared_args(request: Request) -> tuple[Any, str, str | None]:
         """The source, owner and item id from the query string, checked for shape only.
@@ -1099,6 +1107,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         q = (request.query_params.get("q") or "").strip()
         if not q:
             return RedirectResponse("/shared", status_code=303)
+        allowed = await blocking(
+            allow, ctx.store, "shared_search", "user:" + email, SHARED_SEARCH_LIMIT, 60
+        )
+        if not allowed:
+            # Each search reads every sharer's Drive; keep one person from using up theirs.
+            return render(
+                request,
+                "error.html",
+                429,
+                message="Too many searches. Wait a minute and try again.",
+            )
         try:
             results = await blocking(ctx.shared_with_me.search, email, q)
         except SharedAccessError as exc:

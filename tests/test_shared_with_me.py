@@ -253,3 +253,88 @@ def test_search_across_everything_shared_with_me(pair, world, oauth) -> None:
     assert 'action="/shared/search"' in eve.get("/shared").text
     app.state.mailbox.revoke(EVE, link_id)
     assert "No matches" in eve.get("/shared/search?q=roadmap").text
+
+
+def _carol_shares(app, world, eve_pair: bool = True):
+    """Carol signs in, shares one file of hers, and is paired with Eve."""
+    world.add(
+        "carol-doc", "Carol roadmap", "text/plain", ["carol-root"], b"carol roadmap", owner=CAROL
+    )
+    carol = client(app)
+    assert login(carol, "carol-code").status_code == 303
+    assert post(carol, "/sharing/add", file_id="carol-doc").status_code == 303
+    if eve_pair:
+        _pair(app, CAROL, EVE)
+    return carol
+
+
+def test_search_skips_a_sharer_whose_drive_fails(pair, world, monkeypatch) -> None:
+    from scoped_drive_mcp.auth import current_actor
+    from scoped_drive_mcp.service import DriveService
+
+    app, owner, eve = pair
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    _carol_shares(app, world)
+    assert "Carol roadmap" in eve.get("/shared/search?q=roadmap").text
+
+    real = DriveService.search_files
+
+    def flaky(self, query, max_results=10):
+        if current_actor.get() == CAROL:
+            raise RuntimeError("Google said 503")
+        return real(self, query, max_results)
+
+    monkeypatch.setattr(DriveService, "search_files", flaky)
+    page = eve.get("/shared/search?q=roadmap")
+    assert page.status_code == 200
+    assert "Deep roadmap" in page.text  # the owner's results survive
+    assert "Carol roadmap" not in page.text
+    assert "Not searched: " + CAROL in page.text
+
+
+def test_shared_search_is_rate_limited(pair, monkeypatch) -> None:
+    import scoped_drive_mcp.dashboard as dash
+
+    app, owner, eve = pair
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    monkeypatch.setattr(dash, "SHARED_SEARCH_LIMIT", 2)
+    assert eve.get("/shared/search?q=roadmap").status_code == 200
+    assert eve.get("/shared/search?q=roadmap").status_code == 200
+    limited = eve.get("/shared/search?q=roadmap")
+    assert limited.status_code == 429 and "Too many searches" in limited.text
+    # Per person: the owner is not limited by Eve's searches.
+    assert owner.get("/shared/search?q=roadmap").status_code == 200
+
+
+def test_failed_downloads_are_audited_and_explained(pair, memstore) -> None:
+    app, owner, eve = pair
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+
+    doc = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-deep-doc"))
+    assert doc.status_code == 404 and "no file to download" in doc.text
+    folder = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-sub"))
+    assert folder.status_code == 400
+    assert "_shared_" not in folder.text and "open it from the list" in folder.text
+
+    log = [json.loads(r) for r in memstore.lrange(KEY_PREFIX + "activity", 0, -1)]
+    errors = {
+        (r["tool"], r.get("file_id"), r["reason"])
+        for r in log
+        if r.get("role") == "guest" and r["decision"] == "error"
+    }
+    assert ("download_shared_file", "proj-deep-doc", "no_bytes") in errors
+    assert ("download_shared_file", "proj-sub", "invalid_input") in errors
+
+
+def test_breadcrumbs_stop_at_a_shared_subfolder(pair) -> None:
+    app, owner, eve = pair
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj-sub").status_code == 303
+    page = browse(eve, "proj-sub").text
+    assert "Deep roadmap" in page
+    assert "Projects" not in page  # the unshared parent is never named
+    assert browse(eve, "proj").status_code == 403
+    assert open_item(eve, "root").status_code in (400, 403)

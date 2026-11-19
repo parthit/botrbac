@@ -345,3 +345,28 @@ def test_assistant_searches_everything_shared_with_it(people) -> None:
 
     bad = _mcp(eve, token, "search_shared_files", query="   ")
     assert _error(bad)["error"] == "invalid_input"
+
+
+def test_assistant_search_skips_a_sharer_whose_drive_fails(people, world, monkeypatch) -> None:
+    from scoped_drive_mcp.auth import current_actor
+    from scoped_drive_mcp.service import DriveService
+    from tests.test_shared_with_me import _carol_shares
+
+    app, owner, eve, token = people
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    _carol_shares(app, world)
+
+    real = DriveService.search_files
+
+    def flaky(self, query, max_results=10):
+        if current_actor.get() == CAROL:
+            raise RuntimeError("Google said 503")
+        return real(self, query, max_results)
+
+    monkeypatch.setattr(DriveService, "search_files", flaky)
+    out = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert [r["owner"] for r in out["results"]] == [OWNER_EMAIL]
+    assert out["unavailable"] == [CAROL]
+    named = _mcp(eve, token, "search_shared_files", query="roadmap", owner=CAROL)
+    assert _error(named)["error"] == "owner_unavailable"

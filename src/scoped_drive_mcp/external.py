@@ -31,6 +31,7 @@ from typing import Any, TypeVar
 from .audit import audit
 from .auth import current_actor
 from .drive_client import FOLDER_MIME, BotNotConnectedError
+from .errors import report_exception
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 from .service import DriveService
 from .store import Allowlist
@@ -94,6 +95,8 @@ def normalize_email(value: Any) -> str:
 
 
 MAX_SEARCH_QUERY = 200
+# When searching everyone, these errors skip that owner instead of failing the search.
+SKIPPABLE_IN_SEARCH = frozenset({"owner_unavailable", "not_linked"})
 MAX_SEARCH_RESULTS = 50
 
 
@@ -202,9 +205,12 @@ class ExternalShares:
                     lambda: self.search_as_owner(text, limit),
                 )
             except SharedAccessError as exc:
-                if owner or exc.code != "owner_unavailable":
+                # Searching everyone: one owner who is down, or whose pairing ended a
+                # moment ago, is skipped. A named owner gets the real error.
+                if owner or exc.code not in SKIPPABLE_IN_SEARCH:
                     raise
-                unavailable.append(them)
+                if exc.code == "owner_unavailable":
+                    unavailable.append(them)
                 continue
             if files:
                 results.append({"owner": them, "files": files})
@@ -224,13 +230,22 @@ class ExternalShares:
         """Run inside a guest call. Drive's guarded search finds files inside shared
         folders and directly shared files, but never a shared folder itself (it is not
         inside itself). Shared folders are matched here by their current name, first."""
+        # Match the stored names first (no Drive call), then confirm only those few
+        # through the guard: the current name must still match and it must not be trashed.
         needle = text.casefold()
-        top = self.service.list_top_level().get("files") or []
-        hits = [
-            m
-            for m in top
-            if m.get("mimeType") == FOLDER_MIME and needle in str(m.get("name", "")).casefold()
-        ]
+        hits: list[dict[str, Any]] = []
+        for entry in self.allowlist.entries().values():
+            if len(hits) >= limit:
+                break
+            if entry.mime_type != FOLDER_MIME or needle not in entry.name.casefold():
+                continue
+            try:
+                meta = self.service.get_metadata(entry.id)
+            except (OutOfScopeError, ForbiddenError):
+                continue
+            if meta.get("trashed") or needle not in str(meta.get("name", "")).casefold():
+                continue
+            hits.append(meta)
         seen = {str(m.get("id")) for m in hits}
         for meta in self.service.search_files(text, limit).get("files") or []:
             if str(meta.get("id")) not in seen:
@@ -338,6 +353,23 @@ class ExternalShares:
                 raise SharedAccessError(
                     "owner_unavailable",
                     "The owner's Google sign-in is not available right now. Try again later.",
+                    owner=them,
+                ) from None
+            except SharedAccessError as exc:
+                # Raised by `fn` itself (e.g. a Google Doc has no bytes to download). The
+                # owner's Drive was still read, so it is still on their activity log.
+                audit(tool=tool, decision="error", reason=exc.code, file_id=file_id, **who)
+                raise
+            except Exception as exc:
+                # A revoked Google grant, a Drive 429/5xx, or a bug. One owner's failure
+                # must not look like a server error to the guest, or sink a search across
+                # several owners; it is logged for the operator and the owner.
+                report_exception(exc, where=f"guest:{tool}")
+                reason = type(exc).__name__
+                audit(tool=tool, decision="error", reason=reason, file_id=file_id, **who)
+                raise SharedAccessError(
+                    "owner_unavailable",
+                    "The owner's Google Drive did not answer. Try again later.",
                     owner=them,
                 ) from None
             audit(tool=tool, decision="allow", reason="ok", file_id=file_id, **who)
