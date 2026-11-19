@@ -1469,7 +1469,19 @@ def describe_mime(mime: str) -> str:
         "application/vnd.google-apps.document": "Google Doc",
         "application/vnd.google-apps.spreadsheet": "Google Sheet",
         "application/vnd.google-apps.presentation": "Google Slides",
+        "application/vnd.google-apps.form": "Google Form",
+        "application/vnd.google-apps.drawing": "Google Drawing",
         "application/pdf": "PDF",
+        "application/msword": "Word",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word",
+        "application/vnd.ms-excel": "Excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel",
+        "application/vnd.ms-powerpoint": "PowerPoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint",
+        "application/rtf": "Rich text",
+        "application/zip": "ZIP",
+        "application/json": "JSON",
+        "text/csv": "CSV",
     }
     if mime in known:
         return known[mime]
@@ -1477,7 +1489,13 @@ def describe_mime(mime: str) -> str:
         return "Image"
     if mime.startswith("text/"):
         return "Text"
-    return mime.rsplit("/", 1)[-1] or "File"
+    if mime.startswith("video/"):
+        return "Video"
+    if mime.startswith("audio/"):
+        return "Audio"
+    sub = mime.rsplit("/", 1)[-1]
+    # Vendor types like "vnd.foo.bar-baz" mean nothing to a person and break narrow layouts.
+    return sub if sub and len(sub) <= 16 and not sub.startswith(("vnd.", "x-")) else "File"
 
 
 _env.globals["request_headline"] = request_headline

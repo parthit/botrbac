@@ -603,3 +603,14 @@ def test_dashboard_not_configured(world) -> None:
     health = c.get("/health").json()
     assert health == {"status": "ok"}
     assert "SESSION_SECRET" not in str(health)
+
+
+def test_describe_mime_gives_short_human_labels() -> None:
+    from scoped_drive_mcp.dashboard import describe_mime
+
+    word = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert describe_mime(word) == "Word"
+    assert describe_mime("text/csv") == "CSV"
+    assert describe_mime("application/vnd.some-vendor.thing-nobody-knows") == "File"
+    assert describe_mime("application/x-whatever") == "File"
+    assert describe_mime("video/mp4") == "Video"
