@@ -333,6 +333,9 @@ def test_assistant_searches_everything_shared_with_it(people) -> None:
     one = _mcp(eve, token, "search_shared_files", query="notes", owner=OWNER_EMAIL)
     assert [f["id"] for f in one["structuredContent"]["results"][0]["files"]] == ["proj-notes"]
 
+    folder = _mcp(eve, token, "search_shared_files", query="PROJECTS")["structuredContent"]
+    assert folder["results"][0]["files"][0]["id"] == "proj"
+
     for term in ("gamma", "payroll"):
         miss = _mcp(eve, token, "search_shared_files", query=term)["structuredContent"]
         assert miss["results"] == [], term

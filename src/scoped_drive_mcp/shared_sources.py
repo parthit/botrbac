@@ -384,15 +384,15 @@ class DriveSharedSource:
         )
 
     def search(self, caller: str, owner: str, query: str, limit: int) -> builtins.list[SharedHit]:
-        """Drive's guarded search (names and full text), run as the owner's guest."""
+        """Names and full text, plus shared folders by name, run as the owner's guest."""
         text = clean_query(query)
 
         def run() -> builtins.list[SharedHit]:
-            found = self.shares.service.search_files(text, max(1, min(limit, 50)))
+            found = self.shares.search_as_owner(text, max(1, min(limit, 50)))
             memo: dict[str, dict[str, Any] | None] = {}
             hits = [
                 SharedHit(drive_node(meta), self._path(meta, include_start=False, memo=memo))
-                for meta in found.get("files") or []
+                for meta in found
             ]
             return sorted(hits, key=lambda h: (not h.node.is_container, h.node.name.lower()))
 

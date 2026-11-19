@@ -30,7 +30,7 @@ from typing import Any, TypeVar
 
 from .audit import audit
 from .auth import current_actor
-from .drive_client import BotNotConnectedError
+from .drive_client import FOLDER_MIME, BotNotConnectedError
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 from .service import DriveService
 from .store import Allowlist
@@ -194,19 +194,18 @@ class ExternalShares:
         unavailable: list[str] = []
         for them in owners:
             try:
-                found = self._as_guest(
+                files = self._as_guest(
                     you,
                     them,
                     "search_shared_files",
                     None,
-                    lambda: self.service.search_files(text, limit),
+                    lambda: self.search_as_owner(text, limit),
                 )
             except SharedAccessError as exc:
                 if owner or exc.code != "owner_unavailable":
                     raise
                 unavailable.append(them)
                 continue
-            files = found.get("files") or []
             if files:
                 results.append({"owner": them, "files": files})
         return {
@@ -220,6 +219,24 @@ class ExternalShares:
                 "Only people with an active mailbox pairing are searched."
             ),
         }
+
+    def search_as_owner(self, text: str, limit: int) -> list[dict[str, Any]]:
+        """Run inside a guest call. Drive's guarded search finds files inside shared
+        folders and directly shared files, but never a shared folder itself (it is not
+        inside itself). Shared folders are matched here by their current name, first."""
+        needle = text.casefold()
+        top = self.service.list_top_level().get("files") or []
+        hits = [
+            m
+            for m in top
+            if m.get("mimeType") == FOLDER_MIME and needle in str(m.get("name", "")).casefold()
+        ]
+        seen = {str(m.get("id")) for m in hits}
+        for meta in self.service.search_files(text, limit).get("files") or []:
+            if str(meta.get("id")) not in seen:
+                seen.add(str(meta.get("id")))
+                hits.append(meta)
+        return hits[:limit]
 
     def list_folder(
         self, caller: str, owner: str, folder_id: str | None = None, max_results: int = 100

@@ -227,6 +227,11 @@ def test_search_across_everything_shared_with_me(pair, world, oauth) -> None:
     deep_href = shared_href("open", DRIVE, OWNER_EMAIL, "proj-deep-doc")
     assert deep_href.replace("&", "&amp;") in page.text
 
+    # A shared folder itself matches by name (Drive's search only finds what is inside).
+    projects = eve.get("/shared/search?q=project").text
+    proj_href = shared_href("browse", DRIVE, OWNER_EMAIL, "proj").replace("&", "&amp;")
+    assert proj_href in projects
+
     # A directly shared file matches by name.
     assert "Loose memo" in eve.get("/shared/search?q=Loose").text
 
