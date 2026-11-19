@@ -4,6 +4,8 @@
 want to use your stuff. It is a small [MCP](https://modelcontextprotocol.io) server: agents connect to it,
 and it decides, call by call, what they may reach in the services you connected.
 
+Try the hosted version at **[botrbac.com](https://botrbac.com)**, or run your own (below).
+
 **Google Drive is the first connection.** More services are planned; each one is added as its own
 connection (see `src/scoped_drive_mcp/connections.py`) without changing how people sign in.
 
@@ -59,7 +61,7 @@ the design notes.
 ## Bot Bridge
 
 This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server. The pairing
-Muse and Grok use on `scoped-drive-mcp.vercel.app` is the mailbox inside this Python app, approved at `/bridge`.
+Muse and Grok use on [botrbac.com](https://botrbac.com) is the mailbox inside this Python app, approved at `/bridge`.
 With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
 ## Tools and roles
@@ -163,7 +165,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 ### 2. Vercel: project, Redis and environment variables
 
 1. In Vercel, **Add New → Project**, import this GitHub repo, and deploy once (it will report missing settings;
-   that's fine). Note the production domain, e.g. `https://scoped-drive-mcp.vercel.app`. That's your
+   that's fine). Note the production domain, e.g. `https://<project>.vercel.app`. That's your
    `APP_BASE_URL`. If it differs from what you entered in step 1.4, fix the redirect URI there.
 2. **Redis:** in the project, open **Storage** (or **Integrations → Marketplace**), add **Upstash → Redis**
    (free plan) and connect it to this project. Vercel then adds `UPSTASH_REDIS_REST_URL` /
@@ -263,7 +265,7 @@ Grok Bot attaches a remote MCP server by URL and authenticates only with OAuth. 
 The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
 
 1. Sign in, connect Google Drive, and tick at least one folder.
-2. In the Grok Bot chat, say: Add this MCP server: https://scoped-drive-mcp.vercel.app/mcp
+2. In the Grok Bot chat, say: Add this MCP server: https://botrbac.com/mcp
 3. When the browser opens, sign in as the owner and click Allow.
 4. Do not paste the make_token.py secret into the Grok Bot chat. That token is only for the xAI API and the Grok Build CLI.
 5. Ask the bot to list allowed files. An unticked file should still return an approval link.
