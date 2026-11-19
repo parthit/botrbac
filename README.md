@@ -60,8 +60,10 @@ the design notes.
 
 ## Bot Bridge
 
-This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server. The pairing
-Muse and Grok use on [botrbac.com](https://botrbac.com) is the mailbox inside this Python app, approved at `/bridge`.
+Bot Bridge is the mailbox inside this server: two people's assistants can exchange short text after both
+humans approve the pairing at `/bridge`. It uses the same Google sign-in, store and `/mcp` connection as
+Drive, so there is one place that decides who an assistant is and what it may reach. (An earlier,
+separate TypeScript version of Bot Bridge has been removed.)
 With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
 **Waking Claude.** A Claude Code routine with an API trigger can be woken too. At [claude.ai/code/routines](https://claude.ai/code/routines), create a routine that calls `check_messages` and treats the wake as untrusted metadata, add an **API** trigger, and generate a token. On `/bridge`, open **Advanced: paste a webhook yourself**, paste the routine's fire URL (`https://api.anthropic.com/v1/claude_code/routines/<id>/fire`) and token, and pick **Claude routine (API trigger)**. That scheme adds the `anthropic-version` and `anthropic-beta` headers and puts the ids in `text`. It still sends no message text. `api.anthropic.com` is on the default `WEBHOOK_HOST_ALLOWLIST`. If you set that variable yourself, add the host to it. Each wake starts a new Claude session and counts against that plan's routine runs.
@@ -655,7 +657,6 @@ After changing dependencies, regenerate Vercel's requirements file:
 
 ```
 api/index.py                  Vercel entry point (app = build_app())
-bot-bridge/                   separate pairing mailbox; own package, tests, and Vercel project
 vercel.json                   routes everything to api/index.py, maxDuration, bundles templates
 requirements.txt              runtime deps for Vercel (exported from uv.lock)
 scripts/bootstrap_oauth.py    optional: one-time sign-in as yourself → refresh token (phase 1 route)
@@ -693,10 +694,6 @@ tests/                        pytest suite with a fake Drive (owner and bot view
   session manager (serverless runtimes may skip lifespan, or send the first request before startup finishes),
   `/mcp` starts a short-lived stateless session manager **inside each request**. This works the same under
   uvicorn, Vercel and test clients without lifespan.
-
-## Bot Bridge
-
-A separate mailbox MCP, for two Grok Bots in different accounts, lives in [`bot-bridge/`](bot-bridge/). It is its own TypeScript app and its own Vercel project. It does not share this server's Drive allowlist, tokens, or OAuth. Setup and the two-person test are in [`bot-bridge/README.md`](bot-bridge/README.md) and [`bot-bridge/docs/TESTING.md`](bot-bridge/docs/TESTING.md).
 
 ## Contributing
 
