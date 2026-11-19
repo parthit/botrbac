@@ -133,11 +133,61 @@ header {
   background: var(--wash);
   border-bottom: 0;
 }
+.count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--card);
+  font: 600 11px var(--mono);
+}
+.account { position: relative; margin: 0 0 0 auto; border-top: 0; }
+.account summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 4px;
+}
+.account summary::-webkit-details-marker { display: none; }
+.account summary:hover, .account[open] summary { background: var(--wash); color: inherit; }
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1.5px solid var(--ink);
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 14px;
+}
+.account-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(30, 25, 21, 0.12);
+}
+#site-nav .account-menu a { width: 100%; }
+.summary-email { display: none; }
+.account-menu form, .account-menu button { width: 100%; }
 .nav-user {
-  margin-left: auto;
+  padding: 4px 10px 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
   color: var(--ink2);
   font-size: 14px;
-  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -591,7 +641,11 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   }
   #site-nav.open { display: flex; }
   #site-nav a { width: 100%; }
-  .nav-user { margin: 8px 10px 0; max-width: none; }
+  .account { margin: 8px 0 0; border-top: 1px solid var(--line); padding-top: 8px; }
+  .account summary { display: flex; align-items: center; gap: 10px; padding: 4px 6px; color: var(--ink2); font-size: 14px; }
+  .summary-email { display: inline; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .account .nav-user { display: none; }
+  .account-menu { position: static; display: flex; box-shadow: none; border: 0; padding: 0; background: transparent; min-width: 0; }
   .file { grid-template-columns: 1fr; }
   .file-actions { grid-column: 1; grid-row: auto; }
   table.cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }

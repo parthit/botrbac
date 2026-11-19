@@ -8,6 +8,19 @@
     });
   }
 
+  var account = document.querySelector("details.account");
+  if (account) {
+    document.addEventListener("click", function (event) {
+      if (account.open && !account.contains(event.target)) account.open = false;
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && account.open) {
+        account.open = false;
+        account.querySelector("summary").focus();
+      }
+    });
+  }
+
   function fallbackCopy(value) {
     var area = document.createElement("textarea");
     area.value = value;
