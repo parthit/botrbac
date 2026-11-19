@@ -161,6 +161,19 @@ def test_declined_upgrade_does_not_revoke_the_stored_grant(signed_in, oauth, p2_
     assert vault.owner()["scopes"] == narrow
 
 
+def test_wrong_account_connect_keeps_that_accounts_own_grant(c, oauth, p2_app) -> None:
+    eve = client(c.app)
+    sign_in(eve, "eve-code")
+    connect_drive(eve, "eve-code")
+    assert p2_app.state.dashboard.directory.has_owner_refresh("eve@example.com")
+    sign_in(c)
+    oauth.revoked.clear()
+    r = connect_drive(c, code="eve-code")
+    assert r.status_code == 403
+    assert oauth.revoked == []
+    assert p2_app.state.dashboard.directory.has_owner_refresh("eve@example.com")
+
+
 def test_assistant_consent_waits_for_a_drive_connection(signed_in) -> None:
     created = register(signed_in, DONE)
     _verifier, params = auth_params(created.json()["client_id"], DONE)

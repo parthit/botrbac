@@ -623,14 +623,26 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         request: Request, data: dict[str, Any], tokens: Any, email: str
     ) -> Response:
         """Step 2 done. Store the refresh token for the signed-in person."""
+
+        async def refuse_token() -> None:
+            # Google's revoke ends this app's whole grant for that Google account, which
+            # would also kill a token already stored for it (a reconnect that was
+            # declined, or another person's account). Only revoke when none is stored.
+            if ctx.directory is not None:
+                stored = await blocking(ctx.directory.has_owner_refresh, email)
+            else:
+                stored = True
+            if not stored:
+                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+
         signed_in = session_user(request)
         connection = get_connection(str(data.get("connection") or ""))
         if not signed_in or connection is None:
-            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            await refuse_token()
             return render(request, "error.html", 400, message="Sign in first, then connect.")
         if email != signed_in:
             # The Drive an assistant uses must belong to the person who signed in.
-            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            await refuse_token()
             audit_owner("connect", "deny", reason="different_account")
             return render(
                 request,
@@ -642,16 +654,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ),
             )
         if connection.required_scope not in tokens.scopes:
-            # Revoking any token ends this app's whole Google grant for the account.
-            # During a reconnect that would also kill the narrower token still stored,
-            # so only revoke when nothing is stored for this person yet.
-            reset = current_actor.set(email)
-            try:
-                already_stored = await blocking(ctx.drive_connected)
-            finally:
-                current_actor.reset(reset)
-            if not already_stored:
-                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            await refuse_token()
             return render(
                 request,
                 "error.html",
