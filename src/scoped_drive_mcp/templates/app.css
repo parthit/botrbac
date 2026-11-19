@@ -80,9 +80,9 @@ header {
   inset: 0 0 auto 0;
   z-index: 50;
   height: 64px;
+  overflow: visible;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--paper) 85%, transparent);
-  backdrop-filter: blur(12px);
+  background: var(--paper);
 }
 .bar {
   max-width: 1180px;
@@ -555,16 +555,18 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   .diagram-row { justify-items: stretch; }
   .hero h1 { font-size: clamp(40px, 12vw, 64px); }
 }
-@media (max-width: 800px) {
+@media (max-width: 1100px) {
   .bar { padding: 0 16px; }
   main { padding: 80px 16px 56px; }
   .nav-toggle { display: inline-flex; }
   #site-nav {
     display: none;
-    position: absolute;
+    position: fixed;
     top: 64px;
     left: 0;
     right: 0;
+    z-index: 50;
+    flex: none;
     flex-direction: column;
     align-items: stretch;
     gap: 2px;
@@ -610,7 +612,7 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   .trust { flex-direction: column; align-items: flex-start; text-align: left; max-width: 420px; }
   .trust li + li::before { display: none; }
 }
-@media (min-width: 801px) {
+@media (min-width: 1101px) {
   .bar { flex-wrap: nowrap; }
   .nav-toggle { display: none; }
 }
