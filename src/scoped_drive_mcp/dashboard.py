@@ -781,6 +781,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return {
                 "bot": bot,
                 "owner_connected": ctx.owner_connected(),
+                # Step 2 done for this person. Browse, Allow and Sharing need it, even
+                # when the deployment's own bot token (bot.connected) is set.
+                "drive_connected": ctx.drive_connected(),
                 "connections": ctx.connection_rows(),
                 "allow_count": len(entries),
                 "grants": (

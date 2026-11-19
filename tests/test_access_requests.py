@@ -266,8 +266,10 @@ def test_requests_page_lists_pending_and_decided(c) -> None:
     mcp_call(c, "read_file", file_id="priv-other")
     post(c, f"/requests/{a['request_id']}/deny")
     page = c.get("/requests").text
-    # One pending pill in the nav, one on the pending row. The denied row is the bad pill.
-    assert page.count('class="pill pending"') == 2 and page.count('class="pill bad"') == 1
+    # One pending pill on the pending row; the nav shows a count badge. The denied row is
+    # the bad pill.
+    assert page.count('class="pill pending"') == 1 and page.count('class="pill bad"') == 1
+    assert 'aria-label="1 waiting"' in page
 
 
 def test_pending_count_reads_waiting_ids_not_the_history() -> None:

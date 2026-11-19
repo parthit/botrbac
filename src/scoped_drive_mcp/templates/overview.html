@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Overview</h1>
 {% include "_mode.html" %}
-{% if not bot.connected %}
+{% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 <div class="grid">
