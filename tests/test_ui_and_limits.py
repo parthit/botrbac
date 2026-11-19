@@ -39,7 +39,7 @@ def test_favicon_and_robots_do_not_redirect(c) -> None:
     icon = c.get("/favicon.ico")
     assert icon.status_code == 200
     assert icon.headers["content-type"].startswith("image/svg+xml")
-    assert "🤖" in icon.text
+    assert "scoped-mark" in icon.text
     assert "location" not in {name.lower() for name in icon.headers}
     robots = c.get("/robots.txt")
     assert robots.status_code == 200

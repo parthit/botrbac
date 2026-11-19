@@ -1,33 +1,70 @@
 {% extends "base.html" %}
-{% block title %}Share only the files you pick{% endblock %}
+{% block title %}Pick the files. Refuse the rest{% endblock %}
 {% block content %}
-<section class="card hero">
-  <p class="logo-lockup" aria-hidden="true">🤖🌉</p>
-  <h1>Give an assistant only the Drive files you choose</h1>
-  <p class="lede">Scoped Drive is a gateway that sits in front of Google Drive. You sign in with your own Google account, pick the files and folders an assistant may use, and this server refuses the rest.</p>
+<section class="hero">
+  <h1>Pick the files.<br>Refuse the rest.</h1>
+  <ul class="trust">
+    <li><i class="sq" aria-hidden="true"></i><span><b>Your own Google account.</b> Each list stays separate.</span></li>
+    <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every call.</b> Anything else is refused.</span></li>
+  </ul>
+  <p class="sub">Scoped Drive is a gateway that sits in front of Google Drive. You sign in with your own Google account, pick the files and folders an assistant may use, and this server refuses the rest.</p>
   <p class="disclosure">Signing in asks Google for your email and for access to the files and folders you pick. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
-  {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
-  <p><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
+  <div class="ctas">
+    {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
+  </div>
+  <p class="legal-links"><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
 </section>
-<h2>How it works</h2>
-<ol class="step-grid">
-  <li><span class="step-num">1</span> <b>Sign in</b> with your own Google account. Each person’s files stay separate.</li>
-  <li><span class="step-num">2</span> <b>Pick</b> the files and folders an assistant may use. Remove one whenever you want.</li>
-  <li><span class="step-num">3</span> <b>Connect</b> Grok, Muse, or Cursor, then approve the connection when this site asks.</li>
-</ol>
-<h2>Why you can trust the boundary</h2>
-<div class="grid">
-  <article class="card">
-    <h2>Only what you pick</h2>
-    <p>Google grants this app the files you choose in the picker, plus files an assistant creates here. This server still checks every call against your list.</p>
+
+<section class="diagram" aria-label="How a call is checked">
+  <p class="eye">How a call moves</p>
+  <div class="diagram-row">
+    <article class="sticker">
+      <p class="eye">Assistant asks</p>
+      <p class="ask">read Q3 memo</p>
+      <p class="ask dim">read the rest of Drive</p>
+    </article>
+    <span class="arrow" aria-hidden="true"></span>
+    <article class="sticker gate">
+      <p class="eye">This server</p>
+      <p class="ask kept">Q3 memo · on your list</p>
+      <p class="ask dim">everything else · refused</p>
+    </article>
+    <span class="arrow" aria-hidden="true"></span>
+    <article class="sticker">
+      <p class="eye">Google Drive</p>
+      <p class="ask">Q3 memo</p>
+      <p class="ask dim">nothing you did not pick</p>
+    </article>
+  </div>
+</section>
+
+<section class="products" aria-label="What you do">
+  <article class="card product" id="signin">
+    <h2>Sign in</h2>
+    <p>Your own Google account. Your list. Another person’s files stay theirs.</p>
+    <p class="proof">One account per person</p>
   </article>
-  <article class="card">
-    <h2>Encrypted tokens</h2>
-    <p>The Google refresh token is encrypted before it is stored. File contents are not kept on this server.</p>
+  <article class="card product" id="pick">
+    <h2>Pick</h2>
+    <p>A file or a folder. That list is what an assistant can use.</p>
+    <p class="proof">Per-file Google access</p>
   </article>
-  <article class="card">
-    <h2>Revoke anytime</h2>
-    <p>Untick an item, disconnect an app, or remove Scoped Drive from your Google Account. New calls stop. Anything already sent is not recalled.</p>
+  <article class="card product" id="revoke">
+    <h2>Revoke</h2>
+    <p>Untick an item or disconnect an app. The next call stops.</p>
+    <p class="proof">Anytime</p>
   </article>
-</div>
+</section>
+
+<section class="split">
+  <div>
+    <h2>The boundary is the product.</h2>
+    <p class="lead">Three checks. No extra Google products.</p>
+    <ul class="pts">
+      <li><b>Only what you pick.</b> Google opens the files you choose in the picker, plus files an assistant creates here. This server checks the list again.</li>
+      <li><b>Encrypted tokens.</b> The Google refresh token is encrypted before it is stored. File contents are not kept on this server.</li>
+      <li><b>Revoke anytime.</b> Untick an item, disconnect an app, or remove Scoped Drive from your Google Account. New calls stop. Anything already sent is not recalled.</li>
+    </ul>
+  </div>
+</section>
 {% endblock %}
