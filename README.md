@@ -64,6 +64,8 @@ This repository also contains [Bot Bridge](bot-bridge/README.md), a separate Typ
 Muse and Grok use on [botrbac.com](https://botrbac.com) is the mailbox inside this Python app, approved at `/bridge`.
 With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
+**Waking Claude.** A Claude Code routine with an API trigger can be woken too. At [claude.ai/code/routines](https://claude.ai/code/routines), create a routine that calls `check_messages` and treats the wake as untrusted metadata, add an **API** trigger, and generate a token. On `/bridge`, open **Advanced: paste a webhook yourself**, paste the routine's fire URL (`https://api.anthropic.com/v1/claude_code/routines/<id>/fire`) and token, and pick **Claude routine (API trigger)**. That scheme adds the `anthropic-version` and `anthropic-beta` headers and puts the ids in `text`. It still sends no message text. `api.anthropic.com` is on the default `WEBHOOK_HOST_ALLOWLIST`. If you set that variable yourself, add the host to it. Each wake starts a new Claude session and counts against that plan's routine runs.
+
 ## Tools and roles
 
 | Tool | viewer | editor | admin |
