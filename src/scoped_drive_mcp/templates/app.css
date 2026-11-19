@@ -320,6 +320,8 @@ input[type="text"], input[type="search"], input[type="url"], input[type="passwor
 }
 .stack input, .stack select { width: min(100%, 36rem); font-weight: 400; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }
+/* Row toggles hide one state with the hidden attribute; keep it winning over display rules. */
+[hidden] { display: none !important; }
 .pill {
   display: inline-flex;
   align-items: center;

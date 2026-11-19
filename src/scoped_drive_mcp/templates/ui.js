@@ -50,6 +50,93 @@
     }
   });
 
+  // ---- Row actions without a full page reload --------------------------------
+  // Forms marked data-async (Allow, Remove, Share, Stop sharing, Disconnect) post in the
+  // background and update only their own row. The server answers JSON when asked for it
+  // and still redirects a plain form post, so the page works without JavaScript too.
+
+  function showFlash(kind, message) {
+    var main = document.getElementById("main");
+    if (!main || !message) return;
+    var old = main.querySelectorAll(".flash");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    var note = document.createElement("div");
+    note.className = "flash " + (kind === "ok" ? "ok" : "error");
+    note.setAttribute("role", kind === "ok" ? "status" : "alert");
+    note.textContent = message;
+    main.insertBefore(note, main.firstChild);
+  }
+
+  function flipRow(form) {
+    var key = form.getAttribute("data-flip");
+    var row = form.closest("[data-row]");
+    if (!key || !row) return;
+    var next = row.getAttribute("data-" + key) === "on" ? "off" : "on";
+    row.setAttribute("data-" + key, next);
+    var parts = row.querySelectorAll("[data-" + key + "-when]");
+    for (var i = 0; i < parts.length; i++) {
+      parts[i].hidden = parts[i].getAttribute("data-" + key + "-when") !== next;
+    }
+    // Keep keyboard focus on the row: move it to the button that replaced this one.
+    var shown = row.querySelector("form[data-flip='" + key + "']:not([hidden]) button");
+    if (shown) shown.focus();
+  }
+
+  function removeRow(form) {
+    var row = form.closest("[data-row]");
+    if (!row) return;
+    var body = row.parentNode;
+    row.remove();
+    if (body && !body.querySelector("tr, li")) {
+      var list = body.closest("[data-list]");
+      if (list) list.hidden = true;
+      var empty = document.querySelector("[data-empty]");
+      if (empty) empty.hidden = false;
+    }
+  }
+
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!form || !form.hasAttribute || !form.hasAttribute("data-async")) return;
+    if (!window.fetch || !window.URLSearchParams || !window.FormData) return;
+    event.preventDefault();
+    var ask = form.getAttribute("data-confirm");
+    if (ask && !window.confirm(ask)) return;
+    var button = form.querySelector("button[type=submit], button:not([type])");
+    if (form.getAttribute("aria-busy") === "true") return;
+    form.setAttribute("aria-busy", "true");
+    if (button) button.disabled = true;
+
+    fetch(form.getAttribute("action"), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams(new FormData(form)).toString(),
+      credentials: "same-origin"
+    })
+      .then(function (response) {
+        var type = response.headers.get("content-type") || "";
+        if (type.indexOf("application/json") === -1) throw new Error("not json");
+        return response.json();
+      })
+      .then(function (data) {
+        showFlash(data.ok ? "ok" : "error", data.message);
+        if (!data.ok) return;
+        if (form.getAttribute("data-on-success") === "remove-row") removeRow(form);
+        else flipRow(form);
+      })
+      .catch(function () {
+        // Signed out, CSRF expired or a server error page: say so instead of guessing.
+        showFlash("error", "That did not save. Reload the page and try again.");
+      })
+      .then(function () {
+        form.removeAttribute("aria-busy");
+        if (button) button.disabled = false;
+      });
+  });
+
   var pick = document.getElementById("pick-drive");
   if (!pick) return;
 

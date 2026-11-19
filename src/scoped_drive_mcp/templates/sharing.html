@@ -20,16 +20,16 @@
 </div>
 
 {% if rows %}
-<table class="cards">
+<table class="cards" data-list>
   <thead><tr><th>Name</th><th>Type</th><th>Shared</th><th>Action</th></tr></thead>
   <tbody>
   {% for e in rows %}
-  <tr>
+  <tr data-row>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Shared" class="muted">{{ e.granted_at }}</td>
     <td data-label="Action">
-      <form class="inline" method="post" action="/sharing/remove" data-confirm="Stop sharing this with other people’s assistants?">
+      <form class="inline" method="post" action="/sharing/remove" data-async data-on-success="remove-row" data-confirm="Stop sharing this with other people’s assistants?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <input type="hidden" name="next" value="/sharing">
@@ -40,11 +40,10 @@
   {% endfor %}
   </tbody>
 </table>
-{% else %}
-<div class="card empty">
+{% endif %}
+<div class="card empty" data-empty{% if rows %} hidden{% endif %}>
   <h2>Nothing is shared yet</h2>
   <p>Open Browse and choose <b>Share with paired people</b> next to a file or folder, for example your resume.</p>
   <p><a class="btn primary" href="/browse">Browse files</a></p>
 </div>
-{% endif %}
 {% endblock %}

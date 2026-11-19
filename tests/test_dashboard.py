@@ -614,3 +614,50 @@ def test_describe_mime_gives_short_human_labels() -> None:
     assert describe_mime("application/vnd.some-vendor.thing-nobody-knows") == "File"
     assert describe_mime("application/x-whatever") == "File"
     assert describe_mime("video/mp4") == "Video"
+
+
+def _post_json(c, path: str, **data):
+    token = csrf(c)
+    return c.post(
+        path,
+        data={"csrf": token, **data},
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+    )
+
+
+def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
+    """ui.js posts Allow/Remove in the background; it must get JSON, not a page redirect."""
+    r = _post_json(owner_c, "/grant", file_id="proj", next="/browse")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "kind": "ok", "message": "Allowed “Projects” for the assistant."}
+    # No flash left behind for the next full page load.
+    assert "for the assistant." not in owner_c.get("/access").text.split("<h1>")[0]
+    assert "Projects" in owner_c.get("/access").text
+
+    r = _post_json(owner_c, "/revoke", file_id="proj", next="/browse")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert "Projects" not in owner_c.get("/access").text
+
+    r = _post_json(owner_c, "/grant", file_id="does-not-exist", next="/browse")
+    assert r.status_code == 400
+    body = r.json()
+    assert body["ok"] is False and "not found" in body["message"]
+
+
+def test_browse_rows_render_both_toggle_states(owner_c) -> None:
+    page = owner_c.get("/browse").text
+    assert 'data-async data-flip="access" data-access-when="off"' in page
+    assert 'data-async data-flip="access" data-access-when="on"' in page
+    assert "data-row data-access=" in page
+
+
+def test_list_pages_remove_rows_in_place(owner_c) -> None:
+    post(owner_c, "/grant", file_id="proj")
+    page = owner_c.get("/access").text
+    assert 'data-async data-on-success="remove-row"' in page
+    assert "data-empty hidden" in page
+
+
+def test_confirm_js_leaves_async_forms_to_ui_js(owner_c) -> None:
+    assert b"data-async" in owner_c.get("/confirm.js").content
