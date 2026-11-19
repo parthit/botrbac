@@ -656,8 +656,38 @@ def test_list_pages_remove_rows_in_place(owner_c) -> None:
     post(owner_c, "/grant", file_id="proj")
     page = owner_c.get("/access").text
     assert 'data-async data-on-success="remove-row"' in page
-    assert "data-empty hidden" in page
+    # The empty-state block is on the page (hidden) so ui.js can show it after the last row.
+    assert "Nothing is allowed yet" in page
 
 
 def test_confirm_js_leaves_async_forms_to_ui_js(owner_c) -> None:
     assert b"data-async" in owner_c.get("/confirm.js").content
+
+
+def test_revoke_json_reports_change_when_drive_cleanup_fails(owner_c, monkeypatch) -> None:
+    """The allowlist entry is gone even though Drive errored, so the row must still update."""
+    from scoped_drive_mcp.grants import GrantError, GrantService
+
+    post(owner_c, "/grant", file_id="proj")
+    real_revoke = GrantService.revoke
+
+    def half_revoke(self, file_id):
+        real_revoke(self, file_id)
+        raise GrantError("Removed from the allowlist, but Google did not remove the bot's sharing.")
+
+    monkeypatch.setattr(GrantService, "revoke", half_revoke)
+    r = _post_json(owner_c, "/revoke", file_id="proj", next="/browse")
+    assert r.status_code == 400
+    body = r.json()
+    assert body["ok"] is False and body["changed"] is True
+
+    # A failure that changed nothing must not tell ui.js to update the row.
+    r = _post_json(owner_c, "/grant", file_id="does-not-exist", next="/browse")
+    assert r.json()["changed"] is False
+
+
+def test_shortcut_rows_keep_full_page_posts(owner_c) -> None:
+    page = owner_c.get("/browse?folder=proj").text + owner_c.get("/browse").text
+    assert "Allow the target" in page
+    for form in re.findall(r"<form[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Allow the target", page):
+        assert "data-async" not in form

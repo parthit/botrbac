@@ -54,7 +54,8 @@
 <ul class="files">
   {% for r in rows %}
   {#- Each row renders both states of its toggles; ui.js flips data-access / data-share
-      after a background POST so only this row changes. Without JS the forms post normally. -#}
+      after a background POST so only this row changes. Without JS the forms post normally.
+      Shortcut rows stay full posts: the server stores the shortcut's target, not the row's id. -#}
   <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}">
     <div class="file-name">
       <span class="file-icon" aria-hidden="true">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
@@ -78,26 +79,26 @@
           <button class="primary" type="submit">Share for this request</button>
         </form>
       {% else %}
-        <form class="inline" method="post" action="/revoke" data-async data-flip="access" data-access-when="on" data-confirm="Remove this from the assistant?"{% if not r.granted %} hidden{% endif %}>
+        <form class="inline" method="post" action="/revoke"{% if not r.is_shortcut %} data-async{% endif %} data-flip="access" data-access-when="on" data-confirm="Remove this from the assistant?"{% if not r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button class="danger" type="submit">Remove</button>
         </form>
-        <form class="inline" method="post" action="/grant" data-async data-flip="access" data-access-when="off"{% if r.granted %} hidden{% endif %}>
+        <form class="inline" method="post" action="/grant"{% if not r.is_shortcut %} data-async{% endif %} data-flip="access" data-access-when="off"{% if r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}</button>
         </form>
-        <form class="inline" method="post" action="/sharing/remove" data-async data-flip="share" data-share-when="on" data-confirm="Stop sharing this with other people’s assistants?"{% if not r.ext_shared %} hidden{% endif %}>
+        <form class="inline" method="post" action="/sharing/remove"{% if not r.is_shortcut %} data-async{% endif %} data-flip="share" data-share-when="on" data-confirm="Stop sharing this with other people’s assistants?"{% if not r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button class="danger" type="submit">Stop sharing</button>
         </form>
         {% if not shared_by %}
-        <form class="inline" method="post" action="/sharing/add" data-async data-flip="share" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}>
+        <form class="inline" method="post" action="/sharing/add"{% if not r.is_shortcut %} data-async{% endif %} data-flip="share" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">

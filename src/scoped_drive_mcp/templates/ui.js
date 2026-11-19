@@ -58,16 +58,18 @@
   function showFlash(kind, message) {
     var main = document.getElementById("main");
     if (!main || !message) return;
-    var old = main.querySelectorAll(".flash");
+    var old = main.querySelectorAll(":scope > .flash:not([id])");
     for (var i = 0; i < old.length; i++) old[i].remove();
     var note = document.createElement("div");
     note.className = "flash " + (kind === "ok" ? "ok" : "error");
     note.setAttribute("role", kind === "ok" ? "status" : "alert");
     note.textContent = message;
+    note.tabIndex = -1;
     main.insertBefore(note, main.firstChild);
+    return note;
   }
 
-  function flipRow(form) {
+  function flipRow(form, note) {
     var key = form.getAttribute("data-flip");
     var row = form.closest("[data-row]");
     if (!key || !row) return;
@@ -80,6 +82,7 @@
     // Keep keyboard focus on the row: move it to the button that replaced this one.
     var shown = row.querySelector("form[data-flip='" + key + "']:not([hidden]) button");
     if (shown) shown.focus();
+    else if (note) note.focus();
   }
 
   function removeRow(form) {
@@ -90,20 +93,23 @@
     if (body && !body.querySelector("tr, li")) {
       var list = body.closest("[data-list]");
       if (list) list.hidden = true;
-      var empty = document.querySelector("[data-empty]");
+      var scope = list ? list.parentNode : document;
+      var empty = scope.querySelector("[data-empty]");
       if (empty) empty.hidden = false;
     }
   }
+
+  if (window.fetch && window.URLSearchParams && window.FormData) window.__asyncForms = true;
 
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!form || !form.hasAttribute || !form.hasAttribute("data-async")) return;
     if (!window.fetch || !window.URLSearchParams || !window.FormData) return;
     event.preventDefault();
+    if (form.getAttribute("aria-busy") === "true") return;
     var ask = form.getAttribute("data-confirm");
     if (ask && !window.confirm(ask)) return;
     var button = form.querySelector("button[type=submit], button:not([type])");
-    if (form.getAttribute("aria-busy") === "true") return;
     form.setAttribute("aria-busy", "true");
     if (button) button.disabled = true;
 
@@ -122,10 +128,11 @@
         return response.json();
       })
       .then(function (data) {
-        showFlash(data.ok ? "ok" : "error", data.message);
-        if (!data.ok) return;
+        var note = showFlash(data.ok ? "ok" : "error", data.message);
+        var changed = typeof data.changed === "boolean" ? data.changed : data.ok;
+        if (!changed) return;
         if (form.getAttribute("data-on-success") === "remove-row") removeRow(form);
-        else flipRow(form);
+        else flipRow(form, note);
       })
       .catch(function () {
         // Signed out, CSRF expired or a server error page: say so instead of guessing.

@@ -168,6 +168,7 @@ class DashboardContext:
             None,
             on_change=self.on_ext_change,
             audience=AUDIENCE_LINKED,
+            audit_actions=("share_external", "unshare_external"),
         )
 
     def ext_ids(self) -> set[str]:
@@ -296,15 +297,24 @@ def wants_json(request: Request) -> bool:
     return "application/json" in request.headers.get("accept", "")
 
 
-def action_done(request: Request, kind: str, message: str, next_url: str) -> Response:
+def action_done(
+    request: Request, kind: str, message: str, next_url: str, *, changed: bool | None = None
+) -> Response:
     """Finish a dashboard action that changes one row.
 
     ui.js sends these in the background and updates only the affected row, so it gets
     JSON back. A plain form POST (no JavaScript) still gets a flash and a redirect.
+    `changed` says whether the row's state changed. It defaults to success, but a revoke
+    can remove the item from the list and still report a Drive error.
     """
     if wants_json(request):
         return JSONResponse(
-            {"ok": kind == "ok", "kind": kind, "message": message},
+            {
+                "ok": kind == "ok",
+                "kind": kind,
+                "message": message,
+                "changed": (kind == "ok") if changed is None else changed,
+            },
             status_code=200 if kind == "ok" else 400,
         )
     flash(request, kind, message)
@@ -1025,7 +1035,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         try:
             await blocking(ctx.grants().revoke, file_id)
         except GrantError as exc:
-            return action_done(request, "error", str(exc), next_url)
+            gone = await blocking(lambda: ctx.allowlist.get(file_id) is None)
+            return action_done(request, "error", str(exc), next_url, changed=gone)
         return action_done(request, "ok", "Removed. The assistant can no longer use it.", next_url)
 
     async def share_add(request: Request, form: dict[str, str]) -> Response:
@@ -1035,7 +1046,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             entry = await blocking(ctx.ext_grants().grant, file_id)
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
-        audit_owner("share_external", file_id=entry.id)
         return action_done(
             request,
             "ok",
@@ -1049,10 +1059,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         try:
             await blocking(ctx.ext_grants().revoke, file_id)
         except GrantError as exc:
+            ext = ctx.ext_allowlist
+            gone = ext is not None and await blocking(lambda: ext.get(file_id) is None)
             return action_done(
-                request, "error", str(exc).replace("allowlist", "shared list"), next_url
+                request,
+                "error",
+                str(exc).replace("allowlist", "shared list"),
+                next_url,
+                changed=gone,
             )
-        audit_owner("unshare_external", file_id=file_id)
         return action_done(
             request, "ok", "Stopped sharing. Other people's assistants can no longer read it.", next_url
         )
@@ -1379,7 +1394,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             b"document.addEventListener('submit',function(e){"
             b"var f=e.target;if(!f||!f.getAttribute)return;"
             # ui.js asks for confirmation itself on background (data-async) forms.
-            b"if(f.hasAttribute('data-async'))return;"
+            b"if(window.__asyncForms&&f.hasAttribute('data-async'))return;"
             b"var m=f.getAttribute('data-confirm');"
             b"if(m&&!window.confirm(m))e.preventDefault();});",
             media_type="text/javascript",
