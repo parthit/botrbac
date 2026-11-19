@@ -1069,7 +1069,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 changed=gone,
             )
         return action_done(
-            request, "ok", "Stopped sharing. Other people's assistants can no longer read it.", next_url
+            request,
+            "ok",
+            "Stopped sharing. Other people's assistants can no longer read it.",
+            next_url,
         )
 
     async def sharing(request: Request) -> Response:

@@ -630,7 +630,12 @@ def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
     """ui.js posts Allow/Remove in the background; it must get JSON, not a page redirect."""
     r = _post_json(owner_c, "/grant", file_id="proj", next="/browse")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "kind": "ok", "message": "Allowed “Projects” for the assistant."}
+    assert r.json() == {
+        "ok": True,
+        "kind": "ok",
+        "message": "Allowed “Projects” for the assistant.",
+        "changed": True,
+    }
     # No flash left behind for the next full page load.
     assert "for the assistant." not in owner_c.get("/access").text.split("<h1>")[0]
     assert "Projects" in owner_c.get("/access").text
@@ -689,5 +694,8 @@ def test_revoke_json_reports_change_when_drive_cleanup_fails(owner_c, monkeypatc
 def test_shortcut_rows_keep_full_page_posts(owner_c) -> None:
     page = owner_c.get("/browse?folder=proj").text + owner_c.get("/browse").text
     assert "Allow the target" in page
-    for form in re.findall(r"<form[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Allow the target", page):
+    allow_target = r"<form[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Allow the target"
+    forms = re.findall(allow_target, page)
+    assert forms
+    for form in forms:
         assert "data-async" not in form
