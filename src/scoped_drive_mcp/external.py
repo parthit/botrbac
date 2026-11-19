@@ -189,6 +189,24 @@ class ExternalShares:
         result["content_trust"] = "untrusted_peer"
         return {"owner": normalize_email(owner), **result}
 
+    def guest_call(
+        self,
+        caller: str,
+        owner: str,
+        tool: str,
+        file_id: str | None,
+        fn: Callable[[], T],
+        *,
+        via: str | None = None,
+    ) -> T:
+        """Run `fn` against the owner's Drive behind the guest checks.
+
+        For other read-only views of the same share (shared_sources.py, the dashboard's
+        "Shared with me" page). `fn` must only use `self.service`, which is guarded by the
+        owner's external list. `via` is written on the owner's activity log, so the owner
+        can tell a person browsing apart from that person's assistant."""
+        return self._as_guest(caller, owner, tool, file_id, fn, via=via)
+
     def _as_guest(
         self,
         caller: str,
@@ -196,6 +214,8 @@ class ExternalShares:
         tool: str,
         file_id: str | None,
         fn: Callable[[], T],
+        *,
+        via: str | None = None,
     ) -> T:
         you = normalize_email(caller)
         them = normalize_email(owner)
@@ -212,7 +232,13 @@ class ExternalShares:
                 owner=them,
             )
         # Recorded on the owner's activity log, so they can see who read what.
-        who = {"token_name": f"guest:{you}", "role": GUEST_ROLE, "guest": you}
+        who: dict[str, str | None] = {
+            "token_name": f"guest:{you}" + (f" ({via})" if via else ""),
+            "role": GUEST_ROLE,
+            "guest": you,
+        }
+        if via:
+            who["via"] = via
         with acting_as(them):
             try:
                 result = fn()

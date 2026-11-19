@@ -54,6 +54,7 @@ from .policy import is_allowed, require
 from .ratelimit import RateLimitApp
 from .scope import ScopeGuard
 from .service import DriveService
+from .shared_sources import DriveSharedSource, SharedWithMe
 from .store import (
     EXTERNAL_ALLOWLIST_KEY,
     ActivityLog,
@@ -693,6 +694,9 @@ def build_app(
         is_linked=mailbox.is_linked,
         active_peers=mailbox.active_peers,
     )
+    # The human side of the same shares: the dashboard's "Shared with me" page. Each
+    # source runs through the same guest checks as the MCP tools above.
+    shared_with_me = SharedWithMe([DriveSharedSource(shares)], mailbox.active_peers)
     mcp = create_mcp(service, access, mailbox, shares)
 
     if oauth is None and settings.oauth_client_configured and settings.app_base_url:
@@ -726,6 +730,7 @@ def build_app(
         mailbox=mailbox,
         ext_allowlist=ext_allowlist,
         on_ext_change=ext_guard.invalidate_allowlist,
+        shared_with_me=shared_with_me,
     )
     dashboard = build_dashboard(ctx)
 
@@ -764,4 +769,5 @@ def build_app(
     app.state.guard = guard
     app.state.ext_guard = ext_guard
     app.state.shares = shares
+    app.state.shared_with_me = shared_with_me
     return app

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Shared with me{% endblock %}
+{% macro item_link(source, person, n) -%}
+  {%- if n.is_container -%}<a href="{{ shared_href('browse', source.key, person, n.id) }}">{{ n.name or n.id }}</a>
+  {%- else -%}<a href="{{ shared_href('open', source.key, person, n.id) }}">{{ n.name or n.id }}</a>{%- endif -%}
+{%- endmacro %}
+{% block content %}
+<h1>Shared with me</h1>
+<p class="muted">What people you are paired with on <a href="/bridge">Mailbox</a> share with you. You and your
+  assistant can open, read and download these. Nothing here can be changed. Names and contents come from the
+  other person. What you share is on <a href="/sharing">Sharing</a>.</p>
+
+{% if people %}
+  {% for p in people %}
+  <section class="card">
+    <h2>{{ p.owner }}</h2>
+    <p class="muted">{{ p.item_count }} shared item{{ "" if p.item_count == 1 else "s" }}</p>
+    {% for g in p.sources %}
+    <h3>{{ g.source.name }}</h3>
+    <ul class="files">
+      {% for n in g.roots %}
+      <li class="file">
+        <div class="file-name">
+          <span class="file-icon" aria-hidden="true">{% if n.is_container %}📁{% else %}📄{% endif %}</span>
+          {{ item_link(g.source, p.owner, n) }}
+        </div>
+        <div class="file-meta"><span>{{ n.kind or describe_mime(n.mime_type) }}</span></div>
+        <div class="file-actions">
+          {% if n.is_container %}
+          <a class="btn" href="{{ shared_href('browse', g.source.key, p.owner, n.id) }}">Open {{ g.source.container_noun }}</a>
+          {% else %}
+          <a class="btn" href="{{ shared_href('open', g.source.key, p.owner, n.id) }}">Open</a>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+  </section>
+  {% endfor %}
+{% elif peers %}
+<div class="card empty">
+  <h2>Nothing shared with you yet</h2>
+  <p>You are paired with {{ peers | join(", ") }}, but they have not shared anything. Items appear here as soon as
+    they choose <b>Share with paired people</b> on their side.</p>
+</div>
+{% else %}
+<div class="card empty">
+  <h2>No one is sharing with you</h2>
+  <p>People can share with you after you are paired on Mailbox. Both of you approve the pairing, then they pick
+    what to share.</p>
+  <p><a class="btn primary" href="/bridge">Open Mailbox</a></p>
+</div>
+{% endif %}
+{% endblock %}

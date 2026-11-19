@@ -50,6 +50,7 @@ from .drive_client import (
     OwnerDriveClient,
 )
 from .errors import report_exception
+from .external import SharedAccessError, normalize_email
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
@@ -102,6 +103,8 @@ SECURITY_HEADERS = [
 ]
 
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Item ids in "Shared with me" links. Drive ids fit; other sources must too.
+_SHARED_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,200}")
 
 
 class OwnerNotConnectedError(Exception):
@@ -127,6 +130,9 @@ class DashboardContext:
     # The list other people's assistants may read (external.py). None disables Sharing.
     ext_allowlist: Allowlist | None = None
     on_ext_change: Callable[[], None] = lambda: None
+    # What paired people share with this person, across every source (shared_sources.py).
+    # None hides the "Shared with me" pages.
+    shared_with_me: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -1048,6 +1054,100 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request, "sharing.html", rows=rows, peers=data["peers"], describe_mime=describe_mime
         )
 
+    # ---- shared with me ------------------------------------------------
+    # The receiving side of Sharing: what paired people let this person read, across
+    # every source, browsable to any depth. Every call runs the same guest checks as the
+    # MCP tools (pairing active, item on the owner's shared list, read-only), and is
+    # recorded on the owner's activity log as "guest:<you> (dashboard)".
+
+    def shared_error(request: Request, exc: SharedAccessError) -> Response:
+        status = {
+            "invalid_input": 400,
+            "owner_unavailable": 503,
+            "no_bytes": 404,
+        }.get(exc.code, 403)
+        return render(request, "shared_error.html", status, message=exc.message, code=exc.code)
+
+    def shared_args(request: Request) -> tuple[Any, str, str | None]:
+        """The source, owner and item id from the query string, checked for shape only.
+        Whether the caller may see the item is decided by the source on every call."""
+        source = ctx.shared_with_me.get(request.query_params.get("source") or "google_drive")
+        if source is None:
+            raise SharedAccessError("invalid_input", "That source is not available here.")
+        owner = normalize_email(request.query_params.get("owner"))
+        item = request.query_params.get("id") or None
+        if item is not None and not _SHARED_ID.fullmatch(item):
+            raise SharedAccessError("invalid_input", "That item id is not valid.")
+        return source, owner, item
+
+    async def shared_overview(request: Request) -> Response:
+        if ctx.shared_with_me is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+
+        def gather() -> dict[str, Any]:
+            peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
+            return {"people": ctx.shared_with_me.overview(email), "peers": peers}
+
+        data = await blocking(gather)
+        return render(request, "shared.html", **data)
+
+    async def shared_browse(request: Request) -> Response:
+        if ctx.shared_with_me is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+        try:
+            source, owner, folder = shared_args(request)
+            listing = await blocking(source.list, email, owner, folder)
+        except SharedAccessError as exc:
+            return shared_error(request, exc)
+        return render(
+            request,
+            "shared_browse.html",
+            source=source,
+            shared_owner=owner,
+            listing=listing,
+        )
+
+    async def shared_open(request: Request) -> Response:
+        if ctx.shared_with_me is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+        try:
+            source, owner, item = shared_args(request)
+            if item is None:
+                raise SharedAccessError("invalid_input", "Pick an item to open.")
+            doc = await blocking(source.open, email, owner, item)
+        except SharedAccessError as exc:
+            return shared_error(request, exc)
+        if doc.node.is_container:
+            return RedirectResponse(
+                shared_href("browse", source.key, owner, doc.node.id), status_code=303
+            )
+        return render(request, "shared_item.html", source=source, shared_owner=owner, doc=doc)
+
+    async def shared_download(request: Request) -> Response:
+        if ctx.shared_with_me is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+        try:
+            source, owner, item = shared_args(request)
+            if item is None:
+                raise SharedAccessError("invalid_input", "Pick an item to download.")
+            got = await blocking(source.download, email, owner, item)
+        except SharedAccessError as exc:
+            return shared_error(request, exc)
+        # Never served inline: the bytes come from another person and this is our origin.
+        return Response(
+            got.data,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": attachment_disposition(got.filename),
+                "Cache-Control": "no-store",
+                "X-Download-Truncated": "1" if got.truncated else "0",
+            },
+        )
+
     async def access(request: Request) -> Response:
         def gather() -> dict[str, Any]:
             return {"entries": ctx.allowlist.entries(), "bot": ctx.bot_status()}
@@ -1380,6 +1480,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing", owner_only(sharing), methods=["GET"]),
         Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
         Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
+        Route("/shared", owner_only(shared_overview), methods=["GET"]),
+        Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
+        Route("/shared/open", owner_only(shared_open), methods=["GET"]),
+        Route("/shared/download", owner_only(shared_download), methods=["GET"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
@@ -1477,6 +1581,37 @@ def browse_pager(
             folder, q=None, request_id=request_id, page=next_token, prev=nxt_prev
         )
     return {"prev_href": prev_href, "next_href": next_href}
+
+
+def shared_href(view: str, source: str, owner: str, item_id: str | None = None) -> str:
+    """Link inside "Shared with me". view is "browse", "open" or "download"."""
+    pairs = [("source", source), ("owner", owner)]
+    if item_id:
+        pairs.append(("id", item_id))
+    return f"/shared/{view}?" + urlencode(pairs)
+
+
+def attachment_disposition(filename: str) -> str:
+    """Content-Disposition for a download. The name was typed by another person."""
+    cleaned = (
+        "".join(
+            ch for ch in filename if ord(ch) >= 32 and ord(ch) != 127 and ch not in '"\\/;'
+        ).strip()[:200]
+        or "download"
+    )
+    ascii_name = cleaned.encode("ascii", "ignore").decode("ascii").strip() or "download"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(cleaned, safe='')}"
+
+
+def human_size(size: int | None) -> str:
+    if size is None:
+        return ""
+    value = float(size)
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{int(value)} {unit}" if unit == "bytes" else f"{value:.1f} {unit}"
+        value /= 1024
+    return ""
 
 
 def request_headline(req: Any, owner_meta: dict[str, Any] | None = None) -> str:
@@ -1577,3 +1712,5 @@ _env.globals["request_headline"] = request_headline
 _env.globals["status_label"] = status_label
 _env.globals["tool_label"] = tool_label
 _env.globals["describe_mime"] = describe_mime
+_env.globals["shared_href"] = shared_href
+_env.globals["human_size"] = human_size

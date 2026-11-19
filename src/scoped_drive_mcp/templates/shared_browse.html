@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{{ listing.container.name if listing.container else shared_owner }} · Shared with me{% endblock %}
+{% block content %}
+<p class="crumbs">
+  <a href="/shared">Shared with me</a><span class="sep">/</span>
+  {% if listing.container %}<a href="{{ shared_href('browse', source.key, shared_owner) }}">{{ shared_owner }} · {{ source.name }}</a>
+  {% else %}<b>{{ shared_owner }} · {{ source.name }}</b>{% endif %}
+  {% for c in listing.path %}
+    <span class="sep">/</span>
+    {% if not loop.last %}<a href="{{ shared_href('browse', source.key, shared_owner, c.id) }}">{{ c.name or c.id }}</a>
+    {% else %}<b>{{ c.name or c.id }}</b>{% endif %}
+  {% endfor %}
+</p>
+<h1>{{ listing.container.name if listing.container else "Shared by " ~ shared_owner }}</h1>
+<p class="muted">Shared with you by <b>{{ shared_owner }}</b>. Read-only. Names and contents come from them.</p>
+
+{% if listing.items %}
+<ul class="files">
+  {% for n in listing.items %}
+  <li class="file">
+    <div class="file-name">
+      <span class="file-icon" aria-hidden="true">{% if n.is_container %}📁{% else %}📄{% endif %}</span>
+      {% if n.is_container %}<a href="{{ shared_href('browse', source.key, shared_owner, n.id) }}">{{ n.name or n.id }}</a>
+      {% else %}<a href="{{ shared_href('open', source.key, shared_owner, n.id) }}">{{ n.name or n.id }}</a>{% endif %}
+    </div>
+    <div class="file-meta">
+      <span>{{ n.kind or describe_mime(n.mime_type) }}</span>
+      {% if n.modified %}<span>Modified {{ n.modified[:10] }}</span>{% endif %}
+      {% if n.size is not none and not n.is_container %}<span>{{ human_size(n.size) }}</span>{% endif %}
+    </div>
+    <div class="file-actions">
+      {% if n.is_container %}
+      <a class="btn" href="{{ shared_href('browse', source.key, shared_owner, n.id) }}">Open</a>
+      {% else %}
+      <a class="btn" href="{{ shared_href('open', source.key, shared_owner, n.id) }}">Open</a>
+      {% if n.can_download %}<a class="btn" href="{{ shared_href('download', source.key, shared_owner, n.id) }}" download>Download</a>{% endif %}
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% if listing.truncated %}<p class="muted">This {{ source.container_noun }} has more items than this page shows.</p>{% endif %}
+{% else %}
+<div class="card empty">
+  <h2>This {{ source.container_noun }} is empty</h2>
+  <p>Nothing inside it is shared with you.</p>
+</div>
+{% endif %}
+{% endblock %}
