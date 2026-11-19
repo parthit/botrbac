@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Overview</h1>
 {% include "_mode.html" %}
-{% if not bot.connected %}
+{% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 <div class="grid">
@@ -53,16 +53,16 @@
 <h2>Connected apps</h2>
 <p class="muted">Apps that signed in here. Disconnecting stops that app immediately.</p>
 {% if grants %}
-<table class="cards">
+<table class="cards" data-list>
   <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th>Action</th></tr></thead>
   <tbody>
   {% for grant in grants %}
-  <tr>
+  <tr data-row>
     <td data-label="App">{{ grant.client_name }}</td>
     <td data-label="Connected" class="muted">{{ grant.created_at }}</td>
     <td data-label="Last used" class="muted">{{ grant.last_used or "Never" }}</td>
     <td data-label="Action">
-      <form class="inline" method="post" action="/oauth/grants/revoke" data-confirm="Disconnect this app? It loses access immediately.">
+      <form class="inline" method="post" action="/oauth/grants/revoke" data-async data-on-success="remove-row" data-confirm="Disconnect this app? It loses access immediately.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="grant_id" value="{{ grant.id }}">
         <button class="danger" type="submit">Disconnect</button>
@@ -72,12 +72,11 @@
   {% endfor %}
   </tbody>
 </table>
-{% else %}
-<div class="card empty">
+{% endif %}
+<div class="card empty" data-empty{% if grants %} hidden{% endif %}>
   <h2>No apps connected</h2>
   <p>Use one of the setup cards above, then approve the connection when you are asked.</p>
 </div>
-{% endif %}
 
 {% if is_admin %}
 <div class="card">

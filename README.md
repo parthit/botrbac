@@ -90,6 +90,7 @@ With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wa
 | `set_webhook(url, sender_key?, auth_scheme?, enabled?)` | ✓ | ✓ | ✓ |
 | `clear_webhook()` | ✓ | ✓ | ✓ |
 | `list_shared_with_me()` | ✓ | ✓ | ✓ |
+| `search_shared_files(query, owner?, max_results?)` | ✓ | ✓ | ✓ |
 | `list_shared_folder(owner, folder_id?, max_results?)` | ✓ | ✓ | ✓ |
 | `read_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
 | `download_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
@@ -140,10 +141,14 @@ Each person has a second list, separate from **Access**: the **Sharing** page. I
 assistant of anyone you have an **active mailbox pairing** with (both of you approved on `/bridge`). Use it for
 things like a resume that any paired person's assistant may see.
 
+- **Shared with me:** the dashboard's **Shared with me** page shows what paired people share with *you*,
+  grouped by person and source. Open folders to any depth, preview or download files, and search names and
+  text across everything shared with you. It uses the same guest checks as the tools below, and the owner's
+  Activity page shows these reads as `guest:<you> (dashboard)`.
 - **Add or remove:** on **Browse**, choose **Share with paired people** (or **Stop sharing**) next to a file or
   folder. **Sharing** lists what you share and who can currently read it. A folder includes what is inside it.
-- **Read-only, always:** another person's assistant gets `list_shared_with_me`, `list_shared_folder`,
-  `read_shared_file` and `download_shared_file`, and nothing else on your Drive, whatever role its own
+- **Read-only, always:** another person's assistant gets `list_shared_with_me`, `search_shared_files`,
+  `list_shared_folder`, `read_shared_file` and `download_shared_file`, and nothing else on your Drive, whatever role its own
   connection has. These calls run as a *guest* with your Google sign-in, behind a scope guard whose only
   allowlist is your Sharing list. Your **Access** list never counts for a guest, and your Sharing list never
   widens what your own assistants can use.

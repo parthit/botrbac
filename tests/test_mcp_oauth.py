@@ -244,6 +244,7 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "set_webhook",
         "clear_webhook",
         "list_shared_with_me",
+        "search_shared_files",
         "list_shared_folder",
         "read_shared_file",
         "download_shared_file",
@@ -439,7 +440,8 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     assert page.status_code == 200
     assert "Cursor" in page.text
     assert "Drive trash" in page.text
-    assert "sign-in can see your Drive" in page.text
+    # Sign-in is identity only now; the Drive connection is what can see the Drive.
+    assert "your connected Drive is visible" in page.text
     assert "can still reach the rest of your Drive" not in page.text
     assert "trash_file" not in page.text
     assert "something-else" in page.text
@@ -506,7 +508,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     assert hash_in(access) in stored
 
     names = tool_names(owner_c, access)
-    assert len(names) == 27
+    assert len(names) == 28
     assert "trash_file" in names
     dashboard = owner_c.get("/", headers={"Authorization": f"Bearer {access}"})
     assert dashboard.status_code == 200

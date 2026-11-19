@@ -10,7 +10,7 @@
   Sign out and sign in again.</div>
 {% endif %}
 {% if rows or root_folder_id %}
-<table class="cards">
+<table class="cards" data-list>
   <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>From</th><th>Action</th></tr></thead>
   <tbody>
   {% if root_folder_id %}
@@ -23,13 +23,13 @@
   </tr>
   {% endif %}
   {% for e in rows %}
-  <tr>
+  <tr data-row>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Added" class="muted">{{ e.granted_at }}</td>
     <td data-label="From">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">From a request</a>{% else %}Added here{% endif %}</td>
     <td data-label="Action">
-      <form class="inline" method="post" action="/revoke" data-confirm="Remove this from the assistant?">
+      <form class="inline" method="post" action="/revoke" data-async data-on-success="remove-row" data-confirm="Remove this from the assistant?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <input type="hidden" name="next" value="/access">
@@ -40,11 +40,10 @@
   {% endfor %}
   </tbody>
 </table>
-{% else %}
-<div class="card empty">
+{% endif %}
+<div class="card empty" data-empty{% if rows or root_folder_id %} hidden{% endif %}>
   <h2>Nothing is allowed yet</h2>
   <p>Pick a file or folder, then choose Allow. The assistant cannot use your Drive until you do.</p>
   <p><a class="btn primary" href="/browse">Browse files</a></p>
 </div>
-{% endif %}
 {% endblock %}

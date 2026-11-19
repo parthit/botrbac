@@ -313,6 +313,94 @@ def test_browse_marks_items_inside_a_shared_folder(people) -> None:
     assert 'action="/sharing/add"' in other
 
 
+def test_assistant_searches_everything_shared_with_it(people) -> None:
+    app, owner, eve, token = people
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    assert post(owner, "/grant", file_id="loose-two").status_code == 303
+
+    # Not paired: nobody to search, and naming the owner is refused.
+    empty = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert empty["results"] == []
+    named = _mcp(eve, token, "search_shared_files", query="roadmap", owner=OWNER_EMAIL)
+    assert _error(named)["error"] == "not_linked"
+
+    _pair(app, OWNER_EMAIL, EVE)
+    found = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert found["content_trust"] == "untrusted_peer"
+    assert [r["owner"] for r in found["results"]] == [OWNER_EMAIL]
+    assert [f["id"] for f in found["results"][0]["files"]] == ["proj-deep-doc"]
+
+    one = _mcp(eve, token, "search_shared_files", query="notes", owner=OWNER_EMAIL)
+    assert [f["id"] for f in one["structuredContent"]["results"][0]["files"]] == ["proj-notes"]
+
+    folder = _mcp(eve, token, "search_shared_files", query="PROJECTS")["structuredContent"]
+    assert folder["results"][0]["files"][0]["id"] == "proj"
+
+    miss = _mcp(eve, token, "search_shared_files", query="gamma")["structuredContent"]
+    assert miss["results"] == []  # on the owner's own-bot list only
+    # "link to payroll" is a shortcut inside the shared folder, so its name may match.
+    # Its target, a private file, must never appear or be followed.
+    payroll = json.dumps(_mcp(eve, token, "search_shared_files", query="payroll"))
+    assert "priv-secret" not in payroll and SECRET_TEXT not in payroll
+
+    bad = _mcp(eve, token, "search_shared_files", query="   ")
+    assert _error(bad)["error"] == "invalid_input"
+
+
+def test_assistant_search_skips_a_sharer_whose_drive_fails(people, world, monkeypatch) -> None:
+    from scoped_drive_mcp.auth import current_actor
+    from scoped_drive_mcp.service import DriveService
+    from tests.test_shared_with_me import _carol_shares
+
+    app, owner, eve, token = people
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    _carol_shares(app, world)
+
+    real = DriveService.search_files
+
+    def flaky(self, query, max_results=10):
+        if current_actor.get() == CAROL:
+            raise RuntimeError("Google said 503")
+        return real(self, query, max_results)
+
+    monkeypatch.setattr(DriveService, "search_files", flaky)
+    out = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert [r["owner"] for r in out["results"]] == [OWNER_EMAIL]
+    assert out["unavailable"] == [CAROL]
+    named = _mcp(eve, token, "search_shared_files", query="roadmap", owner=CAROL)
+    assert _error(named)["error"] == "owner_unavailable"
+
+
+def test_assistant_search_skips_paired_people_who_share_nothing(people, monkeypatch) -> None:
+    from scoped_drive_mcp.auth import current_actor
+    from scoped_drive_mcp.service import DriveService
+
+    app, owner, eve, token = people
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    # Carol is paired with Eve but shares nothing. Her Drive must not be touched.
+    carol = client(app)
+    assert login(carol, "carol-code").status_code == 303
+    _pair(app, CAROL, EVE)
+
+    real = DriveService.search_files
+    searched: list[str] = []
+
+    def spy(self, query, max_results=10):
+        searched.append(current_actor.get() or "")
+        if current_actor.get() == CAROL:
+            raise RuntimeError("Carol's Drive must not be searched")
+        return real(self, query, max_results)
+
+    monkeypatch.setattr(DriveService, "search_files", spy)
+    out = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert [r["owner"] for r in out["results"]] == [OWNER_EMAIL]
+    assert out["unavailable"] == []
+    assert CAROL not in searched
+    assert "search_shared_files" not in carol.get("/activity").text
+
+
 def test_sharing_logs_as_sharing_not_as_an_own_assistant_grant(people, memstore) -> None:
     _app_, owner, _eve, _token = people
     assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Search · Shared with me{% endblock %}
+{% block content %}
+{% include "_shared_search.html" %}
+<p class="crumbs"><a href="/shared">Shared with me</a><span class="sep">/</span><b>Search</b></p>
+<h1>Results for “{{ results.query }}”</h1>
+<p class="muted">Names and text in everything people you are paired with share with you.
+  {{ results.count }} match{{ "" if results.count == 1 else "es" }}.</p>
+{% if results.unavailable %}
+<p class="warn">Not searched: {{ results.unavailable | join(", ") }}. Their Google sign-in is not available right now.</p>
+{% endif %}
+
+{% for g in results.groups %}
+<section class="card">
+  <h2>{{ g.owner }} · {{ g.source.name }}</h2>
+  <ul class="files">
+    {% for h in g.hits %}
+    {% set n = h.node %}
+    <li class="file">
+      <div class="file-name">
+        <span class="file-icon" aria-hidden="true">{% if n.is_container %}📁{% else %}📄{% endif %}</span>
+        {% if n.is_container %}<a href="{{ shared_href('browse', g.source.key, g.owner, n.id) }}">{{ n.name or n.id }}</a>
+        {% else %}<a href="{{ shared_href('open', g.source.key, g.owner, n.id) }}">{{ n.name or n.id }}</a>{% endif %}
+      </div>
+      <div class="file-meta">
+        <span>{{ n.kind or describe_mime(n.mime_type) }}</span>
+        {% if h.path %}<span>in {% for c in h.path %}<a href="{{ shared_href('browse', g.source.key, g.owner, c.id) }}">{{ c.name or c.id }}</a>{% if not loop.last %} / {% endif %}{% endfor %}</span>{% endif %}
+        {% if n.modified %}<span>Modified {{ n.modified[:10] }}</span>{% endif %}
+      </div>
+      <div class="file-actions">
+        {% if n.is_container %}
+        <a class="btn" href="{{ shared_href('browse', g.source.key, g.owner, n.id) }}">Open</a>
+        {% else %}
+        <a class="btn" href="{{ shared_href('open', g.source.key, g.owner, n.id) }}">Open</a>
+        {% if n.can_download %}<a class="btn" href="{{ shared_href('download', g.source.key, g.owner, n.id) }}" download>Download</a>{% endif %}
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<div class="card empty">
+  <h2>No matches</h2>
+  <p>Nothing shared with you matches “{{ results.query }}”. Try a shorter word.</p>
+</div>
+{% endfor %}
+{% endblock %}
