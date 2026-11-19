@@ -25,11 +25,11 @@ def owner_c(c):
     return c
 
 
-def test_authorization_url_uses_drive_file_scope() -> None:
+def test_authorization_url_uses_full_drive_scope() -> None:
     oauth = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
     query = parse_qs(urlparse(oauth.authorization_url("state-token")).query)
     scopes = query["scope"][0].split()
-    assert scopes == ["openid", "email", "https://www.googleapis.com/auth/drive.file"]
+    assert scopes == ["openid", "email", "https://www.googleapis.com/auth/drive"]
     assert "login_hint" not in query
     hinted = parse_qs(urlparse(oauth.authorization_url("state-token", "visitor@example.com")).query)
     assert hinted["login_hint"] == ["visitor@example.com"]
@@ -50,11 +50,11 @@ def test_favicon_and_robots_do_not_redirect(c) -> None:
     assert css.status_code == 200 and ".skip" in css.text
 
 
-def test_privacy_describes_drive_file(c) -> None:
+def test_privacy_describes_full_drive(c) -> None:
     page = c.get("/privacy")
     assert page.status_code == 200
-    assert "https://www.googleapis.com/auth/drive.file" in page.text
-    assert "https://www.googleapis.com/auth/drive</code>" not in page.text
+    assert "https://www.googleapis.com/auth/drive</code>" in page.text
+    assert "drive.file" not in page.text
 
 
 def test_opaque_drive_page_token_round_trips() -> None:
@@ -147,7 +147,7 @@ def test_request_page_picker_approves_an_unopened_file(world, memstore, oauth) -
     page = signed_in.get(f"/requests/{request_id}")
     assert page.status_code == 200
     assert "Choose the file to approve" in page.text
-    assert "asked for it" in page.text
+    assert "could not open that file" in page.text
     button = re.search(r"<button[^>]*id=\"pick-drive\"[^>]*>", page.text)
     assert button, page.text
     assert f'data-request="{request_id}"' in button.group(0)
@@ -170,13 +170,25 @@ def test_browse_previous_and_next(owner_c, monkeypatch) -> None:
     assert 'aria-disabled="true">Previous' in returned.text
 
 
-def test_legacy_token_shows_reconsent(owner_c, p2_app) -> None:
+def test_narrow_token_shows_reconsent(owner_c, p2_app) -> None:
     vault = p2_app.state.dashboard.vault
     record = vault.owner()
-    vault.set_owner(record["t"], record["email"])
+    vault.set_owner(
+        record["t"],
+        record["email"],
+        "openid email https://www.googleapis.com/auth/drive.file",
+    )
     page = owner_c.get("/").text
     assert 'id="reconsent"' in page
     assert "Sign in again" in page
+    vault.set_owner(record["t"], record["email"])
+    assert 'id="reconsent"' in owner_c.get("/").text
+    vault.set_owner(
+        record["t"],
+        record["email"],
+        "openid email https://www.googleapis.com/auth/drive",
+    )
+    assert 'id="reconsent"' not in owner_c.get("/").text
 
 
 def test_picker_session_hidden_until_configured(owner_c) -> None:

@@ -163,7 +163,7 @@ def test_pages_describe_the_allowlist(c) -> None:
     for page in ("/", "/access"):
         html = c.get(page).text
         assert 'id="mode-note"' in html and "your Google account" in html, page
-        assert "files and folders you pick" in html and "allowlist" not in html
+        assert "files and folders you allow" in html and "allowlist" not in html
         assert "connect-bot" not in html and "BOT_EMAIL" not in html
     assert c.get("/health").json() == {"status": "ok"}
 

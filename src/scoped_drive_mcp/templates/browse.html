@@ -3,7 +3,7 @@
 {% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
 <h1>Files this app can see</h1>
-<p class="muted">Allow the items your assistant may use. Add from Google Drive opens the picker, which is how a file becomes visible under per-file access. Picking a folder shares that folder. Files already inside it may still need to be picked one by one. Files the assistant creates in an allowed folder are included.</p>
+<p class="muted">Allow the items your assistant may use. A folder you allow includes the files inside it. Files the assistant creates in an allowed folder are included. The Google Picker, when it is set up, is another way to choose a file.</p>
 {% if picking %}
 <div class="warn">Choosing an item for this request:
   <b>{{ picking.description or picking.file_name or "a file the assistant asked for" }}</b>.

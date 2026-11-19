@@ -39,7 +39,6 @@ from .config import Settings
 from .drive_client import (
     DRIVE_SCOPE,
     FOLDER_MIME,
-    FULL_DRIVE_SCOPE,
     SHORTCUT_MIME,
     DriveNotFoundError,
     LazyBotDriveClient,
@@ -175,14 +174,18 @@ class DashboardContext:
         return bool(self.vault.enabled and self.vault.owner())
 
     def reconsent_needed(self) -> bool:
-        """True when the stored sign-in predates drive.file (no scope stamp, or the old scope)."""
+        """True when the saved sign-in cannot see the whole Drive.
+
+        A missing scope stamp, or a token that only has drive.file, has to sign in
+        again. A token that already includes full Drive does not.
+        """
         if not self.vault.enabled:
             return False
         record = self.vault.owner()
         if not record or not record.get("t"):
             return False
         scopes = set(str(record.get("scopes") or "").split())
-        return DRIVE_SCOPE not in scopes or FULL_DRIVE_SCOPE in scopes
+        return DRIVE_SCOPE not in scopes
 
 
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -527,24 +530,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 403,
                 message="This Google account is not allowed to use this dashboard.",
             )
-        if FULL_DRIVE_SCOPE in tokens.scopes:
-            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
-            return render(
-                request,
-                "error.html",
-                400,
-                message="This app no longer accepts full Google Drive access. Remove it at "
-                "myaccount.google.com/permissions, then sign in again and allow access "
-                "only to the files you pick.",
-            )
         if DRIVE_SCOPE not in tokens.scopes:
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             return render(
                 request,
                 "error.html",
                 400,
-                message="Google Drive file access was not granted. Sign in again and allow "
-                "access to the files you pick.",
+                message="Google Drive access was not granted. Sign in again and allow "
+                "access to your Drive.",
             )
         if not tokens.refresh_token:
             return render(

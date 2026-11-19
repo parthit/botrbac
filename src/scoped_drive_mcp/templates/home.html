@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Pick the files. Refuse the rest{% endblock %}
+{% block title %}Share only the files you allow{% endblock %}
 {% block content %}
 <section class="hero">
   <h1>Pick the files.<br>Refuse the rest.</h1>
@@ -8,7 +8,7 @@
     <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every call.</b> Anything else is refused.</span></li>
   </ul>
   <p class="sub">Scoped Drive is a gateway that sits in front of Google Drive. You sign in with your own Google account, pick the files and folders an assistant may use, and this server refuses the rest.</p>
-  <p class="disclosure">Signing in asks Google for your email and for access to the files and folders you pick. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
+  <p class="disclosure">Signing in asks Google for your email and for access to your Drive. This server then lets an assistant use only the files and folders you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
   <div class="ctas">
     {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
   </div>
@@ -33,7 +33,7 @@
     <article class="sticker">
       <p class="eye">Google Drive</p>
       <p class="ask">Q3 memo</p>
-      <p class="ask dim">nothing you did not pick</p>
+      <p class="ask dim">nothing you did not allow</p>
     </article>
   </div>
 </section>
@@ -45,9 +45,9 @@
     <p class="proof">One account per person</p>
   </article>
   <article class="card product" id="pick">
-    <h2>Pick</h2>
+    <h2>Allow</h2>
     <p>A file or a folder. That list is what an assistant can use.</p>
-    <p class="proof">Per-file Google access</p>
+    <p class="proof">Checked on every call</p>
   </article>
   <article class="card product" id="revoke">
     <h2>Revoke</h2>
@@ -61,7 +61,7 @@
     <h2>The boundary is the product.</h2>
     <p class="lead">Three checks. No extra Google products.</p>
     <ul class="pts">
-      <li><b>Only what you pick.</b> Google opens the files you choose in the picker, plus files an assistant creates here. This server checks the list again.</li>
+      <li><b>Only what you allow.</b> Sign-in can see your Drive. An assistant cannot, until you allow a file or folder. This server checks every call against that list.</li>
       <li><b>Encrypted tokens.</b> The Google refresh token is encrypted before it is stored. File contents are not kept on this server.</li>
       <li><b>Revoke anytime.</b> Untick an item, disconnect an app, or remove Scoped Drive from your Google Account. New calls stop. Anything already sent is not recalled.</li>
     </ul>
