@@ -284,12 +284,29 @@ def _file_response(name: str, media: str) -> Response:
 
 def favicon(_: Request) -> Response:
     svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
-        '<rect width="64" height="64" rx="12" fill="#f4f6f8"/>'
-        '<text x="32" y="44" text-anchor="middle" font-size="28">🤖🌉</text>'
-        "</svg>"
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img">'
+        '<rect width="64" height="64" rx="14" fill="#f6f2ea"/>'
+        '<g transform="translate(15 12) scale(2.35)">'
+        '<path id="scoped-mark" fill="#1e1915" fill-rule="evenodd" '
+        'd="M5 20V10a7 7 0 0 1 14 0v10h-3.2V10a3.8 3.8 0 0 0-7.6 0v10H5z"/>'
+        "</g></svg>"
     )
     return Response(svg, media_type="image/svg+xml")
+
+
+_FONT_FILES = {
+    "geist-400.woff2": "fonts/geist-400.woff2",
+    "geist-500.woff2": "fonts/geist-500.woff2",
+    "geist-600.woff2": "fonts/geist-600.woff2",
+    "geist-mono-500.woff2": "fonts/geist-mono-500.woff2",
+}
+
+
+def font_asset(request: Request) -> Response:
+    rel = _FONT_FILES.get(request.path_params["name"])
+    if rel is None:
+        return Response(status_code=404)
+    return _file_response(rel, "font/woff2")
 
 
 def robots(_: Request) -> Response:
@@ -322,6 +339,7 @@ def legal_routes() -> list[Route]:
         Route("/robots.txt", robots, methods=["GET"]),
         Route("/app.css", stylesheet, methods=["GET"]),
         Route("/ui.js", ui_script, methods=["GET"]),
+        Route("/fonts/{name}", font_asset, methods=["GET"]),
     ]
 
 

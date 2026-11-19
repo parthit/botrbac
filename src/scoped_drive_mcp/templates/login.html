@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Sign in{% endblock %}
 {% block content %}
-<div class="card hero" style="margin:24px auto;">
-  <p class="logo-lockup" aria-hidden="true">🤖🌉</p>
-  <h1>Sign in to Scoped Drive</h1>
-  <p>Sign in with your own Google account. You pick your own files, and the assistant uses this same account. Each person’s files stay separate.</p>
+<section class="hero">
+  <h1>Sign in.</h1>
+  <p class="sub">Sign in with your own Google account. You pick your own files, and the assistant uses this same account. Each person’s files stay separate.</p>
   <p class="disclosure">Scoped Drive will ask Google for your email address, so this server knows which list is yours, and for access to your Drive. An assistant can open only the files and folders you allow. Those contents go only to an assistant you connect. They are not sold, not used for advertising, and not used to train a model.</p>
-  <p>This is described in the <a href="/privacy">privacy policy</a> and the <a href="/terms">terms of service</a>.</p>
-  {% with href="/auth/login?next=" ~ (next | urlencode) %}{% include "_google_button.html" %}{% endwith %}
-</div>
+  <p class="legal-links">This is described in the <a href="/privacy">privacy policy</a> and the <a href="/terms">terms of service</a>.</p>
+  <div class="ctas">
+    {% with href="/auth/login?next=" ~ (next | urlencode) %}{% include "_google_button.html" %}{% endwith %}
+  </div>
+</section>
 {% endblock %}

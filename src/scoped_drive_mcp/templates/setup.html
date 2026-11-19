@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Setup incomplete{% endblock %}
 {% block content %}
-<div class="card empty">
-  <p class="logo-lockup" aria-hidden="true">🤖🌉</p>
-  <h1>Setup incomplete</h1>
-  {% if problem %}<p>{{ problem }}</p>{% endif %}
+<section class="hero narrow">
+  <p class="eye">Setup</p>
+  <h1>Setup incomplete.</h1>
+  {% if problem %}<p class="sub">{{ problem }}</p>{% endif %}
   {% if missing %}
   <p>The dashboard needs these environment variables before it can start:</p>
-  <ul>
+  <ul class="pts">
     {% for name in missing %}<li><code>{{ name }}</code></li>{% endfor %}
   </ul>
   {% endif %}
   <p class="muted">Set them where this server is hosted, including <code>APP_BASE_URL</code> for the public address, then redeploy.
      See the README's "Phase 2 setup and test walkthrough".</p>
-  <p><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
-</div>
+  <p class="legal-links"><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
+</section>
 {% endblock %}
