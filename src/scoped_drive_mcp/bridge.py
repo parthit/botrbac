@@ -118,6 +118,32 @@ class Mailbox:
         links.sort(key=lambda item: item["created_at"], reverse=True)
         return {"you": you, "links": links}
 
+    def active_peers(self, email: str) -> list[str]:
+        """Emails of people with an active (both approved, not revoked) link to `email`.
+
+        This is what external sharing trusts: a peer's assistant may read the items that
+        person put on their shared list. It is read fresh on every call, so turning a
+        pairing off on /bridge ends that access at once.
+        """
+        you = _email(email)
+        peers: set[str] = set()
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or self._status(link) != "active":
+                continue
+            other = self._other(link, you)
+            if other and other != you:
+                peers.add(other)
+        return sorted(peers)
+
+    def is_linked(self, a: str, b: str) -> bool:
+        """Whether `a` and `b` share an active link."""
+        try:
+            other = _email(b)
+        except MailboxError:
+            return False
+        return other in self.active_peers(a)
+
     def send_message(
         self,
         email: str,

@@ -38,12 +38,15 @@ class GrantService:
         requests: AccessRequests,
         bot_email: str | None,
         on_change: Callable[[], None] = lambda: None,
+        audience: str | None = None,
     ):
         self._owner_drive = owner_drive
         self.allowlist = allowlist
         self.requests = requests
         self.bot_email = bot_email
         self._on_change = on_change
+        # Stamped on new entries. Set for the external list (who may read the item).
+        self.audience = audience
 
     def owner_drive(self) -> OwnerDriveClient:
         return self._owner_drive()
@@ -86,6 +89,7 @@ class GrantService:
             permission_id=permission_id,
             request_id=request_id,
             shared_with=self.bot_email if permission_id else None,
+            audience=self.audience,
         )
         self.allowlist.add(entry)
         self._on_change()

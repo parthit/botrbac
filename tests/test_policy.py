@@ -8,6 +8,7 @@ from scoped_drive_mcp.config import Role
 from scoped_drive_mcp.policy import (
     ADMIN_TOOLS,
     EDITOR_TOOLS,
+    GUEST_TOOLS,
     ROLE_TOOLS,
     VIEWER_TOOLS,
     is_allowed,
@@ -43,15 +44,25 @@ MAILBOX_TOOLS = {
     "set_webhook",
     "clear_webhook",
 }
-VIEWER_EXPECTED = {
-    "search_files",
-    "list_folder",
-    "get_metadata",
-    "read_file",
-    "download_file",
-    "request_access",
-    "check_access_request",
-} | MAILBOX_TOOLS
+SHARED_TOOLS = {
+    "list_shared_with_me",
+    "list_shared_folder",
+    "read_shared_file",
+    "download_shared_file",
+}
+VIEWER_EXPECTED = (
+    {
+        "search_files",
+        "list_folder",
+        "get_metadata",
+        "read_file",
+        "download_file",
+        "request_access",
+        "check_access_request",
+    }
+    | MAILBOX_TOOLS
+    | SHARED_TOOLS
+)
 EXPECTED = {
     Role.VIEWER: VIEWER_EXPECTED,
     Role.EDITOR: VIEWER_EXPECTED
@@ -62,7 +73,7 @@ EXPECTED = {
         "update_file_content",
         "rename_file",
     },
-    Role.ADMIN: set(VALID_ARGS) | MAILBOX_TOOLS,
+    Role.ADMIN: set(VALID_ARGS) | MAILBOX_TOOLS | SHARED_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")
@@ -86,10 +97,17 @@ def test_unknown_role_and_tool() -> None:
 @pytest.mark.anyio
 async def test_registered_tools_are_exactly_the_role_map(service) -> None:
     mcp = create_mcp(service)
-    names = {t.name for t in mcp._tool_manager.list_tools()}
+    tools = {t.name: t for t in mcp._tool_manager.list_tools()}
+    names = set(tools)
     assert names == set(ADMIN_TOOLS)
-    for name in names:
+    assert GUEST_TOOLS == SHARED_TOOLS
+    for name in names - GUEST_TOOLS:
         assert not any(word in name for word in FORBIDDEN_TOOL_WORDS)
+    # "shared" in these names means reading what someone else shared. They can never
+    # change sharing or permissions: each is read-only and has no write path.
+    for name in GUEST_TOOLS:
+        assert tools[name].annotations.model_dump(by_alias=True)["readOnlyHint"] is True, name
+        assert not any(w in name for w in ("move", "permission", "delete", "parent")), name
 
 
 @pytest.mark.anyio
