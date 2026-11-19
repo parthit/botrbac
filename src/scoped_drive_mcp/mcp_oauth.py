@@ -60,6 +60,10 @@ ALLOWED_REDIRECT_URIS = frozenset(
         "https://muse.ai/api/hatch/oauth/callback",
         "https://agent.meta.ai/api/hatch/oauth/callback",
         "https://platform.muse.ai/oauth/credential-test/callback",
+        # Claude (claude.ai, Claude Desktop, Claude mobile). Custom connectors are
+        # brokered by Anthropic and always send one of these callbacks.
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
         "http://localhost:8787/callback",
         "http://127.0.0.1:8787/callback",
     }
