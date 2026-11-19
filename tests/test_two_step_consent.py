@@ -127,6 +127,25 @@ def test_disconnect_drops_the_token_and_keeps_the_session(signed_in, oauth, p2_a
     assert signed_in.get("/browse").headers["location"].startswith("/connect")
 
 
+def test_narrow_token_can_be_upgraded_from_connect(signed_in, oauth, p2_app) -> None:
+    connect_drive(signed_in)
+    vault = p2_app.state.dashboard.vault
+    record = vault.owner()
+    narrow = "openid email https://www.googleapis.com/auth/drive.file"
+    vault.set_owner(record["t"], record["email"], narrow)
+    page = signed_in.get("/connect").text
+    assert "Reconnect Google Drive" in page
+    assert 'action="/connect/google_drive"' in page
+    assert "Disconnect" in page
+    # The existing token stays until the upgrade succeeds.
+    r = connect_drive(signed_in)
+    assert r.status_code == 303
+    assert DRIVE_SCOPE in vault.owner()["scopes"].split()
+    page = signed_in.get("/connect").text
+    assert "Reconnect Google Drive" not in page
+    assert 'action="/connect/google_drive"' not in page
+
+
 def test_assistant_consent_waits_for_a_drive_connection(signed_in) -> None:
     created = register(signed_in, DONE)
     _verifier, params = auth_params(created.json()["client_id"], DONE)

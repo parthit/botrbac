@@ -190,7 +190,12 @@ class DashboardContext:
         rows = []
         for conn in CONNECTIONS.values():
             connected = self.drive_connected() if conn.key == "google_drive" else False
-            rows.append({"connection": conn, "connected": connected})
+            # A stored token without the full scope (old drive.file, or no scope stamp)
+            # still works for what it covers, but has to be upgraded by connecting again.
+            needs_upgrade = connected and conn.key == "google_drive" and self.reconsent_needed()
+            rows.append(
+                {"connection": conn, "connected": connected, "needs_upgrade": needs_upgrade}
+            )
         return rows
 
     def disconnect_drive(self) -> str | None:
