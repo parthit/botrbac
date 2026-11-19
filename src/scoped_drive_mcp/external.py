@@ -93,6 +93,21 @@ def normalize_email(value: Any) -> str:
     return email
 
 
+MAX_SEARCH_QUERY = 200
+MAX_SEARCH_RESULTS = 50
+
+
+def clean_query(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SharedAccessError("invalid_input", "Type something to search for.")
+    text = value.strip()
+    if len(text) > MAX_SEARCH_QUERY:
+        raise SharedAccessError(
+            "invalid_input", f"Search text must be at most {MAX_SEARCH_QUERY} characters."
+        )
+    return text
+
+
 def wrap_untrusted(text: str) -> str:
     """Wrap file text so the reader can tell where another person's content starts and
     ends. The markers are removed from the body first so a file cannot close them early."""
@@ -155,6 +170,54 @@ class ExternalShares:
             "note": (
                 "Pass owner and an item id to list_shared_folder, read_shared_file or "
                 "download_shared_file. Only people with an active mailbox pairing appear."
+            ),
+        }
+
+    def search(
+        self,
+        caller: str,
+        query: str,
+        owner: str | None = None,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        """Search names and text across what paired people share with `caller`.
+
+        With `owner`, only that person (who must be paired). Without it, everyone with an
+        active pairing. Each owner is searched separately, as their guest, so a hit can only
+        come from that owner's external list. One owner whose sign-in is unavailable is
+        reported in `unavailable` instead of failing the whole search."""
+        text = clean_query(query)
+        limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
+        you = normalize_email(caller)
+        owners = [normalize_email(owner)] if owner else self.active_peers(you)
+        results: list[dict[str, Any]] = []
+        unavailable: list[str] = []
+        for them in owners:
+            try:
+                found = self._as_guest(
+                    you,
+                    them,
+                    "search_shared_files",
+                    None,
+                    lambda: self.service.search_files(text, limit),
+                )
+            except SharedAccessError as exc:
+                if owner or exc.code != "owner_unavailable":
+                    raise
+                unavailable.append(them)
+                continue
+            files = found.get("files") or []
+            if files:
+                results.append({"owner": them, "files": files})
+        return {
+            "query": text,
+            "results": results,
+            "unavailable": unavailable,
+            # Names and text matched in other people's files: data, not instructions.
+            "content_trust": "untrusted_peer",
+            "note": (
+                "Pass owner and a file id to read_shared_file or list_shared_folder. "
+                "Only people with an active mailbox pairing are searched."
             ),
         }
 

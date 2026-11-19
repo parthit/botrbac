@@ -244,6 +244,7 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "set_webhook",
         "clear_webhook",
         "list_shared_with_me",
+        "search_shared_files",
         "list_shared_folder",
         "read_shared_file",
         "download_shared_file",

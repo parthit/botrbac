@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 GUEST_TOOLS: frozenset[str] = frozenset(
     {
         "list_shared_with_me",
+        "search_shared_files",
         "list_shared_folder",
         "read_shared_file",
         "download_shared_file",

@@ -210,3 +210,38 @@ def test_attachment_disposition_cleans_names() -> None:
     assert "\r" not in header and "\n" not in header and "/" not in header.split("filename*")[0]
     assert "filename*=UTF-8''" in header and "%C3%A9" in header
     assert attachment_disposition("").startswith('attachment; filename="download"')
+
+
+def test_search_across_everything_shared_with_me(pair, world, oauth) -> None:
+    app, owner, eve = pair
+    link_id = _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
+    assert post(owner, "/grant", file_id="loose-two").status_code == 303  # own-bot only
+
+    # Full text, deep inside a shared folder, with its path inside the share.
+    page = eve.get("/shared/search?q=roadmap")
+    assert page.status_code == 200
+    assert "Deep roadmap" in page.text and OWNER_EMAIL in page.text
+    assert "Projects" in page.text and "Sub" in page.text and "My Drive" not in page.text
+    deep_href = shared_href("open", DRIVE, OWNER_EMAIL, "proj-deep-doc")
+    assert deep_href.replace("&", "&amp;") in page.text
+
+    # A directly shared file matches by name.
+    assert "Loose memo" in eve.get("/shared/search?q=Loose").text
+
+    # Nothing outside the shared list: not the own-bot list, not other private files.
+    for term in ("gamma", "payroll", "Second"):
+        res = eve.get(f"/shared/search?q={term}").text
+        assert "No matches" in res, term
+        assert SECRET_TEXT not in res
+
+    # Empty search goes back; too long is refused.
+    r = eve.get("/shared/search?q=")
+    assert r.status_code == 303 and r.headers["location"] == "/shared"
+    assert eve.get("/shared/search?q=" + "x" * 201).status_code == 400
+
+    # Search box shows once something is shared; unpairing empties results.
+    assert 'action="/shared/search"' in eve.get("/shared").text
+    app.state.mailbox.revoke(EVE, link_id)
+    assert "No matches" in eve.get("/shared/search?q=roadmap").text

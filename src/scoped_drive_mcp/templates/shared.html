@@ -9,6 +9,7 @@
 <p class="muted">What people you are paired with on <a href="/bridge">Mailbox</a> share with you. You and your
   assistant can open, read and download these. Nothing here can be changed. Names and contents come from the
   other person. What you share is on <a href="/sharing">Sharing</a>.</p>
+{% if people %}{% include "_shared_search.html" %}{% endif %}
 
 {% if people %}
   {% for p in people %}

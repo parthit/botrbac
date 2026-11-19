@@ -1092,6 +1092,19 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         data = await blocking(gather)
         return render(request, "shared.html", **data)
 
+    async def shared_search(request: Request) -> Response:
+        if ctx.shared_with_me is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+        q = (request.query_params.get("q") or "").strip()
+        if not q:
+            return RedirectResponse("/shared", status_code=303)
+        try:
+            results = await blocking(ctx.shared_with_me.search, email, q)
+        except SharedAccessError as exc:
+            return shared_error(request, exc)
+        return render(request, "shared_search.html", q=q, results=results)
+
     async def shared_browse(request: Request) -> Response:
         if ctx.shared_with_me is None:
             return render(request, "error.html", 404, message="Sharing is not set up.")
@@ -1481,6 +1494,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
         Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
         Route("/shared", owner_only(shared_overview), methods=["GET"]),
+        Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
         Route("/shared/open", owner_only(shared_open), methods=["GET"]),
         Route("/shared/download", owner_only(shared_download), methods=["GET"]),

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ listing.container.name if listing.container else shared_owner }} · Shared with me{% endblock %}
 {% block content %}
+{% include "_shared_search.html" %}
 <p class="crumbs">
   <a href="/shared">Shared with me</a><span class="sep">/</span>
   {% if listing.container %}<a href="{{ shared_href('browse', source.key, shared_owner) }}">{{ shared_owner }} · {{ source.name }}</a>

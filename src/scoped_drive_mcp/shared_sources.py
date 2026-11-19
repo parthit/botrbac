@@ -13,6 +13,7 @@ showing:
 * `list(caller, owner, container_id)`: one level of the tree. `None` is the top.
 * `open(caller, owner, item_id)`: an item's details and a text preview when there is one.
 * `download(caller, owner, item_id)`: size-capped bytes, when the type has any.
+* `search(caller, owner, query, limit)`: items inside the share whose name or text matches.
 
 A new source (a mail label, a calendar, a notes workspace) implements `SharedSource` and is
 added to `SharedWithMe`. It must enforce the same rules as Drive on every call: the caller
@@ -26,18 +27,27 @@ folder that sits above what the owner shared.
 
 import base64
 import binascii
+import builtins
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .drive_client import FOLDER_MIME, GOOGLE_APPS_PREFIX, SHORTCUT_MIME
-from .external import ExternalShares, SharedAccessError, acting_as, normalize_email
+from .external import (
+    ExternalShares,
+    SharedAccessError,
+    acting_as,
+    clean_query,
+    normalize_email,
+)
 from .scope import ForbiddenError, OutOfScopeError
 
 # How many containers above the current one the breadcrumb walk may fetch.
 MAX_PATH_DEPTH = 20
 # Items shown per folder on the page. Drive folders larger than this say "truncated".
 LIST_LIMIT = 200
+# Hits per person and source on the search page.
+SEARCH_LIMIT = 25
 # Dashboard reads are recorded on the owner's activity log with this marker, so the owner
 # can tell their friend's own browsing apart from that friend's assistant.
 VIA_DASHBOARD = "dashboard"
@@ -78,6 +88,13 @@ class SharedDocument:
 
 
 @dataclass(frozen=True)
+class SharedHit:
+    node: SharedNode
+    path: list[SharedNode]
+    """Containers above the hit, inside the share only. Empty for a shared item itself."""
+
+
+@dataclass(frozen=True)
 class SharedDownload:
     filename: str
     data: bytes
@@ -99,6 +116,10 @@ class SharedSource(Protocol):
 
     def download(self, caller: str, owner: str, item_id: str) -> SharedDownload: ...
 
+    def search(
+        self, caller: str, owner: str, query: str, limit: int
+    ) -> builtins.list[SharedHit]: ...
+
 
 @dataclass(frozen=True)
 class SourceShares:
@@ -114,6 +135,25 @@ class PersonShares:
     @property
     def item_count(self) -> int:
         return sum(len(s.roots) for s in self.sources)
+
+
+@dataclass(frozen=True)
+class SearchGroup:
+    owner: str
+    source: SharedSource
+    hits: list[SharedHit]
+
+
+@dataclass(frozen=True)
+class SearchResults:
+    query: str
+    groups: list[SearchGroup]
+    unavailable: list[str]
+    """People whose sign-in could not be used right now. Their items were not searched."""
+
+    @property
+    def count(self) -> int:
+        return sum(len(g.hits) for g in self.groups)
 
 
 class SharedWithMe:
@@ -143,6 +183,30 @@ class SharedWithMe:
             if groups:
                 people.append(PersonShares(peer, groups))
         return people
+
+    def search(self, caller: str, query: str, limit: int = SEARCH_LIMIT) -> SearchResults:
+        """Search every source of every paired person. Each (person, source) is its own
+        guest call, so a hit can only come from that person's shared list. A person whose
+        sign-in is unavailable is skipped and reported; other errors are raised."""
+        text = clean_query(query)
+        you = normalize_email(caller)
+        groups: list[SearchGroup] = []
+        unavailable: list[str] = []
+        for peer in self.active_peers(you):
+            for source in self._sources.values():
+                if not source.shared_roots(you, peer):
+                    continue
+                try:
+                    hits = source.search(you, peer, text, limit)
+                except SharedAccessError as exc:
+                    if exc.code != "owner_unavailable":
+                        raise
+                    if peer not in unavailable:
+                        unavailable.append(peer)
+                    continue
+                if hits:
+                    groups.append(SearchGroup(peer, source, hits))
+        return SearchResults(text, groups, unavailable)
 
 
 # ---- Google Drive ------------------------------------------------------------
@@ -219,11 +283,18 @@ class DriveSharedSource:
             ]
         )
 
-    def _path(self, start: dict[str, Any], include_start: bool) -> list[SharedNode]:
+    def _path(
+        self,
+        start: dict[str, Any],
+        include_start: bool,
+        memo: dict[str, dict[str, Any] | None] | None = None,
+    ) -> list[SharedNode]:
         """Walk up from `start` while the parent is inside the share. Runs as the owner,
         inside a guest call. `_public` already dropped parents outside the share, so a
-        folder above the shared item is never fetched or named."""
+        folder above the shared item is never fetched or named. `memo` shares folder
+        lookups between calls (search results often sit in the same folders)."""
         service = self.shares.service
+        memo = {} if memo is None else memo
         chain: list[SharedNode] = [drive_node(start)] if include_start else []
         seen = {str(start["id"])}
         node = start
@@ -235,10 +306,15 @@ class DriveSharedSource:
             if parent_id in seen:
                 break
             seen.add(parent_id)
-            try:
-                node = service.get_metadata(parent_id)
-            except (OutOfScopeError, ForbiddenError):
+            if parent_id not in memo:
+                try:
+                    memo[parent_id] = service.get_metadata(parent_id)
+                except (OutOfScopeError, ForbiddenError):
+                    memo[parent_id] = None
+            parent = memo[parent_id]
+            if parent is None:
                 break
+            node = parent
             chain.insert(0, drive_node(node))
         return chain
 
@@ -305,4 +381,21 @@ class DriveSharedSource:
 
         return self.shares.guest_call(
             caller, owner, "download_shared_file", item_id, run, via=VIA_DASHBOARD
+        )
+
+    def search(self, caller: str, owner: str, query: str, limit: int) -> builtins.list[SharedHit]:
+        """Drive's guarded search (names and full text), run as the owner's guest."""
+        text = clean_query(query)
+
+        def run() -> builtins.list[SharedHit]:
+            found = self.shares.service.search_files(text, max(1, min(limit, 50)))
+            memo: dict[str, dict[str, Any] | None] = {}
+            hits = [
+                SharedHit(drive_node(meta), self._path(meta, include_start=False, memo=memo))
+                for meta in found.get("files") or []
+            ]
+            return sorted(hits, key=lambda h: (not h.node.is_container, h.node.name.lower()))
+
+        return self.shares.guest_call(
+            caller, owner, "search_shared_files", None, run, via=VIA_DASHBOARD
         )

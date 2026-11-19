@@ -311,3 +311,32 @@ def test_browse_marks_items_inside_a_shared_folder(people) -> None:
     other = owner.get("/browse?folder=priv").text
     assert "Shared via folder" not in other
     assert 'action="/sharing/add"' in other
+
+
+def test_assistant_searches_everything_shared_with_it(people) -> None:
+    app, owner, eve, token = people
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    assert post(owner, "/grant", file_id="loose-two").status_code == 303
+
+    # Not paired: nobody to search, and naming the owner is refused.
+    empty = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert empty["results"] == []
+    named = _mcp(eve, token, "search_shared_files", query="roadmap", owner=OWNER_EMAIL)
+    assert _error(named)["error"] == "not_linked"
+
+    _pair(app, OWNER_EMAIL, EVE)
+    found = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert found["content_trust"] == "untrusted_peer"
+    assert [r["owner"] for r in found["results"]] == [OWNER_EMAIL]
+    assert [f["id"] for f in found["results"][0]["files"]] == ["proj-deep-doc"]
+
+    one = _mcp(eve, token, "search_shared_files", query="notes", owner=OWNER_EMAIL)
+    assert [f["id"] for f in one["structuredContent"]["results"][0]["files"]] == ["proj-notes"]
+
+    for term in ("gamma", "payroll"):
+        miss = _mcp(eve, token, "search_shared_files", query=term)["structuredContent"]
+        assert miss["results"] == [], term
+        assert SECRET_TEXT not in json.dumps(miss)
+
+    bad = _mcp(eve, token, "search_shared_files", query="   ")
+    assert _error(bad)["error"] == "invalid_input"
