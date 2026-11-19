@@ -76,8 +76,9 @@
       </label>
       <label>How the key is sent
         <select name="auth_scheme">
-          <option value="bearer" {% if webhook.auth_scheme != 'bearer_and_x_automation_key' %}selected{% endif %}>Bearer token</option>
+          <option value="bearer" {% if webhook.auth_scheme not in ('bearer_and_x_automation_key', 'claude_routine') %}selected{% endif %}>Bearer token</option>
           <option value="bearer_and_x_automation_key" {% if webhook.auth_scheme == 'bearer_and_x_automation_key' %}selected{% endif %}>Bearer token and X-Automation-Key</option>
+          <option value="claude_routine" {% if webhook.auth_scheme == 'claude_routine' %}selected{% endif %}>Claude routine (API trigger)</option>
         </select>
       </label>
       <label>Wake-ups

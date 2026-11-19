@@ -15,11 +15,12 @@ import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from .store import KeyValueStore, parse_inbox_token
-from .wake import SCHEMES, WakeSettings, approve_url, deliver, hint, seal
+from .wake import SCHEMES, WakeSettings, approve_url, check_scheme_target, deliver, hint, seal
 
 HOUR = 3600
 DAY = 24 * HOUR
@@ -390,10 +391,11 @@ class Mailbox:
         if scheme not in SCHEMES:
             raise MailboxError(
                 "invalid_input",
-                "auth_scheme must be bearer or bearer_and_x_automation_key.",
+                "auth_scheme must be bearer, bearer_and_x_automation_key, or claude_routine.",
             )
         try:
-            approve_url(url, self.wake.allowlist, self.wake.lookup)
+            host, path, _address = approve_url(url, self.wake.allowlist, self.wake.lookup)
+            check_scheme_target(scheme, host, path)
         except ValueError as exc:
             code = str(exc)
             if code == "webhook_host_not_allowed":
@@ -403,7 +405,10 @@ class Mailbox:
                 ) from None
             raise MailboxError(
                 "invalid_webhook_url",
-                "Use an https URL on an allowlisted host, with no user, query, or fragment.",
+                "Use an https URL on an allowlisted host, with no user, query, or fragment. "
+                "A claude_routine wake needs the routine's fire URL, "
+                "https://api.anthropic.com/v1/claude_code/routines/<id>/fire, "
+                "and that host only takes claude_routine.",
             ) from None
         except OSError:
             raise MailboxError(
@@ -412,6 +417,10 @@ class Mailbox:
             ) from None
         current = self._hook(you) or {}
         key = (sender_key or "").strip()
+        if not key and current and _host(str(current.get("url") or "")) != host:
+            # Never carry a saved key to a different host (a Grok key must not reach
+            # Anthropic, or the other way around).
+            current = {}
         if key:
             ciphertext, nonce = seal(key, self.wake.kek or b"")
             saved_hint = hint(key)
@@ -1095,3 +1104,11 @@ def _split_pending(token: str) -> tuple[str, str, str, float, str] | None:
 
 def _retry(now: float, bucket: int) -> int:
     return max(1, int((bucket + 1) * HOUR - now) + 1)
+
+
+def _host(url: str) -> str:
+    try:
+        name = urlsplit(url.strip()).hostname
+    except ValueError:
+        return ""
+    return name.lower().rstrip(".") if name else ""

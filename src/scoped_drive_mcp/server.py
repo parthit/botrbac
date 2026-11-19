@@ -63,7 +63,7 @@ from .store import (
     TokenVault,
     build_store,
 )
-from .wake import WakeSettings, decode_kek
+from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +379,9 @@ def create_mcp(
         """Register a wake-up URL only when the human already handed you one. Do not ask
         them to paste a URL or key. Prefer a scheduled check_messages routine from the
         watch_mailbox prompt. If a key is passed, do not repeat it. The ping has no message
-        text. Read the mail with check_messages."""
+        text. Read the mail with check_messages. auth_scheme is bearer (Grok Bot routine),
+        bearer_and_x_automation_key, or claude_routine (a Claude Code routine's API trigger
+        URL on api.anthropic.com)."""
         return await _run(
             run_mail,
             box.set_webhook,
@@ -600,7 +602,7 @@ def build_app(
     )
     webhook_hosts = tuple(
         host.strip().lower() for host in settings.webhook_host_allowlist.split(",") if host.strip()
-    ) or ("api2.cursor.sh",)
+    ) or DEFAULT_ALLOWLIST
     mailbox = Mailbox(
         kv,
         base_url=settings.app_base_url or "",
