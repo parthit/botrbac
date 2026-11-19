@@ -311,3 +311,14 @@ def test_browse_marks_items_inside_a_shared_folder(people) -> None:
     other = owner.get("/browse?folder=priv").text
     assert "Shared via folder" not in other
     assert 'action="/sharing/add"' in other
+
+
+def test_sharing_logs_as_sharing_not_as_an_own_assistant_grant(people, memstore) -> None:
+    _app_, owner, _eve, _token = people
+    assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
+    assert post(owner, "/sharing/remove", file_id="loose-doc").status_code == 303
+    log = [json.loads(r) for r in memstore.lrange(KEY_PREFIX + "activity", 0, -1)]
+    actions = [r.get("action") for r in log if r.get("event") == "owner"]
+    assert "share_external" in actions and "unshare_external" in actions
+    assert "grant" not in actions and "revoke" not in actions
+    assert actions.count("share_external") == 1 and actions.count("unshare_external") == 1

@@ -443,9 +443,10 @@ class Mailbox:
             ) from None
         current = self._hook(you) or {}
         key = (sender_key or "").strip()
-        if not key and current and _host(str(current.get("url") or "")) != host:
+        if not key and current and not _key_carries(current, host, path, scheme):
             # Never carry a saved key to a different host (a Grok key must not reach
-            # Anthropic, or the other way around).
+            # Anthropic, or the other way around), nor to a different Claude routine:
+            # a routine's token only starts that one routine.
             current = {}
         if key:
             ciphertext, nonce = seal(key, self.wake.kek or b"")
@@ -1130,6 +1131,20 @@ def _split_pending(token: str) -> tuple[str, str, str, float, str] | None:
 
 def _retry(now: float, bucket: int) -> int:
     return max(1, int((bucket + 1) * HOUR - now) + 1)
+
+
+def _key_carries(current: dict[str, Any], host: str, path: str, scheme: str) -> bool:
+    """Whether the saved key may be reused for the new host, path and scheme."""
+    saved_url = str(current.get("url") or "")
+    if _host(saved_url) != host:
+        return False
+    if "claude_routine" in (scheme, current.get("scheme")):
+        try:
+            saved_path = urlsplit(saved_url.strip()).path or "/"
+        except ValueError:
+            return False
+        return saved_path == path
+    return True
 
 
 def _host(url: str) -> str:
