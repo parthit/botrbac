@@ -196,6 +196,7 @@ def test_metadata_is_public(c) -> None:
     assert document["grant_types_supported"] == ["authorization_code", "refresh_token"]
     assert document["code_challenge_methods_supported"] == ["S256"]
     assert document["token_endpoint_auth_methods_supported"] == ["none"]
+    assert document["authorization_response_iss_parameter_supported"] is True
 
 
 def test_mcp_without_token_advertises_metadata(c) -> None:
@@ -317,6 +318,36 @@ def test_claude_can_register_its_callbacks(c) -> None:
 )
 def test_claude_lookalikes_are_rejected(c, uri: str) -> None:
     response = register(c, uri, name="Claude")
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_redirect_uri"
+
+
+CHATGPT = "https://chatgpt.com/connector_platform_oauth_redirect"
+
+
+def test_chatgpt_can_register_its_callback(c) -> None:
+    response = register(c, CHATGPT, name="ChatGPT")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["redirect_uris"] == [CHATGPT]
+    assert body["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in body
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        CHATGPT + "/",
+        "http://chatgpt.com/connector_platform_oauth_redirect",
+        "https://evil.chatgpt.com/connector_platform_oauth_redirect",
+        "https://chatgpt.com.evil.example/connector_platform_oauth_redirect",
+        CHATGPT + "?next=https://evil.example",
+        # Per-connector callback ids are not on the exact allow list.
+        "https://chatgpt.com/connector/oauth/abc123",
+    ],
+)
+def test_chatgpt_lookalikes_are_rejected(c, uri: str) -> None:
+    response = register(c, uri, name="ChatGPT")
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_redirect_uri"
 

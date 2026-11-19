@@ -32,32 +32,22 @@
 </div>
 
 <h2>Connect an assistant</h2>
-<p class="muted">Copy the server address into the client, then come back here and choose Allow. You can disconnect an app later on this page.</p>
-<div class="grid">
-  <article class="card">
-    <h2>Grok</h2>
-    <p>Add a connector and paste this server address.</p>
-    <div class="copy-row">
-      <code>{{ mcp_url }}</code>
-      <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
-    </div>
-  </article>
-  <article class="card">
-    <h2>Muse</h2>
-    <p>Add a custom connector with this address. Leave the client id empty.</p>
-    <div class="copy-row">
-      <code>{{ mcp_url }}</code>
-      <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
-    </div>
-  </article>
-  <article class="card">
-    <h2>Cursor</h2>
-    <p>Add an MCP server with this same address.</p>
-    <div class="copy-row">
-      <code>{{ mcp_url }}</code>
-      <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
-    </div>
-  </article>
+<div class="card" id="mcp-address">
+  <p>Every assistant uses the same server address. Add it as a custom connector or MCP server, sign in when the browser opens, and choose Allow. Leave any client id and secret empty.</p>
+  <div class="copy-row">
+    <code>{{ mcp_url }}</code>
+    <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
+  </div>
+  <h3>Works with</h3>
+  <ul class="clients">
+    <li><b>Claude</b> <span class="muted">Settings → Connectors → Add custom connector. Works on web, desktop and mobile.</span></li>
+    <li><b>ChatGPT</b> <span class="muted">Turn on developer mode, then Settings → Apps → Create, with OAuth.</span></li>
+    <li><b>Dots</b> <span class="muted">Add the connector in ChatGPT first. Your dots can then use it.</span></li>
+    <li><b>Grok</b> <span class="muted">Connectors → New connector → Custom, or tell Grok Bot to add this server.</span></li>
+    <li><b>Muse</b> <span class="muted">Add a custom connector with this address.</span></li>
+    <li><b>Cursor</b> <span class="muted">Add an MCP server with this address.</span></li>
+  </ul>
+  <p class="muted">You can disconnect any app below.</p>
 </div>
 
 <h2>Connected apps</h2>

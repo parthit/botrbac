@@ -528,6 +528,14 @@ def test_non_admin_overview_hides_operator_notes(c) -> None:
     assert "BOT_EMAIL" not in page
 
 
+def test_overview_shows_one_mcp_address_for_every_client(c) -> None:
+    login(c, "eve-code")
+    page = c.get("/").text
+    assert page.count(f'data-copy="{BASE_URL}/mcp"') == 1
+    for name in ("Claude", "ChatGPT", "Dots", "Grok", "Muse", "Cursor"):
+        assert f"<b>{name}</b>" in page
+
+
 def test_allowed_emails_rejects_other_accounts(world, memstore, oauth) -> None:
     app = build_app(
         make_settings(

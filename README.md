@@ -282,6 +282,18 @@ Muse (muse.ai) also connects with OAuth and registers itself. Leave any client i
 
 The same **Connected apps** list shows the Muse connection, and **Disconnect** stops it.
 
+### Connect Claude, ChatGPT or Dots
+
+All of these use the same `https://<project>.vercel.app/mcp` address and OAuth. Leave any client id and secret empty.
+
+- **Claude** (claude.ai, desktop, mobile): **Settings → Connectors → Add custom connector**.
+- **ChatGPT**: turn on developer mode, then **Settings → Apps → Create** and choose OAuth.
+- **Dots** (OpenAI dots): add the connector in ChatGPT first. Dots use the apps installed in your ChatGPT
+  account, so there is no separate setup.
+
+The server advertises `authorization_response_iss_parameter_supported`, so ChatGPT uses its stable
+`https://chatgpt.com/connector_platform_oauth_redirect` callback, which is on the allow list.
+
 ### 7. Test it
 
 1. **Ticked file works:** ask Grok "Read the doc *Test plan* in my Drive". It should quote it.
@@ -574,7 +586,7 @@ After changing dependencies, regenerate Vercel's requirements file:
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection is an admin token on `/mcp` and still cannot pass the allowlist.
   Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
-  Redirect URLs are an exact allow list (Cursor, Grok Bot, Muse, and a local test callback).
+  Redirect URLs are an exact allow list (Claude, ChatGPT/Dots, Cursor, Grok Bot, Muse, and a local test callback).
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
