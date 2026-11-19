@@ -3,10 +3,10 @@
 {% block content %}
 <div class="card">
   <h1>Terms of service</h1>
-  <p>These are the terms of service linked from the Google sign-in screen for Scoped Drive.
+  <p>These are the terms of service linked from the Google sign-in screen for Bot RBAC.
      The <a href="/privacy">privacy policy</a> describes what Google data the app uses.</p>
-  <p>Scoped Drive is a gateway that sits in front of Google Drive.</p>
-  <p>Sign-in grants this app the same Drive access your Google account has. This server
+  <p>Bot RBAC is an access-control gateway that sits between AI assistants and services you connect. Google Drive is the first.</p>
+  <p>Signing in shares only your email address. Connecting Google Drive, a separate step, grants this app the same Drive access your Google account has. This server
      is the check in front of an assistant: you sign in with your own Google account,
      choose the files and folders that assistant may use, and every API call is checked
      against your list before it reaches Drive. Anything else is refused.
@@ -28,8 +28,8 @@
   <p>The service is a personal tool. It can be unavailable when its host, its database, or
      Google is unavailable. Your files stay in Google Drive. This server does not keep a
      copy of them.</p>
-  <p>Scoped Drive is not made by Google, and these terms are not Google’s terms.
+  <p>Bot RBAC is not made by Google, and these terms are not Google’s terms.
      <a href="/privacy">Privacy</a> describes what is stored.</p>
-  <p class="muted">Last updated November 18, 2026.</p>
+  <p class="muted">Last updated November 19, 2026.</p>
 </div>
 {% endblock %}

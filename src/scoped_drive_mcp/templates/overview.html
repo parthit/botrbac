@@ -4,7 +4,7 @@
 <h1>Overview</h1>
 {% include "_mode.html" %}
 {% if not bot.connected %}
-<div class="warn" role="status">Your Google sign-in is not stored yet, so the assistant cannot reach Drive. Sign out and sign in again.</div>
+<div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 <div class="grid">
   <div class="card stat">
@@ -19,12 +19,15 @@
     <a href="/requests">Review</a>
   </div>
   <div class="card stat">
-    <span class="muted">Your Google account</span>
-    <p>
-      {% if bot.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
+    <span class="muted">Connections</span>
+    {% for row in connections %}
+    <p>{{ row.connection.name }}
+      {% if row.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
       {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
     </p>
-    <span class="muted">{{ owner }}</span>
+    {% endfor %}
+    <span class="muted">Signed in as {{ owner }}</span>
+    <a href="/connect">Manage</a>
   </div>
 </div>
 

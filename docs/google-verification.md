@@ -9,8 +9,12 @@ is the list of those clicks. Nothing here changes Vercel secrets for you.
 
 ## What the server already does
 
-- The sign-in URL requests only `openid`, `email`, and `https://www.googleapis.com/auth/drive`.
-  A token that does not include that scope is refused. A stored token that only has
+- Google is asked twice. **Sign-in** (`/auth/login`) requests only `openid` and `email`, online
+  access, and stores no token. **Connect Google Drive** (`/connect`, a separate click after
+  sign-in) requests `https://www.googleapis.com/auth/drive` with offline access and incremental
+  authorization (`include_granted_scopes=true`), pinned to the signed-in address with
+  `login_hint`. A connect token that does not include the Drive scope, or that belongs to a
+  different Google account than the one signed in, is revoked and refused. A stored token that only has
   `https://www.googleapis.com/auth/drive.file` keeps working for files that grant already
   covers, and the dashboard asks that person to sign in again.
 - `/privacy` and `/terms` are public and linked from the home page, the sign-in page, and the footer.
@@ -29,8 +33,8 @@ is the list of those clicks. Nothing here changes Vercel secrets for you.
 Refresh tokens keep the scopes they were granted. The server does not send a new scope list on
 refresh, so a `drive.file` token still cannot open the rest of Drive until that person signs in again.
 
-1. Each person opens the dashboard. A banner says the saved sign-in cannot see the whole Drive.
-2. They choose **Sign in again** and allow Drive access. If Google keeps the narrower permission,
+1. Each person opens the dashboard. A banner says the saved connection cannot see the whole Drive.
+2. They choose **Reconnect Google Drive** and allow Drive access. If Google keeps the narrower permission,
    they remove the app at [Google Account permissions](https://myaccount.google.com/permissions)
    and sign in once more.
 3. If `GOOGLE_OAUTH_REFRESH_TOKEN` is set, it overrides the admin's dashboard sign-in. Replace it
@@ -56,6 +60,8 @@ Do these in a **separate production** Google Cloud project, not the one you used
 4. **Consent screen.** App name, support email, developer contact, logo, and home page
    `APP_BASE_URL`. Privacy policy `APP_BASE_URL/privacy`. Terms `APP_BASE_URL/terms`.
    Scopes: `openid`, `email`, `https://www.googleapis.com/auth/drive`. Audience: External.
+   In the scope justification, say that sign-in uses only `openid` and `email`, and that the
+   Drive scope is requested in a separate step only when the person chooses to connect Drive.
 5. **Search Console.** Add the custom domain as a property and verify it (DNS is the durable
    method). Google uses this for brand verification of the domain on the consent screen.
 6. **Brand verification.** In the Google Auth Platform / consent screen, submit the app for

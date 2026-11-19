@@ -1,7 +1,11 @@
-"""Web dashboard: Google sign-in, Drive browser, allowlist, access requests, activity.
+"""Web dashboard: sign-in, connections, Drive browser, allowlist, access requests, activity.
 
-Authentication is a signed, httponly, SameSite=Lax session cookie set after a verified
-Google sign-in that granted Drive access. Each person then sees only their own Drive.
+Google is asked twice. Step 1 (`/auth/login`) signs the person in with `openid` and
+`email` only, and sets a signed, httponly, SameSite=Lax session cookie. Step 2
+(`/connect`) is a separate, explicit choice that asks for the wider scopes of one
+connection (Google Drive today, see `connections.py`) and stores that refresh token.
+Pages that need Drive send a signed-in person without a connection to `/connect`.
+Each person sees only their own data.
 `OWNER_EMAIL` is the admin and the only account that can open `/admin`. MCP bearer tokens
 are never consulted here, and the MCP endpoint never reads this cookie (it is a separate
 ASGI app behind BearerAuthMiddleware). Every POST requires the per-session CSRF token, and
@@ -36,6 +40,7 @@ from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
 from .config import Settings
+from .connections import CONNECTIONS, Connection, get_connection
 from .drive_client import (
     DRIVE_SCOPE,
     FOLDER_MIME,
@@ -47,7 +52,7 @@ from .drive_client import (
 from .errors import report_exception
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
-from .oauth import OAuthClient, OAuthError, refresh_access_token
+from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
@@ -100,7 +105,7 @@ _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class OwnerNotConnectedError(Exception):
-    """No stored refresh token for the owner (sign in again)."""
+    """Signed in, but Google Drive is not connected yet (send them to /connect)."""
 
 
 @dataclass
@@ -172,6 +177,28 @@ class DashboardContext:
 
     def owner_connected(self) -> bool:
         return bool(self.vault.enabled and self.vault.owner())
+
+    def drive_connected(self) -> bool:
+        """Step 2 is done: a Google Drive refresh token is stored for this person."""
+        if not self.vault.enabled:
+            return False
+        record = self.vault.owner()
+        return bool(record and record.get("t"))
+
+    def connection_rows(self) -> list[dict[str, Any]]:
+        """Each connection and whether this person has finished it."""
+        rows = []
+        for conn in CONNECTIONS.values():
+            connected = self.drive_connected() if conn.key == "google_drive" else False
+            rows.append({"connection": conn, "connected": connected})
+        return rows
+
+    def disconnect_drive(self) -> str | None:
+        """Forget this person's Drive token. Returns the token so Google can revoke it."""
+        record = self.vault.owner() if self.vault.enabled else None
+        token = record.get("t") if record else None
+        self.vault.clear_owner()
+        return token
 
     def reconsent_needed(self) -> bool:
         """True when the saved sign-in cannot see the whole Drive.
@@ -381,13 +408,23 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request.state.reconsent = False
 
     def session_user(request: Request) -> str | None:
-        """Signed-in email, only if that tenant still has a stored owner refresh token."""
+        """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
         owner = request.session.get("owner")
         if not isinstance(owner, str) or not owner or ctx.directory is None:
             return None
-        if not ctx.directory.has_owner_refresh(owner):
+        if not settings.sign_in_allowed(owner):
+            return None
+        if not ctx.directory.is_known_user(owner):
             return None
         return owner
+
+    def connect_redirect(request: Request) -> RedirectResponse:
+        target = request.url.path
+        if request.url.query:
+            target += "?" + request.url.query
+        if request.method != "GET":
+            target = "/"
+        return RedirectResponse(f"/connect?{urlencode({'next': target})}", status_code=303)
 
     def owner_only(handler: Handler) -> Handler:
         async def wrapped(request: Request) -> Response:
@@ -404,8 +441,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 await remember_pending(request)
                 return await handler(request)
             except OwnerNotConnectedError:
-                request.session.clear()
-                return RedirectResponse("/login", status_code=303)
+                return connect_redirect(request)
             except InvalidInputError as exc:
                 return render(request, "error.html", 400, message=str(exc))
             except Exception as exc:
@@ -443,11 +479,52 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- sign-in -------------------------------------------------------
 
-    def start_oauth(request: Request, flow: str, login_hint: str | None) -> RedirectResponse:
+    def start_oauth(
+        request: Request,
+        flow: str,
+        login_hint: str | None,
+        connection: Connection | None = None,
+    ) -> RedirectResponse:
+        """Step 1 (`flow="signin"`) or step 2 (`flow="connect"` with a connection)."""
         nonce = secrets.token_urlsafe(24)
         request.session["oauth_nonce"] = nonce
-        state = serializer.dumps({"flow": flow, "nonce": nonce})
-        return RedirectResponse(oauth.authorization_url(state, login_hint), status_code=303)
+        payload: dict[str, str] = {"flow": flow, "nonce": nonce}
+        if connection is None:
+            url_scopes = SIGN_IN_SCOPES
+            offline = False
+        else:
+            payload["connection"] = connection.key
+            url_scopes = SIGN_IN_SCOPES + connection.scopes
+            offline = True
+        state = serializer.dumps(payload)
+        url = oauth.authorization_url(state, login_hint, scopes=url_scopes, offline=offline)
+        return RedirectResponse(url, status_code=303)
+
+    async def login_rate_limited(request: Request) -> Response | None:
+        ip = client_ip(
+            [(k.encode(), v.encode()) for k, v in request.headers.items()],
+            request.client.host if request.client else "unknown",
+        )
+        allowed = await blocking(
+            allow,
+            ctx.store,
+            "login",
+            "ip:" + ip,
+            settings.login_rate_limit,
+            settings.login_rate_window_seconds,
+        )
+        if allowed:
+            return None
+        page = render(
+            request,
+            "error.html",
+            429,
+            message=(
+                "Too many sign-in attempts from this network. Wait a few minutes and try again."
+            ),
+        )
+        page.headers["retry-after"] = str(settings.login_rate_window_seconds)
+        return page
 
     async def login(request: Request) -> Response:
         if session_user(request):
@@ -465,32 +542,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return raw
 
     async def auth_login(request: Request) -> Response:
-        ip = client_ip(
-            [(k.encode(), v.encode()) for k, v in request.headers.items()],
-            request.client.host if request.client else "unknown",
-        )
-        allowed = await blocking(
-            allow,
-            ctx.store,
-            "login",
-            "ip:" + ip,
-            settings.login_rate_limit,
-            settings.login_rate_window_seconds,
-        )
-        if not allowed:
-            page = render(
-                request,
-                "error.html",
-                429,
-                message=(
-                    "Too many sign-in attempts from this network. "
-                    "Wait a few minutes and try again."
-                ),
-            )
-            page.headers["retry-after"] = str(settings.login_rate_window_seconds)
-            return page
+        limited = await login_rate_limited(request)
+        if limited is not None:
+            return limited
         request.session["oauth_next"] = safe_next(request.query_params.get("next"))
-        return start_oauth(request, "owner", supplied_login_hint(request))
+        return start_oauth(request, "signin", supplied_login_hint(request))
 
     async def auth_callback(request: Request) -> Response:
         params = request.query_params
@@ -507,7 +563,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
         ):
             return render(request, "error.html", 400, message="Sign-in expired. Try again.")
-        if data.get("flow") != "owner":
+        flow = data.get("flow")
+        if flow not in ("signin", "connect"):
             return render(request, "error.html", 400, message="Invalid sign-in state.")
         code = params.get("code")
         if not code:
@@ -530,14 +587,65 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 403,
                 message="This Google account is not allowed to use this dashboard.",
             )
-        if DRIVE_SCOPE not in tokens.scopes:
+        if flow == "connect":
+            return await finish_connect(request, data, tokens, email)
+        return await finish_sign_in(request, email)
+
+    async def finish_sign_in(request: Request, email: str) -> Response:
+        """Step 1 done. Nothing from Google is stored except that this address signed in."""
+        if ctx.directory is not None:
+            reset = current_actor.set(email)
+            try:
+                await blocking(ctx.directory.remember_user, email)
+            finally:
+                current_actor.reset(reset)
+        next_url = safe_next(request.session.get("oauth_next"))
+        request.session.clear()
+        request.session["owner"] = email
+        request.session["csrf"] = secrets.token_urlsafe(32)
+        audit_owner("login")
+        reset = current_actor.set(email)
+        try:
+            connected = await blocking(ctx.drive_connected)
+        finally:
+            current_actor.reset(reset)
+        if not connected:
+            # Step 2 is its own page and its own click, never chained silently.
+            return RedirectResponse(f"/connect?{urlencode({'next': next_url})}", status_code=303)
+        return RedirectResponse(next_url, status_code=303)
+
+    async def finish_connect(
+        request: Request, data: dict[str, Any], tokens: Any, email: str
+    ) -> Response:
+        """Step 2 done. Store the refresh token for the signed-in person."""
+        signed_in = session_user(request)
+        connection = get_connection(str(data.get("connection") or ""))
+        if not signed_in or connection is None:
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            return render(request, "error.html", 400, message="Sign in first, then connect.")
+        if email != signed_in:
+            # The Drive an assistant uses must belong to the person who signed in.
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            audit_owner("connect", "deny", reason="different_account")
+            return render(
+                request,
+                "error.html",
+                403,
+                message=(
+                    f"You are signed in as {signed_in}, but Google returned a different "
+                    f"account. Connect {connection.name} with {signed_in}."
+                ),
+            )
+        if connection.required_scope not in tokens.scopes:
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             return render(
                 request,
                 "error.html",
                 400,
-                message="Google Drive access was not granted. Sign in again and allow "
-                "access to your Drive.",
+                message=(
+                    f"{connection.name} access was not granted. Choose Connect again and "
+                    f"allow access to your Drive."
+                ),
             )
         if not tokens.refresh_token:
             return render(
@@ -556,13 +664,49 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 await blocking(ctx.directory.remember_user, email)
         finally:
             current_actor.reset(reset)
-        next_url = safe_next(request.session.get("oauth_next"))
-        request.session.clear()
-        request.session["owner"] = email
-        request.session["csrf"] = secrets.token_urlsafe(32)
         ctx.forget_drive(email)
-        audit_owner("login")
+        audit_owner("connect", connection=connection.key)
+        next_url = safe_next(request.session.pop("oauth_next", None))
+        flash(request, "ok", f"{connection.name} is connected.")
         return RedirectResponse(next_url, status_code=303)
+
+    # ---- connections (step 2) -------------------------------------------
+
+    async def connect_page(request: Request) -> Response:
+        rows = await blocking(ctx.connection_rows)
+        next_url = safe_next(request.query_params.get("next"))
+        if next_url.startswith("/connect"):
+            next_url = "/"
+        return render(request, "connect.html", rows=rows, next=next_url)
+
+    async def connect_start(request: Request, form: dict[str, str]) -> Response:
+        connection = get_connection(request.path_params.get("key"))
+        if connection is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        limited = await login_rate_limited(request)
+        if limited is not None:
+            return limited
+        request.session["oauth_next"] = safe_next(form.get("next"))
+        return start_oauth(request, "connect", current_actor.get() or None, connection)
+
+    async def connect_remove(request: Request, form: dict[str, str]) -> Response:
+        connection = get_connection(request.path_params.get("key"))
+        if connection is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        email = current_actor.get()
+        token = await blocking(ctx.disconnect_drive)
+        if token:
+            # Google's revoke also ends this app's sign-in grant. Step 1 holds no token,
+            # so the dashboard session is unaffected.
+            await blocking(oauth.revoke, token)
+        ctx.forget_drive(email)
+        audit_owner("disconnect", connection=connection.key)
+        flash(
+            request,
+            "ok",
+            f"{connection.name} is disconnected. Assistants can no longer reach it.",
+        )
+        return RedirectResponse("/connect", status_code=303)
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
@@ -590,6 +734,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return {
                 "bot": bot,
                 "owner_connected": ctx.owner_connected(),
+                "connections": ctx.connection_rows(),
                 "allow_count": len(entries),
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
@@ -985,9 +1130,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if request.url.query:
                 target += "?" + request.url.query
             return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
-        request.session["mcp_auth"] = pending.to_dict()
         reset = current_actor.set(signed_in)
         try:
+            if not await blocking(ctx.drive_connected):
+                # An assistant can only be allowed once there is something to reach.
+                return connect_redirect(request)
+            request.session["mcp_auth"] = pending.to_dict()
             await remember_pending(request)
             return render(
                 request,
@@ -1130,6 +1278,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/login", login, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
+        Route("/connect", owner_only(connect_page), methods=["GET"]),
+        Route("/connect/{key}", csrf_protected(connect_start), methods=["POST"]),
+        Route("/connect/{key}/disconnect", csrf_protected(connect_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", home, methods=["GET"]),
         Route("/browse", owner_only(browse), methods=["GET"]),

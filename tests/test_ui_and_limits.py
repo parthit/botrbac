@@ -25,12 +25,33 @@ def owner_c(c):
     return c
 
 
-def test_authorization_url_uses_full_drive_scope() -> None:
+def test_sign_in_url_asks_only_for_identity() -> None:
     oauth = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
     query = parse_qs(urlparse(oauth.authorization_url("state-token")).query)
-    scopes = query["scope"][0].split()
-    assert scopes == ["openid", "email", "https://www.googleapis.com/auth/drive"]
+    assert query["scope"][0].split() == ["openid", "email"]
+    assert query["access_type"] == ["online"]
+    assert query["include_granted_scopes"] == ["false"]
     assert "login_hint" not in query
+
+
+def test_connect_url_adds_full_drive_scope_incrementally() -> None:
+    oauth = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
+    url = oauth.authorization_url(
+        "state-token",
+        "owner@example.com",
+        scopes=("openid", "email", "https://www.googleapis.com/auth/drive"),
+        offline=True,
+    )
+    query = parse_qs(urlparse(url).query)
+    assert query["scope"][0].split() == [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    assert query["access_type"] == ["offline"]
+    assert query["prompt"] == ["consent"]
+    assert query["include_granted_scopes"] == ["true"]
+    assert query["login_hint"] == ["owner@example.com"]
     hinted = parse_qs(urlparse(oauth.authorization_url("state-token", "visitor@example.com")).query)
     assert hinted["login_hint"] == ["visitor@example.com"]
 
@@ -180,7 +201,7 @@ def test_narrow_token_shows_reconsent(owner_c, p2_app) -> None:
     )
     page = owner_c.get("/").text
     assert 'id="reconsent"' in page
-    assert "Sign in again" in page
+    assert "Reconnect Google Drive" in page and 'href="/connect"' in page
     vault.set_owner(record["t"], record["email"])
     assert 'id="reconsent"' in owner_c.get("/").text
     vault.set_owner(
