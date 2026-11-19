@@ -23,6 +23,7 @@
       <a href="/connect" class="{{ 'on' if nav.startswith('/connect') }}">Connections</a>
       <a href="/browse" class="{{ 'on' if nav == '/browse' }}">Browse</a>
       <a href="/access" class="{{ 'on' if nav == '/access' }}">Access</a>
+      <a href="/sharing" class="{{ 'on' if nav == '/sharing' }}">Sharing</a>
       <a href="/requests" class="{{ 'on' if nav.startswith('/requests') }}">Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
       <a href="/activity" class="{{ 'on' if nav == '/activity' }}">Activity</a>
       <a href="/bridge" class="{{ 'on' if nav.startswith('/bridge') }}">Mailbox</a>

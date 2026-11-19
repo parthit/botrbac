@@ -85,6 +85,10 @@ With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wa
 | `get_webhook()` | ✓ | ✓ | ✓ |
 | `set_webhook(url, sender_key?, auth_scheme?, enabled?)` | ✓ | ✓ | ✓ |
 | `clear_webhook()` | ✓ | ✓ | ✓ |
+| `list_shared_with_me()` | ✓ | ✓ | ✓ |
+| `list_shared_folder(owner, folder_id?, max_results?)` | ✓ | ✓ | ✓ |
+| `read_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
+| `download_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
@@ -125,6 +129,34 @@ The same `/mcp` connection can carry short text between two people. Each person 
 4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person turns the mailbox off on `/bridge`. There is no revoke tool for the assistant.
 
 `list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
+
+## Sharing with paired people
+
+Each person has a second list, separate from **Access**: the **Sharing** page. Items on it can be read by the
+assistant of anyone you have an **active mailbox pairing** with (both of you approved on `/bridge`). Use it for
+things like a resume that any paired person's assistant may see.
+
+- **Add or remove:** on **Browse**, choose **Share with paired people** (or **Stop sharing**) next to a file or
+  folder. **Sharing** lists what you share and who can currently read it. A folder includes what is inside it.
+- **Read-only, always:** another person's assistant gets `list_shared_with_me`, `list_shared_folder`,
+  `read_shared_file` and `download_shared_file`, and nothing else on your Drive, whatever role its own
+  connection has. These calls run as a *guest* with your Google sign-in, behind a scope guard whose only
+  allowlist is your Sharing list. Your **Access** list never counts for a guest, and your Sharing list never
+  widens what your own assistants can use.
+- **Checked on every call:** turning a pairing off on `/bridge`, or choosing **Stop sharing**, ends access on the
+  next call (within `ALLOWLIST_CACHE_TTL` on other instances).
+- **No probing:** an item that is not shared returns `not_shared`, the same answer as an id that does not exist.
+  Guests never create access requests, so other people cannot fill your **Requests** queue.
+- **Untrusted content:** `read_shared_file` wraps the text in markers and marks it `content_trust:
+  untrusted_peer`. The reading assistant is told not to follow instructions inside it.
+- **Activity:** every guest read or denial appears on your **Activity** page with the reader's email
+  (`guest:<email>`), the tool and the file id. File contents are never logged.
+
+Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
+your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.
+
+Later: per-person audiences on each item (`audience` is already stored on each entry, `linked` today), asking
+the owner for an item that is not shared, and expiry dates.
 
 ## Phase 2 setup and test walkthrough
 

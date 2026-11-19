@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Sharing{% endblock %}
+{% block content %}
+<h1>Shared with other people’s assistants</h1>
+<p class="muted">Items on this list can be read by the assistant of anyone you are paired with on
+  <a href="/bridge">Mailbox</a>. They can read, list and download. They cannot change, rename or delete anything.
+  A folder includes what is inside it. This list is separate from <a href="/access">Access</a>, which is what
+  your own assistants may use.</p>
+
+<div class="card">
+  <h2>Who can read these</h2>
+  {% if peers %}
+  <ul>
+    {% for p in peers %}<li><b>{{ p }}</b></li>{% endfor %}
+  </ul>
+  <p class="muted">Turning a pairing off on Mailbox stops that person’s assistant at once.</p>
+  {% else %}
+  <p>No one yet. Items you add here stay private until you approve a pairing on <a href="/bridge">Mailbox</a>.</p>
+  {% endif %}
+</div>
+
+{% if rows %}
+<table class="cards">
+  <thead><tr><th>Name</th><th>Type</th><th>Shared</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for e in rows %}
+  <tr>
+    <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
+    <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
+    <td data-label="Shared" class="muted">{{ e.granted_at }}</td>
+    <td data-label="Action">
+      <form class="inline" method="post" action="/sharing/remove" data-confirm="Stop sharing this with other people’s assistants?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="file_id" value="{{ e.id }}">
+        <input type="hidden" name="next" value="/sharing">
+        <button class="danger" type="submit">Stop sharing</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card empty">
+  <h2>Nothing is shared yet</h2>
+  <p>Open Browse and choose <b>Share with paired people</b> next to a file or folder, for example your resume.</p>
+  <p><a class="btn primary" href="/browse">Browse files</a></p>
+</div>
+{% endif %}
+{% endblock %}

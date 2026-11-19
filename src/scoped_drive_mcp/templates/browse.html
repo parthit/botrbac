@@ -63,6 +63,7 @@
       {% if r.granted %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
       {% elif r.covered %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed via folder</span>
       {% else %}<span class="pill"><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
+      {% if r.ext_shared %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared with paired people</span>{% endif %}
     </div>
     <div class="file-actions">
       {% if picking %}
@@ -85,6 +86,23 @@
           <input type="hidden" name="next" value="{{ here }}">
           <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}</button>
         </form>
+      {% endif %}
+      {% if not picking %}
+        {% if r.ext_shared %}
+        <form class="inline" method="post" action="/sharing/remove" data-confirm="Stop sharing this with other people’s assistants?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="file_id" value="{{ r.id }}">
+          <input type="hidden" name="next" value="{{ here }}">
+          <button class="danger" type="submit">Stop sharing</button>
+        </form>
+        {% else %}
+        <form class="inline" method="post" action="/sharing/add">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="file_id" value="{{ r.id }}">
+          <input type="hidden" name="next" value="{{ here }}">
+          <button type="submit">Share with paired people</button>
+        </form>
+        {% endif %}
       {% endif %}
     </div>
   </li>

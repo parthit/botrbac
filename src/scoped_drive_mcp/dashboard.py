@@ -55,7 +55,7 @@ from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
-from .store import ActivityLog, Allowlist, TokenVault
+from .store import AUDIENCE_LINKED, ActivityLog, Allowlist, TokenVault
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,9 @@ class DashboardContext:
     directory: Any = None
     drive_router: Any = None
     mailbox: Any = None
+    # The list other people's assistants may read (external.py). None disables Sharing.
+    ext_allowlist: Allowlist | None = None
+    on_ext_change: Callable[[], None] = lambda: None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -151,6 +154,24 @@ class DashboardContext:
             None,
             on_change=self.on_allowlist_change,
         )
+
+    def ext_grants(self) -> GrantService:
+        """Grant and revoke on the external list. Same checks as the own-bot list (the item
+        must be in this person's Drive, not trashed, not My Drive's root; a shortcut adds
+        its target). No Drive permission is created."""
+        if self.ext_allowlist is None:
+            raise GrantError("Sharing is not set up on this server.")
+        return GrantService(
+            self.owner_drive,
+            self.ext_allowlist,
+            self.requests,
+            None,
+            on_change=self.on_ext_change,
+            audience=AUDIENCE_LINKED,
+        )
+
+    def ext_ids(self) -> set[str]:
+        return set(self.ext_allowlist.entries()) if self.ext_allowlist is not None else set()
 
     def visible_root_folder_id(self) -> str | None:
         """The deployment root is the admin's folder. Other people do not see its id."""
@@ -784,6 +805,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except DriveNotFoundError:
             root_id = None
         entries = ctx.allowlist.entries()
+        shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
         covered_by: str | None = None
         next_token: str | None = None
@@ -859,6 +881,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "link": item.get("webViewLink"),
                     "granted": iid in entries,
                     "covered": covered_by is not None and iid not in entries,
+                    "ext_shared": iid in shared,
                 }
             )
         return {
@@ -975,6 +998,48 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except GrantError as exc:
             flash(request, "error", str(exc))
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
+
+    async def share_add(request: Request, form: dict[str, str]) -> Response:
+        file_id = validate_drive_id(form.get("file_id"))
+        try:
+            entry = await blocking(ctx.ext_grants().grant, file_id)
+            audit_owner("share_external", file_id=entry.id)
+            flash(
+                request,
+                "ok",
+                f"Shared \u201c{entry.name}\u201d with the assistants of people "
+                "you are paired with.",
+            )
+        except GrantError as exc:
+            flash(request, "error", str(exc))
+        return RedirectResponse(safe_next(form.get("next") or "/sharing"), status_code=303)
+
+    async def share_remove(request: Request, form: dict[str, str]) -> Response:
+        file_id = validate_drive_id(form.get("file_id"))
+        try:
+            await blocking(ctx.ext_grants().revoke, file_id)
+            audit_owner("unshare_external", file_id=file_id)
+            flash(
+                request, "ok", "Stopped sharing. Other people's assistants can no longer read it."
+            )
+        except GrantError as exc:
+            flash(request, "error", str(exc).replace("allowlist", "shared list"))
+        return RedirectResponse(safe_next(form.get("next") or "/sharing"), status_code=303)
+
+    async def sharing(request: Request) -> Response:
+        if ctx.ext_allowlist is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+
+        def gather() -> dict[str, Any]:
+            peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
+            return {"entries": ctx.ext_allowlist.entries(), "peers": peers}
+
+        data = await blocking(gather)
+        rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
+        return render(
+            request, "sharing.html", rows=rows, peers=data["peers"], describe_mime=describe_mime
+        )
 
     async def access(request: Request) -> Response:
         def gather() -> dict[str, Any]:
@@ -1305,6 +1370,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
         Route("/access", owner_only(access), methods=["GET"]),
+        Route("/sharing", owner_only(sharing), methods=["GET"]),
+        Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
+        Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
