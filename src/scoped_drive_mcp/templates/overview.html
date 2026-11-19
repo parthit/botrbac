@@ -4,48 +4,64 @@
 <h1>Overview</h1>
 {% include "_mode.html" %}
 {% if not bot.connected %}
-<div class="warn">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
-  Sign out and sign in again.</div>
+<div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 <div class="grid">
-  <div class="card stat"><span class="muted">Allowed items</span><b>{{ allow_count }}</b><a href="/access">Manage</a></div>
-  <div class="card stat"><span class="muted">Pending requests</span><b>{{ pending_count }}</b><a href="/requests">Review</a></div>
-  <div class="card stat"><span class="muted">Your Google account</span>
-    <b style="font-size:16px">{% if bot.connected %}<span class="pill ok">connected</span>{% else %}<span class="pill bad">not connected</span>{% endif %}</b>
-    <span class="muted">{{ owner }}</span></div>
+  <div class="card stat">
+    <span class="muted">Allowed items</span>
+    <b>{{ allow_count }}</b>
+    <a href="/access">Manage</a>
+  </div>
+  <div class="card stat">
+    <span class="muted">Pending requests</span>
+    <b>{{ pending_count }}</b>
+    {% if pending_count %}<span class="pill pending"><span aria-hidden="true">●</span> Waiting</span>{% else %}<span class="pill"><span aria-hidden="true">✓</span> None waiting</span>{% endif %}
+    <a href="/requests">Review</a>
+  </div>
+  <div class="card stat">
+    <span class="muted">Connections</span>
+    {% for row in connections %}
+    <p>{{ row.connection.name }}
+      {% if row.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
+      {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
+    </p>
+    {% endfor %}
+    <span class="muted">Signed in as {{ owner }}</span>
+    <a href="/connect">Manage</a>
+  </div>
 </div>
 
-<h2>Get started</h2>
-<ol class="steps">
-  <li class="done">Signed in as {{ owner }}. Tick folders before you connect an assistant.</li>
-  <li{% if allow_count %} class="done"{% endif %}>
-    Tick at least one folder. <a href="/browse">Browse your Drive</a>
-    {% if allow_count %}<span class="pill ok">{{ allow_count }} allowed</span>{% endif %}
-  </li>
-  <li{% if grants %} class="done"{% endif %}>
-    Connect the assistant, then come back here and click Allow.
-    <ol>
-      <li>In Grok, add a connector and use this server address: <code>{{ mcp_url }}</code></li>
-      <li>In Muse, add a custom connector with that same address. Leave the client id empty.</li>
-      <li>In Cursor, add that same address as an MCP server.</li>
-      <li>When this site asks, click Allow. You can disconnect the app later on this page.</li>
-    </ol>
-  </li>
-</ol>
+<h2>Connect an assistant</h2>
+<div class="card" id="mcp-address">
+  <p>Every assistant uses the same server address. Add it as a custom connector or MCP server, sign in when the browser opens, and choose Allow. Leave any client id and secret empty.</p>
+  <div class="copy-row">
+    <code>{{ mcp_url }}</code>
+    <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
+  </div>
+  <h3>Works with</h3>
+  <ul class="clients">
+    <li><b>Claude</b> <span class="muted">Settings → Connectors → Add custom connector. Works on web, desktop and mobile.</span></li>
+    <li><b>ChatGPT</b> <span class="muted">Turn on developer mode, then Settings → Apps → Create, with OAuth.</span></li>
+    <li><b>Dots</b> <span class="muted">Add the connector in ChatGPT first. Your dots can then use it.</span></li>
+    <li><b>Grok</b> <span class="muted">Connectors → New connector → Custom, or tell Grok Bot to add this server.</span></li>
+    <li><b>Muse</b> <span class="muted">Add a custom connector with this address.</span></li>
+    <li><b>Cursor</b> <span class="muted">Add an MCP server with this address.</span></li>
+  </ul>
+  <p class="muted">You can disconnect any app below.</p>
+</div>
 
 <h2>Connected apps</h2>
-<p class="muted">Apps such as Grok that signed in here. Disconnecting stops that app immediately.</p>
+<p class="muted">Apps that signed in here. Disconnecting stops that app immediately.</p>
 {% if grants %}
-<div class="scroll-x">
-<table>
-  <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th></th></tr></thead>
+<table class="cards">
+  <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th>Action</th></tr></thead>
   <tbody>
   {% for grant in grants %}
   <tr>
-    <td>{{ grant.client_name }}</td>
-    <td class="muted">{{ grant.created_at }}</td>
-    <td class="muted">{{ grant.last_used or "never" }}</td>
-    <td style="text-align:right">
+    <td data-label="App">{{ grant.client_name }}</td>
+    <td data-label="Connected" class="muted">{{ grant.created_at }}</td>
+    <td data-label="Last used" class="muted">{{ grant.last_used or "Never" }}</td>
+    <td data-label="Action">
       <form class="inline" method="post" action="/oauth/grants/revoke" data-confirm="Disconnect this app? It loses access immediately.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="grant_id" value="{{ grant.id }}">
@@ -56,9 +72,11 @@
   {% endfor %}
   </tbody>
 </table>
-</div>
 {% else %}
-<div class="card"><p>No apps connected.</p></div>
+<div class="card empty">
+  <h2>No apps connected</h2>
+  <p>Use one of the setup cards above, then approve the connection when you are asked.</p>
+</div>
 {% endif %}
 
 {% if is_admin %}
@@ -69,9 +87,15 @@
     {% if store_kind == "memory" %}Without Redis or Postgres, grants and requests are kept in memory and are lost when the server restarts.{% endif %}
   </div>
   {% endif %}
+  {% if not picker_ready %}
+  <p>The Google Picker is optional. It needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before the picker button appears. Browse and approval work from the signed-in Drive without it.</p>
+  {% endif %}
+  {% if env_token_set %}
+  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with only per-file access, replace it with <code>scripts/bootstrap_oauth.py</code> so this server can see that Drive. The allowlist still limits assistants.</p>
+  {% endif %}
   <p>Server address: <code>{{ mcp_url }}</code></p>
   {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}
-  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with connected apps.</p>
+  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with connected apps. The public site address is <code>APP_BASE_URL</code>.</p>
 </div>
 {% endif %}
 {% endblock %}

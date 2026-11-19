@@ -74,7 +74,7 @@ flowchart LR
 - **Which Google identity the server uses (set by `AUTH_MODE`):**
   - `service_account`: use with a **Shared Drive** (needs Google Workspace). Add the service account as a Content manager. Writes need a Shared Drive because service accounts have no storage quota of their own, so uploads into a My Drive folder fail.
   - `oauth_bot`: use a dedicated bot Gmail account with a stored refresh token, and share the target folder with it as Editor. Works on personal Gmail, and new files count against the bot account's storage.
-- **OAuth scope:** full `https://www.googleapis.com/auth/drive`. `drive.file` can't see shared folders. The actual limit comes from what's shared with the bot plus the scope guard.
+- **OAuth scope:** `openid`, `email`, and `https://www.googleapis.com/auth/drive`. Sign-in can see the account's Drive. The allowlist is still the server-side limit for assistants. See [google-verification.md](google-verification.md). A token that only has `drive.file` cannot see the rest of that Drive until that person signs in again.
 - **Roles, mapped to tools:**
   - `viewer`: `search_files`, `list_folder`, `get_metadata`, `read_file`
   - `editor`: everything `viewer` has, plus `create_folder`, `create_doc`, `upload_file`, `update_file_content`, `rename_file`
@@ -88,8 +88,8 @@ flowchart LR
   - Folder mode: list all subfolders (cached), build a query of the form `('id1' in parents or ...)` split into chunks, and run the scope guard again on every result.
 - **Tokens:** set in `API_TOKENS` as SHA-256 hash and role pairs, compared with a timing-safe check. The role is passed to tools through a `contextvars.ContextVar`.
 - **Output limits and logging:**
-  - Google Docs, Sheets and Slides are exported as text or CSV.
-  - Downloads are capped at `MAX_BYTES` and text output at `MAX_CHARS`.
+  - Google Docs, Sheets and Slides are exported as text or CSV. PDF and Office files are extracted to text. Other binaries are available from `download_file` as size-capped base64.
+  - Downloads are capped at `MAX_BYTES` and text output at `MAX_CHARS`. `download_file` also caps returned bytes at 1 MiB.
   - Every call is written to stdout as a JSON audit line with token ID, tool name, file ID, decision and timestamp.
 
 ## Project layout (`~/Projects/scoped-drive-mcp`)

@@ -15,11 +15,12 @@ import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from .store import KeyValueStore, parse_inbox_token
-from .wake import SCHEMES, WakeSettings, approve_url, deliver, hint, seal
+from .wake import SCHEMES, WakeSettings, approve_url, check_scheme_target, deliver, hint, seal
 
 HOUR = 3600
 DAY = 24 * HOUR
@@ -116,6 +117,32 @@ class Mailbox:
             links.append(self._public_link(link, you))
         links.sort(key=lambda item: item["created_at"], reverse=True)
         return {"you": you, "links": links}
+
+    def active_peers(self, email: str) -> list[str]:
+        """Emails of people with an active (both approved, not revoked) link to `email`.
+
+        This is what external sharing trusts: a peer's assistant may read the items that
+        person put on their shared list. It is read fresh on every call, so turning a
+        pairing off on /bridge ends that access at once.
+        """
+        you = _email(email)
+        peers: set[str] = set()
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or self._status(link) != "active":
+                continue
+            other = self._other(link, you)
+            if other and other != you:
+                peers.add(other)
+        return sorted(peers)
+
+    def is_linked(self, a: str, b: str) -> bool:
+        """Whether `a` and `b` share an active link."""
+        try:
+            other = _email(b)
+        except MailboxError:
+            return False
+        return other in self.active_peers(a)
 
     def send_message(
         self,
@@ -390,10 +417,11 @@ class Mailbox:
         if scheme not in SCHEMES:
             raise MailboxError(
                 "invalid_input",
-                "auth_scheme must be bearer or bearer_and_x_automation_key.",
+                "auth_scheme must be bearer, bearer_and_x_automation_key, or claude_routine.",
             )
         try:
-            approve_url(url, self.wake.allowlist, self.wake.lookup)
+            host, path, _address = approve_url(url, self.wake.allowlist, self.wake.lookup)
+            check_scheme_target(scheme, host, path)
         except ValueError as exc:
             code = str(exc)
             if code == "webhook_host_not_allowed":
@@ -403,7 +431,10 @@ class Mailbox:
                 ) from None
             raise MailboxError(
                 "invalid_webhook_url",
-                "Use an https URL on an allowlisted host, with no user, query, or fragment.",
+                "Use an https URL on an allowlisted host, with no user, query, or fragment. "
+                "A claude_routine wake needs the routine's fire URL, "
+                "https://api.anthropic.com/v1/claude_code/routines/<id>/fire, "
+                "and that host only takes claude_routine.",
             ) from None
         except OSError:
             raise MailboxError(
@@ -412,6 +443,11 @@ class Mailbox:
             ) from None
         current = self._hook(you) or {}
         key = (sender_key or "").strip()
+        if not key and current and not _key_carries(current, host, path, scheme):
+            # Never carry a saved key to a different host (a Grok key must not reach
+            # Anthropic, or the other way around), nor to a different Claude routine:
+            # a routine's token only starts that one routine.
+            current = {}
         if key:
             ciphertext, nonce = seal(key, self.wake.kek or b"")
             saved_hint = hint(key)
@@ -1095,3 +1131,25 @@ def _split_pending(token: str) -> tuple[str, str, str, float, str] | None:
 
 def _retry(now: float, bucket: int) -> int:
     return max(1, int((bucket + 1) * HOUR - now) + 1)
+
+
+def _key_carries(current: dict[str, Any], host: str, path: str, scheme: str) -> bool:
+    """Whether the saved key may be reused for the new host, path and scheme."""
+    saved_url = str(current.get("url") or "")
+    if _host(saved_url) != host:
+        return False
+    if "claude_routine" in (scheme, current.get("scheme")):
+        try:
+            saved_path = urlsplit(saved_url.strip()).path or "/"
+        except ValueError:
+            return False
+        return saved_path == path
+    return True
+
+
+def _host(url: str) -> str:
+    try:
+        name = urlsplit(url.strip()).hostname
+    except ValueError:
+        return ""
+    return name.lower().rstrip(".") if name else ""

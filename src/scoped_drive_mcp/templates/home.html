@@ -1,17 +1,75 @@
 {% extends "base.html" %}
-{% block title %}Home{% endblock %}
+{% block title %}Give AI agents only what you allow{% endblock %}
 {% block content %}
-<div class="card" style="max-width:640px;">
-  <h1>Scoped Drive</h1>
-  <p>Scoped Drive is a gateway that sits in front of Google Drive.</p>
-  <p>You sign in with your own Google account, then tick the files and folders an assistant
-     may use. Each person’s files stay separate.</p>
-  <p>Drive’s API cannot limit an app to those items, so this server checks every call against
-     your list before it reaches Drive. Anything you have not allowed is refused. If the
-     assistant asks for something else, you get a link to allow or deny it.</p>
-  <p>The assistant uses the Google account you sign in with. The list you tick is what
-     limits it. Google does not hide the rest of that Drive from this sign-in.</p>
-  <p><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
-  <p><a class="btn primary" href="/login">Sign in</a></p>
-</div>
+<section class="hero">
+  <h1>Pick what agents see.<br>Refuse the rest.</h1>
+  <ul class="trust">
+    <li><i class="sq" aria-hidden="true"></i><span><b>Sign in, then connect.</b> Signing in shares only your email. Each service is a separate permission.</span></li>
+    <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every call.</b> Anything else is refused.</span></li>
+  </ul>
+  <p class="sub">Bot RBAC is an access-control gateway that sits between AI agents, like Grok and Muse, and your accounts. It starts with Google Drive: you sign in, connect Drive, pick the files and folders an assistant may use, and this server refuses the rest. More services will follow.</p>
+  <p class="disclosure">Signing in asks Google only for your email. Connecting Google Drive is a second, separate step that asks for access to your Drive. This server then lets an assistant use only the files and folders you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
+  <div class="ctas">
+    {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
+  </div>
+  <p class="legal-links"><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
+</section>
+
+<section class="diagram" aria-label="How a call is checked">
+  <p class="eye">How a call moves</p>
+  <div class="diagram-row">
+    <article class="sticker">
+      <p class="eye">Assistant asks</p>
+      <p class="ask">read Q3 memo</p>
+      <p class="ask dim">read the rest of Drive</p>
+    </article>
+    <span class="arrow" aria-hidden="true"></span>
+    <article class="sticker gate">
+      <p class="eye">This server</p>
+      <p class="ask kept">Q3 memo · on your list</p>
+      <p class="ask dim">everything else · refused</p>
+    </article>
+    <span class="arrow" aria-hidden="true"></span>
+    <article class="sticker">
+      <p class="eye">Your service (Google Drive)</p>
+      <p class="ask">Q3 memo</p>
+      <p class="ask dim">nothing you did not allow</p>
+    </article>
+  </div>
+</section>
+
+<section class="products" aria-label="What you do">
+  <article class="card product" id="signin">
+    <h2>Sign in</h2>
+    <p>Your own Google account, email only. Another person’s settings stay theirs.</p>
+    <p class="proof">One account per person</p>
+  </article>
+  <article class="card product" id="connect">
+    <h2>Connect</h2>
+    <p>Choose a service, like Google Drive, and grant access to it separately.</p>
+    <p class="proof">One permission per service</p>
+  </article>
+  <article class="card product" id="pick">
+    <h2>Allow</h2>
+    <p>A file or a folder. That list is what an assistant can use.</p>
+    <p class="proof">Checked on every call</p>
+  </article>
+  <article class="card product" id="revoke">
+    <h2>Revoke</h2>
+    <p>Untick an item or disconnect an app. The next call stops.</p>
+    <p class="proof">Anytime</p>
+  </article>
+</section>
+
+<section class="split">
+  <div>
+    <h2>The boundary is the product.</h2>
+    <p class="lead">Three checks. No extra Google products.</p>
+    <ul class="pts">
+      <li><b>Only what you allow.</b> A connected Drive is visible to this server. An assistant cannot see it until you allow a file or folder. This server checks every call against that list.</li>
+      <li><b>Encrypted tokens.</b> The Google refresh token is encrypted before it is stored. File contents are not kept on this server.</li>
+      <li><b>Revoke anytime.</b> Untick an item, disconnect an app, disconnect a service, or remove Bot RBAC from your Google Account. New calls stop. Anything already sent is not recalled.</li>
+    </ul>
+  </div>
+</section>
 {% endblock %}

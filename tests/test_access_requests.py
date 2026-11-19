@@ -145,6 +145,10 @@ def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(c, w
     path = payload["approval_url"].removeprefix(BASE_URL)
     page = c.get(path).text
     assert "pick a different item" in page and "Share just this item" not in page
+    assert "could not open that file" in page
+    assert "Choose the file to approve" not in page  # picker is not configured here
+    listing = c.get("/requests").text
+    assert "Approve or deny" in listing
     post(c, f"{path}/approve", target_id="loose-two")
     assert [p["emailAddress"] for p in world.files["loose-two"].permissions] == []
     status = mcp_call(c, "check_access_request", request_id=payload["request_id"])

@@ -166,3 +166,99 @@ def test_public_address_helper_rejects_mapped_loopback() -> None:
     assert _public("10.1.2.3") is False
     assert _public("169.254.169.254") is False
     assert _public("::ffff:127.0.0.1") is False
+
+
+CLAUDE_URL = "https://api.anthropic.com/v1/claude_code/routines/trig_01ABCdef/fire"
+CLAUDE_KEY = "sk-ant-oat01-test-routine-token-7788"
+
+
+def _claude_box(posts: list[dict[str, str]]) -> Mailbox:
+    store = MemoryStore(clock=lambda: 1_700_000_000.0)
+    return Mailbox(
+        store,
+        base_url="https://drive-test.example.com",
+        clock=store._clock,
+        wake=WakeSettings(
+            enabled=True,
+            kek=base64.b64decode(KEK),
+            allowlist=("api2.cursor.sh", "api.anthropic.com"),
+            lookup=lambda _host: ["8.8.8.8"],
+            poster=lambda request: posts.append(request) or 200,
+        ),
+    )
+
+
+def test_claude_routine_ping_has_anthropic_headers_and_ids_in_text() -> None:
+    posts: list[dict[str, str]] = []
+    box = _claude_box(posts)
+    link_id = _pair(box)
+    saved = box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
+    assert saved["auth_scheme"] == "claude_routine"
+    sent = box.send_message(OWNER_EMAIL, link_id, "Dinner is at 7.")
+    request = posts[0]
+    assert request["hostname"] == "api.anthropic.com"
+    assert request["path"] == "/v1/claude_code/routines/trig_01ABCdef/fire"
+    assert request["authorization"] == f"Bearer {CLAUDE_KEY}"
+    assert request["anthropic-version"] == "2023-06-01"
+    assert request["anthropic-beta"] == "experimental-cc-routine-2026-04-01"
+    assert "x-automation-key" not in request
+    assert "Dinner is at 7." not in request["body"]
+    body = json.loads(request["body"])
+    assert set(body) == {"text"}
+    event = json.loads(body["text"])
+    assert event["type"] == "bot_bridge.message_available"
+    assert event["msg_id"] == sent["msg_id"]
+    assert event["link_id"] == link_id
+
+
+def test_claude_routine_scheme_only_targets_a_routine_fire_url() -> None:
+    posts: list[dict[str, str]] = []
+    box = _claude_box(posts)
+    for url in (
+        URL,  # Grok host with the Claude scheme
+        "https://api.anthropic.com/v1/messages",
+        "https://api.anthropic.com/v1/claude_code/routines/trig_1/fire/extra",
+    ):
+        with pytest.raises(MailboxError) as bad:
+            box.set_webhook(EVE, url, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
+        assert bad.value.code == "invalid_webhook_url"
+    for scheme in ("bearer", "bearer_and_x_automation_key"):
+        with pytest.raises(MailboxError) as wrong:
+            box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme=scheme)
+        assert wrong.value.code == "invalid_webhook_url"
+    assert posts == []
+
+
+def test_saved_key_is_not_carried_to_a_different_host() -> None:
+    posts: list[dict[str, str]] = []
+    box = _claude_box(posts)
+    box.set_webhook(EVE, URL, sender_key=SECRET)
+    with pytest.raises(MailboxError) as missing:
+        box.set_webhook(EVE, CLAUDE_URL, auth_scheme="claude_routine")
+    assert missing.value.code == "secret_required"
+    assert box.get_webhook(EVE)["url"] == URL
+    box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
+    # Same routine: the saved key is kept (e.g. turning wake-ups off and on).
+    kept = box.set_webhook(EVE, CLAUDE_URL, auth_scheme="claude_routine")
+    assert kept["secret_hint"] == CLAUDE_KEY[-4:]
+
+
+def test_saved_key_is_not_carried_to_a_different_claude_routine() -> None:
+    posts: list[dict[str, str]] = []
+    box = _claude_box(posts)
+    box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
+    other_routine = "https://api.anthropic.com/v1/claude_code/routines/trig_02/fire"
+    # A routine's token only starts that one routine, so a new routine needs its own.
+    with pytest.raises(MailboxError) as missing:
+        box.set_webhook(EVE, other_routine, auth_scheme="claude_routine")
+    assert missing.value.code == "secret_required"
+    assert box.get_webhook(EVE)["url"] == CLAUDE_URL
+    moved = box.set_webhook(
+        EVE, other_routine, sender_key="sk-new-routine-key-9876", auth_scheme="claude_routine"
+    )
+    assert moved["secret_hint"] == "9876"
+
+
+def test_anthropic_is_on_the_default_allowlist() -> None:
+    assert "api.anthropic.com" in WakeSettings().allowlist
+    assert "api2.cursor.sh" in WakeSettings().allowlist

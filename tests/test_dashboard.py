@@ -5,10 +5,20 @@ import re
 import pytest
 
 from scoped_drive_mcp.dashboard import SESSION_COOKIE
+from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveNotFoundError
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import BOT_TOKEN_KEY, KEY_PREFIX, OWNER_TOKEN_KEY, MemoryStore
 from tests.conftest import BASE_URL, OWNER_EMAIL, TOKENS, make_settings
-from tests.dash import MCP_HEADERS, client, csrf, login, mcp_call, post, start_oauth
+from tests.dash import (
+    MCP_HEADERS,
+    client,
+    connect_drive,
+    csrf,
+    login,
+    mcp_call,
+    post,
+    start_oauth,
+)
 
 OWNER_PAGES = [
     "/browse",
@@ -62,15 +72,16 @@ def test_login_page_is_public(c) -> None:
     assert r.status_code == 200 and "Sign in with Google" in r.text
     assert r.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert "apis.google.com" in r.headers["content-security-policy"]
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
     # Google requires the data disclosure immediately before the consent button.
-    assert r.text.index("Full access to Google Drive") < r.text.index("Sign in with Google")
+    assert r.text.index("files and folders you allow") < r.text.index("Sign in with Google")
 
 
 def test_public_home_is_the_consent_screen_page(c) -> None:
     r = c.get("/")
     assert r.status_code == 200
-    assert "gateway that sits in front of Google Drive" in r.text
+    assert "access-control gateway" in r.text and "Google Drive" in r.text
     assert 'href="/privacy"' in r.text and 'href="/terms"' in r.text
     assert ">Privacy policy</a>" in r.text and ">Terms of service</a>" in r.text
     assert "set-cookie" not in {name.lower() for name in r.headers}
@@ -79,7 +90,7 @@ def test_public_home_is_the_consent_screen_page(c) -> None:
 @pytest.mark.parametrize(
     ("path", "needle"),
     [
-        ("/terms", "gateway that sits in front of Google Drive"),
+        ("/terms", "access-control gateway"),
         ("/privacy", "Google API Services User Data Policy"),
     ],
 )
@@ -101,7 +112,8 @@ def test_owner_login(c, oauth, memstore, p2_app) -> None:
     cookie = r.headers["set-cookie"].lower()
     assert SESSION_COOKIE in cookie
     assert "httponly" in cookie and "secure" in cookie and "samesite=lax" in cookie
-    assert oauth.hints[-1] == OWNER_EMAIL
+    # Step 1 had no hint; step 2 is pinned to the signed-in address.
+    assert oauth.hints[-2:] == [None, OWNER_EMAIL]
     assert c.get("/").status_code == 200
     # the refresh token is stored encrypted
     raw = memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY)
@@ -116,6 +128,14 @@ def test_owner_login(c, oauth, memstore, p2_app) -> None:
 def test_login_redirects_back_to_next(c) -> None:
     r = c.get("/requests")
     assert r.headers["location"] == "/login?next=%2Frequests"
+    state = start_oauth(c, "/auth/login?next=/requests")
+    r = c.get("/auth/callback", params={"code": "owner-code", "state": state})
+    # First sign-in goes to the separate connect step, which keeps the destination.
+    assert r.headers["location"] == "/connect?next=%2Frequests"
+    r = connect_drive(c, next_url="/requests")
+    assert r.headers["location"] == "/requests"
+    # A returning person who is already connected goes straight back.
+    post(c, "/logout")
     state = start_oauth(c, "/auth/login?next=/requests")
     r = c.get("/auth/callback", params={"code": "owner-code", "state": state})
     assert r.headers["location"] == "/requests"
@@ -173,6 +193,23 @@ def test_drive_scope_required(c, oauth) -> None:
     oauth.scopes = frozenset({"openid", "email"})
     r = login(c)
     assert r.status_code == 400 and "Drive access was not granted" in r.text
+
+
+def test_full_drive_scope_is_accepted(c, oauth) -> None:
+    oauth.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
+    r = login(c)
+    assert r.status_code == 303
+
+
+def test_login_hint_is_only_the_visitors(c, oauth) -> None:
+    start_oauth(c, "/auth/login")
+    assert oauth.hints[-1] is None
+    start_oauth(c, "/auth/login?login_hint=visitor@example.com")
+    assert oauth.hints[-1] == "visitor@example.com"
+    start_oauth(c, "/auth/login?login_hint=not-an-email")
+    assert oauth.hints[-1] is None
+    start_oauth(c, f"/auth/login?login_hint={OWNER_EMAIL}")
+    assert oauth.hints[-1] == OWNER_EMAIL
 
 
 def test_logout(owner_c) -> None:
@@ -276,10 +313,7 @@ def test_sign_in_is_the_only_drive_token(no_env_bot_app, memstore, world) -> Non
     assert "Connect bot" not in text
 
     login(c)
-    health = c.get("/health").json()
-    assert health["bot_connected"] is True and health["bot_source"] == "owner"
-    assert health["owner_connected"] is True
-    assert health["mode"] == "same_account"
+    assert c.get("/health").json() == {"status": "ok"}
     post(c, "/grant", file_id="loose-doc")
     assert world.files["loose-doc"].permissions == []
     result = mcp_call(c, "read_file", file_id="loose-doc")
@@ -380,6 +414,47 @@ def test_browse_my_drive(owner_c) -> None:
     assert owner_c.get("/browse?folder=proj-notes").status_code == 400
 
 
+def test_browse_when_my_drive_root_is_hidden(owner_c, monkeypatch) -> None:
+    """drive.file often 404s files.get('root'). Browse still has to render."""
+    from tests.fake_drive import FakeDrive
+
+    real = FakeDrive.get_file
+
+    def get_file(self, file_id, fields):
+        if file_id == "root":
+            raise DriveNotFoundError(file_id)
+        return real(self, file_id, fields)
+
+    monkeypatch.setattr(FakeDrive, "get_file", get_file)
+    page = owner_c.get("/browse")
+    assert page.status_code == 200
+    assert "Something went wrong" not in page.text
+    assert "My Drive" in page.text
+
+
+def test_browse_does_not_invent_a_my_drive_parent(owner_c, world) -> None:
+    """A folder whose parent this app cannot see is not shown under My Drive."""
+    world.add("specs", "Specs", FOLDER_MIME, ["shared-drive-root"], owner=OWNER_EMAIL)
+    page = owner_c.get("/browse?folder=specs")
+    assert page.status_code == 200
+    assert "Specs" in page.text
+    assert 'href="/browse?folder=root"' not in page.text
+
+
+def test_browse_stays_up_when_drive_list_fails(owner_c, monkeypatch) -> None:
+    from tests.fake_drive import FakeDrive
+
+    def boom(self, q, fields, page_size, page_token=None):
+        raise RuntimeError("drive list refused")
+
+    monkeypatch.setattr(FakeDrive, "list_files", boom)
+    page = owner_c.get("/browse")
+    assert page.status_code == 200
+    assert "Google Drive did not return files" in page.text
+    assert "Something went wrong" not in page.text
+    assert "The file picker is not set up" in page.text
+
+
 def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
     assert mcp_call(owner_c, "read_file", file_id="proj-notes")["isError"] is True
     r = post(owner_c, "/grant", file_id="proj", next="/browse")
@@ -436,7 +511,7 @@ def test_overview_and_health_report_status(owner_c) -> None:
     assert "UPSTASH_REDIS_REST_URL" in page
     assert f"{BASE_URL}/mcp" in page
     assert "uses your Google account" in page
-    assert "whole Drive" in page
+    assert "files and folders you allow" in page
     assert "Assistant acts as" not in page
     assert "make_token.py" in page  # admin-only operator note
 
@@ -445,12 +520,20 @@ def test_non_admin_overview_hides_operator_notes(c) -> None:
     login(c, "eve-code")
     page = c.get("/").text
     assert "uses your Google account" in page
-    assert "whole Drive" in page
+    assert "files and folders you allow" in page
     assert f"{BASE_URL}/mcp" in page
     assert "make_token.py" not in page
     assert "UPSTASH_REDIS_REST_URL" not in page
     assert "Vercel" not in page
     assert "BOT_EMAIL" not in page
+
+
+def test_overview_shows_one_mcp_address_for_every_client(c) -> None:
+    login(c, "eve-code")
+    page = c.get("/").text
+    assert page.count(f'data-copy="{BASE_URL}/mcp"') == 1
+    for name in ("Claude", "ChatGPT", "Dots", "Grok", "Muse", "Cursor"):
+        assert f"<b>{name}</b>" in page
 
 
 def test_allowed_emails_rejects_other_accounts(world, memstore, oauth) -> None:
@@ -479,7 +562,7 @@ def test_requests_nav_counts_pending(owner_c) -> None:
     mcp_call(owner_c, "read_file", file_id="priv-secret")
     page = owner_c.get("/browse").text
     start = page.index("Requests")
-    assert 'class="pill pending">1<' in page[start : start + 160]
+    assert "1 waiting" in page[start : start + 220]
 
 
 def test_confirm_script_is_served(c) -> None:
@@ -518,4 +601,16 @@ def test_dashboard_not_configured(world) -> None:
     assert c.get("/terms").status_code == 200
     assert c.get("/privacy").status_code == 200
     health = c.get("/health").json()
-    assert {"SESSION_SECRET", "OWNER_EMAIL"} <= set(health["missing"])
+    assert health == {"status": "ok"}
+    assert "SESSION_SECRET" not in str(health)
+
+
+def test_describe_mime_gives_short_human_labels() -> None:
+    from scoped_drive_mcp.dashboard import describe_mime
+
+    word = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert describe_mime(word) == "Word"
+    assert describe_mime("text/csv") == "CSV"
+    assert describe_mime("application/vnd.some-vendor.thing-nobody-knows") == "File"
+    assert describe_mime("application/x-whatever") == "File"
+    assert describe_mime("video/mp4") == "Video"

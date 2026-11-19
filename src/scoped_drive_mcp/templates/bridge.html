@@ -2,12 +2,14 @@
 {% block title %}Mailbox{% endblock %}
 {% block content %}
 <h1>Mailbox</h1>
-<p class="muted">This pairs your assistant with one other person's assistant. Both of you have to approve.
+<p class="muted">This pairs your assistant with one other person’s assistant. Both of you have to approve.
   Messages are short text. They stay with your assistant, which should summarize them for you and wait.
-  The other person's Google account is the name you are confirming.</p>
+  The other person’s Google account is the name you are confirming.</p>
+<p class="muted">While a pairing is on, that person’s assistant can also read the items on your
+  <a href="/sharing">Sharing</a> list (read-only), and yours can read theirs. Nothing else in your Drive is reachable.</p>
 {% if not links %}
-<div class="card">
-  <p>No pairings yet.</p>
+<div class="card empty">
+  <h2>No pairings yet</h2>
   <ol>
     <li>Ask your assistant to start a pairing and read you the code.</li>
     <li>Give that code to the other person. Their assistant joins with it.</li>
@@ -18,9 +20,9 @@
 {% for link in links %}
 <div class="card">
   <p>
-    {% if link.status == "active" %}<span class="pill ok">on</span>
-    {% elif link.status == "revoked" %}<span class="pill bad">off</span>
-    {% else %}<span class="pill pending">waiting</span>{% endif %}
+    {% if link.status == "active" %}<span class="pill ok"><span aria-hidden="true">✓</span> On</span>
+    {% elif link.status == "revoked" %}<span class="pill bad"><span aria-hidden="true">!</span> Off</span>
+    {% else %}<span class="pill pending"><span aria-hidden="true">●</span> Waiting</span>{% endif %}
   </p>
   <p>{% if link.peer_email %}Pairing with <b>{{ link.peer_email }}</b>.
     {% else %}Waiting for the other person to join.{% endif %}</p>
@@ -29,14 +31,16 @@
   {% endif %}
   <p class="muted">{{ link.next_step }}</p>
   {% if link.status == "pending_approval" and not link.you_approved %}
-  <form class="inline" method="post" action="/bridge/{{ link.link_id }}/approve">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="primary" type="submit">Approve pairing</button>
-  </form>
-  <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="danger" type="submit">Deny</button>
-  </form>
+  <div class="actions">
+    <form class="inline" method="post" action="/bridge/{{ link.link_id }}/approve">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="primary" type="submit">Approve pairing</button>
+    </form>
+    <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" type="submit">Deny</button>
+    </form>
+  </div>
   {% elif link.status != "revoked" %}
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this mailbox off?">
     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -49,39 +53,52 @@
 {% if webhook is defined and webhook.available %}
 <div class="card">
   <h2>Wake your assistant</h2>
-  <p class="muted">Paste the POST-to URL and key from a Grok Bot webhook routine. A ping sends ids only.
-    The message stays here until your assistant calls check_messages.</p>
+  <p>Ask your assistant to watch this mailbox. It creates the check on its own. You confirm the routine it shows. You do not paste a webhook URL or a key for that.</p>
   {% if webhook.configured %}
-  <p>Saved for {{ webhook.auth_scheme }}. Key hint <code>{{ webhook.secret_hint }}</code>.
-    {% if webhook.enabled %}Enabled.{% else %}Paused.{% endif %}
-    {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}</p>
+  <p>
+    <span class="pill {{ 'ok' if webhook.enabled else 'pending' }}">
+      <span aria-hidden="true">{{ '✓' if webhook.enabled else '●' }}</span>
+      {{ 'Enabled' if webhook.enabled else 'Paused' }}
+    </span>
+    Saved. Key hint <code>{{ webhook.secret_hint }}</code>.
+    {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}
+  </p>
   {% endif %}
-  <form method="post" action="/bridge/webhook">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="action" value="save">
-    <label>Webhook URL <input name="url" type="url" required value="{{ webhook.url or '' }}" autocomplete="off" spellcheck="false"></label>
-    <label>Sender key <input name="sender_key" type="password" autocomplete="off" placeholder="{% if webhook.secret_hint %}Leave blank to keep the saved key{% else %}Required the first time{% endif %}"></label>
-    <label>Scheme
-      <select name="auth_scheme">
-        <option value="bearer" {% if webhook.auth_scheme != 'bearer_and_x_automation_key' %}selected{% endif %}>bearer</option>
-        <option value="bearer_and_x_automation_key" {% if webhook.auth_scheme == 'bearer_and_x_automation_key' %}selected{% endif %}>bearer and X-Automation-Key</option>
-      </select>
-    </label>
-    <label>Enabled
-      <select name="enabled">
-        <option value="true" {% if not webhook.configured or webhook.enabled %}selected{% endif %}>Yes</option>
-        <option value="false" {% if webhook.configured and not webhook.enabled %}selected{% endif %}>No</option>
-      </select>
-    </label>
-    <button class="primary" type="submit">Save webhook</button>
-  </form>
-  {% if webhook.configured %}
-  <form method="post" action="/bridge/webhook">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="action" value="remove">
-    <button type="submit">Remove webhook</button>
-  </form>
-  {% endif %}
+  <details>
+    <summary>Advanced: paste a webhook yourself</summary>
+    <p class="muted">Use this only if you already have a wake-up URL and key. The usual path is the routine your assistant creates.</p>
+    <form class="stack" method="post" action="/bridge/webhook">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="save">
+      <label>Webhook URL
+        <input name="url" type="url" required value="{{ webhook.url or '' }}" autocomplete="off" spellcheck="false" placeholder="https://">
+      </label>
+      <label>Sender key
+        <input name="sender_key" type="password" autocomplete="off" placeholder="{% if webhook.secret_hint %}Leave blank to keep the saved key{% else %}Required the first time{% endif %}">
+      </label>
+      <label>How the key is sent
+        <select name="auth_scheme">
+          <option value="bearer" {% if webhook.auth_scheme not in ('bearer_and_x_automation_key', 'claude_routine') %}selected{% endif %}>Bearer token</option>
+          <option value="bearer_and_x_automation_key" {% if webhook.auth_scheme == 'bearer_and_x_automation_key' %}selected{% endif %}>Bearer token and X-Automation-Key</option>
+          <option value="claude_routine" {% if webhook.auth_scheme == 'claude_routine' %}selected{% endif %}>Claude routine (API trigger)</option>
+        </select>
+      </label>
+      <label>Wake-ups
+        <select name="enabled">
+          <option value="true" {% if not webhook.configured or webhook.enabled %}selected{% endif %}>Enabled</option>
+          <option value="false" {% if webhook.configured and not webhook.enabled %}selected{% endif %}>Paused</option>
+        </select>
+      </label>
+      <button class="primary" type="submit">Save webhook</button>
+    </form>
+    {% if webhook.configured %}
+    <form method="post" action="/bridge/webhook">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="remove">
+      <button type="submit">Remove webhook</button>
+    </form>
+    {% endif %}
+  </details>
 </div>
 {% elif webhook is defined %}
 <p class="muted">Wake-ups are off on this server. Mail still arrives when your assistant calls check_messages.</p>

@@ -56,7 +56,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    flow = InstalledAppFlow.from_client_config(_client_config(args), scopes=[DRIVE_SCOPE])
+    flow = InstalledAppFlow.from_client_config(
+        _client_config(args), scopes=["openid", "email", DRIVE_SCOPE]
+    )
     print("A browser window will open. Sign in as the BOT Gmail account, not your own.\n")
     creds = flow.run_local_server(
         port=args.port,

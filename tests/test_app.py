@@ -50,11 +50,8 @@ async def test_health_needs_no_auth(client, drive) -> None:
     r = await client.get("/health")
     assert r.status_code == 200
     body = r.json()
-    # only Redis is missing in the test settings (an in-memory store is injected)
-    assert body["status"] == "incomplete"
-    assert body["missing"] == ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"]
-    assert body["bot_connected"] is True and body["bot_source"] == "env"
-    assert body["owner_connected"] is False
+    assert body == {"status": "ok"}
+    assert "missing" not in body and "mode" not in body and "store" not in body
     assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
     assert drive.get_calls == [] and drive.queries == []
 
@@ -85,7 +82,7 @@ async def _initialize(client, role: str) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("role", "count"), [("viewer", 13), ("editor", 18), ("admin", 19)])
+@pytest.mark.parametrize(("role", "count"), [("viewer", 21), ("editor", 26), ("admin", 27)])
 async def test_initialize_and_list_tools(client, role: str, count: int) -> None:
     await _initialize(client, role)
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth(role))
@@ -122,7 +119,7 @@ async def test_tool_calls_over_http(client) -> None:
 async def test_principal_does_not_leak_between_requests(client) -> None:
     await _initialize(client, "admin")
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth("viewer"))
-    assert len(r.json()["result"]["tools"]) == 13
+    assert len(r.json()["result"]["tools"]) == 21
 
 
 def test_starlette_testclient_with_lifespan(app) -> None:
@@ -134,7 +131,7 @@ def test_starlette_testclient_with_lifespan(app) -> None:
         r = tc.post("/mcp", json=INIT, headers=auth("editor"))
         assert r.status_code == 200
         r = tc.post("/mcp", json=rpc("tools/list"), headers=auth("editor"))
-        assert len(r.json()["result"]["tools"]) == 18
+        assert len(r.json()["result"]["tools"]) == 26
 
 
 @pytest.mark.anyio
@@ -153,10 +150,9 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.get("/health")
         assert r.status_code == 503
-        assert r.json()["status"] == "misconfigured"
+        assert r.json() == {"status": "unavailable"}
         assert "do-not-leak-this" not in r.text
-        settings = {p["setting"] for p in r.json()["problems"]}
-        assert settings == {"API_TOKENS"}
+        assert "API_TOKENS" not in r.text and "problems" not in r.text
         assert (await c.post("/mcp", json=INIT)).status_code == 503
         assert (await c.get("/browse")).status_code == 503
         assert (await c.get("/terms")).status_code == 200
@@ -203,9 +199,8 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
         r = await c.get("/health")
         assert r.status_code == 503
         body = r.json()
-        assert body["status"] == "misconfigured"
-        assert body["store_error"] == "redis_not_configured"
-        assert "UPSTASH_REDIS_REST_URL" in body["missing"] and "Redis" in body["detail"]
+        assert body == {"status": "unavailable"}
+        assert "redis" not in r.text.lower() and "missing" not in body
         assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
         r = await c.post("/mcp", json=INIT, headers=auth("admin"))
         assert r.status_code == 503 and "storage" in r.json()["error"]

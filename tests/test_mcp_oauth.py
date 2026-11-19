@@ -196,6 +196,7 @@ def test_metadata_is_public(c) -> None:
     assert document["grant_types_supported"] == ["authorization_code", "refresh_token"]
     assert document["code_challenge_methods_supported"] == ["S256"]
     assert document["token_endpoint_auth_methods_supported"] == ["none"]
+    assert document["authorization_response_iss_parameter_supported"] is True
 
 
 def test_mcp_without_token_advertises_metadata(c) -> None:
@@ -229,6 +230,7 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "list_folder",
         "get_metadata",
         "read_file",
+        "download_file",
         "request_access",
         "check_access_request",
         "request_link",
@@ -241,6 +243,10 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "get_webhook",
         "set_webhook",
         "clear_webhook",
+        "list_shared_with_me",
+        "list_shared_folder",
+        "read_shared_file",
+        "download_shared_file",
     }
     assert "trash_file" not in names
     assert spy.oauth_ops == 0
@@ -288,6 +294,66 @@ def test_registration_rejects_foreign_redirects(c, uri: str) -> None:
     mixed = register(c, [DONE, uri])
     assert mixed.status_code == 400
     assert mixed.json()["error"] == "invalid_redirect_uri"
+
+
+CLAUDE = (
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+)
+
+
+def test_claude_can_register_its_callbacks(c) -> None:
+    response = register(c, list(CLAUDE), name="Claude")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["redirect_uris"] == list(CLAUDE)
+    assert body["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in body
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://claude.ai/api/mcp/auth_callback/",
+        "https://evil.claude.ai/api/mcp/auth_callback",
+        "https://claude.ai.evil.example/api/mcp/auth_callback",
+        "http://claude.ai/api/mcp/auth_callback",
+    ],
+)
+def test_claude_lookalikes_are_rejected(c, uri: str) -> None:
+    response = register(c, uri, name="Claude")
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_redirect_uri"
+
+
+CHATGPT = "https://chatgpt.com/connector_platform_oauth_redirect"
+
+
+def test_chatgpt_can_register_its_callback(c) -> None:
+    response = register(c, CHATGPT, name="ChatGPT")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["redirect_uris"] == [CHATGPT]
+    assert body["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in body
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        CHATGPT + "/",
+        "http://chatgpt.com/connector_platform_oauth_redirect",
+        "https://evil.chatgpt.com/connector_platform_oauth_redirect",
+        "https://chatgpt.com.evil.example/connector_platform_oauth_redirect",
+        CHATGPT + "?next=https://evil.example",
+        # Per-connector callback ids are not on the exact allow list.
+        "https://chatgpt.com/connector/oauth/abc123",
+    ],
+)
+def test_chatgpt_lookalikes_are_rejected(c, uri: str) -> None:
+    response = register(c, uri, name="ChatGPT")
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_redirect_uri"
 
 
 def test_muse_can_register_its_callbacks(c) -> None:
@@ -373,8 +439,8 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     assert page.status_code == 200
     assert "Cursor" in page.text
     assert "Drive trash" in page.text
-    assert "cannot see the rest of your Drive" not in page.text
-    assert "can still reach the rest of your Drive" in page.text
+    assert "sign-in can see your Drive" in page.text
+    assert "can still reach the rest of your Drive" not in page.text
     assert "trash_file" not in page.text
     assert "something-else" in page.text
     denied = post(owner_c, "/oauth/authorize", decision="deny")
@@ -440,7 +506,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     assert hash_in(access) in stored
 
     names = tool_names(owner_c, access)
-    assert len(names) == 22
+    assert len(names) == 27
     assert "trash_file" in names
     dashboard = owner_c.get("/", headers={"Authorization": f"Bearer {access}"})
     assert dashboard.status_code == 200

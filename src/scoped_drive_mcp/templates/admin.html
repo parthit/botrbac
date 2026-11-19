@@ -2,39 +2,41 @@
 {% block title %}Directory{% endblock %}
 {% block content %}
 <h1>People</h1>
-<p class="muted">Everyone who has signed in. This page lists accounts only: not their files,
-  requests, or activity.</p>
-<div class="scroll-x">
-<table>
+<p class="muted">Everyone who has signed in. This page lists accounts only: not their files, requests, or activity.</p>
+{% if people %}
+<table class="cards">
   <thead>
     <tr>
       <th>Email</th>
       <th>First signed in</th>
-      <th>Grok Bot</th>
+      <th>Connected app</th>
     </tr>
   </thead>
   <tbody>
   {% for person in people %}
   <tr>
-    <td>{{ person.email }}</td>
-    <td class="muted">{{ person.created_at or "unknown" }}</td>
-    <td>
+    <td data-label="Email">{{ person.email }}</td>
+    <td data-label="First signed in" class="muted">{{ person.created_at or "Unknown" }}</td>
+    <td data-label="Connected app">
       {% if person.grants %}
       {% for grant in person.grants %}
       <div>
-        <span class="pill ok">connected</span> {{ grant.client_name }}
+        <span class="pill ok"><span aria-hidden="true">✓</span> connected</span> {{ grant.client_name }}
         <span class="muted">since {{ grant.created_at }}, last used {{ grant.last_used or "never" }}</span>
       </div>
       {% endfor %}
       {% else %}
-      <span class="pill bad">not connected</span>
+      <span class="pill"><span aria-hidden="true">–</span> Not connected</span>
       {% endif %}
     </td>
   </tr>
-  {% else %}
-  <tr><td colspan="3" class="muted">No one has signed in yet.</td></tr>
   {% endfor %}
   </tbody>
 </table>
+{% else %}
+<div class="card empty">
+  <h2>No one has signed in yet</h2>
+  <p>When someone signs in with Google, their address shows up here. Their files do not.</p>
 </div>
+{% endif %}
 {% endblock %}

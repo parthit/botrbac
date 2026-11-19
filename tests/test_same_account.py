@@ -69,9 +69,7 @@ def test_tools_use_the_owner_token(c, same_app) -> None:
     assert result["isError"] is False
     assert result["structuredContent"]["content"] == "memo beta"
     assert same_app.state.tool_tokens == [f"rt-{OWNER_EMAIL}"]
-    health = c.get("/health").json()
-    assert health["mode"] == "same_account"
-    assert health["bot_connected"] is True and health["bot_source"] == "owner"
+    assert c.get("/health").json() == {"status": "ok"}
 
 
 def test_tools_need_the_owner_signed_in_once(same_app) -> None:
@@ -93,7 +91,8 @@ def test_env_refresh_token_still_wins(world, memstore, oauth) -> None:
     post(c, "/grant", file_id="loose-doc")
     assert mcp_call(c, "read_file", file_id="loose-doc")["isError"] is False
     assert app.state.tool_tokens == ["env-rt"]
-    assert c.get("/health").json()["bot_source"] == "env"
+    assert "overrides this account" in c.get("/").text
+    assert c.get("/health").json() == {"status": "ok"}
 
 
 def test_grant_and_revoke_make_no_permission_calls(c, same_app, world) -> None:
@@ -164,9 +163,9 @@ def test_pages_describe_the_allowlist(c) -> None:
     for page in ("/", "/access"):
         html = c.get(page).text
         assert 'id="mode-note"' in html and "your Google account" in html, page
-        assert "whole Drive" in html and "allowlist" not in html
+        assert "files and folders you allow" in html and "allowlist" not in html
         assert "connect-bot" not in html and "BOT_EMAIL" not in html
-    assert c.get("/health").json()["mode"] == "same_account"
+    assert c.get("/health").json() == {"status": "ok"}
 
 
 def test_bot_oauth_flow_is_rejected(c, same_app) -> None:

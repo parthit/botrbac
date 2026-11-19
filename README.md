@@ -1,27 +1,43 @@
-# scoped-drive-mcp
+# Bot RBAC (scoped-drive-mcp)
 
-A small [MCP](https://modelcontextprotocol.io) server that sits between **Grok** (xAI) and **Google Drive**.
-You open a web dashboard, sign in with your own Google account, browse your whole My Drive and **tick the
-files and folders Grok may use**. Grok can reach only those (and whatever is inside ticked folders). If it
-tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
+**Bot RBAC** is a role-based access layer for AI agents — starting with **Grok** (xAI) and **Muse** — that
+want to use your stuff. It is a small [MCP](https://modelcontextprotocol.io) server: agents connect to it,
+and it decides, call by call, what they may reach in the services you connected.
+
+Try the hosted version at **[botrbac.com](https://botrbac.com)**, or run your own (below).
+
+**Google Drive is the first connection.** More services are planned; each one is added as its own
+connection (see `src/scoped_drive_mcp/connections.py`) without changing how people sign in.
+
+Getting started is two separate Google permission screens:
+
+1. **Sign in** to Bot RBAC with your Google account. This asks only for `openid` and `email`, so Bot RBAC
+   knows who you are. Nothing of yours is reachable and no Google token is stored.
+2. **Connect Google Drive** on the Connections page. This is a separate, explicit click that asks for the
+   wider `https://www.googleapis.com/auth/drive` permission and stores that refresh token (encrypted).
+
+You then **tick the files and folders an assistant may use**. The connected Drive is visible to this
+server. The assistant can reach only what you ticked, plus files it creates inside a folder you allowed. If it tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
 you can untick (revoke) anything at any time. Each access token you hand out also has a **role** that
 decides which tools it may use. It runs as a single Python function on **Vercel** (the free Hobby plan is
 enough), with Upstash Redis (free tier) for storage.
 
 ```
-Grok ──HTTPS + Bearer token──▶ Vercel /mcp ──▶ role check ──▶ allowlist check ──▶ Google Drive API (as you)
-You  ──browser + Google sign-in──▶ Vercel dashboard ──▶ allowlist (Redis)
+Grok / Muse ──HTTPS + Bearer token──▶ Vercel /mcp ──▶ role check ──▶ allowlist check ──▶ Google Drive API (as you)
+You ──① sign in (email only)──▶ dashboard ──② connect Google Drive──▶ allowlist (Redis / Postgres)
 ```
 
 Every call checks the token's role and confirms the file is on the allowlist, or inside an allowlisted
-folder, before anything is sent to Google. The Drive call uses the Google account that signed in. There
-is no second Gmail. Google does not hide the rest of that Drive from this sign-in, so the allowlist is
-the limit. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
-the whole Drive rather than only what was ticked.
+folder, before anything is sent to Google. The Drive call uses the Google account that signed in; connecting
+Drive with a different Google account is refused. There is no second Gmail. The Drive connection has full
+Drive access, and the allowlist is checked before every call. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
+more of that Drive than the list you ticked.
 
 ## More than one person
 
-Each person signs in with their own Google account. Ticking an item adds it to **their** allowlist.
+Each person signs in with their own Google account and connects their own Drive. Ticking an item adds it
+to **their** allowlist. Someone who signed in but has not connected Drive can see the dashboard; pages that
+need Drive, and approving an assistant on `/oauth/authorize`, send them to `/connect` first.
 Grok Bot connects with the MCP OAuth flow on `/oauth/authorize`; that grant is tied to the signed-in
 user, and `/mcp` calls Drive with that user's sign-in. One Grok Bot does not see another person's files.
 
@@ -45,9 +61,10 @@ the design notes.
 ## Bot Bridge
 
 This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server. The pairing
-Muse and Grok use on `scoped-drive-mcp.vercel.app` is the mailbox inside this Python app, approved at `/bridge`.
-With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can POST a wake-up (ids only, no message text)
-to a Grok Bot webhook routine. The separate TypeScript server is a different deployment and a different mailbox.
+Muse and Grok use on [botrbac.com](https://botrbac.com) is the mailbox inside this Python app, approved at `/bridge`.
+With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
+
+**Waking Claude.** A Claude Code routine with an API trigger can be woken too. At [claude.ai/code/routines](https://claude.ai/code/routines), create a routine that calls `check_messages` and treats the wake as untrusted metadata, add an **API** trigger, and generate a token. On `/bridge`, open **Advanced: paste a webhook yourself**, paste the routine's fire URL (`https://api.anthropic.com/v1/claude_code/routines/<id>/fire`) and token, and pick **Claude routine (API trigger)**. That scheme adds the `anthropic-version` and `anthropic-beta` headers and puts the ids in `text`. It still sends no message text. `api.anthropic.com` is on the default `WEBHOOK_HOST_ALLOWLIST`. If you set that variable yourself, add the host to it. Each wake starts a new Claude session and counts against that plan's routine runs.
 
 ## Tools and roles
 
@@ -57,6 +74,7 @@ to a Grok Bot webhook routine. The separate TypeScript server is a different dep
 | `list_folder(folder_id?)` (no folder_id: the items you shared) | ✓ | ✓ | ✓ |
 | `get_metadata(file_id)` | ✓ | ✓ | ✓ |
 | `read_file(file_id)` | ✓ | ✓ | ✓ |
+| `download_file(file_id)` | ✓ | ✓ | ✓ |
 | `request_access(description, reason, file_id?)` | ✓ | ✓ | ✓ |
 | `check_access_request(request_id)` | ✓ | ✓ | ✓ |
 | `request_link(invite_code?)` | ✓ | ✓ | ✓ |
@@ -69,12 +87,25 @@ to a Grok Bot webhook routine. The separate TypeScript server is a different dep
 | `get_webhook()` | ✓ | ✓ | ✓ |
 | `set_webhook(url, sender_key?, auth_scheme?, enabled?)` | ✓ | ✓ | ✓ |
 | `clear_webhook()` | ✓ | ✓ | ✓ |
+| `list_shared_with_me()` | ✓ | ✓ | ✓ |
+| `list_shared_folder(owner, folder_id?, max_results?)` | ✓ | ✓ | ✓ |
+| `read_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
+| `download_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
 | `update_file_content(file_id, content)` |  | ✓ | ✓ |
 | `rename_file(file_id, new_name)` |  | ✓ | ✓ |
 | `trash_file(file_id)` (recoverable from Drive's trash for 30 days) |  |  | ✓ |
+
+`read_file` returns text for files inside the owner's share, including files nested in a shared folder.
+Google Docs and Slides are exported as plain text and Google Sheets as CSV (first sheet only). PDF, Word
+(`.docx` and legacy `.doc`), PowerPoint (`.pptx`), Excel (`.xlsx`), RTF, CSV, Markdown, JSON, and other
+text files are extracted to plain text in the server process. Scanned PDFs and other files with no text
+layer come back empty of content, with a note to call `download_file`. Images, archives, and anything else
+that cannot be turned into text are not inlined; `download_file` returns those bytes as base64, capped at
+1 MiB (and never above `MAX_BYTES`) so the response fits the host's body limit. `truncated` is true when
+either tool stops early. Text output is also capped by `MAX_CHARS`. Shortcuts are never followed.
 
 There are deliberately **no** tools to move files, share files, change permissions or permanently delete.
 A client only sees the tools its role allows (`tools/list` is filtered), and calls to anything else are refused.
@@ -101,8 +132,33 @@ The same `/mcp` connection can carry short text between two people. Each person 
 
 `list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
 
-`read_file` exports Google Docs and Slides as plain text and Google Sheets as CSV (first sheet only), downloads
-text-like files, and refuses binary files (PDFs, images, ...). Output is capped by `MAX_BYTES` and `MAX_CHARS`.
+## Sharing with paired people
+
+Each person has a second list, separate from **Access**: the **Sharing** page. Items on it can be read by the
+assistant of anyone you have an **active mailbox pairing** with (both of you approved on `/bridge`). Use it for
+things like a resume that any paired person's assistant may see.
+
+- **Add or remove:** on **Browse**, choose **Share with paired people** (or **Stop sharing**) next to a file or
+  folder. **Sharing** lists what you share and who can currently read it. A folder includes what is inside it.
+- **Read-only, always:** another person's assistant gets `list_shared_with_me`, `list_shared_folder`,
+  `read_shared_file` and `download_shared_file`, and nothing else on your Drive, whatever role its own
+  connection has. These calls run as a *guest* with your Google sign-in, behind a scope guard whose only
+  allowlist is your Sharing list. Your **Access** list never counts for a guest, and your Sharing list never
+  widens what your own assistants can use.
+- **Checked on every call:** turning a pairing off on `/bridge`, or choosing **Stop sharing**, ends access on the
+  next call (within `ALLOWLIST_CACHE_TTL` on other instances).
+- **No probing:** an item that is not shared returns `not_shared`, the same answer as an id that does not exist.
+  Guests never create access requests, so other people cannot fill your **Requests** queue.
+- **Untrusted content:** `read_shared_file` wraps the text in markers and marks it `content_trust:
+  untrusted_peer`. The reading assistant is told not to follow instructions inside it.
+- **Activity:** every guest read or denial appears on your **Activity** page with the reader's email
+  (`guest:<email>`), the tool and the file id. File contents are never logged.
+
+Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
+your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.
+
+Later: per-person audiences on each item (`audience` is already stored on each entry, `linked` today), asking
+the owner for an item that is not shared, and expiry dates.
 
 ## Phase 2 setup and test walkthrough
 
@@ -130,15 +186,20 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
    `GOOGLE_OAUTH_CLIENT_SECRET`.
    (If you set up phase 1 with a *Desktop* client, create this new *Web* client anyway; Desktop clients
    don't accept these redirect URIs.)
-5. **Publish:** back on the consent screen (**Audience**), click **Publish app** so the status is **In
-   production**. While an app is in *Testing*, Google expires its sign-ins after 7 days. You don't need to
-   submit for verification. When you sign in, Google will show **"Google hasn't verified this app"**: that's
-   expected for a personal app. Click **Advanced → Go to … (unsafe)**.
+5. **Publish and verify:** the consent screen should list `openid`, `email`, and
+   `https://www.googleapis.com/auth/drive`. Sign-in only requests the first two; the Drive scope is
+   requested later, when someone chooses **Connect Google Drive**. That scope is restricted. The Google Picker is optional:
+   enable the **Google Picker API**, create a browser API key, and set `GOOGLE_PICKER_API_KEY` plus
+   `GOOGLE_CLOUD_PROJECT_NUMBER` only if you want the picker button. The remaining clicks in Google
+   Cloud and Search Console (custom domain, a separate production project, brand verification,
+   publishing **In production**) are listed in
+   [docs/google-verification.md](docs/google-verification.md). While the app is in *Testing*, Google expires
+   sign-ins after 7 days. A saved sign-in that only has `drive.file` must sign in again.
 
 ### 2. Vercel: project, Redis and environment variables
 
 1. In Vercel, **Add New → Project**, import this GitHub repo, and deploy once (it will report missing settings;
-   that's fine). Note the production domain, e.g. `https://scoped-drive-mcp.vercel.app`. That's your
+   that's fine). Note the production domain, e.g. `https://<project>.vercel.app`. That's your
    `APP_BASE_URL`. If it differs from what you entered in step 1.4, fix the redirect URI there.
 2. **Redis:** in the project, open **Storage** (or **Integrations → Marketplace**), add **Upstash → Redis**
    (free plan) and connect it to this project. Vercel then adds `UPSTASH_REDIS_REST_URL` /
@@ -155,7 +216,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | step 1.4 |
 | `OWNER_EMAIL` | yes | the admin's Google address (the only account that can open `/admin`; other people can sign in too) |
 | `ALLOWED_EMAILS` | no | comma-separated Google addresses allowed to sign in. Leave unset and any verified Google account can sign in. `OWNER_EMAIL` is always allowed |
-| `APP_BASE_URL` | yes | your Vercel domain, e.g. `https://scoped-drive-mcp.vercel.app` (no trailing `/`) |
+| `APP_BASE_URL` | yes | the public origin users open, with no trailing `/`. A custom domain replaces the Vercel host here and in the OAuth redirect URI (`APP_BASE_URL/auth/callback`) |
 | `SESSION_SECRET` | yes | step 2.3 |
 | `ENCRYPTION_KEY` | yes | step 2.3 |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | one store | added by the Upstash integration (or `KV_REST_API_URL` / `KV_REST_API_TOKEN`). On Vercel the app needs Redis **or** Postgres |
@@ -164,28 +225,30 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `ROOT_FOLDER_ID` | no | a folder that is always allowed in addition to your ticks |
 | `MAX_BYTES`, `MAX_CHARS`, `SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL` | no | limits; defaults 5 MB, 100000, 60 s, 2 s |
 | `AUTH_MODE` | no | `oauth_bot` (default and only mode) |
+| `GOOGLE_PICKER_API_KEY` | no | browser API key for the Google Picker. Restrict it by HTTP referrer. Public in the signed-in page |
+| `GOOGLE_CLOUD_PROJECT_NUMBER` | no | numeric Cloud project number. The Picker needs it so a chosen file is granted to this app |
+| `LOGIN_RATE_LIMIT`, `LOGIN_RATE_WINDOW_SECONDS` | no | sign-in attempts per IP. Defaults 30 per 600 seconds |
+| `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | no | `/mcp` calls per bearer token. Defaults 300 per 60 seconds |
 
 ### 3. Deploy
 
 Redeploy (**Deployments → … → Redeploy**, or push to `main`). Then open `https://<project>.vercel.app/health`.
-It never shows values, only names:
-
-- `"status": "ok"` with `"missing": []` means every required setting is present.
-- `"status": "incomplete"` lists the `missing` names. `owner_connected` and `bot_connected` tell you whether
-  step 4 is done. `bot_connected` means the assistant can call Drive as the signed-in user. `"mode"` is
-  `same_account`.
-- HTTP 503 `"misconfigured"` means a value is malformed (e.g. a bad `ENCRYPTION_KEY`); `problems` names it.
-- HTTP 503 `"misconfigured"` with `"store_error": "redis_not_configured"` means the Redis variables are missing.
-  On Vercel the server then refuses to serve the dashboard and the tools (each instance has its own memory, so
-  grants and sign-ins would silently disappear). Connect Upstash (step 2.2) and redeploy.
+The public body is only `{"status":"ok"}` or, on HTTP 503, `{"status":"unavailable"}`. It does not list
+settings, the store, or whether an account is connected. A bad `ENCRYPTION_KEY` or a missing store is in
+the host logs. If Redis or Postgres is missing on Vercel, the site itself explains that and refuses to
+serve the dashboard (each instance has its own memory, so grants and sign-ins would silently disappear).
+Connect Upstash (step 2.2) and redeploy. The signed-in admin overview still names missing settings.
 
 Preview deployments are usually behind Vercel's login, so use the production URL for everything below.
 
-### 4. Sign in
+### 4. Sign in, then connect Google Drive
 
-1. Open `https://<project>.vercel.app/` and click **Sign in with Google**. Choose **your own** account, accept
-   the unverified-app warning and allow Drive access. The overview should show that account as connected.
-   Grok's tools use this sign-in. Other people sign in with their own Google accounts and tick their own
+1. Open `https://<project>.vercel.app/` and click **Sign in with Google**. Choose **your own** account and
+   accept the unverified-app warning. Google asks only for your email address.
+2. You land on **Connections** (step 2 of 2). Click **Allow Bot RBAC to access Google Drive**. Google shows a
+   second screen for Drive access; allow it with the same account. The overview should now show Google Drive
+   as connected. Grok's tools use this connection. **Disconnect** on the same page deletes the stored token
+   and asks Google to revoke it. Other people sign in with their own Google accounts and tick their own
    files. Only `OWNER_EMAIL` can open `/admin`. If `ALLOWED_EMAILS` is set, any address not on that list
    is rejected.
 
@@ -235,8 +298,8 @@ Also disconnect Grok's built-in Google Drive connector so it can't bypass this s
 Grok Bot attaches a remote MCP server by URL and authenticates only with OAuth. It cannot use a static bearer.
 The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
 
-1. Finish dashboard sign-in and tick at least one folder.
-2. In the Grok Bot chat, say: Add this MCP server: https://scoped-drive-mcp.vercel.app/mcp
+1. Sign in, connect Google Drive, and tick at least one folder.
+2. In the Grok Bot chat, say: Add this MCP server: https://botrbac.com/mcp
 3. When the browser opens, sign in as the owner and click Allow.
 4. Do not paste the make_token.py secret into the Grok Bot chat. That token is only for the xAI API and the Grok Build CLI.
 5. Ask the bot to list allowed files. An unticked file should still return an approval link.
@@ -249,11 +312,23 @@ a token for `/mcp`.
 
 Muse (muse.ai) also connects with OAuth and registers itself. Leave any client id and secret empty.
 
-1. Finish dashboard sign-in and tick at least one folder.
+1. Sign in, connect Google Drive, and tick at least one folder.
 2. In Muse, add a custom connector for `https://<project>.vercel.app/mcp`.
 3. When the browser opens, sign in and click Allow.
 
 The same **Connected apps** list shows the Muse connection, and **Disconnect** stops it.
+
+### Connect Claude, ChatGPT or Dots
+
+All of these use the same `https://<project>.vercel.app/mcp` address and OAuth. Leave any client id and secret empty.
+
+- **Claude** (claude.ai, desktop, mobile): **Settings → Connectors → Add custom connector**.
+- **ChatGPT**: turn on developer mode, then **Settings → Apps → Create** and choose OAuth.
+- **Dots** (OpenAI dots): add the connector in ChatGPT first. Dots use the apps installed in your ChatGPT
+  account, so there is no separate setup.
+
+The server advertises `authorization_response_iss_parameter_supported`, so ChatGPT uses its stable
+`https://chatgpt.com/connector_platform_oauth_redirect` callback, which is on the allow list.
 
 ### 7. Test it
 
@@ -374,7 +449,7 @@ values in yourself.** They are never stored in this repo.
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | yes (phase 1) | from step (c); your own account. Optional once the dashboard sign-in is stored, and it overrides that sign-in if set |
 | `API_TOKENS` | yes | from step (d) |
 | `AUTH_MODE` | no | `oauth_bot` (the default and only mode) |
-| `MAX_BYTES` | no | max bytes downloaded per read (default `5242880`, 5 MB) |
+| `MAX_BYTES` | no | max bytes fetched per read (default `5242880`, 5 MB). `download_file` also caps the returned bytes at 1 MiB |
 | `MAX_CHARS` | no | max characters returned per read (default `100000`) |
 | `SCOPE_CACHE_TTL` | no | seconds to cache folder lookups (default `60`) |
 
@@ -406,7 +481,7 @@ Add the server as a remote MCP tool in `POST https://api.x.ai/v1/responses`:
       "server_url": "https://<project>.vercel.app/mcp",
       "server_label": "drive",
       "authorization": "<token from step d>",
-      "allowed_tools": ["search_files", "list_folder", "get_metadata", "read_file"]
+      "allowed_tools": ["search_files", "list_folder", "get_metadata", "read_file", "download_file"]
     }
   ]
 }
@@ -432,7 +507,13 @@ chat = client.chat.create(
             server_url="https://<project>.vercel.app/mcp",
             server_label="drive",
             authorization=os.environ["DRIVE_MCP_TOKEN"],
-            allowed_tool_names=["search_files", "list_folder", "get_metadata", "read_file"],
+            allowed_tool_names=[
+                "search_files",
+                "list_folder",
+                "get_metadata",
+                "read_file",
+                "download_file",
+            ],
         )
     ],
 )
@@ -541,12 +622,14 @@ After changing dependencies, regenerate Vercel's requirements file:
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection is an admin token on `/mcp` and still cannot pass the allowlist.
   Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
-  Redirect URLs are an exact allow list (Cursor, Grok Bot, Muse, and a local test callback).
+  Redirect URLs are an exact allow list (Claude, ChatGPT/Dots, Cursor, Grok Bot, Muse, and a local test callback).
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
-- The stored refresh token can reach the signed-in account's whole Drive. The allowlist is the limit, not a
-  second Google account.
+- New sign-ins request full Drive access (`https://www.googleapis.com/auth/drive`). The allowlist is still
+  checked first. A token saved with only `drive.file` keeps that narrower grant until that person signs in
+  again. Replace `GOOGLE_OAUTH_REFRESH_TOKEN` with `scripts/bootstrap_oauth.py` if it was minted with
+  `drive.file`. See [docs/google-verification.md](docs/google-verification.md).
 
 ## How the restriction works
 

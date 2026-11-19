@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 KEY_PREFIX = "sdm:"
 ALLOWLIST_KEY = "allowlist"
+# Items this person lets other people's assistants read (see external.py). Kept apart from
+# ALLOWLIST_KEY so an item can be shared with paired people without the owner's own bot
+# seeing it, and the reverse.
+EXTERNAL_ALLOWLIST_KEY = "ext_allowlist"
+# Who may read an external entry. v1 has one audience: anyone with an active mailbox
+# pairing with the owner. Per-person lists can be added later as another value.
+AUDIENCE_LINKED = "linked"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
 OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
@@ -775,6 +782,8 @@ class AllowEntry:
     request_id: str | None = None
     # The bot address `permission_id` belongs to; None when no Drive share was made.
     shared_with: str | None = None
+    # Only set on external entries: who may read it (AUDIENCE_LINKED in v1).
+    audience: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -790,16 +799,21 @@ class AllowEntry:
             granted_at=str(data.get("granted_at", "")),
             request_id=data.get("request_id"),
             shared_with=data.get("shared_with"),
+            audience=data.get("audience"),
         )
 
 
 class Allowlist:
-    def __init__(self, store: KeyValueStore):
+    """A hash of AllowEntry records. `key` picks which list: the owner's own-bot list
+    (ALLOWLIST_KEY) or the list shared with paired people (EXTERNAL_ALLOWLIST_KEY)."""
+
+    def __init__(self, store: KeyValueStore, key: str = ALLOWLIST_KEY):
         self.store = store
+        self.key = key
 
     def entries(self) -> dict[str, AllowEntry]:
         out: dict[str, AllowEntry] = {}
-        for file_id, raw in self.store.hgetall(ALLOWLIST_KEY).items():
+        for file_id, raw in self.store.hgetall(self.key).items():
             try:
                 out[file_id] = AllowEntry.from_json(raw)
             except (ValueError, KeyError, TypeError):
@@ -807,14 +821,14 @@ class Allowlist:
         return out
 
     def get(self, file_id: str) -> AllowEntry | None:
-        raw = self.store.hget(ALLOWLIST_KEY, file_id)
+        raw = self.store.hget(self.key, file_id)
         return AllowEntry.from_json(raw) if raw else None
 
     def add(self, entry: AllowEntry) -> None:
-        self.store.hset(ALLOWLIST_KEY, entry.id, entry.to_json())
+        self.store.hset(self.key, entry.id, entry.to_json())
 
     def remove(self, file_id: str) -> None:
-        self.store.hdel(ALLOWLIST_KEY, file_id)
+        self.store.hdel(self.key, file_id)
 
     def mime_map(self) -> dict[str, str]:
         return {fid: e.mime_type for fid, e in self.entries().items()}
@@ -838,11 +852,13 @@ class TokenVault:
     def enabled(self) -> bool:
         return self._fernet is not None
 
-    def _put(self, key: str, token: str, email: str) -> None:
+    def _put(self, key: str, token: str, email: str, scopes: str | None = None) -> None:
         if self._fernet is None:
             raise RuntimeError("ENCRYPTION_KEY is not set")
-        payload = json.dumps({"t": token, "email": email, "at": utc_now()})
-        self.store.set(key, self._fernet.encrypt(payload.encode()).decode())
+        payload: dict[str, str] = {"t": token, "email": email, "at": utc_now()}
+        if scopes:
+            payload["scopes"] = scopes
+        self.store.set(key, self._fernet.encrypt(json.dumps(payload).encode()).decode())
 
     def _take(self, key: str) -> dict[str, str] | None:
         if self._fernet is None:
@@ -857,8 +873,8 @@ class TokenVault:
         except (InvalidToken, ValueError):
             return None
 
-    def set_owner(self, token: str, email: str) -> None:
-        self._put(OWNER_TOKEN_KEY, token, email)
+    def set_owner(self, token: str, email: str, scopes: str | None = None) -> None:
+        self._put(OWNER_TOKEN_KEY, token, email, scopes)
 
     def owner(self) -> dict[str, str] | None:
         return self._take(OWNER_TOKEN_KEY)
@@ -949,6 +965,7 @@ def import_admin_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
         if dest.get(REDIS_IMPORT_FLAG):
             return
         _copy_hash(source, dest, KEY_PREFIX + ALLOWLIST_KEY)
+        _copy_hash(source, dest, KEY_PREFIX + EXTERNAL_ALLOWLIST_KEY)
         _copy_string(source, dest, KEY_PREFIX + OWNER_TOKEN_KEY)
         _copy_string(source, dest, KEY_PREFIX + BOT_TOKEN_KEY)
         _copy_list(source, dest, KEY_PREFIX + ACTIVITY_KEY)
@@ -1020,6 +1037,10 @@ class TenantDirectory:
     def has_owner_refresh(self, email: str) -> bool:
         record = self.vault_for(email).owner()
         return bool(record and record.get("t"))
+
+    def is_known_user(self, email: str) -> bool:
+        """Signed in at least once (step 1), or has a stored connection from before."""
+        return self.store.hget(USERS_INDEX, email) is not None or self.has_owner_refresh(email)
 
     def remember_user(self, email: str) -> None:
         if self.store.hget(USERS_INDEX, email) is None:

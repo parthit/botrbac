@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Connections{% endblock %}
+{% block content %}
+<section class="hero narrow">
+  <p class="eye">Step 2 of 2</p>
+  <h1>Connect your services.</h1>
+  <p class="sub">You are signed in as <b>{{ owner }}</b>. Connect a service so you can choose what an assistant may use from it. Nothing is reachable until you connect it and allow specific items.</p>
+</section>
+
+<div class="grid">
+  {% for row in rows %}
+  {% set conn = row.connection %}
+  <article class="card" id="connection-{{ conn.key }}">
+    <h2>{{ conn.name }}</h2>
+    <p>
+      {% if row.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
+      {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
+    </p>
+    <p class="muted">{{ conn.summary }}</p>
+    {% if row.connected %}
+    {% if row.needs_upgrade %}
+    <p class="warn">This connection only covers some of your Drive. Reconnect to allow full Drive access. Your current access keeps working until you do.</p>
+    <p class="disclosure">{{ conn.disclosure }}</p>
+    <form method="post" action="/connect/{{ conn.key }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button class="primary" type="submit">Reconnect {{ conn.name }}</button>
+    </form>
+    {% endif %}
+    <form class="inline" method="post" action="/connect/{{ conn.key }}/disconnect" data-confirm="Disconnect {{ conn.name }}? Assistants lose access to it immediately.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" type="submit">Disconnect</button>
+    </form>
+    {% else %}
+    <p class="disclosure">{{ conn.disclosure }}</p>
+    <form method="post" action="/connect/{{ conn.key }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button class="primary" type="submit">Allow Bot RBAC to access {{ conn.name }}</button>
+    </form>
+    {% endif %}
+  </article>
+  {% endfor %}
+  <article class="card">
+    <h2>More services</h2>
+    <p class="muted">Other services will appear here as they are added. Each one is its own permission, asked for only when you connect it.</p>
+  </article>
+</div>
+{% if next and next != "/" %}
+<p><a href="{{ next }}">Continue where you left off</a></p>
+{% endif %}
+{% endblock %}

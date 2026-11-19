@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 from collections.abc import Callable
@@ -19,16 +20,25 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
 
-SCHEMES = ("bearer", "bearer_and_x_automation_key")
+SCHEMES = ("bearer", "bearer_and_x_automation_key", "claude_routine")
 Lookup = Callable[[str], list[str]]
 Poster = Callable[[dict[str, str]], int]
+
+# Claude Code routine API trigger:
+# POST https://api.anthropic.com/v1/claude_code/routines/<routine_id>/fire
+# Bearer is a per-routine token (sk-ant-oat01-...) that can only start that one routine.
+CLAUDE_ROUTINE_HOST = "api.anthropic.com"
+CLAUDE_ROUTINE_PATH = re.compile(r"^/v1/claude_code/routines/[A-Za-z0-9_-]{1,128}/fire$")
+CLAUDE_API_VERSION = "2023-06-01"
+CLAUDE_ROUTINE_BETA = "experimental-cc-routine-2026-04-01"
+DEFAULT_ALLOWLIST = ("api2.cursor.sh", CLAUDE_ROUTINE_HOST)
 
 
 @dataclass(frozen=True)
 class WakeSettings:
     enabled: bool = False
     kek: bytes | None = None
-    allowlist: tuple[str, ...] = ("api2.cursor.sh",)
+    allowlist: tuple[str, ...] = DEFAULT_ALLOWLIST
     timeout: float = 4.0
     lookup: Lookup | None = None
     poster: Poster | None = None
@@ -103,6 +113,27 @@ def payload(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def check_scheme_target(scheme: str, host: str, path: str) -> None:
+    """A claude_routine wake may only go to a routine fire URL on api.anthropic.com,
+    and that host only takes claude_routine wakes."""
+    is_claude = host == CLAUDE_ROUTINE_HOST
+    if scheme == "claude_routine" and not (is_claude and CLAUDE_ROUTINE_PATH.match(path)):
+        raise ValueError("invalid_webhook_url")
+    if is_claude and scheme != "claude_routine":
+        raise ValueError("invalid_webhook_url")
+
+
+def body_for(scheme: str, message: dict[str, Any]) -> str:
+    """The ping body. Still ids and a timestamp only, never message text.
+
+    A Claude routine reads only the `text` field (as a literal string) and ignores
+    the rest, so the same JSON goes there as a string."""
+    event = json.dumps(payload(message), separators=(",", ":"))
+    if scheme == "claude_routine":
+        return json.dumps({"text": event}, separators=(",", ":"))
+    return event
+
+
 def headers_for(scheme: str, secret: str) -> dict[str, str]:
     headers = {
         "content-type": "application/json",
@@ -114,6 +145,10 @@ def headers_for(scheme: str, secret: str) -> dict[str, str]:
     elif scheme == "bearer_and_x_automation_key":
         headers["authorization"] = f"Bearer {secret}"
         headers["x-automation-key"] = secret
+    elif scheme == "claude_routine":
+        headers["authorization"] = f"Bearer {secret}"
+        headers["anthropic-version"] = CLAUDE_API_VERSION
+        headers["anthropic-beta"] = CLAUDE_ROUTINE_BETA
     else:
         raise ValueError("invalid_input")
     return headers
@@ -122,15 +157,16 @@ def headers_for(scheme: str, secret: str) -> dict[str, str]:
 def deliver(settings: WakeSettings, record: dict[str, Any], message: dict[str, Any]) -> int:
     if not settings.kek:
         raise ValueError("webhook_disabled")
+    scheme = str(record.get("scheme") or "bearer")
     host, path, address = approve_url(str(record["url"]), settings.allowlist, settings.lookup)
+    check_scheme_target(scheme, host, path)
     secret = open_secret(str(record["ciphertext"]), str(record["nonce"]), settings.kek)
-    body = json.dumps(payload(message), separators=(",", ":"))
     request = {
         "hostname": host,
         "path": path,
         "address": address,
-        "body": body,
-        **headers_for(str(record.get("scheme") or "bearer"), secret),
+        "body": body_for(scheme, message),
+        **headers_for(scheme, secret),
     }
     poster = settings.poster or _post
     status = poster(request)

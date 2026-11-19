@@ -4,23 +4,31 @@
 <h1>Recent activity</h1>
 <p class="muted">The last 500 audit events (newest first). Contents, names and search text are never logged.
   The Item column is a Drive id, not a file name.</p>
-<div class="scroll-x">
-<table>
+{% if records %}
+<table class="cards">
   <thead><tr><th>Time (UTC)</th><th>Who</th><th>What</th><th>Item</th><th>Decision</th><th>Reason</th></tr></thead>
   <tbody>
   {% for r in records %}
   <tr>
-    <td class="muted">{{ r.ts }}</td>
-    <td>{% if r.event == "owner" %}owner{% elif r.event == "auth" %}<span class="muted">unknown</span>{% else %}{{ r.token_name or "—" }}{% endif %}</td>
-    <td>{{ r.tool or r.action or r.path or r.event }}</td>
-    <td><code>{{ r.file_id or r.folder_id or r.parent_id or r.request_id or "" }}</code></td>
-    <td><span class="pill {{ 'ok' if r.decision == 'allow' else 'bad' }}">{{ r.decision }}</span></td>
-    <td class="muted">{{ r.reason or "" }}</td>
+    <td data-label="Time (UTC)" class="muted">{{ r.ts }}</td>
+    <td data-label="Who">{% if r.event == "owner" %}You{% elif r.event == "auth" %}<span class="muted">Unknown</span>{% else %}{{ r.token_name or "—" }}{% endif %}</td>
+    <td data-label="What">{{ r.tool or r.action or r.path or r.event }}</td>
+    <td data-label="Item"><code>{{ r.file_id or r.folder_id or r.parent_id or r.request_id or "" }}</code></td>
+    <td data-label="Decision">
+      <span class="pill {{ 'ok' if r.decision == 'allow' else 'bad' }}">
+        <span aria-hidden="true">{{ '✓' if r.decision == 'allow' else '!' }}</span>
+        {{ status_label(r.decision) }}
+      </span>
+    </td>
+    <td data-label="Reason" class="muted">{{ r.reason or "" }}</td>
   </tr>
-  {% else %}
-  <tr><td colspan="6" class="muted">No activity yet.</td></tr>
   {% endfor %}
   </tbody>
 </table>
+{% else %}
+<div class="card empty">
+  <h2>No activity yet</h2>
+  <p>Allow a file or connect an assistant, and events will show up here. File contents are not written to this log.</p>
 </div>
+{% endif %}
 {% endblock %}

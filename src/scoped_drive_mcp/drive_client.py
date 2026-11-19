@@ -9,6 +9,7 @@ which the dashboard uses with the owner's own credentials.
 """
 
 import io
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -16,6 +17,9 @@ from typing import Any, Protocol
 
 from .config import Settings
 
+# The signed-in account's Drive. The server allowlist, not this scope, decides
+# what an assistant can open. A stored token that only has drive.file cannot see
+# files this app did not create or the user did not pick, so those people sign in again.
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint, not a secret
 
@@ -29,6 +33,24 @@ UPDATE_METADATA_KEYS = frozenset({"name", "trashed"})
 
 class DriveNotFoundError(Exception):
     """The file does not exist or the identity cannot see it."""
+
+
+class DriveAccessError(Exception):
+    """Drive refused a list because this sign-in cannot run it."""
+
+
+def drive_field_mask(fields: str) -> str:
+    """Request shortcut targets explicitly.
+
+    `files.list` rejects a bare `shortcutDetails` object. `files.get` accepts the
+    same `shortcutDetails(targetId)` mask and still returns the target id.
+    """
+    return re.sub(r"shortcutDetails(?!\()", "shortcutDetails(targetId)", fields)
+
+
+def _http_status(exc: BaseException) -> int | None:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return status if isinstance(status, int) else None
 
 
 OWNER_NOT_SIGNED_IN = (
@@ -109,6 +131,13 @@ class CredentialsProvider(Protocol):
 
 
 def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
+    """Build user credentials without pinning a scope on refresh.
+
+    Google binds a refresh token to the scopes granted when it was issued. Sending
+    a different `scope` on refresh would reject a token that still has only
+    `drive.file`. Omitting `scopes` keeps whichever grant that token already has.
+    New sign-ins request `DRIVE_SCOPE` (full Drive) in the authorization URL.
+    """
     from google.oauth2.credentials import Credentials
 
     assert settings.google_oauth_client_id is not None
@@ -119,7 +148,7 @@ def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
         client_id=settings.google_oauth_client_id.get_secret_value(),
         client_secret=settings.google_oauth_client_secret.get_secret_value(),
         token_uri=TOKEN_URI,
-        scopes=[DRIVE_SCOPE],
+        scopes=None,
     )
 
 
@@ -172,25 +201,59 @@ class GoogleDriveClient:
             raise
 
     def get_file(self, file_id: str, fields: str) -> dict[str, Any]:
+        from googleapiclient.errors import HttpError
+
         files = self._service().files()
-        return self._execute(files.get(fileId=file_id, fields=fields, supportsAllDrives=True))
+        try:
+            return self._execute(
+                files.get(
+                    fileId=file_id,
+                    fields=drive_field_mask(fields),
+                    supportsAllDrives=True,
+                )
+            )
+        except HttpError as exc:
+            # drive.file hides a file this app has never opened. Google uses 404 or 403
+            # for that, and callers already treat "not visible" as missing.
+            if _http_status(exc) == 403:
+                raise DriveNotFoundError("403") from None
+            raise
 
     def list_files(
         self, q: str, fields: str, page_size: int, page_token: str | None = None
     ) -> dict[str, Any]:
+        from googleapiclient.errors import HttpError
+
         files = self._service().files()
-        return self._execute(
-            files.list(
-                q=q,
-                fields=f"nextPageToken, files({fields})",
-                pageSize=page_size,
-                pageToken=page_token,
-                spaces="drive",
-                corpora="allDrives",
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-            )
-        )
+        # corpora=allDrives needs the full Drive scope. A drive.file sign-in is rejected
+        # (403, sometimes 400). Listing again without corpora still returns files this
+        # app created or the user picked, including shared-drive files opened that way.
+        common = {
+            "q": q,
+            "fields": f"nextPageToken, files({drive_field_mask(fields)})",
+            "pageSize": page_size,
+            "pageToken": page_token,
+            "spaces": "drive",
+            "includeItemsFromAllDrives": True,
+            "supportsAllDrives": True,
+        }
+
+        def run(extra: dict[str, Any]) -> dict[str, Any]:
+            return self._execute(files.list(**common, **extra))
+
+        try:
+            return run({"corpora": "allDrives"})
+        except HttpError as exc:
+            if _http_status(exc) not in (400, 403):
+                raise
+            try:
+                return run({})
+            except HttpError as again:
+                if _http_status(again) in (400, 403):
+                    raise DriveAccessError(
+                        "Google Drive refused to list files for this sign-in"
+                    ) from None
+                raise
 
     def export(self, file_id: str, mime_type: str) -> bytes:
         files = self._service().files()

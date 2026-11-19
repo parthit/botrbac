@@ -18,12 +18,24 @@ from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 
 logger = logging.getLogger(__name__)
 
-VIEWER_TOOLS: frozenset[str] = frozenset(
+# Reading what another person shared with paired assistants. These run as that person's
+# guest: read-only, limited to their external list, whatever role this connection has.
+GUEST_TOOLS: frozenset[str] = frozenset(
+    {
+        "list_shared_with_me",
+        "list_shared_folder",
+        "read_shared_file",
+        "download_shared_file",
+    }
+)
+
+VIEWER_TOOLS: frozenset[str] = GUEST_TOOLS | frozenset(
     {
         "search_files",
         "list_folder",
         "get_metadata",
         "read_file",
+        "download_file",
         "request_access",
         "check_access_request",
         "request_link",
@@ -55,7 +67,7 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
-_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id")
+_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id", "owner")
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
 ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]

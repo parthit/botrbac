@@ -60,6 +60,13 @@ ALLOWED_REDIRECT_URIS = frozenset(
         "https://muse.ai/api/hatch/oauth/callback",
         "https://agent.meta.ai/api/hatch/oauth/callback",
         "https://platform.muse.ai/oauth/credential-test/callback",
+        # Claude (claude.ai, Claude Desktop, Claude mobile). Custom connectors are
+        # brokered by Anthropic and always send one of these callbacks.
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
+        # ChatGPT apps/connectors, which OpenAI dots also use. ChatGPT sends this stable
+        # callback because the metadata below advertises RFC 9207 `iss` support.
+        "https://chatgpt.com/connector_platform_oauth_redirect",
         "http://localhost:8787/callback",
         "http://127.0.0.1:8787/callback",
     }
@@ -323,9 +330,9 @@ class McpOAuth:
         self.base_url = base_url.rstrip("/")
         self.owner_email = owner_email
         # A person may approve, finish, exchange and refresh only after they have
-        # signed in (a stored owner refresh token). A forged session with no token
-        # still fails. `signed_in` is optional so a caller can keep the old
-        # owner-only check.
+        # signed in and connected Google Drive (a stored owner refresh token, step 2).
+        # Signing in alone, or a forged session with no token, still fails.
+        # `signed_in` is optional so a caller can keep the old owner-only check.
         self.signed_in = signed_in
         self.resource = resource_identifier(self.base_url)
         self.metadata_url = protected_resource_metadata_url(self.base_url)
@@ -401,6 +408,8 @@ class McpOAuth:
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": [SCOPE],
             "response_modes_supported": ["query"],
+            # Every authorization response (success or error) carries `iss`.
+            "authorization_response_iss_parameter_supported": True,
         }
 
     def routes(self) -> list[Route]:

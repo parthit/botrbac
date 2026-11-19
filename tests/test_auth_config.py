@@ -110,4 +110,7 @@ def test_build_credentials_oauth_bot() -> None:
     assert creds.refresh_token == REFRESH_TOKEN
     assert creds.client_id == CLIENT_ID
     assert creds.token_uri == TOKEN_URI
-    assert creds.scopes == [DRIVE_SCOPE]
+    # Refresh omits a scope list so a full-Drive token and a leftover
+    # drive.file token both keep working.
+    assert creds.scopes is None
+    assert DRIVE_SCOPE == "https://www.googleapis.com/auth/drive"

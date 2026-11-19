@@ -1,7 +1,11 @@
-"""Web dashboard: Google sign-in, Drive browser, allowlist, access requests, activity.
+"""Web dashboard: sign-in, connections, Drive browser, allowlist, access requests, activity.
 
-Authentication is a signed, httponly, SameSite=Lax session cookie set after a verified
-Google sign-in that granted Drive access. Each person then sees only their own Drive.
+Google is asked twice. Step 1 (`/auth/login`) signs the person in with `openid` and
+`email` only, and sets a signed, httponly, SameSite=Lax session cookie. Step 2
+(`/connect`) is a separate, explicit choice that asks for the wider scopes of one
+connection (Google Drive today, see `connections.py`) and stores that refresh token.
+Pages that need Drive send a signed-in person without a connection to `/connect`.
+Each person sees only their own data.
 `OWNER_EMAIL` is the admin and the only account that can open `/admin`. MCP bearer tokens
 are never consulted here, and the MCP endpoint never reads this cookie (it is a separate
 ASGI app behind BearerAuthMiddleware). Every POST requires the per-session CSRF token, and
@@ -11,6 +15,7 @@ a cross-origin `Origin` is refused.
 import hmac
 import html
 import logging
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -26,7 +31,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -35,6 +40,7 @@ from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
 from .config import Settings
+from .connections import CONNECTIONS, Connection, get_connection
 from .drive_client import (
     DRIVE_SCOPE,
     FOLDER_MIME,
@@ -43,11 +49,13 @@ from .drive_client import (
     LazyBotDriveClient,
     OwnerDriveClient,
 )
+from .errors import report_exception
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
-from .oauth import OAuthClient, OAuthError
+from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
+from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
-from .store import ActivityLog, Allowlist, TokenVault
+from .store import AUDIENCE_LINKED, ActivityLog, Allowlist, TokenVault
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +86,26 @@ SECURITY_HEADERS = [
     (b"cache-control", b"no-store"),
     (
         b"content-security-policy",
-        b"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        b"form-action 'self' https://accounts.google.com; frame-ancestors 'none'; "
-        b"base-uri 'none'",
+        # Google Picker loads api.js from apis.google.com (that script evaluates code),
+        # then opens Drive in a frame. frame-ancestors stays none so this site is not embedded.
+        b"default-src 'self'; "
+        b"script-src 'self' https://apis.google.com https://www.gstatic.com 'unsafe-eval'; "
+        b"style-src 'self' 'unsafe-inline'; "
+        b"img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; "
+        b"connect-src 'self' https://www.googleapis.com https://content.googleapis.com; "
+        b"frame-src https://docs.google.com https://drive.google.com https://accounts.google.com "
+        b"https://content.googleapis.com https://*.google.com https://*.googleusercontent.com; "
+        b"worker-src 'self' blob:; "
+        b"form-action 'self' https://accounts.google.com; "
+        b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
     ),
 ]
 
+_LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 class OwnerNotConnectedError(Exception):
-    """No stored refresh token for the owner (sign in again)."""
+    """Signed in, but Google Drive is not connected yet (send them to /connect)."""
 
 
 @dataclass
@@ -105,6 +124,9 @@ class DashboardContext:
     directory: Any = None
     drive_router: Any = None
     mailbox: Any = None
+    # The list other people's assistants may read (external.py). None disables Sharing.
+    ext_allowlist: Allowlist | None = None
+    on_ext_change: Callable[[], None] = lambda: None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -133,6 +155,25 @@ class DashboardContext:
             on_change=self.on_allowlist_change,
         )
 
+    def ext_grants(self) -> GrantService:
+        """Grant and revoke on the external list. Same checks as the own-bot list (the item
+        must be in this person's Drive, not trashed, not My Drive's root; a shortcut adds
+        its target). No Drive permission is created."""
+        if self.ext_allowlist is None:
+            raise GrantError("Sharing is not set up on this server.")
+        return GrantService(
+            self.owner_drive,
+            self.ext_allowlist,
+            self.requests,
+            None,
+            on_change=self.on_ext_change,
+            audience=AUDIENCE_LINKED,
+            audit_actions=("share_external", "unshare_external"),
+        )
+
+    def ext_ids(self) -> set[str]:
+        return set(self.ext_allowlist.entries()) if self.ext_allowlist is not None else set()
+
     def visible_root_folder_id(self) -> str | None:
         """The deployment root is the admin's folder. Other people do not see its id."""
         if self._admin_actor():
@@ -158,6 +199,47 @@ class DashboardContext:
 
     def owner_connected(self) -> bool:
         return bool(self.vault.enabled and self.vault.owner())
+
+    def drive_connected(self) -> bool:
+        """Step 2 is done: a Google Drive refresh token is stored for this person."""
+        if not self.vault.enabled:
+            return False
+        record = self.vault.owner()
+        return bool(record and record.get("t"))
+
+    def connection_rows(self) -> list[dict[str, Any]]:
+        """Each connection and whether this person has finished it."""
+        rows = []
+        for conn in CONNECTIONS.values():
+            connected = self.drive_connected() if conn.key == "google_drive" else False
+            # A stored token without the full scope (old drive.file, or no scope stamp)
+            # still works for what it covers, but has to be upgraded by connecting again.
+            needs_upgrade = connected and conn.key == "google_drive" and self.reconsent_needed()
+            rows.append(
+                {"connection": conn, "connected": connected, "needs_upgrade": needs_upgrade}
+            )
+        return rows
+
+    def disconnect_drive(self) -> str | None:
+        """Forget this person's Drive token. Returns the token so Google can revoke it."""
+        record = self.vault.owner() if self.vault.enabled else None
+        token = record.get("t") if record else None
+        self.vault.clear_owner()
+        return token
+
+    def reconsent_needed(self) -> bool:
+        """True when the saved sign-in cannot see the whole Drive.
+
+        A missing scope stamp, or a token that only has drive.file, has to sign in
+        again. A token that already includes full Drive does not.
+        """
+        if not self.vault.enabled:
+            return False
+        record = self.vault.owner()
+        if not record or not record.get("t"):
+            return False
+        scopes = set(str(record.get("scopes") or "").split())
+        return DRIVE_SCOPE not in scopes
 
 
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -218,6 +300,9 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     pending_count = ctx.pop("pending_count", None)
     if pending_count is None:
         pending_count = getattr(request.state, "pending_count", 0)
+    reconsent = ctx.pop("reconsent", None)
+    if reconsent is None:
+        reconsent = getattr(request.state, "reconsent", False)
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -226,13 +311,16 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         flashes=request.session.pop("flash", []) if owner else [],
         nav=request.url.path,
         pending_count=pending_count,
+        reconsent=reconsent,
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)
 
 
 def render_plain(template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
-    html = _env.get_template(template).render(owner=None, csrf=None, flashes=[], nav="", **ctx)
+    html = _env.get_template(template).render(
+        owner=None, csrf=None, flashes=[], nav="", reconsent=False, pending_count=0, **ctx
+    )
     return HTMLResponse(html, status_code=status_code)
 
 
@@ -244,11 +332,68 @@ async def privacy_page(_: Request) -> Response:
     return render_plain("privacy.html")
 
 
+def _file_response(name: str, media: str) -> Response:
+    return Response((TEMPLATES_DIR / name).read_bytes(), media_type=media)
+
+
+def favicon(_: Request) -> Response:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img">'
+        '<rect width="64" height="64" rx="14" fill="#f6f2ea"/>'
+        '<g transform="translate(3.8 4.975) scale(2.35)">'
+        '<path id="scoped-mark" fill="#1e1915" fill-rule="evenodd" '
+        'd="M5 20V10a7 7 0 0 1 14 0v10h-3.2V10a3.8 3.8 0 0 0-7.6 0v10H5z"/>'
+        "</g></svg>"
+    )
+    return Response(svg, media_type="image/svg+xml")
+
+
+_FONT_FILES = {
+    "geist-400.woff2": "fonts/geist-400.woff2",
+    "geist-500.woff2": "fonts/geist-500.woff2",
+    "geist-600.woff2": "fonts/geist-600.woff2",
+    "geist-mono-500.woff2": "fonts/geist-mono-500.woff2",
+}
+
+
+def font_asset(request: Request) -> Response:
+    rel = _FONT_FILES.get(request.path_params["name"])
+    if rel is None:
+        return Response(status_code=404)
+    return _file_response(rel, "font/woff2")
+
+
+def robots(_: Request) -> Response:
+    body = (
+        "User-agent: *\n"
+        "Allow: /$\n"
+        "Allow: /login\n"
+        "Allow: /privacy\n"
+        "Allow: /terms\n"
+        "Disallow: /\n"
+    )
+    return Response(body, media_type="text/plain; charset=utf-8")
+
+
+def stylesheet(_: Request) -> Response:
+    return _file_response("app.css", "text/css; charset=utf-8")
+
+
+def ui_script(_: Request) -> Response:
+    return _file_response("ui.js", "text/javascript; charset=utf-8")
+
+
 def legal_routes() -> list[Route]:
-    """Public /terms and /privacy. Google's OAuth screen links here with no session."""
+    """Public pages and assets. Google's OAuth screen links to /terms and /privacy."""
     return [
         Route("/terms", terms_page, methods=["GET"]),
         Route("/privacy", privacy_page, methods=["GET"]),
+        Route("/favicon.ico", favicon, methods=["GET"]),
+        Route("/favicon.svg", favicon, methods=["GET"]),
+        Route("/robots.txt", robots, methods=["GET"]),
+        Route("/app.css", stylesheet, methods=["GET"]),
+        Route("/ui.js", ui_script, methods=["GET"]),
+        Route("/fonts/{name}", font_asset, methods=["GET"]),
     ]
 
 
@@ -283,15 +428,30 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except Exception:
             logger.exception("pending request count failed")
             request.state.pending_count = 0
+        try:
+            request.state.reconsent = await blocking(ctx.reconsent_needed)
+        except Exception:
+            logger.exception("reconsent check failed")
+            request.state.reconsent = False
 
     def session_user(request: Request) -> str | None:
-        """Signed-in email, only if that tenant still has a stored owner refresh token."""
+        """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
         owner = request.session.get("owner")
         if not isinstance(owner, str) or not owner or ctx.directory is None:
             return None
-        if not ctx.directory.has_owner_refresh(owner):
+        if not settings.sign_in_allowed(owner):
+            return None
+        if not ctx.directory.is_known_user(owner):
             return None
         return owner
+
+    def connect_redirect(request: Request) -> RedirectResponse:
+        target = request.url.path
+        if request.url.query:
+            target += "?" + request.url.query
+        if request.method != "GET":
+            target = "/"
+        return RedirectResponse(f"/connect?{urlencode({'next': target})}", status_code=303)
 
     def owner_only(handler: Handler) -> Handler:
         async def wrapped(request: Request) -> Response:
@@ -308,12 +468,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 await remember_pending(request)
                 return await handler(request)
             except OwnerNotConnectedError:
-                request.session.clear()
-                return RedirectResponse("/login", status_code=303)
+                return connect_redirect(request)
             except InvalidInputError as exc:
                 return render(request, "error.html", 400, message=str(exc))
-            except Exception:
-                logger.exception("dashboard request failed")
+            except Exception as exc:
+                report_exception(exc, where="dashboard")
                 return render(
                     request, "error.html", 502, message="A Google Drive request failed. Try again."
                 )
@@ -347,20 +506,74 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- sign-in -------------------------------------------------------
 
-    def start_oauth(request: Request, flow: str, login_hint: str | None) -> RedirectResponse:
+    def start_oauth(
+        request: Request,
+        flow: str,
+        login_hint: str | None,
+        connection: Connection | None = None,
+    ) -> RedirectResponse:
+        """Step 1 (`flow="signin"`) or step 2 (`flow="connect"` with a connection)."""
         nonce = secrets.token_urlsafe(24)
         request.session["oauth_nonce"] = nonce
-        state = serializer.dumps({"flow": flow, "nonce": nonce})
-        return RedirectResponse(oauth.authorization_url(state, login_hint), status_code=303)
+        payload: dict[str, str] = {"flow": flow, "nonce": nonce}
+        if connection is None:
+            url_scopes = SIGN_IN_SCOPES
+            offline = False
+        else:
+            payload["connection"] = connection.key
+            url_scopes = SIGN_IN_SCOPES + connection.scopes
+            offline = True
+        state = serializer.dumps(payload)
+        url = oauth.authorization_url(state, login_hint, scopes=url_scopes, offline=offline)
+        return RedirectResponse(url, status_code=303)
+
+    async def login_rate_limited(request: Request) -> Response | None:
+        ip = client_ip(
+            [(k.encode(), v.encode()) for k, v in request.headers.items()],
+            request.client.host if request.client else "unknown",
+        )
+        allowed = await blocking(
+            allow,
+            ctx.store,
+            "login",
+            "ip:" + ip,
+            settings.login_rate_limit,
+            settings.login_rate_window_seconds,
+        )
+        if allowed:
+            return None
+        page = render(
+            request,
+            "error.html",
+            429,
+            message=(
+                "Too many sign-in attempts from this network. Wait a few minutes and try again."
+            ),
+        )
+        page.headers["retry-after"] = str(settings.login_rate_window_seconds)
+        return page
 
     async def login(request: Request) -> Response:
         if session_user(request):
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
         return render(request, "login.html", next=safe_next(request.query_params.get("next")))
 
+    def supplied_login_hint(request: Request) -> str | None:
+        """A hint only when this visitor typed one. Never the server's owner address."""
+        raw = request.query_params.get("login_hint")
+        if not isinstance(raw, str):
+            return None
+        raw = raw.strip().lower()
+        if not raw or len(raw) > 254 or not _LOGIN_HINT.fullmatch(raw):
+            return None
+        return raw
+
     async def auth_login(request: Request) -> Response:
+        limited = await login_rate_limited(request)
+        if limited is not None:
+            return limited
         request.session["oauth_next"] = safe_next(request.query_params.get("next"))
-        return start_oauth(request, "owner", settings.owner_email)
+        return start_oauth(request, "signin", supplied_login_hint(request))
 
     async def auth_callback(request: Request) -> Response:
         params = request.query_params
@@ -377,7 +590,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
         ):
             return render(request, "error.html", 400, message="Sign-in expired. Try again.")
-        if data.get("flow") != "owner":
+        flow = data.get("flow")
+        if flow not in ("signin", "connect"):
             return render(request, "error.html", 400, message="Invalid sign-in state.")
         code = params.get("code")
         if not code:
@@ -400,14 +614,77 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 403,
                 message="This Google account is not allowed to use this dashboard.",
             )
-        if DRIVE_SCOPE not in tokens.scopes:
-            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+        if flow == "connect":
+            return await finish_connect(request, data, tokens, email)
+        return await finish_sign_in(request, email)
+
+    async def finish_sign_in(request: Request, email: str) -> Response:
+        """Step 1 done. Nothing from Google is stored except that this address signed in."""
+        if ctx.directory is not None:
+            reset = current_actor.set(email)
+            try:
+                await blocking(ctx.directory.remember_user, email)
+            finally:
+                current_actor.reset(reset)
+        next_url = safe_next(request.session.get("oauth_next"))
+        request.session.clear()
+        request.session["owner"] = email
+        request.session["csrf"] = secrets.token_urlsafe(32)
+        audit_owner("login")
+        reset = current_actor.set(email)
+        try:
+            connected = await blocking(ctx.drive_connected)
+        finally:
+            current_actor.reset(reset)
+        if not connected:
+            # Step 2 is its own page and its own click, never chained silently.
+            return RedirectResponse(f"/connect?{urlencode({'next': next_url})}", status_code=303)
+        return RedirectResponse(next_url, status_code=303)
+
+    async def finish_connect(
+        request: Request, data: dict[str, Any], tokens: Any, email: str
+    ) -> Response:
+        """Step 2 done. Store the refresh token for the signed-in person."""
+
+        async def refuse_token() -> None:
+            # Google's revoke ends this app's whole grant for that Google account, which
+            # would also kill a token already stored for it (a reconnect that was
+            # declined, or another person's account). Only revoke when none is stored.
+            if ctx.directory is not None:
+                stored = await blocking(ctx.directory.has_owner_refresh, email)
+            else:
+                stored = True
+            if not stored:
+                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+
+        signed_in = session_user(request)
+        connection = get_connection(str(data.get("connection") or ""))
+        if not signed_in or connection is None:
+            await refuse_token()
+            return render(request, "error.html", 400, message="Sign in first, then connect.")
+        if email != signed_in:
+            # The Drive an assistant uses must belong to the person who signed in.
+            await refuse_token()
+            audit_owner("connect", "deny", reason="different_account")
+            return render(
+                request,
+                "error.html",
+                403,
+                message=(
+                    f"You are signed in as {signed_in}, but Google returned a different "
+                    f"account. Connect {connection.name} with {signed_in}."
+                ),
+            )
+        if connection.required_scope not in tokens.scopes:
+            await refuse_token()
             return render(
                 request,
                 "error.html",
                 400,
-                message="Google Drive access was not granted. Sign in again and tick the "
-                "Drive checkbox on Google's consent screen.",
+                message=(
+                    f"{connection.name} access was not granted. Choose Connect again and "
+                    f"allow access to your Drive."
+                ),
             )
         if not tokens.refresh_token:
             return render(
@@ -420,18 +697,55 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         reset = current_actor.set(email)
         try:
-            await blocking(ctx.vault.set_owner, tokens.refresh_token, email)
+            scope_stamp = " ".join(sorted(tokens.scopes))
+            await blocking(ctx.vault.set_owner, tokens.refresh_token, email, scope_stamp)
             if ctx.directory is not None:
                 await blocking(ctx.directory.remember_user, email)
         finally:
             current_actor.reset(reset)
-        next_url = safe_next(request.session.get("oauth_next"))
-        request.session.clear()
-        request.session["owner"] = email
-        request.session["csrf"] = secrets.token_urlsafe(32)
         ctx.forget_drive(email)
-        audit_owner("login")
+        audit_owner("connect", connection=connection.key)
+        next_url = safe_next(request.session.pop("oauth_next", None))
+        flash(request, "ok", f"{connection.name} is connected.")
         return RedirectResponse(next_url, status_code=303)
+
+    # ---- connections (step 2) -------------------------------------------
+
+    async def connect_page(request: Request) -> Response:
+        rows = await blocking(ctx.connection_rows)
+        next_url = safe_next(request.query_params.get("next"))
+        if next_url.startswith("/connect"):
+            next_url = "/"
+        return render(request, "connect.html", rows=rows, next=next_url)
+
+    async def connect_start(request: Request, form: dict[str, str]) -> Response:
+        connection = get_connection(request.path_params.get("key"))
+        if connection is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        limited = await login_rate_limited(request)
+        if limited is not None:
+            return limited
+        request.session["oauth_next"] = safe_next(form.get("next"))
+        return start_oauth(request, "connect", current_actor.get() or None, connection)
+
+    async def connect_remove(request: Request, form: dict[str, str]) -> Response:
+        connection = get_connection(request.path_params.get("key"))
+        if connection is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        email = current_actor.get()
+        token = await blocking(ctx.disconnect_drive)
+        if token:
+            # Google's revoke also ends this app's sign-in grant. Step 1 holds no token,
+            # so the dashboard session is unaffected.
+            await blocking(oauth.revoke, token)
+        ctx.forget_drive(email)
+        audit_owner("disconnect", connection=connection.key)
+        flash(
+            request,
+            "ok",
+            f"{connection.name} is disconnected. Assistants can no longer reach it.",
+        )
+        return RedirectResponse("/connect", status_code=303)
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
@@ -459,6 +773,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return {
                 "bot": bot,
                 "owner_connected": ctx.owner_connected(),
+                "connections": ctx.connection_rows(),
                 "allow_count": len(entries),
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
@@ -473,15 +788,30 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             store_kind=getattr(ctx.store, "kind", "custom"),
             root_folder_id=ctx.visible_root_folder_id(),
             mcp_url=f"{settings.app_base_url}/mcp",
+            picker_ready=settings.picker_configured,
+            env_token_set=bool(
+                settings.env_bot_refresh_token and session_user(request) == settings.owner_email
+            ),
             **data,
         )
 
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
         drive = ctx.owner_drive()
-        root_id = str(drive.get_file("root", fields="id")["id"])
+        # drive.file cannot files.get("root") until the app has opened My Drive.
+        # The alias still works in a parents query, which is enough to list files
+        # this app created or the user picked.
+        root_id: str | None
+        try:
+            root_id = str(drive.get_file("root", fields="id")["id"])
+        except DriveNotFoundError:
+            root_id = None
         entries = ctx.allowlist.entries()
+        shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
         covered_by: str | None = None
+        # The nearest folder on the Sharing list above the one being browsed. Everything
+        # inside it is readable by paired people's assistants, as the guest guard allows.
+        shared_by: str | None = None
         next_token: str | None = None
         current: dict[str, Any] | None = None
         if q:
@@ -490,13 +820,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             resp = drive.list_files(query, fields=OWNER_FIELDS, page_size=100)
             items = resp.get("files", [])
         else:
-            folder_id = root_id if folder == "root" else validate_drive_id(folder, "folder")
-            try:
-                current = drive.get_file(folder_id, fields=OWNER_FIELDS)
-            except DriveNotFoundError:
-                raise InvalidInputError("folder not found in your Drive") from None
-            if current.get("mimeType") != FOLDER_MIME:
-                raise InvalidInputError("that is not a folder")
+            if folder == "root":
+                folder_id = root_id or "root"
+            else:
+                folder_id = validate_drive_id(folder, "folder")
+            if folder_id == "root":
+                current = {
+                    "id": "root",
+                    "name": "My Drive",
+                    "mimeType": FOLDER_MIME,
+                    "parents": [],
+                }
+            else:
+                try:
+                    current = drive.get_file(folder_id, fields=OWNER_FIELDS)
+                except DriveNotFoundError:
+                    raise InvalidInputError("folder not found in your Drive") from None
+                if current.get("mimeType") != FOLDER_MIME:
+                    raise InvalidInputError("that is not a folder")
             node: dict[str, Any] | None = current
             seen: set[str] = set()
             while node is not None and len(crumbs) < MAX_BREADCRUMBS:
@@ -504,22 +845,32 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 if nid in seen:
                     break
                 seen.add(nid)
-                name = "My Drive" if nid == root_id else str(node.get("name", ""))
-                crumbs.insert(0, {"id": nid, "name": name})
+                name = "My Drive" if nid == root_id or nid == "root" else str(node.get("name", ""))
+                crumbs.insert(0, {"id": "root" if nid == root_id else nid, "name": name})
                 if covered_by is None and nid in entries:
                     covered_by = name
+                if shared_by is None and nid in shared:
+                    shared_by = name
                 parents = node.get("parents") or []
-                if nid == root_id or not parents:
+                if nid == root_id or nid == "root" or not parents:
                     break
                 try:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            query = f"{parents_clause([folder_id])} and trashed=false"
+            if folder_id == "root":
+                query = "'root' in parents and trashed=false"
+            else:
+                query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
                 query, fields=OWNER_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
             )
-            items = [i for i in resp.get("files", []) if folder_id in (i.get("parents") or [])]
+            items = resp.get("files", [])
+            # Drive's parents filter can echo a file that merely mentions the folder.
+            # The alias "root" is not the id Drive returns on a file, so it cannot be
+            # used for that check.
+            if folder_id != "root":
+                items = [i for i in items if folder_id in (i.get("parents") or [])]
             next_token = resp.get("nextPageToken")
         items.sort(key=lambda i: (i.get("mimeType") != FOLDER_MIME, str(i.get("name", "")).lower()))
         rows = []
@@ -536,32 +887,106 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "link": item.get("webViewLink"),
                     "granted": iid in entries,
                     "covered": covered_by is not None and iid not in entries,
+                    "ext_shared": iid in shared,
+                    "ext_covered": shared_by is not None and iid not in shared,
                 }
             )
         return {
             "rows": rows,
             "crumbs": crumbs,
             "covered_by": covered_by,
+            "shared_by": shared_by,
             "current": current,
             "current_granted": current is not None and str(current["id"]) in entries,
-            "is_root": current is not None and str(current["id"]) == root_id,
+            "is_root": current is not None
+            and (
+                str(current["id"]) == root_id
+                or (root_id is None and str(current["id"]) == "root")
+            ),
             "next_token": next_token,
+            "drive_error": False,
         }
 
     async def browse(request: Request) -> Response:
         folder = request.query_params.get("folder") or "root"
         q = (request.query_params.get("q") or "").strip()[:200] or None
-        page_token = request.query_params.get("page") or None
+        page_token = normalize_page_token(request.query_params.get("page"))
+        prev = [
+            token
+            for token in (
+                normalize_page_token(item) for item in request.query_params.getlist("prev")
+            )
+            if token
+        ]
         request_id = request.query_params.get("request") or None
         picking = None
         if request_id:
             picking = await blocking(ctx.requests.get, request_id)
             if picking is None or picking.status != PENDING:
                 picking = None
-        data = await blocking(browse_data, folder, q, page_token)
+        try:
+            data = await blocking(browse_data, folder, q, page_token)
+        except (InvalidInputError, OwnerNotConnectedError):
+            raise
+        except Exception as exc:
+            # The picker has to stay on the page. A Drive failure used to replace the
+            # whole screen, which also removed the only way to approve a file.
+            report_exception(exc, where="browse")
+            data = {
+                "rows": [],
+                "crumbs": [{"id": "root", "name": "My Drive"}],
+                "covered_by": None,
+                "current": {"id": "root", "name": "My Drive", "mimeType": FOLDER_MIME},
+                "current_granted": False,
+                "is_root": True,
+                "next_token": None,
+                "drive_error": True,
+            }
         here = request.url.path + ("?" + request.url.query if request.url.query else "")
+        pager = browse_pager(
+            folder,
+            q=q,
+            request_id=picking.id if picking else None,
+            page=page_token,
+            prev=prev,
+            next_token=data.get("next_token"),
+        )
         return render(
-            request, "browse.html", q=q, folder=folder, picking=picking, here=here, **data
+            request,
+            "browse.html",
+            q=q,
+            folder=folder,
+            picking=picking,
+            here=here,
+            picker_ready=settings.picker_configured,
+            **pager,
+            **data,
+        )
+
+    async def picker_session(request: Request) -> Response:
+        if not settings.picker_configured:
+            return JSONResponse({"error": "picker_not_configured"}, status_code=404)
+        record = await blocking(ctx.vault.owner)
+        if not record or not record.get("t"):
+            return JSONResponse({"error": "sign_in_required"}, status_code=401)
+        assert settings.google_oauth_client_id is not None
+        assert settings.google_oauth_client_secret is not None
+        try:
+            token = await blocking(
+                refresh_access_token,
+                settings.google_oauth_client_id.get_secret_value(),
+                settings.google_oauth_client_secret.get_secret_value(),
+                record["t"],
+            )
+        except OAuthError as exc:
+            logger.warning("picker token refresh failed")
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        return JSONResponse(
+            {
+                "access_token": token,
+                "api_key": settings.google_picker_api_key,
+                "app_id": settings.google_cloud_project_number,
+            }
         )
 
     async def grant(request: Request, form: dict[str, str]) -> Response:
@@ -581,6 +1006,46 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except GrantError as exc:
             flash(request, "error", str(exc))
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
+
+    async def share_add(request: Request, form: dict[str, str]) -> Response:
+        file_id = validate_drive_id(form.get("file_id"))
+        try:
+            entry = await blocking(ctx.ext_grants().grant, file_id)
+            flash(
+                request,
+                "ok",
+                f"Shared \u201c{entry.name}\u201d with the assistants of people "
+                "you are paired with.",
+            )
+        except GrantError as exc:
+            flash(request, "error", str(exc))
+        return RedirectResponse(safe_next(form.get("next") or "/sharing"), status_code=303)
+
+    async def share_remove(request: Request, form: dict[str, str]) -> Response:
+        file_id = validate_drive_id(form.get("file_id"))
+        try:
+            await blocking(ctx.ext_grants().revoke, file_id)
+            flash(
+                request, "ok", "Stopped sharing. Other people's assistants can no longer read it."
+            )
+        except GrantError as exc:
+            flash(request, "error", str(exc).replace("allowlist", "shared list"))
+        return RedirectResponse(safe_next(form.get("next") or "/sharing"), status_code=303)
+
+    async def sharing(request: Request) -> Response:
+        if ctx.ext_allowlist is None:
+            return render(request, "error.html", 404, message="Sharing is not set up.")
+        email = str(request.session.get("owner") or "")
+
+        def gather() -> dict[str, Any]:
+            peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
+            return {"entries": ctx.ext_allowlist.entries(), "peers": peers}
+
+        data = await blocking(gather)
+        rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
+        return render(
+            request, "sharing.html", rows=rows, peers=data["peers"], describe_mime=describe_mime
+        )
 
     async def access(request: Request) -> Response:
         def gather() -> dict[str, Any]:
@@ -610,16 +1075,27 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="Request not found or expired.")
         options = []
         owner_meta = None
+        drive_error = False
         if req.file_id and req.status == PENDING:
             grants = ctx.grants()
-            options = await blocking(grants.approval_options, req)
-            owner_meta = await blocking(grants.owner_meta, req.file_id)
+            try:
+                options = await blocking(grants.approval_options, req)
+                owner_meta = await blocking(grants.owner_meta, req.file_id)
+            except (InvalidInputError, OwnerNotConnectedError):
+                raise
+            except Exception as exc:
+                report_exception(exc, where="request")
+                options = []
+                owner_meta = None
+                drive_error = True
         return render(
             request,
             "request.html",
             req=req,
             options=options,
             owner_meta=owner_meta,
+            drive_error=drive_error,
+            picker_ready=settings.picker_configured,
             describe_mime=describe_mime,
         )
 
@@ -742,9 +1218,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if request.url.query:
                 target += "?" + request.url.query
             return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
-        request.session["mcp_auth"] = pending.to_dict()
         reset = current_actor.set(signed_in)
         try:
+            if not await blocking(ctx.drive_connected):
+                # An assistant can only be allowed once there is something to reach.
+                return connect_redirect(request)
+            request.session["mcp_auth"] = pending.to_dict()
             await remember_pending(request)
             return render(
                 request,
@@ -887,12 +1366,19 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/login", login, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
+        Route("/connect", owner_only(connect_page), methods=["GET"]),
+        Route("/connect/{key}", csrf_protected(connect_start), methods=["POST"]),
+        Route("/connect/{key}/disconnect", csrf_protected(connect_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", home, methods=["GET"]),
         Route("/browse", owner_only(browse), methods=["GET"]),
+        Route("/picker/session", owner_only(picker_session), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
         Route("/access", owner_only(access), methods=["GET"]),
+        Route("/sharing", owner_only(sharing), methods=["GET"]),
+        Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
+        Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
@@ -929,6 +1415,127 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     return app
 
 
+def normalize_page_token(value: str | None) -> str | None:
+    """Keep an opaque Drive page token.
+
+    Google's tokens are not a fixed alphabet (`~`, `!`, `*`, `|` all show up).
+    Drop only blank, huge, or control-character values so a real Next link
+    still addresses the same page.
+    """
+    if not value or len(value) > 1024:
+        return None
+    if any(ord(ch) < 33 or ord(ch) == 127 for ch in value):
+        return None
+    return value
+
+
+def browse_href(
+    folder: str,
+    *,
+    q: str | None,
+    request_id: str | None,
+    page: str | None,
+    prev: list[str],
+) -> str:
+    pairs: list[tuple[str, str]] = []
+    if q:
+        pairs.append(("q", q))
+    else:
+        pairs.append(("folder", folder or "root"))
+        if page:
+            pairs.append(("page", page))
+        for item in prev:
+            pairs.append(("prev", item))
+    if request_id:
+        pairs.append(("request", request_id))
+    return "/browse?" + urlencode(pairs)
+
+
+def browse_pager(
+    folder: str,
+    *,
+    q: str | None,
+    request_id: str | None,
+    page: str | None,
+    prev: list[str],
+    next_token: str | None,
+) -> dict[str, str | None]:
+    """Previous/Next links. Drive tokens are not reversible, so the previous stack is in the URL."""
+    prev_href = None
+    if page and not q:
+        if prev:
+            prev_href = browse_href(
+                folder, q=None, request_id=request_id, page=prev[-1], prev=prev[:-1]
+            )
+        else:
+            prev_href = browse_href(folder, q=None, request_id=request_id, page=None, prev=[])
+    next_href = None
+    if next_token and not q:
+        nxt_prev = [*prev, page] if page else list(prev)
+        next_href = browse_href(
+            folder, q=None, request_id=request_id, page=next_token, prev=nxt_prev
+        )
+    return {"prev_href": prev_href, "next_href": next_href}
+
+
+def request_headline(req: Any, owner_meta: dict[str, Any] | None = None) -> str:
+    """Plain-language summary of an access request. Technical fields stay out of this sentence."""
+    who = str(getattr(req, "token_name", None) or "").strip() or "An assistant"
+    name = None
+    if owner_meta and owner_meta.get("name"):
+        name = str(owner_meta["name"])
+    elif getattr(req, "file_name", None):
+        name = str(req.file_name)
+    elif getattr(req, "description", None):
+        name = str(req.description)
+    item = name or "something in your Drive"
+    tool = str(getattr(req, "tool", "") or "")
+    sentences = {
+        "read_file": f"{who} wants to read {item}.",
+        "get_metadata": f"{who} wants to see the details of {item}.",
+        "list_folder": f"{who} wants to list {item}.",
+        "search_files": f"{who} wants to search your Drive.",
+        "create_folder": f"{who} wants to create a folder in {item}.",
+        "create_doc": f"{who} wants to create a document in {item}.",
+        "upload_file": f"{who} wants to upload a file in {item}.",
+        "update_file_content": f"{who} wants to edit {item}.",
+        "rename_file": f"{who} wants to rename {item}.",
+        "trash_file": f"{who} wants to move {item} to trash.",
+        "request_access": f"{who} is asking to use {item}.",
+    }
+    return sentences.get(tool, f"{who} wants to use {item}.")
+
+
+def status_label(status: str | None) -> str:
+    if not status:
+        return ""
+    labels = {
+        "pending": "Waiting for you",
+        "approved": "Approved",
+        "denied": "Denied",
+        "allow": "Allowed",
+        "deny": "Denied",
+        "error": "Error",
+    }
+    return labels.get(status, status.replace("_", " "))
+
+
+def tool_label(tool: str) -> str:
+    return {
+        "read_file": "Read a file",
+        "get_metadata": "See file details",
+        "list_folder": "List a folder",
+        "search_files": "Search",
+        "create_folder": "Create a folder",
+        "create_doc": "Create a document",
+        "upload_file": "Upload a file",
+        "update_file_content": "Edit a file",
+        "rename_file": "Rename a file",
+        "trash_file": "Move to trash",
+        "request_access": "Ask for access",
+    }.get(tool, "Use a file")
+
+
 def describe_mime(mime: str) -> str:
     known = {
         FOLDER_MIME: "Folder",
@@ -936,7 +1543,19 @@ def describe_mime(mime: str) -> str:
         "application/vnd.google-apps.document": "Google Doc",
         "application/vnd.google-apps.spreadsheet": "Google Sheet",
         "application/vnd.google-apps.presentation": "Google Slides",
+        "application/vnd.google-apps.form": "Google Form",
+        "application/vnd.google-apps.drawing": "Google Drawing",
         "application/pdf": "PDF",
+        "application/msword": "Word",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word",
+        "application/vnd.ms-excel": "Excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel",
+        "application/vnd.ms-powerpoint": "PowerPoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint",
+        "application/rtf": "Rich text",
+        "application/zip": "ZIP",
+        "application/json": "JSON",
+        "text/csv": "CSV",
     }
     if mime in known:
         return known[mime]
@@ -944,4 +1563,16 @@ def describe_mime(mime: str) -> str:
         return "Image"
     if mime.startswith("text/"):
         return "Text"
-    return mime.rsplit("/", 1)[-1] or "File"
+    if mime.startswith("video/"):
+        return "Video"
+    if mime.startswith("audio/"):
+        return "Audio"
+    sub = mime.rsplit("/", 1)[-1]
+    # Vendor types like "vnd.foo.bar-baz" mean nothing to a person and break narrow layouts.
+    return sub if sub and len(sub) <= 16 and not sub.startswith(("vnd.", "x-")) else "File"
+
+
+_env.globals["request_headline"] = request_headline
+_env.globals["status_label"] = status_label
+_env.globals["tool_label"] = tool_label
+_env.globals["describe_mime"] = describe_mime

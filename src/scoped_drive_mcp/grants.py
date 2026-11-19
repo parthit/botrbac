@@ -38,12 +38,19 @@ class GrantService:
         requests: AccessRequests,
         bot_email: str | None,
         on_change: Callable[[], None] = lambda: None,
+        audience: str | None = None,
+        audit_actions: tuple[str, str] = ("grant", "revoke"),
     ):
         self._owner_drive = owner_drive
         self.allowlist = allowlist
         self.requests = requests
         self.bot_email = bot_email
         self._on_change = on_change
+        # Stamped on new entries. Set for the external list (who may read the item).
+        self.audience = audience
+        # Activity-log names for grant and revoke, so the external list does not log
+        # as if the person's own assistant were given access.
+        self._grant_action, self._revoke_action = audit_actions
 
     def owner_drive(self) -> OwnerDriveClient:
         return self._owner_drive()
@@ -71,6 +78,10 @@ class GrantService:
         item_id = str(meta["id"])
         existing = self.allowlist.get(item_id)
         if existing is not None:
+            if request_id and not existing.request_id:
+                updated = replace(existing, request_id=request_id)
+                self.allowlist.add(updated)
+                return updated
             return existing
         if item_id == self.my_drive_root_id():
             raise GrantError("Your whole My Drive cannot be shared; pick folders or files in it.")
@@ -82,10 +93,11 @@ class GrantService:
             permission_id=permission_id,
             request_id=request_id,
             shared_with=self.bot_email if permission_id else None,
+            audience=self.audience,
         )
         self.allowlist.add(entry)
         self._on_change()
-        audit_owner("grant", file_id=item_id, request_id=request_id)
+        audit_owner(self._grant_action, file_id=item_id, request_id=request_id)
         return entry
 
     def _share(self, item_id: str) -> str:
@@ -95,7 +107,7 @@ class GrantService:
         except DriveNotFoundError:
             raise GrantError("That item was not found in your Drive.") from None
         except Exception as exc:
-            audit_owner("grant", "error", file_id=item_id, reason=type(exc).__name__)
+            audit_owner(self._grant_action, "error", file_id=item_id, reason=type(exc).__name__)
             raise GrantError(
                 "Google refused to share this item with the bot (you may not own it)."
             ) from None
@@ -158,12 +170,14 @@ class GrantService:
             except DriveNotFoundError:
                 pass
             except Exception as exc:
-                audit_owner("revoke", "error", file_id=file_id, reason=type(exc).__name__)
+                audit_owner(
+                    self._revoke_action, "error", file_id=file_id, reason=type(exc).__name__
+                )
                 raise GrantError(
                     "Removed from the allowlist, but Google did not remove the bot's sharing. "
                     "Remove the bot from this item's Share dialog in Drive."
                 ) from None
-        audit_owner("revoke", file_id=file_id)
+        audit_owner(self._revoke_action, file_id=file_id)
 
     # ---- access request decisions --------------------------------------
 
