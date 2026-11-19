@@ -84,7 +84,7 @@ export async function driveAccessToken(input: { clientId: string; clientSecret: 
 }
 
 export async function listDriveChildren(fetchImpl: typeof fetch, accessToken: string, folderId?: string): Promise<DriveResource[]> {
-  const q = folderId ? `'${folderId.replace(/'/g, "\\'")}' in parents and trashed=false` : "'root' in parents and trashed=false";
+  const q = folderId ? `'${escapeQuery(folderId)}' in parents and trashed=false` : "'root' in parents and trashed=false";
   const url = new URL("https://www.googleapis.com/drive/v3/files");
   url.searchParams.set("q", q);
   url.searchParams.set("fields", "files(id,name,mimeType)");
@@ -150,7 +150,7 @@ export async function executeDriveTool(input: {
     const query = stringArg(input.args, "query");
     if (!query) return err("invalid_input", "query is required.");
     const url = new URL("https://www.googleapis.com/drive/v3/files");
-    url.searchParams.set("q", `trashed=false and name contains '${query.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
+    url.searchParams.set("q", `trashed=false and name contains '${escapeQuery(query)}'`);
     url.searchParams.set("fields", "files(id,name,mimeType)");
     url.searchParams.set("pageSize", "20");
     url.searchParams.set("supportsAllDrives", "true");
@@ -187,11 +187,17 @@ export async function executeDriveTool(input: {
       parents: [parentId],
     });
     const id = stringField(created, "id");
-    await input.fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(id)}?uploadType=media&supportsAllDrives=true`, {
-      method: "PATCH",
-      headers: { authorization: `Bearer ${input.accessToken}`, "content-type": "text/plain" },
-      body: content,
-    });
+    if (!id) return err("drive_write_failed", "Google Drive did not create the file.");
+    if (!(await uploadMedia(input.fetch, input.accessToken, id, content))) {
+      // Do not leave an empty file behind in the granted folder.
+      await input
+        .fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`, {
+          method: "DELETE",
+          headers: { authorization: `Bearer ${input.accessToken}` },
+        })
+        .catch(() => undefined);
+      return err("drive_write_failed", "Google Drive did not accept the file content.");
+    }
     return ok({ id, name });
   }
   if (!fileId) return err("invalid_input", "file_id is required.");
@@ -223,11 +229,9 @@ export async function executeDriveTool(input: {
   if (input.tool === "drive_update_file") {
     const content = stringArg(input.args, "content");
     if (!content) return err("invalid_input", "content is required.");
-    await input.fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media&supportsAllDrives=true`, {
-      method: "PATCH",
-      headers: { authorization: `Bearer ${input.accessToken}`, "content-type": "text/plain" },
-      body: content,
-    });
+    if (!(await uploadMedia(input.fetch, input.accessToken, fileId, content))) {
+      return err("drive_write_failed", "Google Drive did not accept the new content.");
+    }
     return ok({ id: fileId, updated: true });
   }
   return err("unknown_tool", "This Drive action is not available.");
@@ -240,6 +244,20 @@ export async function createDriveFolder(fetchImpl: typeof fetch, accessToken: st
     parents: [parentId],
   });
   return { id: stringField(created, "id"), name: stringField(created, "name") || name };
+}
+
+async function uploadMedia(fetchImpl: typeof fetch, accessToken: string, fileId: string, content: string): Promise<boolean> {
+  const response = await fetchImpl(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media&supportsAllDrives=true`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "text/plain" },
+    body: content,
+  });
+  return response.ok;
+}
+
+/** Escapes a value for a single-quoted Drive query string literal. */
+function escapeQuery(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
 function outOfScope(externalId: string, mimeType?: string): Result<never> {

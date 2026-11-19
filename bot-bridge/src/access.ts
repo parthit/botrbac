@@ -13,7 +13,7 @@ import {
 import { err, ok, type Result } from "./result.js";
 import { decryptSecret, encryptSecret } from "./secret.js";
 import type { Store } from "./store/types.js";
-import type { BotRow, ConnectionRow, GrantRow } from "./types.js";
+import type { AccessRequestRow, BotRow, ConnectionRow, GrantRow } from "./types.js";
 
 const DEFAULT_CAPABILITIES = ["list", "read"];
 const KNOWN = new Set(DRIVE_CAPABILITIES.map((item) => item.id));
@@ -205,9 +205,13 @@ export class Access {
     const request = await this.store.findAccessRequestByToken(token);
     if (!request) return err("not_found", "This approval link is not valid.");
     if (request.status !== "pending") return ok({ status: request.status });
-    request.status = decision === "approve" ? "approved" : "denied";
-    request.decided_at = this.now();
-    await this.store.updateAccessRequest(request);
+    const status = decision === "approve" ? "approved" : "denied";
+    // Only the first decision counts, so an approve racing a deny cannot leave a grant behind a denied request.
+    if (!(await this.store.decideAccessRequest(request.request_id, status, this.now()))) {
+      const settled = await this.store.findAccessRequestByToken(token);
+      return ok({ status: settled?.status ?? request.status });
+    }
+    request.status = status;
     if (decision === "approve") {
       await this.store.insertGrant({
         grant_id: newId("gr"),
@@ -221,10 +225,20 @@ export class Access {
     return ok({ status: request.status });
   }
 
-  private async ensureRequest(connection: ConnectionRow, externalId: string, kind: "file" | "folder", capabilityId: string) {
-    const pending = await this.store.findPendingAccessRequest(connection.connection_id, externalId);
-    if (pending) return pending;
-    const request = {
+  private async ensureRequest(connection: ConnectionRow, externalId: string, kind: "file" | "folder", capabilityId: string): Promise<AccessRequestRow> {
+    // Two overlapping tool calls for the same item can both miss the lookup; the loser of the
+    // insert reuses the winner's pending request instead of failing with a 500.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const pending = await this.store.findPendingAccessRequest(connection.connection_id, externalId);
+      if (pending) return pending;
+      const request = this.newRequest(connection, externalId, kind, capabilityId);
+      if ((await this.store.insertAccessRequest(request)) === "ok") return request;
+    }
+    throw new Error("access_request_conflict");
+  }
+
+  private newRequest(connection: ConnectionRow, externalId: string, kind: "file" | "folder", capabilityId: string): AccessRequestRow {
+    return {
       request_id: newId("req"),
       connection_id: connection.connection_id,
       external_id: externalId,
@@ -235,8 +249,6 @@ export class Access {
       created_at: this.now(),
       decided_at: null,
     };
-    await this.store.insertAccessRequest(request);
-    return request;
   }
 
   private async activeDrive(botId: string): Promise<ConnectionRow | null> {

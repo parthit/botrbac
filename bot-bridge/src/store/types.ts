@@ -45,10 +45,12 @@ export interface Store {
   insertGrant(row: GrantRow): Promise<"ok" | "exists">;
   listGrants(connectionId: string): Promise<GrantRow[]>;
   deleteGrant(connectionId: string, grantId: string): Promise<void>;
-  insertAccessRequest(row: AccessRequestRow): Promise<void>;
+  /** "conflict" when a pending request for the same item already exists (or the token collided). */
+  insertAccessRequest(row: AccessRequestRow): Promise<"ok" | "conflict">;
   findPendingAccessRequest(connectionId: string, externalId: string): Promise<AccessRequestRow | null>;
   findAccessRequestByToken(token: string): Promise<AccessRequestRow | null>;
-  updateAccessRequest(row: AccessRequestRow): Promise<void>;
+  /** Moves a pending request to approved or denied. False when it was no longer pending. */
+  decideAccessRequest(requestId: string, status: "approved" | "denied", decidedAt: Date): Promise<boolean>;
 
   insertLink(row: LinkRow): Promise<"ok" | "conflict">;
   findLinkById(id: string): Promise<LinkRow | null>;

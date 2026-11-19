@@ -162,8 +162,20 @@ export class MemoryStore implements Store {
     if (row?.connection_id === connectionId) this.grants.delete(grantId);
   }
 
-  async insertAccessRequest(row: AccessRequestRow): Promise<void> {
+  async insertAccessRequest(row: AccessRequestRow): Promise<"ok" | "conflict"> {
+    for (const existing of this.accessRequests.values()) {
+      if (existing.approval_token === row.approval_token) return "conflict";
+      if (
+        row.status === "pending" &&
+        existing.status === "pending" &&
+        existing.connection_id === row.connection_id &&
+        existing.external_id === row.external_id
+      ) {
+        return "conflict";
+      }
+    }
     this.accessRequests.set(row.request_id, copy(row));
+    return "ok";
   }
 
   async findPendingAccessRequest(connectionId: string, externalId: string): Promise<AccessRequestRow | null> {
@@ -180,8 +192,12 @@ export class MemoryStore implements Store {
     return null;
   }
 
-  async updateAccessRequest(row: AccessRequestRow): Promise<void> {
-    this.accessRequests.set(row.request_id, copy(row));
+  async decideAccessRequest(requestId: string, status: "approved" | "denied", decidedAt: Date): Promise<boolean> {
+    const row = this.accessRequests.get(requestId);
+    if (!row || row.status !== "pending") return false;
+    row.status = status;
+    row.decided_at = decidedAt;
+    return true;
   }
 
   async lockBot(_botId: string): Promise<void> {}

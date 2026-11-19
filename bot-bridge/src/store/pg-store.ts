@@ -167,13 +167,16 @@ export class PgStore implements Store {
     await this.db.query("DELETE FROM resource_grants WHERE connection_id = $1 AND grant_id = $2", [connectionId, grantId]);
   }
 
-  async insertAccessRequest(row: AccessRequestRow): Promise<void> {
-    await this.db.query(
+  async insertAccessRequest(row: AccessRequestRow): Promise<"ok" | "conflict"> {
+    const rows = await this.db.query<Raw>(
       `INSERT INTO access_requests (
          request_id, connection_id, external_id, kind, capability_id, status, approval_token, created_at, decided_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT DO NOTHING
+       RETURNING request_id`,
       [row.request_id, row.connection_id, row.external_id, row.kind, row.capability_id, row.status, row.approval_token, row.created_at, row.decided_at],
     );
+    return rows[0] ? "ok" : "conflict";
   }
 
   async findPendingAccessRequest(connectionId: string, externalId: string): Promise<AccessRequestRow | null> {
@@ -189,12 +192,12 @@ export class PgStore implements Store {
     return rows[0] ? mapAccessRequest(rows[0]) : null;
   }
 
-  async updateAccessRequest(row: AccessRequestRow): Promise<void> {
-    await this.db.query("UPDATE access_requests SET status = $2, decided_at = $3 WHERE request_id = $1", [
-      row.request_id,
-      row.status,
-      row.decided_at,
-    ]);
+  async decideAccessRequest(requestId: string, status: "approved" | "denied", decidedAt: Date): Promise<boolean> {
+    const rows = await this.db.query<Raw>(
+      "UPDATE access_requests SET status = $2, decided_at = $3 WHERE request_id = $1 AND status = 'pending' RETURNING request_id",
+      [requestId, status, decidedAt],
+    );
+    return rows.length > 0;
   }
 
   async lockBot(botId: string): Promise<void> {

@@ -109,7 +109,7 @@ export function createApp(deps: AppDeps): Hono {
     return html(c, accountPage(bots.map((bot) => ({ bot_id: bot.bot_id, display_name: bot.display_name }))));
   });
 
-  app.get("/login", (c) => html(c, loginPage(loginLinks(oauth))));
+  app.get("/login", (c) => html(c, loginPage(loginLinks(oauth, safeNext(c.req.query("next"))))));
 
   app.post("/logout", (c) => {
     setCookie(c, "bb_session", "", cookieOptions(base(c, deps.baseUrl), 0));
@@ -122,8 +122,12 @@ export function createApp(deps: AppDeps): Hono {
       return html(c, loginPage(loginLinks(oauth), "That login is not configured."), 400);
     }
     const verifier = codeVerifier();
-    const state = seal(sessionSecret, { provider, verifier, exp: Date.now() + 10 * 60 * 1000, purpose: "login" });
-    setCookie(c, "bb_oauth", state, cookieOptions(base(c, deps.baseUrl), 600));
+    // The PKCE verifier stays in the httpOnly cookie only. The state sent through the
+    // browser is a random nonce bound to that cookie, so a leaked URL never reveals it.
+    const state = newCsrf();
+    const next = safeNext(c.req.query("next"));
+    const sealed = seal(sessionSecret, { provider, verifier, state, next, exp: Date.now() + 10 * 60 * 1000, purpose: "login" });
+    setCookie(c, "bb_oauth", sealed, cookieOptions(base(c, deps.baseUrl), 600));
     const redirectUri = `${base(c, deps.baseUrl)}/auth/${provider}/callback`;
     return c.redirect(authorizationUrl(provider, oauth[provider], redirectUri, state, codeChallenge(verifier)), 302);
   });
@@ -137,7 +141,7 @@ export function createApp(deps: AppDeps): Hono {
     const pending = openOAuthState(sessionSecret, sealed);
     const state = c.req.query("state") ?? "";
     const code = c.req.query("code") ?? "";
-    if (!pending || pending.provider !== provider || pending.purpose !== "login" || state !== sealed || !code) {
+    if (!pending || pending.provider !== provider || pending.purpose !== "login" || !safeEqual(state, pending.state) || !code) {
       return html(c, messagePage("Sign-in failed", "Start the sign-in again."), 400);
     }
     let profile;
@@ -152,7 +156,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!result.ok) return html(c, messagePage("Sign-in failed", result.message), 409);
     const payload: SessionPayload = { user_id: result.data.user_id, csrf: newCsrf(), exp: Date.now() + 8 * 60 * 60 * 1000 };
     setCookie(c, "bb_session", seal(sessionSecret, payload), cookieOptions(base(c, deps.baseUrl), 8 * 60 * 60));
-    return c.redirect("/", 303);
+    return c.redirect(pending.next ?? "/", 303);
   });
   app.get("/playbook", (c) => {
     if (wantsJson(c)) return c.text(PLAYBOOK);
@@ -353,11 +357,12 @@ export function createApp(deps: AppDeps): Hono {
     if (!sessionSecret) return html(c, messagePage("Not configured", "Set SESSION_SECRET before connecting Drive."), 400);
     const capabilities = stringList(body.value, "capability");
     const verifier = codeVerifier();
-    const state = seal(sessionSecret, { provider: "google_drive", verifier, exp: Date.now() + 10 * 60 * 1000, purpose: "drive", bot_id: owned.bot.bot_id, capabilities });
+    const state = newCsrf();
+    const sealed = seal(sessionSecret, { provider: "google_drive", verifier, state, exp: Date.now() + 10 * 60 * 1000, purpose: "drive", bot_id: owned.bot.bot_id, capabilities });
     const redirectUri = `${base(c, deps.baseUrl)}/integrations/google-drive/callback`;
     const url = access.driveConnectUrl({ redirectUri, state, challenge: codeChallenge(verifier), capabilities });
     if (!url.ok) return html(c, messagePage("Drive is not configured", url.message), 400);
-    setCookie(c, "bb_oauth", state, cookieOptions(base(c, deps.baseUrl), 600));
+    setCookie(c, "bb_oauth", sealed, cookieOptions(base(c, deps.baseUrl), 600));
     return c.redirect(url.data, 302);
   });
 
@@ -367,7 +372,7 @@ export function createApp(deps: AppDeps): Hono {
     const sealed = getCookie(c, "bb_oauth") ?? "";
     const pending = openOAuthState(sessionSecret, sealed);
     const code = c.req.query("code") ?? "";
-    if (!pending || pending.purpose !== "drive" || c.req.query("state") !== sealed || !code || !pending.bot_id) {
+    if (!pending || pending.purpose !== "drive" || !safeEqual(c.req.query("state") ?? "", pending.state) || !code || !pending.bot_id) {
       return html(c, messagePage("Drive connection failed", "Start the Drive connection again."), 400);
     }
     const bot = await deps.store.findBotById(pending.bot_id);
@@ -429,14 +434,15 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get("/access/:token", async (c) => {
     const session = readSession(c, sessionSecret);
-    const view = await access.approvalFor(c.req.param("token"), session?.user_id ?? null);
+    if (!session) return c.redirect(`/login?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 303);
+    const view = await access.approvalFor(c.req.param("token"), session.user_id);
     if (!view.ok) return html(c, messagePage("Approval unavailable", view.message), view.error === "forbidden" ? 403 : 404);
-    return html(c, accessRequestPage({ externalId: view.data.external_id, kind: view.data.kind, status: view.data.status, csrf: session?.csrf ?? "" }));
+    return html(c, accessRequestPage({ externalId: view.data.external_id, kind: view.data.kind, status: view.data.status, csrf: session.csrf }));
   });
 
   app.post("/access/:token", async (c) => {
     const session = readSession(c, sessionSecret);
-    if (!session) return c.redirect("/login", 303);
+    if (!session) return c.redirect(`/login?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 303);
     const body = await readObject(c);
     const decision = body.ok ? stringField(body.value, "decision") : null;
     if (!body.ok || !csrfOk(body.value, session) || (decision !== "approve" && decision !== "deny")) {
@@ -569,7 +575,7 @@ async function allowRegister(store: Store, ip: string, limit: number, now: Date)
   return store.tryConsumeRate(`register:${sha256(ip)}`, now, REGISTER_WINDOW_MS, limit);
 }
 
-async function readObject(c: { req: { header: (name: string) => string | undefined; json: () => Promise<unknown>; parseBody: () => Promise<Record<string, unknown>> } }): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; message: string }> {
+async function readObject(c: { req: { header: (name: string) => string | undefined; json: () => Promise<unknown>; parseBody: (options: { all: true }) => Promise<Record<string, unknown>> } }): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; message: string }> {
   const type = c.req.header("content-type") ?? "";
   try {
     if (type.includes("application/json")) {
@@ -577,7 +583,9 @@ async function readObject(c: { req: { header: (name: string) => string | undefin
       if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, message: "JSON body must be an object." };
       return { ok: true, value: value as Record<string, unknown> };
     }
-    const form = await c.req.parseBody();
+    // all: true keeps every value of a repeated field (the capability checkboxes);
+    // without it Hono keeps only the last one.
+    const form = await c.req.parseBody({ all: true });
     return { ok: true, value: form };
   } catch {
     return { ok: false, message: "Could not read the form." };
@@ -620,12 +628,21 @@ function readSession(c: { req: { header: (name: string) => string | undefined } 
   return openSession(secret, token, new Date());
 }
 
-function loginLinks(oauth: OAuthConfig): Array<{ href: string; label: string }> {
+function loginLinks(oauth: OAuthConfig, next?: string | null): Array<{ href: string; label: string }> {
+  const suffix = next ? `?next=${encodeURIComponent(next)}` : "";
   const links: Array<{ href: string; label: string }> = [];
-  if (oauth.google) links.push({ href: "/auth/google", label: "Continue with Google" });
-  if (oauth.github) links.push({ href: "/auth/github", label: "Continue with GitHub" });
-  if (oauth.x) links.push({ href: "/auth/x", label: "Continue with X" });
+  if (oauth.google) links.push({ href: `/auth/google${suffix}`, label: "Continue with Google" });
+  if (oauth.github) links.push({ href: `/auth/github${suffix}`, label: "Continue with GitHub" });
+  if (oauth.x) links.push({ href: `/auth/x${suffix}`, label: "Continue with X" });
   return links;
+}
+
+/** A same-origin path to return to after sign-in, or null. Rejects anything that could leave the site. */
+export function safeNext(value: string | undefined | null): string | null {
+  if (!value || value.length > 512) return null;
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return null;
+  if (/[\u0000-\u001f\u007f]/.test(value)) return null;
+  return value;
 }
 
 function oauthFromEnv(): OAuthConfig {
@@ -649,11 +666,24 @@ function driveClientFromEnv(oauth: OAuthConfig): DriveClientConfig | null {
   return { clientId: id, clientSecret: secret };
 }
 
-function openOAuthState(secret: string, token: string): { provider: string; verifier: string; purpose: string; bot_id?: string; capabilities: string[] } | null {
+function openOAuthState(
+  secret: string,
+  token: string,
+): { provider: string; verifier: string; state: string; purpose: string; bot_id?: string; next: string | null; capabilities: string[] } | null {
+  if (!token) return null;
   const parsed = openSealed(secret, token, new Date());
   if (!parsed || typeof parsed.provider !== "string" || typeof parsed.verifier !== "string" || typeof parsed.purpose !== "string") return null;
+  if (typeof parsed.state !== "string" || !parsed.state) return null;
   const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities.filter((item): item is string => typeof item === "string") : [];
-  return { provider: parsed.provider, verifier: parsed.verifier, purpose: parsed.purpose, bot_id: typeof parsed.bot_id === "string" ? parsed.bot_id : undefined, capabilities };
+  return {
+    provider: parsed.provider,
+    verifier: parsed.verifier,
+    state: parsed.state,
+    purpose: parsed.purpose,
+    bot_id: typeof parsed.bot_id === "string" ? parsed.bot_id : undefined,
+    next: safeNext(typeof parsed.next === "string" ? parsed.next : null),
+    capabilities,
+  };
 }
 
 async function ownedBot(
