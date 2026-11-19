@@ -370,3 +370,14 @@ def test_assistant_search_skips_a_sharer_whose_drive_fails(people, world, monkey
     assert out["unavailable"] == [CAROL]
     named = _mcp(eve, token, "search_shared_files", query="roadmap", owner=CAROL)
     assert _error(named)["error"] == "owner_unavailable"
+
+
+def test_sharing_logs_as_sharing_not_as_an_own_assistant_grant(people, memstore) -> None:
+    _app_, owner, _eve, _token = people
+    assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
+    assert post(owner, "/sharing/remove", file_id="loose-doc").status_code == 303
+    log = [json.loads(r) for r in memstore.lrange(KEY_PREFIX + "activity", 0, -1)]
+    actions = [r.get("action") for r in log if r.get("event") == "owner"]
+    assert "share_external" in actions and "unshare_external" in actions
+    assert "grant" not in actions and "revoke" not in actions
+    assert actions.count("share_external") == 1 and actions.count("unshare_external") == 1

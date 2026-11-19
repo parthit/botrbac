@@ -176,6 +176,7 @@ class DashboardContext:
             None,
             on_change=self.on_ext_change,
             audience=AUDIENCE_LINKED,
+            audit_actions=("share_external", "unshare_external"),
         )
 
     def ext_ids(self) -> set[str]:
@@ -1018,7 +1019,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         file_id = validate_drive_id(form.get("file_id"))
         try:
             entry = await blocking(ctx.ext_grants().grant, file_id)
-            audit_owner("share_external", file_id=entry.id)
             flash(
                 request,
                 "ok",
@@ -1033,7 +1033,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         file_id = validate_drive_id(form.get("file_id"))
         try:
             await blocking(ctx.ext_grants().revoke, file_id)
-            audit_owner("unshare_external", file_id=file_id)
             flash(
                 request, "ok", "Stopped sharing. Other people's assistants can no longer read it."
             )
