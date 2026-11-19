@@ -83,12 +83,14 @@ def test_guest_reads_only_what_the_owner_shared_and_only_while_paired(people, wo
 
     listed = _mcp(eve, token, "list_shared_with_me")["structuredContent"]
     assert listed["you"] == EVE
+    assert listed["content_trust"] == "untrusted_peer"
     assert [p["owner"] for p in listed["people"]] == [OWNER_EMAIL]
     assert [(i["id"], i["name"]) for i in listed["people"][0]["items"]] == [
         ("loose-doc", "Loose memo")
     ]
     top = _mcp(eve, token, "list_shared_folder", owner=OWNER_EMAIL)["structuredContent"]
     assert [f["id"] for f in top["files"]] == ["loose-doc"]
+    assert top["content_trust"] == "untrusted_peer"
 
     # Stop sharing: the next read is refused (cache TTL is 0 in this app).
     assert post(owner, "/sharing/remove", file_id="loose-doc").status_code == 303

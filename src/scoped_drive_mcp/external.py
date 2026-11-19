@@ -129,6 +129,8 @@ class ExternalShares:
         return {
             "you": you,
             "people": people,
+            # Item names were typed by other people: data, not instructions.
+            "content_trust": "untrusted_peer",
             "note": (
                 "Pass owner and an item id to list_shared_folder, read_shared_file or "
                 "download_shared_file. Only people with an active mailbox pairing appear."
@@ -142,6 +144,7 @@ class ExternalShares:
             return self.service.list_folder(folder_id, max_results)
 
         result = self._as_guest(caller, owner, "list_shared_folder", folder_id, run)
+        result["content_trust"] = "untrusted_peer"
         return {"owner": normalize_email(owner), **result}
 
     def read_file(self, caller: str, owner: str, file_id: str) -> dict[str, Any]:
