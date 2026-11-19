@@ -283,8 +283,8 @@ def favicon(_: Request) -> Response:
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img">'
         '<rect width="64" height="64" rx="14" fill="#f6f2ea"/>'
-        '<path id="scoped-mark" fill="#1e1915" '
-        'd="M16 14h8v36h-8V14zm24 0h8v36h-8V14zM24 26h16v12H24z"/>'
+        '<path id="scoped-mark" fill="#1e1915" fill-rule="evenodd" '
+        'd="M12 12h40v40H12V12zm10 10v20h20V22H22z"/>'
         "</svg>"
     )
     return Response(svg, media_type="image/svg+xml")
