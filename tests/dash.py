@@ -23,9 +23,25 @@ def start_oauth(c: TestClient, path: str = "/auth/login", **form) -> str:
     return parse_qs(urlparse(location).query)["state"][0]
 
 
-def login(c: TestClient, code: str = "owner-code"):
-    state = start_oauth(c)
+def sign_in(c: TestClient, code: str = "owner-code", path: str = "/auth/login"):
+    """Step 1 only: identity scopes. Leaves the person signed in, Drive not connected."""
+    state = start_oauth(c, path)
     return c.get("/auth/callback", params={"code": code, "state": state})
+
+
+def connect_drive(c: TestClient, code: str = "owner-code", next_url: str = "/"):
+    """Step 2: the explicit Connect Google Drive button on /connect."""
+    token = csrf(c, "/connect")
+    state = start_oauth(c, "/connect/google_drive", csrf=token, next=next_url)
+    return c.get("/auth/callback", params={"code": code, "state": state})
+
+
+def login(c: TestClient, code: str = "owner-code"):
+    """Both steps, as a first-time person would do them. A returning person skips step 2."""
+    r = sign_in(c, code)
+    if r.status_code == 303 and r.headers["location"].startswith("/connect"):
+        return connect_drive(c, code)
+    return r
 
 
 def csrf(c: TestClient, page: str = "/") -> str:

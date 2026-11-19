@@ -1023,6 +1023,10 @@ class TenantDirectory:
         record = self.vault_for(email).owner()
         return bool(record and record.get("t"))
 
+    def is_known_user(self, email: str) -> bool:
+        """Signed in at least once (step 1), or has a stored connection from before."""
+        return self.store.hget(USERS_INDEX, email) is not None or self.has_owner_refresh(email)
+
     def remember_user(self, email: str) -> None:
         if self.store.hget(USERS_INDEX, email) is None:
             self.store.hset(USERS_INDEX, email, json.dumps({"created_at": utc_now()}))

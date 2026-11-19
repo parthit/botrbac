@@ -170,6 +170,8 @@ class FakeOAuth:
     def __init__(self) -> None:
         self.revoked: list[str] = []
         self.hints: list[str | None] = []
+        # (scopes, offline) for each consent URL, in order: step 1 then step 2.
+        self.requested: list[tuple[tuple[str, ...], bool]] = []
         self.accounts = {
             "owner-code": (OWNER_EMAIL, True),
             "bot-code": (BOT_EMAIL, True),
@@ -178,8 +180,15 @@ class FakeOAuth:
         }
         self.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
 
-    def authorization_url(self, state: str, login_hint: str | None = None) -> str:
+    def authorization_url(
+        self,
+        state: str,
+        login_hint: str | None = None,
+        scopes: tuple[str, ...] = ("openid", "email"),
+        offline: bool = False,
+    ) -> str:
         self.hints.append(login_hint)
+        self.requested.append((tuple(scopes), offline))
         return f"https://accounts.google.com/o/oauth2/v2/auth?state={state}"
 
     def exchange_code(self, code: str):
@@ -188,8 +197,13 @@ class FakeOAuth:
         if code not in self.accounts:
             raise OAuthError("Google rejected the sign-in code")
         email = self.accounts[code][0]
+        # Like Google: you get what was asked for and allowed, and a refresh token
+        # only from an offline (connect) request.
+        asked, offline = self.requested[-1] if self.requested else ((), True)
         return OAuthTokens(
-            access_token=f"at:{code}", refresh_token=f"rt-{email}", scopes=self.scopes
+            access_token=f"at:{code}",
+            refresh_token=f"rt-{email}" if offline else None,
+            scopes=self.scopes & frozenset(asked) if asked else self.scopes,
         )
 
     def userinfo(self, access_token: str) -> dict:

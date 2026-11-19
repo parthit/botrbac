@@ -3,10 +3,12 @@
 {% block content %}
 <div class="card">
   <h1>Privacy policy</h1>
-  <p>This is the privacy policy for Scoped Drive, linked from the Google sign-in screen
+  <p>This is the privacy policy for Bot RBAC, linked from the Google sign-in screen
      and from the <a href="/">home page</a>.</p>
-  <p>Scoped Drive is a gateway in front of Google Drive. Sign-in can see the same Drive
-     you can. You then choose the files and folders an assistant may use. This server
+  <p>Bot RBAC is an access-control gateway between AI assistants and services you
+     connect. Google Drive is the first such service. Signing in only identifies you.
+     If you then connect Google Drive, this server can see the same Drive you can, and
+     you choose the files and folders an assistant may use. This server
      checks every call against that list. The list, and the assistant you connect, are
      the features of the app.</p>
   <p>This deployment is run by the person who set it up. Any verified Google account can
@@ -16,12 +18,14 @@
      Google sign-in screen is the contact for this app.</p>
 
   <h2>Google data we access</h2>
-  <p>Sign-in requests these Google permissions, and no others:</p>
+  <p>Google is asked for permission in two separate steps:</p>
   <ul>
-    <li><code>openid</code> and <code>email</code>, to read the account’s email address and
-        whether Google has verified it. We use that to tell signed-in people apart.</li>
-    <li><code>https://www.googleapis.com/auth/drive</code>, which can see, create,
-        edit, and trash files and folders in the Google account you sign in with.
+    <li><b>Signing in</b> requests only <code>openid</code> and <code>email</code>, to read
+        the account’s email address and whether Google has verified it. We use that to
+        tell signed-in people apart. No Google token is stored at this step.</li>
+    <li><b>Connecting Google Drive</b>, which you choose separately after signing in,
+        requests <code>https://www.googleapis.com/auth/drive</code>. It can see, create,
+        edit, and trash files and folders in the Google account you signed in with.
         This server still limits the assistant to items you have allowed. A folder you
         allow covers files inside it. Files the assistant creates inside an allowed
         folder are included.</li>
@@ -51,7 +55,7 @@
 
   <h2>What we store</h2>
   <ul>
-    <li>The Google refresh token, encrypted at rest, so the server can keep calling Drive
+    <li>The Google refresh token from connecting Google Drive, encrypted at rest, so the server can keep calling Drive
         after you close the browser. It is stored in Redis (Upstash) or Postgres, whichever
         this deployment uses.</li>
     <li>The list you ticked: the Drive file and folder ids.</li>
@@ -83,7 +87,7 @@
      contents are not stored with them.</p>
 
   <h2>Limited use</h2>
-  <p>Scoped Drive’s use of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+  <p>Bot RBAC’s use of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
   <p>The use of information received from Google Workspace scopes will adhere to the <a href="https://developers.google.com/workspace/workspace-api-user-data-developer-policy">Google User Data Policy</a>, including the Limited Use requirements.</p>
   <p>We do not sell Google user data. We do not transfer it to advertising platforms, data
      brokers, or information resellers. We do not use it for advertising or to determine
@@ -100,7 +104,9 @@
         shared with an older assistant account, the share is removed too.</li>
     <li>Disconnect an assistant on the dashboard overview. That deletes the tokens stored
         for that connection.</li>
-    <li>Remove Scoped Drive at
+    <li>Disconnect Google Drive on the Connections page. That deletes the stored refresh
+        token and asks Google to revoke it.</li>
+    <li>Remove Bot RBAC at
         <a href="https://myaccount.google.com/permissions">Google Account permissions</a>.
         Google then stops accepting this app’s sign-in, so the stored refresh token can
         no longer call Drive.</li>
@@ -110,7 +116,7 @@
      your list in place, so an assistant you already connected keeps the access you
      granted until you remove it or disconnect the assistant.</p>
 
-  <p>Scoped Drive is not directed at children under 13 and does not knowingly collect
+  <p>Bot RBAC is not directed at children under 13 and does not knowingly collect
      their information.</p>
   <p>See also the <a href="/terms">terms of service</a>.</p>
   <p class="muted">Last updated November 19, 2026.</p>

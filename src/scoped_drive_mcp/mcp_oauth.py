@@ -327,9 +327,9 @@ class McpOAuth:
         self.base_url = base_url.rstrip("/")
         self.owner_email = owner_email
         # A person may approve, finish, exchange and refresh only after they have
-        # signed in (a stored owner refresh token). A forged session with no token
-        # still fails. `signed_in` is optional so a caller can keep the old
-        # owner-only check.
+        # signed in and connected Google Drive (a stored owner refresh token, step 2).
+        # Signing in alone, or a forged session with no token, still fails.
+        # `signed_in` is optional so a caller can keep the old owner-only check.
         self.signed_in = signed_in
         self.resource = resource_identifier(self.base_url)
         self.metadata_url = protected_resource_metadata_url(self.base_url)

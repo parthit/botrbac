@@ -9,7 +9,16 @@ from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveNotFoundError
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import BOT_TOKEN_KEY, KEY_PREFIX, OWNER_TOKEN_KEY, MemoryStore
 from tests.conftest import BASE_URL, OWNER_EMAIL, TOKENS, make_settings
-from tests.dash import MCP_HEADERS, client, csrf, login, mcp_call, post, start_oauth
+from tests.dash import (
+    MCP_HEADERS,
+    client,
+    connect_drive,
+    csrf,
+    login,
+    mcp_call,
+    post,
+    start_oauth,
+)
 
 OWNER_PAGES = [
     "/browse",
@@ -72,7 +81,7 @@ def test_login_page_is_public(c) -> None:
 def test_public_home_is_the_consent_screen_page(c) -> None:
     r = c.get("/")
     assert r.status_code == 200
-    assert "gateway that sits in front of Google Drive" in r.text
+    assert "access-control gateway" in r.text and "Google Drive" in r.text
     assert 'href="/privacy"' in r.text and 'href="/terms"' in r.text
     assert ">Privacy policy</a>" in r.text and ">Terms of service</a>" in r.text
     assert "set-cookie" not in {name.lower() for name in r.headers}
@@ -81,7 +90,7 @@ def test_public_home_is_the_consent_screen_page(c) -> None:
 @pytest.mark.parametrize(
     ("path", "needle"),
     [
-        ("/terms", "gateway that sits in front of Google Drive"),
+        ("/terms", "access-control gateway"),
         ("/privacy", "Google API Services User Data Policy"),
     ],
 )
@@ -103,7 +112,8 @@ def test_owner_login(c, oauth, memstore, p2_app) -> None:
     cookie = r.headers["set-cookie"].lower()
     assert SESSION_COOKIE in cookie
     assert "httponly" in cookie and "secure" in cookie and "samesite=lax" in cookie
-    assert oauth.hints[-1] is None
+    # Step 1 had no hint; step 2 is pinned to the signed-in address.
+    assert oauth.hints[-2:] == [None, OWNER_EMAIL]
     assert c.get("/").status_code == 200
     # the refresh token is stored encrypted
     raw = memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY)
@@ -118,6 +128,14 @@ def test_owner_login(c, oauth, memstore, p2_app) -> None:
 def test_login_redirects_back_to_next(c) -> None:
     r = c.get("/requests")
     assert r.headers["location"] == "/login?next=%2Frequests"
+    state = start_oauth(c, "/auth/login?next=/requests")
+    r = c.get("/auth/callback", params={"code": "owner-code", "state": state})
+    # First sign-in goes to the separate connect step, which keeps the destination.
+    assert r.headers["location"] == "/connect?next=%2Frequests"
+    r = connect_drive(c, next_url="/requests")
+    assert r.headers["location"] == "/requests"
+    # A returning person who is already connected goes straight back.
+    post(c, "/logout")
     state = start_oauth(c, "/auth/login?next=/requests")
     r = c.get("/auth/callback", params={"code": "owner-code", "state": state})
     assert r.headers["location"] == "/requests"

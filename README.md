@@ -1,27 +1,41 @@
-# scoped-drive-mcp
+# Bot RBAC (scoped-drive-mcp)
 
-A small [MCP](https://modelcontextprotocol.io) server that sits between **Grok** (xAI) and **Google Drive**.
-You open a web dashboard, sign in with your own Google account, and **tick the files and folders an assistant
-may use**. Sign-in can see that Drive. The assistant can reach only what you ticked, plus files it creates
-inside a folder you allowed. If it tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
+**Bot RBAC** is a role-based access layer for AI agents — starting with **Grok** (xAI) and **Muse** — that
+want to use your stuff. It is a small [MCP](https://modelcontextprotocol.io) server: agents connect to it,
+and it decides, call by call, what they may reach in the services you connected.
+
+**Google Drive is the first connection.** More services are planned; each one is added as its own
+connection (see `src/scoped_drive_mcp/connections.py`) without changing how people sign in.
+
+Getting started is two separate Google permission screens:
+
+1. **Sign in** to Bot RBAC with your Google account. This asks only for `openid` and `email`, so Bot RBAC
+   knows who you are. Nothing of yours is reachable and no Google token is stored.
+2. **Connect Google Drive** on the Connections page. This is a separate, explicit click that asks for the
+   wider `https://www.googleapis.com/auth/drive` permission and stores that refresh token (encrypted).
+
+You then **tick the files and folders an assistant may use**. The connected Drive is visible to this
+server. The assistant can reach only what you ticked, plus files it creates inside a folder you allowed. If it tries anything else it gets an **approval link** to show you; you approve or deny it in the dashboard, and
 you can untick (revoke) anything at any time. Each access token you hand out also has a **role** that
 decides which tools it may use. It runs as a single Python function on **Vercel** (the free Hobby plan is
 enough), with Upstash Redis (free tier) for storage.
 
 ```
-Grok ──HTTPS + Bearer token──▶ Vercel /mcp ──▶ role check ──▶ allowlist check ──▶ Google Drive API (as you)
-You  ──browser + Google sign-in──▶ Vercel dashboard ──▶ allowlist (Redis)
+Grok / Muse ──HTTPS + Bearer token──▶ Vercel /mcp ──▶ role check ──▶ allowlist check ──▶ Google Drive API (as you)
+You ──① sign in (email only)──▶ dashboard ──② connect Google Drive──▶ allowlist (Redis / Postgres)
 ```
 
 Every call checks the token's role and confirms the file is on the allowlist, or inside an allowlisted
-folder, before anything is sent to Google. The Drive call uses the Google account that signed in. There
-is no second Gmail. Sign-in uses full Drive access, and the allowlist is checked before
-every call. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
+folder, before anything is sent to Google. The Drive call uses the Google account that signed in; connecting
+Drive with a different Google account is refused. There is no second Gmail. The Drive connection has full
+Drive access, and the allowlist is checked before every call. A bug in this server, or a leaked `ENCRYPTION_KEY` plus access to the store, could expose
 more of that Drive than the list you ticked.
 
 ## More than one person
 
-Each person signs in with their own Google account. Ticking an item adds it to **their** allowlist.
+Each person signs in with their own Google account and connects their own Drive. Ticking an item adds it
+to **their** allowlist. Someone who signed in but has not connected Drive can see the dashboard; pages that
+need Drive, and approving an assistant on `/oauth/authorize`, send them to `/connect` first.
 Grok Bot connects with the MCP OAuth flow on `/oauth/authorize`; that grant is tied to the signed-in
 user, and `/mcp` calls Drive with that user's sign-in. One Grok Bot does not see another person's files.
 
@@ -136,8 +150,9 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
    `GOOGLE_OAUTH_CLIENT_SECRET`.
    (If you set up phase 1 with a *Desktop* client, create this new *Web* client anyway; Desktop clients
    don't accept these redirect URIs.)
-5. **Publish and verify:** the consent screen should request `openid`, `email`, and
-   `https://www.googleapis.com/auth/drive`. That scope is restricted. The Google Picker is optional:
+5. **Publish and verify:** the consent screen should list `openid`, `email`, and
+   `https://www.googleapis.com/auth/drive`. Sign-in only requests the first two; the Drive scope is
+   requested later, when someone chooses **Connect Google Drive**. That scope is restricted. The Google Picker is optional:
    enable the **Google Picker API**, create a browser API key, and set `GOOGLE_PICKER_API_KEY` plus
    `GOOGLE_CLOUD_PROJECT_NUMBER` only if you want the picker button. The remaining clicks in Google
    Cloud and Search Console (custom domain, a separate production project, brand verification,
@@ -190,11 +205,14 @@ Connect Upstash (step 2.2) and redeploy. The signed-in admin overview still name
 
 Preview deployments are usually behind Vercel's login, so use the production URL for everything below.
 
-### 4. Sign in
+### 4. Sign in, then connect Google Drive
 
-1. Open `https://<project>.vercel.app/` and click **Sign in with Google**. Choose **your own** account, accept
-   the unverified-app warning and allow Drive access. The overview should show that account as connected.
-   Grok's tools use this sign-in. Other people sign in with their own Google accounts and tick their own
+1. Open `https://<project>.vercel.app/` and click **Sign in with Google**. Choose **your own** account and
+   accept the unverified-app warning. Google asks only for your email address.
+2. You land on **Connections** (step 2 of 2). Click **Allow Bot RBAC to access Google Drive**. Google shows a
+   second screen for Drive access; allow it with the same account. The overview should now show Google Drive
+   as connected. Grok's tools use this connection. **Disconnect** on the same page deletes the stored token
+   and asks Google to revoke it. Other people sign in with their own Google accounts and tick their own
    files. Only `OWNER_EMAIL` can open `/admin`. If `ALLOWED_EMAILS` is set, any address not on that list
    is rejected.
 
@@ -244,7 +262,7 @@ Also disconnect Grok's built-in Google Drive connector so it can't bypass this s
 Grok Bot attaches a remote MCP server by URL and authenticates only with OAuth. It cannot use a static bearer.
 The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
 
-1. Finish dashboard sign-in and tick at least one folder.
+1. Sign in, connect Google Drive, and tick at least one folder.
 2. In the Grok Bot chat, say: Add this MCP server: https://scoped-drive-mcp.vercel.app/mcp
 3. When the browser opens, sign in as the owner and click Allow.
 4. Do not paste the make_token.py secret into the Grok Bot chat. That token is only for the xAI API and the Grok Build CLI.
@@ -258,7 +276,7 @@ a token for `/mcp`.
 
 Muse (muse.ai) also connects with OAuth and registers itself. Leave any client id and secret empty.
 
-1. Finish dashboard sign-in and tick at least one folder.
+1. Sign in, connect Google Drive, and tick at least one folder.
 2. In Muse, add a custom connector for `https://<project>.vercel.app/mcp`.
 3. When the browser opens, sign in and click Allow.
 
