@@ -146,6 +146,21 @@ def test_narrow_token_can_be_upgraded_from_connect(signed_in, oauth, p2_app) -> 
     assert 'action="/connect/google_drive"' not in page
 
 
+def test_declined_upgrade_does_not_revoke_the_stored_grant(signed_in, oauth, p2_app) -> None:
+    connect_drive(signed_in)
+    vault = p2_app.state.dashboard.vault
+    record = vault.owner()
+    narrow = "openid email https://www.googleapis.com/auth/drive.file"
+    vault.set_owner(record["t"], record["email"], narrow)
+    oauth.revoked.clear()
+    oauth.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive.file"})
+    r = connect_drive(signed_in)
+    assert r.status_code == 400
+    assert oauth.revoked == []
+    assert vault.owner()["t"] == record["t"]
+    assert vault.owner()["scopes"] == narrow
+
+
 def test_assistant_consent_waits_for_a_drive_connection(signed_in) -> None:
     created = register(signed_in, DONE)
     _verifier, params = auth_params(created.json()["client_id"], DONE)

@@ -642,7 +642,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ),
             )
         if connection.required_scope not in tokens.scopes:
-            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            # Revoking any token ends this app's whole Google grant for the account.
+            # During a reconnect that would also kill the narrower token still stored,
+            # so only revoke when nothing is stored for this person yet.
+            reset = current_actor.set(email)
+            try:
+                already_stored = await blocking(ctx.drive_connected)
+            finally:
+                current_actor.reset(reset)
+            if not already_stored:
+                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             return render(
                 request,
                 "error.html",
