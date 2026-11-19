@@ -292,6 +292,35 @@ def flash(request: Request, kind: str, message: str) -> None:
     request.session["flash"] = messages[-5:]
 
 
+def wants_json(request: Request) -> bool:
+    """True when ui.js submitted a row action in the background (Accept: application/json)."""
+    return "application/json" in request.headers.get("accept", "")
+
+
+def action_done(
+    request: Request, kind: str, message: str, next_url: str, *, changed: bool | None = None
+) -> Response:
+    """Finish a dashboard action that changes one row.
+
+    ui.js sends these in the background and updates only the affected row, so it gets
+    JSON back. A plain form POST (no JavaScript) still gets a flash and a redirect.
+    `changed` says whether the row's state changed. It defaults to success, but a revoke
+    can remove the item from the list and still report a Drive error.
+    """
+    if wants_json(request):
+        return JSONResponse(
+            {
+                "ok": kind == "ok",
+                "kind": kind,
+                "message": message,
+                "changed": (kind == "ok") if changed is None else changed,
+            },
+            status_code=200 if kind == "ok" else 400,
+        )
+    flash(request, kind, message)
+    return RedirectResponse(next_url, status_code=303)
+
+
 def render(request: Request, template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
     owner = request.session.get("owner")
     admin_email = getattr(request.app.state, "owner_email", None)
@@ -991,46 +1020,60 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def grant(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
+        next_url = safe_next(form.get("next"))
         try:
             entry = await blocking(ctx.grants().grant, file_id)
-            flash(request, "ok", f"Allowed \u201c{entry.name}\u201d for the assistant.")
         except GrantError as exc:
-            flash(request, "error", str(exc))
-        return RedirectResponse(safe_next(form.get("next")), status_code=303)
+            return action_done(request, "error", str(exc), next_url)
+        return action_done(
+            request, "ok", f"Allowed \u201c{entry.name}\u201d for the assistant.", next_url
+        )
 
     async def revoke(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
+        next_url = safe_next(form.get("next"))
         try:
             await blocking(ctx.grants().revoke, file_id)
-            flash(request, "ok", "Removed. The assistant can no longer use it.")
         except GrantError as exc:
-            flash(request, "error", str(exc))
-        return RedirectResponse(safe_next(form.get("next")), status_code=303)
+            gone = await blocking(lambda: ctx.allowlist.get(file_id) is None)
+            return action_done(request, "error", str(exc), next_url, changed=gone)
+        return action_done(request, "ok", "Removed. The assistant can no longer use it.", next_url)
 
     async def share_add(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
+        next_url = safe_next(form.get("next") or "/sharing")
         try:
             entry = await blocking(ctx.ext_grants().grant, file_id)
-            flash(
-                request,
-                "ok",
-                f"Shared \u201c{entry.name}\u201d with the assistants of people "
-                "you are paired with.",
-            )
         except GrantError as exc:
-            flash(request, "error", str(exc))
-        return RedirectResponse(safe_next(form.get("next") or "/sharing"), status_code=303)
+            return action_done(request, "error", str(exc), next_url)
+        return action_done(
+            request,
+            "ok",
+            f"Shared \u201c{entry.name}\u201d with the assistants of people you are paired with.",
+            next_url,
+        )
 
     async def share_remove(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
+        next_url = safe_next(form.get("next") or "/sharing")
         try:
             await blocking(ctx.ext_grants().revoke, file_id)
-            flash(
-                request, "ok", "Stopped sharing. Other people's assistants can no longer read it."
-            )
         except GrantError as exc:
-            flash(request, "error", str(exc).replace("allowlist", "shared list"))
-        return RedirectResponse(safe_next(form.get("next") or "/sharing"), status_code=303)
+            ext = ctx.ext_allowlist
+            gone = ext is not None and await blocking(lambda: ext.get(file_id) is None)
+            return action_done(
+                request,
+                "error",
+                str(exc).replace("allowlist", "shared list"),
+                next_url,
+                changed=gone,
+            )
+        return action_done(
+            request,
+            "ok",
+            "Stopped sharing. Other people's assistants can no longer read it.",
+            next_url,
+        )
 
     async def sharing(request: Request) -> Response:
         if ctx.ext_allowlist is None:
@@ -1345,16 +1388,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if ctx.mcp_oauth is None or not await blocking(
             ctx.mcp_oauth.revoke, grant_id, email=str(request.session.get("owner") or "")
         ):
-            flash(request, "error", "That connection was not found.")
-        else:
-            audit_owner("oauth_revoke")
-            flash(request, "ok", "Disconnected the app. Its tokens no longer work.")
-        return RedirectResponse("/", status_code=303)
+            return action_done(request, "error", "That connection was not found.", "/")
+        audit_owner("oauth_revoke")
+        return action_done(request, "ok", "Disconnected the app. Its tokens no longer work.", "/")
 
     async def confirm_js(_: Request) -> Response:
         return Response(
             b"document.addEventListener('submit',function(e){"
             b"var f=e.target;if(!f||!f.getAttribute)return;"
+            # ui.js asks for confirmation itself on background (data-async) forms.
+            b"if(window.__asyncForms&&f.hasAttribute('data-async'))return;"
             b"var m=f.getAttribute('data-confirm');"
             b"if(m&&!window.confirm(m))e.preventDefault();});",
             media_type="text/javascript",

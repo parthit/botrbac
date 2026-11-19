@@ -614,3 +614,88 @@ def test_describe_mime_gives_short_human_labels() -> None:
     assert describe_mime("application/vnd.some-vendor.thing-nobody-knows") == "File"
     assert describe_mime("application/x-whatever") == "File"
     assert describe_mime("video/mp4") == "Video"
+
+
+def _post_json(c, path: str, **data):
+    token = csrf(c)
+    return c.post(
+        path,
+        data={"csrf": token, **data},
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+    )
+
+
+def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
+    """ui.js posts Allow/Remove in the background; it must get JSON, not a page redirect."""
+    r = _post_json(owner_c, "/grant", file_id="proj", next="/browse")
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": True,
+        "kind": "ok",
+        "message": "Allowed “Projects” for the assistant.",
+        "changed": True,
+    }
+    # No flash left behind for the next full page load.
+    assert "for the assistant." not in owner_c.get("/access").text.split("<h1>")[0]
+    assert "Projects" in owner_c.get("/access").text
+
+    r = _post_json(owner_c, "/revoke", file_id="proj", next="/browse")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert "Projects" not in owner_c.get("/access").text
+
+    r = _post_json(owner_c, "/grant", file_id="does-not-exist", next="/browse")
+    assert r.status_code == 400
+    body = r.json()
+    assert body["ok"] is False and "not found" in body["message"]
+
+
+def test_browse_rows_render_both_toggle_states(owner_c) -> None:
+    page = owner_c.get("/browse").text
+    assert 'data-async data-flip="access" data-access-when="off"' in page
+    assert 'data-async data-flip="access" data-access-when="on"' in page
+    assert "data-row data-access=" in page
+
+
+def test_list_pages_remove_rows_in_place(owner_c) -> None:
+    post(owner_c, "/grant", file_id="proj")
+    page = owner_c.get("/access").text
+    assert 'data-async data-on-success="remove-row"' in page
+    # The empty-state block is on the page (hidden) so ui.js can show it after the last row.
+    assert "Nothing is allowed yet" in page
+
+
+def test_confirm_js_leaves_async_forms_to_ui_js(owner_c) -> None:
+    assert b"data-async" in owner_c.get("/confirm.js").content
+
+
+def test_revoke_json_reports_change_when_drive_cleanup_fails(owner_c, monkeypatch) -> None:
+    """The allowlist entry is gone even though Drive errored, so the row must still update."""
+    from scoped_drive_mcp.grants import GrantError, GrantService
+
+    post(owner_c, "/grant", file_id="proj")
+    real_revoke = GrantService.revoke
+
+    def half_revoke(self, file_id):
+        real_revoke(self, file_id)
+        raise GrantError("Removed from the allowlist, but Google did not remove the bot's sharing.")
+
+    monkeypatch.setattr(GrantService, "revoke", half_revoke)
+    r = _post_json(owner_c, "/revoke", file_id="proj", next="/browse")
+    assert r.status_code == 400
+    body = r.json()
+    assert body["ok"] is False and body["changed"] is True
+
+    # A failure that changed nothing must not tell ui.js to update the row.
+    r = _post_json(owner_c, "/grant", file_id="does-not-exist", next="/browse")
+    assert r.json()["changed"] is False
+
+
+def test_shortcut_rows_keep_full_page_posts(owner_c) -> None:
+    page = owner_c.get("/browse?folder=proj").text + owner_c.get("/browse").text
+    assert "Allow the target" in page
+    allow_target = r"<form[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Allow the target"
+    forms = re.findall(allow_target, page)
+    assert forms
+    for form in forms:
+        assert "data-async" not in form

@@ -53,7 +53,10 @@
 {% elif rows %}
 <ul class="files">
   {% for r in rows %}
-  <li class="file">
+  {#- Each row renders both states of its toggles; ui.js flips data-access / data-share
+      after a background POST so only this row changes. Without JS the forms post normally.
+      Shortcut rows stay full posts: the server stores the shortcut's target, not the row's id. -#}
+  <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}">
     <div class="file-name">
       <span class="file-icon" aria-hidden="true">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
       {% if r.is_folder %}<a href="/browse?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}</a>
@@ -62,11 +65,11 @@
     </div>
     <div class="file-meta">
       <span>{{ r.kind }}</span>
-      {% if r.granted %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
-      {% elif r.covered %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed via folder</span>
-      {% else %}<span class="pill"><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
-      {% if r.ext_shared %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared with paired people</span>
-      {% elif r.ext_covered %}<span class="pill ok"><span aria-hidden="true">✓</span> Shared via folder</span>{% endif %}
+      <span class="pill ok" data-access-when="on"{% if not r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed</span>
+      {% if covered_by %}<span class="pill ok" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed via folder</span>
+      {% else %}<span class="pill" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
+      <span class="pill ok" data-share-when="on"{% if not r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared with paired people</span>
+      {% if shared_by %}<span class="pill ok" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared via folder</span>{% endif %}
     </div>
     <div class="file-actions">
       {% if picking %}
@@ -75,31 +78,27 @@
           <input type="hidden" name="target_id" value="{{ r.id }}">
           <button class="primary" type="submit">Share for this request</button>
         </form>
-      {% elif r.granted %}
-        <form class="inline" method="post" action="/revoke" data-confirm="Remove this from the assistant?">
+      {% else %}
+        <form class="inline" method="post" action="/revoke"{% if not r.is_shortcut %} data-async{% endif %} data-flip="access" data-access-when="on" data-confirm="Remove this from the assistant?"{% if not r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button class="danger" type="submit">Remove</button>
         </form>
-      {% else %}
-        <form class="inline" method="post" action="/grant">
+        <form class="inline" method="post" action="/grant"{% if not r.is_shortcut %} data-async{% endif %} data-flip="access" data-access-when="off"{% if r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}</button>
         </form>
-      {% endif %}
-      {% if not picking %}
-        {% if r.ext_shared %}
-        <form class="inline" method="post" action="/sharing/remove" data-confirm="Stop sharing this with other people’s assistants?">
+        <form class="inline" method="post" action="/sharing/remove"{% if not r.is_shortcut %} data-async{% endif %} data-flip="share" data-share-when="on" data-confirm="Stop sharing this with other people’s assistants?"{% if not r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button class="danger" type="submit">Stop sharing</button>
         </form>
-        {% elif not r.ext_covered %}
-        <form class="inline" method="post" action="/sharing/add">
+        {% if not shared_by %}
+        <form class="inline" method="post" action="/sharing/add"{% if not r.is_shortcut %} data-async{% endif %} data-flip="share" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
