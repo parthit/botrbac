@@ -26,7 +26,7 @@ Grounded in the current code:
 
 The Python page at `src/scoped_drive_mcp/templates/bridge.html` (`/bridge` on the Drive connector) is a different product. Webhook registration belongs on the Bot Bridge host, next to `/register`, `/approve/:token`, and `/manage/:token`.
 
-Confirm the live origin before the manual test. `GET /health` on the Bot Bridge deployment returns `"service": "bot-bridge"`. The repo documents that deployment as its own Vercel project with Root Directory `bot-bridge`. The Drive connector at `https://scoped-drive-mcp.vercel.app` is the Python app. If both bots are in fact pointed at a host whose `/health` is the Python service, the webhook work still lands in `bot-bridge/` and is deployed with that project's root. Do not add this feature to the Python app.
+Confirm the live origin before the manual test. `GET /health` on the Bot Bridge deployment returns `"service": "bot-bridge"`. The repo documents that deployment as its own Vercel project with Root Directory `bot-bridge`. The Drive connector at `https://botrbac.com` is the Python app. If both bots are in fact pointed at a host whose `/health` is the Python service, the webhook work still lands in `bot-bridge/` and is deployed with that project's root. Do not add this feature to the Python app.
 
 ## 3. What is already known about Grok Bot webhooks
 
