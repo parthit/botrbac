@@ -291,6 +291,36 @@ def test_registration_rejects_foreign_redirects(c, uri: str) -> None:
     assert mixed.json()["error"] == "invalid_redirect_uri"
 
 
+CLAUDE = (
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+)
+
+
+def test_claude_can_register_its_callbacks(c) -> None:
+    response = register(c, list(CLAUDE), name="Claude")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["redirect_uris"] == list(CLAUDE)
+    assert body["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in body
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://claude.ai/api/mcp/auth_callback/",
+        "https://evil.claude.ai/api/mcp/auth_callback",
+        "https://claude.ai.evil.example/api/mcp/auth_callback",
+        "http://claude.ai/api/mcp/auth_callback",
+    ],
+)
+def test_claude_lookalikes_are_rejected(c, uri: str) -> None:
+    response = register(c, uri, name="Claude")
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_redirect_uri"
+
+
 def test_muse_can_register_its_callbacks(c) -> None:
     response = register(c, list(MUSE), name="Muse")
     assert response.status_code == 201, response.text
