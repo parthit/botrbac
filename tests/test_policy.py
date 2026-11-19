@@ -46,6 +46,7 @@ MAILBOX_TOOLS = {
 }
 SHARED_TOOLS = {
     "list_shared_with_me",
+    "search_shared_files",
     "list_shared_folder",
     "read_shared_file",
     "download_shared_file",

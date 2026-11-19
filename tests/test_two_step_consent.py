@@ -44,7 +44,11 @@ def test_signed_in_without_drive_sees_the_connect_step(signed_in) -> None:
     )
     overview = signed_in.get("/")
     assert overview.status_code == 200
+    # The admin's deployment bot token is set in these settings, but Browse and Allow
+    # need this person's own Drive, so the banner still shows until step 2 is done.
     assert 'id="connect-drive"' in overview.text
+    assert connect_drive(signed_in).status_code == 303
+    assert 'id="connect-drive"' not in signed_in.get("/").text
 
 
 @pytest.mark.parametrize("page", DRIVE_PAGES)

@@ -1,0 +1,6 @@
+<form method="get" action="/shared/search" class="actions" role="search">
+  <label class="sr-only" for="shared-q" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Search everything shared with you</label>
+  <input id="shared-q" type="search" name="q" value="{{ q or '' }}" maxlength="200" placeholder="Search everything shared with you">
+  <button type="submit">Search</button>
+  {% if q %}<a href="/shared">Clear search</a>{% endif %}
+</form>

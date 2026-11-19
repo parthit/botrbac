@@ -695,3 +695,17 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto; }
 }
+
+/* Shared with me: text preview of another person's file */
+.shared-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 70vh;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--wash);
+  font: 13px/1.5 var(--mono);
+}

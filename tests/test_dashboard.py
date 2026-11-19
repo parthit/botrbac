@@ -144,7 +144,9 @@ def test_login_redirects_back_to_next(c) -> None:
 def test_login_next_cannot_redirect_offsite(c) -> None:
     state = start_oauth(c, "/auth/login?next=//evil.example.com/x")
     r = c.get("/auth/callback", params={"code": "owner-code", "state": state})
-    assert r.headers["location"] == "/"
+    # Not connected yet, so step 2 comes next; the offsite next became "/".
+    assert r.headers["location"] == "/connect?next=%2F"
+    assert "evil" not in r.headers["location"]
 
 
 def test_unverified_account_cannot_sign_in(c, oauth, memstore) -> None:
@@ -583,7 +585,7 @@ def test_public_pages_do_not_say_only_the_owner(c) -> None:
         text = c.get(path).text
         assert "Only the" not in text
         assert "only the owner" not in text.lower()
-    assert "your own Google account" in c.get("/").text
+    assert "your own google account" in c.get("/").text.lower()
     assert "14 days" in c.get("/privacy").text
     assert "Postgres" in c.get("/privacy").text
 
