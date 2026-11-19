@@ -237,10 +237,26 @@ def test_saved_key_is_not_carried_to_a_different_host() -> None:
         box.set_webhook(EVE, CLAUDE_URL, auth_scheme="claude_routine")
     assert missing.value.code == "secret_required"
     assert box.get_webhook(EVE)["url"] == URL
-    other_routine = "https://api.anthropic.com/v1/claude_code/routines/trig_02/fire"
     box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
-    kept = box.set_webhook(EVE, other_routine, auth_scheme="claude_routine")
+    # Same routine: the saved key is kept (e.g. turning wake-ups off and on).
+    kept = box.set_webhook(EVE, CLAUDE_URL, auth_scheme="claude_routine")
     assert kept["secret_hint"] == CLAUDE_KEY[-4:]
+
+
+def test_saved_key_is_not_carried_to_a_different_claude_routine() -> None:
+    posts: list[dict[str, str]] = []
+    box = _claude_box(posts)
+    box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
+    other_routine = "https://api.anthropic.com/v1/claude_code/routines/trig_02/fire"
+    # A routine's token only starts that one routine, so a new routine needs its own.
+    with pytest.raises(MailboxError) as missing:
+        box.set_webhook(EVE, other_routine, auth_scheme="claude_routine")
+    assert missing.value.code == "secret_required"
+    assert box.get_webhook(EVE)["url"] == CLAUDE_URL
+    moved = box.set_webhook(
+        EVE, other_routine, sender_key="sk-new-routine-key-9876", auth_scheme="claude_routine"
+    )
+    assert moved["secret_hint"] == "9876"
 
 
 def test_anthropic_is_on_the_default_allowlist() -> None:
