@@ -127,6 +127,33 @@ def test_picker_button_keeps_folder_and_request(world, memstore, oauth) -> None:
     assert "response.status >= 400" in script
 
 
+def test_request_page_picker_approves_an_unopened_file(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            google_picker_api_key="AIzaSyTestKeyValue",
+            google_cloud_project_number="123456789012",
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    signed_in = client(app)
+    assert login(signed_in).status_code == 303
+    denied = mcp_call(signed_in, "get_metadata", file_id="stray-shared")
+    request_id = denied["structuredContent"]["request_id"]
+    page = signed_in.get(f"/requests/{request_id}")
+    assert page.status_code == 200
+    assert "Choose the file to approve" in page.text
+    assert "asked for it" in page.text
+    button = re.search(r"<button[^>]*id=\"pick-drive\"[^>]*>", page.text)
+    assert button, page.text
+    assert f'data-request="{request_id}"' in button.group(0)
+    assert f'data-next="/requests/{request_id}"' in button.group(0)
+
+
 def test_browse_previous_and_next(owner_c, monkeypatch) -> None:
     monkeypatch.setattr("scoped_drive_mcp.dashboard.BROWSE_PAGE_SIZE", 1)
     first = owner_c.get("/browse")

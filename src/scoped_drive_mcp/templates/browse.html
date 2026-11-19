@@ -39,7 +39,16 @@
 <p class="muted">Search results for “{{ q }}”.</p>
 {% endif %}
 
-{% if rows %}
+{% if drive_error %}
+<div class="card empty" role="alert">
+  <h2>Google Drive did not return files</h2>
+  {% if picker_ready %}
+  <p>Use <b>Add from Google Drive</b> and choose the document. A file created in Google Docs stays closed to this app until you choose it. Choosing it is what lets the assistant open it.</p>
+  {% else %}
+  <p>The file picker is not set up on this server yet, so a document created in Google Docs cannot be added from this page.</p>
+  {% endif %}
+</div>
+{% elif rows %}
 <ul class="files">
   {% for r in rows %}
   <li class="file">
@@ -90,7 +99,7 @@
 {% else %}
 <div class="card empty">
   <h2>Nothing here yet</h2>
-  <p>This folder has no files this app can open. Add files with the Google picker above, or create them with an assistant inside a folder you have allowed.</p>
+  <p>This folder has no files this app can open. A document created in Google Docs stays closed until you add it with the picker above. Files an assistant creates inside a folder you have allowed show up here.</p>
   {% if not picker_ready %}
   <p>The file picker is not set up on this server yet. Files the assistant creates in an allowed folder will show up here.</p>
   {% endif %}

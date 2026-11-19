@@ -17,7 +17,13 @@
         {{ status_label(r.status) }}
       </span>
     </td>
-    <td data-label="Open"><a href="/requests/{{ r.id }}">Open</a></td>
+    <td data-label="Decision">
+      {% if r.status == 'pending' %}
+      <a class="btn primary" href="/requests/{{ r.id }}">Approve or deny</a>
+      {% else %}
+      <a href="/requests/{{ r.id }}">Open</a>
+      {% endif %}
+    </td>
   </tr>
   {% endfor %}
   </tbody>
@@ -28,6 +34,7 @@
 {% endmacro %}
 {% block content %}
 <h1>Access requests</h1>
+<p class="muted">The assistant can name a file before it is allowed to open it. That name is the document it asked to read. A file created in Google Docs, or by another connector, stays closed to this app until you choose it while approving.</p>
 <h2>Waiting for you</h2>
 {{ table(pending, "No one is waiting. When an assistant asks for a file you have not shared, it shows up here.") }}
 <h2>Recent decisions</h2>

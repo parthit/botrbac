@@ -602,7 +602,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
         drive = ctx.owner_drive()
-        root_id = str(drive.get_file("root", fields="id")["id"])
+        # drive.file cannot files.get("root") until the app has opened My Drive.
+        # The alias still works in a parents query, which is enough to list files
+        # this app created or the user picked.
+        root_id: str | None
+        try:
+            root_id = str(drive.get_file("root", fields="id")["id"])
+        except DriveNotFoundError:
+            root_id = None
         entries = ctx.allowlist.entries()
         crumbs: list[dict[str, str]] = []
         covered_by: str | None = None
@@ -614,13 +621,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             resp = drive.list_files(query, fields=OWNER_FIELDS, page_size=100)
             items = resp.get("files", [])
         else:
-            folder_id = root_id if folder == "root" else validate_drive_id(folder, "folder")
-            try:
-                current = drive.get_file(folder_id, fields=OWNER_FIELDS)
-            except DriveNotFoundError:
-                raise InvalidInputError("folder not found in your Drive") from None
-            if current.get("mimeType") != FOLDER_MIME:
-                raise InvalidInputError("that is not a folder")
+            if folder == "root":
+                folder_id = root_id or "root"
+            else:
+                folder_id = validate_drive_id(folder, "folder")
+            if folder_id == "root":
+                current = {
+                    "id": "root",
+                    "name": "My Drive",
+                    "mimeType": FOLDER_MIME,
+                    "parents": [],
+                }
+            else:
+                try:
+                    current = drive.get_file(folder_id, fields=OWNER_FIELDS)
+                except DriveNotFoundError:
+                    raise InvalidInputError("folder not found in your Drive") from None
+                if current.get("mimeType") != FOLDER_MIME:
+                    raise InvalidInputError("that is not a folder")
             node: dict[str, Any] | None = current
             seen: set[str] = set()
             while node is not None and len(crumbs) < MAX_BREADCRUMBS:
@@ -628,22 +646,30 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 if nid in seen:
                     break
                 seen.add(nid)
-                name = "My Drive" if nid == root_id else str(node.get("name", ""))
-                crumbs.insert(0, {"id": nid, "name": name})
+                name = "My Drive" if nid == root_id or nid == "root" else str(node.get("name", ""))
+                crumbs.insert(0, {"id": "root" if nid == root_id else nid, "name": name})
                 if covered_by is None and nid in entries:
                     covered_by = name
                 parents = node.get("parents") or []
-                if nid == root_id or not parents:
+                if nid == root_id or nid == "root" or not parents:
                     break
                 try:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            query = f"{parents_clause([folder_id])} and trashed=false"
+            if folder_id == "root":
+                query = "'root' in parents and trashed=false"
+            else:
+                query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
                 query, fields=OWNER_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
             )
-            items = [i for i in resp.get("files", []) if folder_id in (i.get("parents") or [])]
+            items = resp.get("files", [])
+            # Drive's parents filter can echo a file that merely mentions the folder.
+            # The alias "root" is not the id Drive returns on a file, so it cannot be
+            # used for that check.
+            if folder_id != "root":
+                items = [i for i in items if folder_id in (i.get("parents") or [])]
             next_token = resp.get("nextPageToken")
         items.sort(key=lambda i: (i.get("mimeType") != FOLDER_MIME, str(i.get("name", "")).lower()))
         rows = []
@@ -668,8 +694,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "covered_by": covered_by,
             "current": current,
             "current_granted": current is not None and str(current["id"]) in entries,
-            "is_root": current is not None and str(current["id"]) == root_id,
+            "is_root": current is not None
+            and (
+                str(current["id"]) == root_id
+                or (root_id is None and str(current["id"]) == "root")
+            ),
             "next_token": next_token,
+            "drive_error": False,
         }
 
     async def browse(request: Request) -> Response:
@@ -689,7 +720,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             picking = await blocking(ctx.requests.get, request_id)
             if picking is None or picking.status != PENDING:
                 picking = None
-        data = await blocking(browse_data, folder, q, page_token)
+        try:
+            data = await blocking(browse_data, folder, q, page_token)
+        except (InvalidInputError, OwnerNotConnectedError):
+            raise
+        except Exception as exc:
+            # The picker has to stay on the page. A Drive failure used to replace the
+            # whole screen, which also removed the only way to approve a file.
+            report_exception(exc, where="browse")
+            data = {
+                "rows": [],
+                "crumbs": [{"id": "root", "name": "My Drive"}],
+                "covered_by": None,
+                "current": {"id": "root", "name": "My Drive", "mimeType": FOLDER_MIME},
+                "current_granted": False,
+                "is_root": True,
+                "next_token": None,
+                "drive_error": True,
+            }
         here = request.url.path + ("?" + request.url.query if request.url.query else "")
         pager = browse_pager(
             folder,
@@ -783,16 +831,27 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="Request not found or expired.")
         options = []
         owner_meta = None
+        drive_error = False
         if req.file_id and req.status == PENDING:
             grants = ctx.grants()
-            options = await blocking(grants.approval_options, req)
-            owner_meta = await blocking(grants.owner_meta, req.file_id)
+            try:
+                options = await blocking(grants.approval_options, req)
+                owner_meta = await blocking(grants.owner_meta, req.file_id)
+            except (InvalidInputError, OwnerNotConnectedError):
+                raise
+            except Exception as exc:
+                report_exception(exc, where="request")
+                options = []
+                owner_meta = None
+                drive_error = True
         return render(
             request,
             "request.html",
             req=req,
             options=options,
             owner_meta=owner_meta,
+            drive_error=drive_error,
+            picker_ready=settings.picker_configured,
             describe_mime=describe_mime,
         )
 
