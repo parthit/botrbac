@@ -372,6 +372,35 @@ def test_assistant_search_skips_a_sharer_whose_drive_fails(people, world, monkey
     assert _error(named)["error"] == "owner_unavailable"
 
 
+def test_assistant_search_skips_paired_people_who_share_nothing(people, monkeypatch) -> None:
+    from scoped_drive_mcp.auth import current_actor
+    from scoped_drive_mcp.service import DriveService
+
+    app, owner, eve, token = people
+    _pair(app, OWNER_EMAIL, EVE)
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    # Carol is paired with Eve but shares nothing. Her Drive must not be touched.
+    carol = client(app)
+    assert login(carol, "carol-code").status_code == 303
+    _pair(app, CAROL, EVE)
+
+    real = DriveService.search_files
+    searched: list[str] = []
+
+    def spy(self, query, max_results=10):
+        searched.append(current_actor.get() or "")
+        if current_actor.get() == CAROL:
+            raise RuntimeError("Carol's Drive must not be searched")
+        return real(self, query, max_results)
+
+    monkeypatch.setattr(DriveService, "search_files", spy)
+    out = _mcp(eve, token, "search_shared_files", query="roadmap")["structuredContent"]
+    assert [r["owner"] for r in out["results"]] == [OWNER_EMAIL]
+    assert out["unavailable"] == []
+    assert CAROL not in searched
+    assert "search_shared_files" not in carol.get("/activity").text
+
+
 def test_sharing_logs_as_sharing_not_as_an_own_assistant_grant(people, memstore) -> None:
     _app_, owner, _eve, _token = people
     assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303

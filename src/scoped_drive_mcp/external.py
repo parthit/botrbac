@@ -192,7 +192,7 @@ class ExternalShares:
         text = clean_query(query)
         limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
         you = normalize_email(caller)
-        owners = [normalize_email(owner)] if owner else self.active_peers(you)
+        owners = [normalize_email(owner)] if owner else self._sharing_peers(you)
         results: list[dict[str, Any]] = []
         unavailable: list[str] = []
         for them in owners:
@@ -225,6 +225,17 @@ class ExternalShares:
                 "Only people with an active mailbox pairing are searched."
             ),
         }
+
+    def _sharing_peers(self, you: str) -> list[str]:
+        """Active peers whose external list is not empty. Searching everyone skips the rest,
+        so a person who shares nothing gets no Drive call, no activity entry, and is never
+        reported as unavailable."""
+        peers = []
+        for peer in self.active_peers(you):
+            with acting_as(peer):
+                if self.allowlist.entries():
+                    peers.append(peer)
+        return peers
 
     def search_as_owner(self, text: str, limit: int) -> list[dict[str, Any]]:
         """Run inside a guest call. Drive's guarded search finds files inside shared
