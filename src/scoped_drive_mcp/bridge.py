@@ -767,6 +767,12 @@ class Mailbox:
         if record is None:
             raise MailboxError("not_found", "There is no account-wide wake-up to move.")
         owner = self._hook_owner(you, app)
+        if self._hook(owner) is not None:
+            raise MailboxError(
+                "invalid_state",
+                "That app already has its own wake-up. Remove it first, or remove the "
+                "account-wide one instead.",
+            )
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
         self._index_hook(you, owner, present=True)
@@ -851,7 +857,15 @@ class Mailbox:
         if shared is not None:
             return [(recipient, shared)]
         found: list[tuple[str, dict[str, Any]]] = []
-        for grant in sorted(self.store.hgetall(f"bridge:hookapps:{recipient}")):
+        grants = set(self.store.hgetall(f"bridge:hookapps:{recipient}"))
+        # Hooks saved in an app's own slot before the index existed (paired apps only).
+        for link_id in self._user_link_ids(recipient):
+            link = self._link(link_id)
+            if link is not None and link.get("same_account") and not self._revoked(link_id):
+                grants.update(
+                    str(link[f"grant_{side}"]) for side in ("a", "b") if link.get(f"grant_{side}")
+                )
+        for grant in sorted(grants):
             slot = _self_addr(recipient, grant)
             record = self._hook(slot)
             if record is not None:

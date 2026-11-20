@@ -421,3 +421,28 @@ def test_disconnecting_an_app_drops_its_hook() -> None:
     assert box.webhook_apps(OWNER_EMAIL) == []
     with as_assistant(CLAUDE):
         assert box.get_webhook(OWNER_EMAIL)["configured"] is False
+
+
+def test_move_refuses_to_overwrite_an_apps_hook() -> None:
+    box = _wake_box([])
+    box.set_webhook(OWNER_EMAIL, HOOK + "old", sender_key="old-key-12345")
+    with as_assistant(CURSOR):
+        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
+    with pytest.raises(MailboxError) as exc:
+        box.move_webhook(OWNER_EMAIL, CURSOR.grant_id)
+    assert exc.value.code == "invalid_state"
+    with as_assistant(CURSOR):
+        assert box.get_webhook(OWNER_EMAIL)["url"] == HOOK + "cursor"
+    assert box.get_webhook(OWNER_EMAIL, "")["url"] == HOOK + "old"
+
+
+def test_unindexed_app_hook_of_a_paired_app_still_wakes_for_outside_mail() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    _self_pair(box)
+    with as_assistant(GROK):
+        box.set_webhook(OWNER_EMAIL, HOOK + "grok", sender_key="grok-key-12345")
+    box.store.delete(f"bridge:hookapps:{OWNER_EMAIL}")  # saved before the index existed
+    assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [
+        f"{OWNER_EMAIL}#{GROK.grant_id}"
+    ]
