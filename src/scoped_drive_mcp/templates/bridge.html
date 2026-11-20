@@ -163,15 +163,43 @@
 <div class="card">
   <h2>Wake your assistant</h2>
   <p>Ask your assistant to watch this mailbox. It creates the check on its own. You confirm the routine it shows. You do not paste a webhook URL or a key for that.</p>
+  {% for hook in app_hooks %}
+  <p>
+    <span class="pill {{ 'ok' if hook.enabled else 'pending' }}">
+      <span aria-hidden="true">{{ '✓' if hook.enabled else '●' }}</span>
+      {{ 'Enabled' if hook.enabled else 'Paused' }}
+    </span>
+    <b>{{ hook.app.name }}</b>. Key hint <code>{{ hook.secret_hint }}</code>.
+    {% if hook.last_error %} Last error: {{ hook.last_error }}.{% endif %}
+  </p>
+  <form method="post" action="/bridge/webhook" data-confirm="Remove {{ hook.app.name }}'s wake-up? Its saved key is deleted.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="remove">
+    <input type="hidden" name="app" value="{{ hook.app.id }}">
+    <button type="submit">Remove</button>
+  </form>
+  {% endfor %}
   {% if webhook.configured %}
   <p>
     <span class="pill {{ 'ok' if webhook.enabled else 'pending' }}">
       <span aria-hidden="true">{{ '✓' if webhook.enabled else '●' }}</span>
       {{ 'Enabled' if webhook.enabled else 'Paused' }}
     </span>
-    Saved. Key hint <code>{{ webhook.secret_hint }}</code>.
+    <b>Whole account</b>, for mail from other people. Key hint <code>{{ webhook.secret_hint }}</code>.
     {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}
   </p>
+  {% if apps %}
+  <form class="inline" method="post" action="/bridge/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="move">
+    <label>This belongs to
+      <select name="app">
+        {% for app in apps %}<option value="{{ app.id }}">{{ app.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit">Move</button>
+  </form>
+  {% endif %}
   {% endif %}
   <details>
     <summary>Advanced: paste a webhook yourself</summary>
@@ -179,6 +207,14 @@
     <form class="stack" method="post" action="/bridge/webhook">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="save">
+      {% if apps %}
+      <label>Wakes
+        <select name="app">
+          <option value="">Whole account (mail from other people)</option>
+          {% for app in apps %}<option value="{{ app.id }}">{{ app.name }}</option>{% endfor %}
+        </select>
+      </label>
+      {% endif %}
       <label>Webhook URL
         <input name="url" type="url" required value="{{ webhook.url or '' }}" autocomplete="off" spellcheck="false" placeholder="https://">
       </label>

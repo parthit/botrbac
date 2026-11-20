@@ -69,7 +69,10 @@ With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wa
 **Your own assistants.** One person can also pair two of their own assistants, for example Grok and Claude
 signed in with the same Google account. Start a pairing in one and join with the code from the other. Each
 assistant gets its own inbox. One approval on `/bridge` turns it on, and disconnecting either app turns it off.
-It shares nothing new, because both assistants already see the same Drive. It is on by default. To turn it off
+It shares nothing new, because both assistants already see the same Drive. Each connected app saves its own
+wake-up hook, and only mail for that app wakes it. Mail from another person wakes the account-wide hook (pasted
+on `/bridge` for the whole account), or every app's hook when there is none. A hook saved before apps had their
+own slots stays on the account; use **Move** on `/bridge` to give it to the app it belongs to. It is on by default. To turn it off
 for some or all accounts, connect a Vercel Edge Config to the project and set the item `self_pairing` to
 `{"enabled": true, "off_for_domains": ["example.com"]}` (or `"enabled": false`). Changes apply within about
 30 seconds, with no redeploy.

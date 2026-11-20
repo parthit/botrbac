@@ -388,7 +388,7 @@ def create_mcp(
     @mcp.tool(annotations=READ_ONLY)
     @guarded("get_webhook")
     async def get_webhook() -> dict[str, Any]:
-        """Show this account's wake-up webhook, if one was saved. Does not return the sender key.
+        """Show this app's own wake-up webhook, if one was saved. Does not return the sender key.
         Do not ask the human to paste a URL or key. Use the watch_mailbox prompt and create
         a scheduled check_messages routine instead."""
         return await _run(run_mail, box.get_webhook)
@@ -419,7 +419,7 @@ def create_mcp(
     @mcp.tool(annotations=WRITE)
     @guarded("clear_webhook")
     async def clear_webhook() -> dict[str, Any]:
-        """Remove this account's wake-up webhook. check_messages still returns mail."""
+        """Remove this app's own wake-up webhook. check_messages still returns mail."""
         return await _run(run_mail, box.clear_webhook)
 
     def run_shared(method: str, *args: Any) -> dict[str, Any]:
