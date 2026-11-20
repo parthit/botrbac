@@ -334,3 +334,33 @@ def test_flag_outage_costs_one_fetch_per_window() -> None:
     now["t"] = 31.0
     flags.self_pairing_enabled("a@fine.io")
     assert calls["n"] == 2
+
+
+def test_wake_targets_cover_cross_person_and_dashboard_hooks() -> None:
+    box = _box()
+    _self_pair(box)
+    grok_slot = f"{OWNER_EMAIL}#{GROK.grant_id}"
+    box.store.set(f"bridge:hook:{grok_slot}", '{"url": "https://g", "enabled": true}')
+    # Mail from another person goes to the account inbox and wakes Grok's own hook.
+    assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [grok_slot]
+    # A hook pasted on the dashboard belongs to no assistant, so Claude's mail can use it.
+    box.store.set(f"bridge:hook:{OWNER_EMAIL}", '{"url": "https://d", "enabled": true}')
+    claude_slot = f"{OWNER_EMAIL}#{CLAUDE.grant_id}"
+    assert [slot for slot, _ in box._wake_targets(claude_slot)] == [OWNER_EMAIL]
+    # One another assistant saved does not.
+    box.store.set(
+        f"bridge:hook:{OWNER_EMAIL}",
+        '{"url": "https://d", "enabled": true, "grant_id": "grant-grok"}',
+    )
+    assert box._wake_targets(claude_slot) == []
+
+
+def test_disabled_pending_pairing_can_still_be_ended(p2_app) -> None:
+    box = p2_app.state.mailbox
+    link_id = _self_pair(box, approve=False)
+    box.self_pairing = lambda _email: False
+    owner = client(p2_app)
+    login(owner)
+    page = owner.get("/bridge")
+    assert "Turned off by your organisation" in page.text
+    assert f"/bridge/{link_id}/revoke" in page.text

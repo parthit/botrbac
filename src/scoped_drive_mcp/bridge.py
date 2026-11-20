@@ -777,29 +777,59 @@ class Mailbox:
     def _maybe_wake(self, message: dict[str, Any]) -> None:
         if not self.wake.ready:
             return
-        recipient = str(message["to"])
-        record = self._hook(recipient)
-        if record is None and "#" in recipient:
-            # Mail for one assistant may use the account-wide hook only if that assistant
-            # saved it; otherwise it would wake the other assistant (often the sender).
+        for slot, record in self._wake_targets(str(message["to"])):
+            if not record.get("enabled") or not record.get("url"):
+                continue
+            # One mark per message and hook, so a retry does not ping a hook twice.
+            suffix = "" if slot == message["to"] else f":{slot}"
+            mark = f"bridge:woke:{message['msg_id']}{suffix}"
+            if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
+                continue
+            try:
+                deliver(self.wake, record, message)
+            except Exception as exc:
+                self.store.delete(mark)
+                logged = _wake_error(exc)
+                logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
+                self._note_wake(slot, record, logged)
+            else:
+                self._note_wake(slot, record, None)
+
+    def _wake_targets(self, recipient: str) -> list[tuple[str, dict[str, Any]]]:
+        """Which saved hooks to ping for mail addressed to `recipient`.
+
+        - Mail for one assistant (`email#grant`): its own hook, else the account-wide hook
+          unless another assistant saved it (that would wake the other one, often the
+          sender). A hook pasted on the dashboard belongs to no assistant, so it counts.
+        - Mail for the account (from another person): the account-wide hook, else the
+          hooks of this person's assistants that moved to their own slot when paired.
+        """
+        own = self._hook(recipient)
+        if own is not None:
+            return [(recipient, own)]
+        if "#" in recipient:
             email, grant = recipient.split("#", 1)
             shared = self._hook(email)
-            if shared is not None and shared.get("grant_id") == grant:
-                recipient, record = email, shared
-        if not record or not record.get("enabled") or not record.get("url"):
-            return
-        mark = f"bridge:woke:{message['msg_id']}"
-        if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
-            return
-        try:
-            deliver(self.wake, record, message)
-        except Exception as exc:
-            self.store.delete(mark)
-            logged = _wake_error(exc)
-            logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
-            self._note_wake(recipient, record, logged)
-        else:
-            self._note_wake(recipient, record, None)
+            if shared is not None and shared.get("grant_id") in (None, grant):
+                return [(email, shared)]
+            return []
+        found: list[tuple[str, dict[str, Any]]] = []
+        grants: set[str] = set()
+        for link_id in self._user_link_ids(recipient):
+            link = self._link(link_id)
+            if link is None or not link.get("same_account"):
+                continue
+            if self._status(link) not in ("active", "pending_approval"):
+                continue
+            grants.update(
+                str(link[f"grant_{side}"]) for side in ("a", "b") if link.get(f"grant_{side}")
+            )
+        for grant in sorted(grants):
+            slot = _self_addr(recipient, grant)
+            record = self._hook(slot)
+            if record is not None:
+                found.append((slot, record))
+        return found
 
     def _note_wake(self, email: str, used: dict[str, Any], error: str | None) -> None:
         """Record the outcome only while the saved webhook is still the one we called."""

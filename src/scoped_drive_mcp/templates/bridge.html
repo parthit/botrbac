@@ -51,7 +51,7 @@
   <p><span class="pill bad"><span aria-hidden="true">!</span> Off</span></p>
   <p><b>{{ pair }}</b> · your account</p>
   {% endif %}
-  {% if link.status == "active" %}
+  {% if link.status == "active" or (link.disabled_by_org and link.status != "revoked") %}
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this off? Your two assistants will not be able to message each other.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="actions"><button class="danger" type="submit">Turn off</button></div>
