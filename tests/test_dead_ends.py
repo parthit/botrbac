@@ -440,3 +440,18 @@ def test_old_request_for_a_file_inside_a_shared_folder_names_the_sharer(
     page = eve.get(f"/requests/{req.id}").text
     assert "This file isn’t in your Drive" in page
     assert OWNER_EMAIL in page and "read_shared_file" in page
+
+
+def test_mailbox_refusals_are_not_blamed_on_drive() -> None:
+    record = {
+        "ts": "2026-11-20T00:00:00+00:00",
+        "event": "tool_call",
+        "token_name": "viewer-tok",
+        "tool": "send_message",
+        "decision": "error",
+        "reason": "link_revoked",
+    }
+    text = describe(record, {}, {}, {}).text
+    assert "pairing is off" in text and "Google Drive" not in text
+    record["reason"] = "some_new_code"
+    assert "Google Drive" not in describe(record, {}, {}, {}).text

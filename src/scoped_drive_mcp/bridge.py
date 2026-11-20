@@ -118,7 +118,7 @@ class Mailbox:
                 if open_invite is not None:
                     return {**self._public_link(open_invite, you), "reused": True}
             return {**self._create(you), "reused": False}
-        return self._redeem(you, code)
+        return {**self._redeem(you, code), "reused": False}
 
     def summary(self, email: str) -> dict[str, int]:
         """Counts for the dashboard: pairings that need this person's approval, active
@@ -412,7 +412,9 @@ class Mailbox:
             )
         side = "a" if you == link["email_a"] else "b"
         if decision == "deny":
-            self._end(link, you, "declined")
+            # A Decline from a stale page on a pairing that is already on is a turn-off:
+            # it was on and mail may have moved, so it must not read as "never turned on".
+            self._end(link, you, "turned_off" if status == "active" else "declined")
             return {"link_id": link["link_id"], "status": "revoked"}
         if not self._peer(link["link_id"]):
             raise MailboxError(

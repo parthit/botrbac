@@ -70,7 +70,7 @@
       A shortcut row shows its target's state: Allow stores the target, so Remove and
       Stop sharing post the target's id (r.acts_on). -#}
   {%- set t = r.target %}
-  <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}">
+  <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}" data-acts-on="{{ r.acts_on }}">
     <div class="file-name">
       <span class="file-icon" aria-hidden="true">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
       {% if r.is_folder %}<a href="/browse?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}</a>
@@ -89,6 +89,7 @@
       {% else %}
       <span class="pill ok" data-access-when="on"{% if not r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed</span>
       {% if r.covered_by %}<span class="pill ok" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed via folder “{{ r.covered_by }}”</span>
+      {% elif r.unsure %}<span class="muted" data-access-when="off"{% if r.granted %} hidden{% endif %}>Open its folder to check whether a folder already allows it.</span>
       {% else %}<span class="pill" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
       {% endif %}
       {% if r.granted and r.covered_by %}<span class="muted" data-access-when="on">Also included through “{{ r.covered_by }}”.</span>{% endif %}

@@ -405,3 +405,15 @@ def test_denial_records_expire_with_the_window() -> None:
     cleared = [k for k in spy.ttls if "denied-cleared" in k]
     assert cleared and all(spy.ttls[k] == DENIAL_WINDOW for k in cleared)
     assert reqs.recent_denial("f1", "viewer-tok") is None
+
+
+def test_search_stops_guessing_when_the_lookup_budget_runs_out(c, monkeypatch) -> None:
+    """A search page makes a bounded number of folder lookups. Past that, a row says to
+    open its folder rather than claiming "Not allowed" when a folder may allow it."""
+    import scoped_drive_mcp.dashboard as dashboard_module
+
+    assert post(c, "/grant", file_id="proj").status_code == 303
+    monkeypatch.setattr(dashboard_module, "SEARCH_LOOKUPS", 0)
+    row = _row(c.get("/browse?q=notes").text, "notes.txt")
+    assert "Open its folder to check" in row
+    assert "Not allowed" not in row

@@ -124,6 +124,9 @@ SECURITY_HEADERS = [
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Searches per person per minute on "Shared with me". Each one reads every sharer's Drive.
 SHARED_SEARCH_LIMIT = 20
+# Folder lookups one Browse page may make to work out search-result paths and
+# folder-inherited access. Past this, the remaining rows say to open their folder.
+SEARCH_LOOKUPS = 40
 # Item ids in "Shared with me" links. Drive ids fit; other sources must too.
 _SHARED_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,200}")
 
@@ -1076,30 +1079,42 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if current is not None:
             metas[str(current["id"])] = current
 
+        lookups = [0]
+
+        class _OutOfLookups(Exception):
+            pass
+
         def meta_of(fid: str) -> dict[str, Any] | None:
             if fid not in metas:
+                if lookups[0] >= SEARCH_LOOKUPS:
+                    raise _OutOfLookups
+                lookups[0] += 1
                 try:
                     metas[fid] = drive.get_file(fid, fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     metas[fid] = None
             return metas[fid]
 
-        def lineage(item: dict[str, Any]) -> list[tuple[str, str]]:
+        def lineage(item: dict[str, Any]) -> list[tuple[str, str]] | None:
             """(id, name) of the folders above `item`, nearest first, up to My Drive.
-            Follows the first parent, as the breadcrumbs do."""
+            Follows the first parent, as the breadcrumbs do. None when the page's lookup
+            budget ran out before reaching the top, so the answer would be a guess."""
             out: list[tuple[str, str]] = []
             seen_ids = {str(item.get("id", ""))}
             parents = item.get("parents") or []
-            while parents and len(out) < MAX_BREADCRUMBS:
-                pid = str(parents[0])
-                if pid in seen_ids or pid == root_id or pid == "root":
-                    break
-                seen_ids.add(pid)
-                node_meta = meta_of(pid)
-                if node_meta is None:
-                    break
-                out.append((pid, str(node_meta.get("name", ""))))
-                parents = node_meta.get("parents") or []
+            try:
+                while parents and len(out) < MAX_BREADCRUMBS:
+                    pid = str(parents[0])
+                    if pid in seen_ids or pid == root_id or pid == "root":
+                        break
+                    seen_ids.add(pid)
+                    node_meta = meta_of(pid)
+                    if node_meta is None:
+                        break
+                    out.append((pid, str(node_meta.get("name", ""))))
+                    parents = node_meta.get("parents") or []
+            except _OutOfLookups:
+                return None
             return out
 
         def nearest(chain: list[tuple[str, str]], ids: Any) -> tuple[str, str] | None:
@@ -1115,12 +1130,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             mime = str(item.get("mimeType", ""))
             is_shortcut = mime == SHORTCUT_MIME
             path: str | None = None
+            unsure = False
             if q:
                 chain = lineage(item)
-                cover = nearest(chain, entries)
-                share = nearest(chain, shared)
-                path = " / ".join(["My Drive", *(name for _, name in reversed(chain))])
-                parent_id = chain[0][0] if chain else "root"
+                if chain is None:
+                    # Too many folders to look up on one page: don't guess the status.
+                    unsure, cover, share, parent_id = True, None, None, None
+                else:
+                    cover = nearest(chain, entries)
+                    share = nearest(chain, shared)
+                    path = " / ".join(["My Drive", *(name for _, name in reversed(chain))])
+                    parent_id = chain[0][0] if chain else "root"
             else:
                 cover, share = folder_cover, folder_share
                 parent_id = None
@@ -1130,10 +1150,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             target: dict[str, Any] | None = None
             if is_shortcut:
                 target_id = str((item.get("shortcutDetails") or {}).get("targetId") or "")
-                target_meta = meta_of(target_id) if target_id else None
-                if target_meta is not None:
+                try:
+                    target_meta = meta_of(target_id) if target_id else None
+                except _OutOfLookups:
+                    target_meta, unsure = None, True
+                tchain = lineage(target_meta) if target_meta is not None else None
+                if target_meta is not None and tchain is None:
+                    unsure = True
+                if target_meta is not None and tchain is not None:
                     acts_on = target_id
-                    tchain = lineage(target_meta)
                     cover = nearest(tchain, entries)
                     share = nearest(tchain, shared)
                     item_parents = [str(p) for p in item.get("parents") or []]
@@ -1156,6 +1181,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "link": item.get("webViewLink"),
                     "path": path,
                     "parent_id": parent_id,
+                    "unsure": unsure,
                     "granted": acts_on in entries,
                     "covered_by": cover[1] if cover else None,
                     "ext_shared": acts_on in shared,
@@ -1696,13 +1722,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request_names[req.id] = str(label)
         unknown = [i for i in item_ids(records) if i not in names][:ACTIVITY_LOOKUPS]
         if unknown and ctx.drive_connected():
+            # Under a limited (drive.file) sign-in Google also answers 404 for real files
+            # this app never opened, so a 404 proves nothing: don't call them missing.
+            limited = ctx.reconsent_needed()
             try:
                 drive = ctx.owner_drive()
                 for item in unknown:
                     try:
                         meta = drive.get_file(item, fields="id,name")
                     except DriveNotFoundError:
-                        names[item] = MISSING
+                        if not limited:
+                            names[item] = MISSING
                         continue
                     if meta.get("name"):
                         names[item] = str(meta["name"])

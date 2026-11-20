@@ -4,6 +4,7 @@ Nothing here reads the store or Drive. The dashboard gathers names (from the per
 lists and requests) and passes them in, so the audit log itself still holds only ids.
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -209,11 +210,36 @@ def _deny_why(reason: str, guest: bool) -> str:
     return "it isn’t allowed"
 
 
+# Error codes from the mailbox and shared-with-me tools (MailboxError / SharedAccessError
+# payloads). These are refusals by this server, not Google Drive failures.
+_REFUSALS = {
+    "link_revoked": "that pairing is off",
+    "link_pending": "that pairing isn’t on yet",
+    "link_expired": "that invite has expired",
+    "not_linked": "you aren’t paired with that person",
+    "not_paired": "you aren’t paired with that person",
+    "invite_not_found": "that invite code wasn’t found",
+    "invite_taken": "that invite was already used",
+    "already_paired": "you’re already paired with that person",
+    "waiting_for_peer": "the other person hasn’t joined yet",
+    "rate_limited": "it was sending too much, too fast",
+    "message_too_large": "the message was too long",
+    "not_shared": "it isn’t shared with you",
+    "not_found": "it wasn’t found",
+    "webhooks_disabled": "wake-ups are turned off on this server",
+}
+
+
 def _error_why(reason: str) -> str:
     if reason in ("bot_not_connected", "owner_not_signed_in"):
         return "Google Drive isn’t connected"
     if reason in ("invalid_input",) or reason.startswith(("file_id", "folder_id", "parent_id")):
         return "the request was not valid"
+    if reason in _REFUSALS:
+        return _REFUSALS[reason]
+    if re.fullmatch(r"[a-z]+(_[a-z]+)+", reason):
+        # Another stable error code from this server: say so instead of blaming Drive.
+        return "this server refused it"
     return "Google Drive returned an error"
 
 

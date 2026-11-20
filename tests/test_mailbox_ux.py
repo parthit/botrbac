@@ -392,3 +392,25 @@ def test_mailbox_dates_are_local_time_elements() -> None:
     html = str(when("2026-11-27T01:30:00+00:00", date_only=True))
     assert html.startswith('<time datetime="2026-11-27T01:30:00Z" data-time="date"')
     assert ">Nov 27, 2026</time>" in html
+
+
+def test_stale_decline_on_an_active_pairing_reads_as_turned_off(clock: FakeClock) -> None:
+    """Decline from a page opened before the pairing turned on must not claim it never
+    turned on: mail may already have moved."""
+    box = _box(clock)
+    link_id = _pair(box, OWNER_EMAIL, CAROL)
+    box.send_message(OWNER_EMAIL, link_id, "hello")
+    box.decide(CAROL, link_id, "deny")
+    card = _card(box, OWNER_EMAIL, link_id)
+    assert card["status"] == "revoked"
+    assert card["ended_reason"] == "turned_off"
+    assert card["ended_by"] == CAROL
+
+
+def test_every_request_link_result_says_whether_it_was_reused(clock: FakeClock) -> None:
+    box = _box(clock)
+    created = box.request_link(OWNER_EMAIL)
+    assert created["reused"] is False
+    joined = box.request_link(EVE, created["invite_code"])
+    assert joined["reused"] is False
+    assert box.request_link(OWNER_EMAIL, new_invite=True)["reused"] is False

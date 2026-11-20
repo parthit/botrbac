@@ -131,11 +131,23 @@
     var row = form.closest("[data-row]");
     if (!key || !row) return;
     var next = row.getAttribute("data-" + key) === "on" ? "off" : "on";
-    row.setAttribute("data-" + key, next);
-    var parts = row.querySelectorAll("[data-" + key + "-when]");
-    for (var i = 0; i < parts.length; i++) {
-      parts[i].hidden = parts[i].getAttribute("data-" + key + "-when") !== next;
+    // A shortcut's Allow / Share acts on its target, so every row on the page for that
+    // same item (the target itself, other shortcuts to it) changes with it.
+    var rows = [row];
+    var target = row.getAttribute("data-acts-on");
+    if (target) {
+      var all = document.querySelectorAll("[data-row][data-acts-on]");
+      for (var j = 0; j < all.length; j++) {
+        if (all[j] !== row && all[j].getAttribute("data-acts-on") === target) rows.push(all[j]);
+      }
     }
+    rows.forEach(function (r) {
+      r.setAttribute("data-" + key, next);
+      var parts = r.querySelectorAll("[data-" + key + "-when]");
+      for (var i = 0; i < parts.length; i++) {
+        parts[i].hidden = parts[i].getAttribute("data-" + key + "-when") !== next;
+      }
+    });
     // Keep keyboard focus on the row: move it to the button that replaced this one.
     var shown = row.querySelector("form[data-flip='" + key + "']:not([hidden]) button");
     if (shown) shown.focus();
@@ -245,8 +257,8 @@
       var text;
       if (el.getAttribute("data-time") === "date") text = dateOnly.format(d);
       else if (rel && secs >= -60 && secs < 60) text = "just now";
-      else if (rel && secs >= 0 && secs < 3600) text = rel.format(-Math.round(secs / 60), "minute");
-      else if (rel && secs >= 0 && secs < 6 * 3600) text = rel.format(-Math.round(secs / 3600), "hour");
+      else if (rel && secs >= 0 && secs < 3570) text = rel.format(-Math.round(secs / 60), "minute");
+      else if (rel && secs >= 3570 && secs < 6 * 3600) text = rel.format(-Math.round(secs / 3600), "hour");
       else if (t >= startOfToday && t < startOfToday + day) text = "Today, " + clock.format(d);
       else if (t >= startOfToday - day && t < startOfToday) text = "Yesterday, " + clock.format(d);
       else text = full.format(d);
