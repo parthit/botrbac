@@ -76,7 +76,8 @@ def test_tools_need_the_owner_signed_in_once(same_app) -> None:
     c = client(same_app)
     result = mcp_call(c, "read_file", file_id="loose-doc")
     text = result["content"][0]["text"]
-    assert result["isError"] and "owner has not signed in" in text
+    assert result["isError"] and "Google Drive is not connected" in text
+    assert f"{BASE_URL}/connect" in text and "sign in with Google" not in text
     assert "Connect bot" not in text
 
     login(c)

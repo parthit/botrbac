@@ -201,7 +201,10 @@ def test_owner_sees_dashboard_reads_on_activity(pair, memstore) -> None:
     assert all(r.get("via") == "dashboard" for r in guest)
     assert all(r["token_name"] == f"guest:{EVE} (dashboard)" for r in guest)
     assert "project notes alpha" not in json.dumps(log)
-    assert f"guest:{EVE} (dashboard)" in owner.get("/activity").text
+    activity = owner.get("/activity").text
+    assert f"{EVE} read \u201cnotes.txt\u201d from your Sharing list." in activity
+    assert "guest:" not in activity
+    assert f"{EVE} tried to read \u201cpayroll.txt\u201d. Blocked:" in activity
 
 
 def test_attachment_disposition_cleans_names() -> None:

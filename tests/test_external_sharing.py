@@ -189,7 +189,10 @@ def test_owner_sees_guest_reads_and_bad_owner_values_are_refused(people, memstor
     assert LOOSE_TEXT not in json.dumps(owner_log)
     activity_page = owner.get("/activity")
     assert activity_page.status_code == 200
-    assert f"guest:{EVE}" in activity_page.text
+    assert f"{EVE}\u2019s assistant read \u201cLoose memo\u201d from your Sharing list." in (
+        activity_page.text
+    )
+    assert "Blocked: it isn\u2019t on your Sharing list." in activity_page.text
     assert LOOSE_TEXT not in activity_page.text
 
     own = _mcp(eve, token, "read_shared_file", owner=EVE, file_id=EVE_DOC)

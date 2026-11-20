@@ -5,9 +5,8 @@
 {% include "_mode.html" %}
 <p class="muted">Each item below is on your list. A folder includes what this server can see inside it.
   Remove takes the item off that list.</p>
-{% if not bot.connected %}
-<div class="warn" role="status">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
-  Sign out and sign in again.</div>
+{% if not drive_connected %}
+<div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so the assistant cannot reach your files. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 {% if rows or root_folder_id %}
 <table class="cards" data-list>
@@ -26,7 +25,7 @@
   <tr data-row>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
-    <td data-label="Added" class="muted">{{ e.granted_at }}</td>
+    <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
     <td data-label="From">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">From a request</a>{% else %}Added here{% endif %}</td>
     <td data-label="Action">
       <form class="inline" method="post" action="/revoke" data-async data-on-success="remove-row" data-confirm="Remove this from the assistant?">

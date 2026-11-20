@@ -2,10 +2,18 @@
 {% block title %}Connections{% endblock %}
 {% block content %}
 <section class="hero narrow">
-  <p class="eye">Step 2 of 2</p>
+  {% if drive_connected %}
+  <h1>Connections.</h1>
+  <p class="sub">You are signed in as <b>{{ owner }}</b>. An assistant can only use the items you allow from a connected service.</p>
+  {% else %}
+  <p class="eye">One more step</p>
   <h1>Connect your services.</h1>
   <p class="sub">You are signed in as <b>{{ owner }}</b>. Connect a service so you can choose what an assistant may use from it. Nothing is reachable until you connect it and allow specific items.</p>
+  {% endif %}
 </section>
+{% if waiting_client and not drive_connected %}
+<div class="warn" role="status" id="waiting-client"><b>{{ waiting_client }} is waiting to connect.</b> Connect Google Drive first, then you’ll be asked to Allow it.</div>
+{% endif %}
 
 <div class="grid">
   {% for row in rows %}
@@ -46,7 +54,9 @@
     <p class="muted">Other services will appear here as they are added. Each one is its own permission, asked for only when you connect it.</p>
   </article>
 </div>
-{% if next and next != "/" %}
-<p><a href="{{ next }}">Continue where you left off</a></p>
+{% if drive_connected and next and next != "/" %}
+<div class="actions" id="continue">
+  <a class="btn primary" href="{{ next }}">{% if waiting_client %}Continue to {{ waiting_client }}{% else %}Continue where you left off{% endif %}</a>
+</div>
 {% endif %}
 {% endblock %}

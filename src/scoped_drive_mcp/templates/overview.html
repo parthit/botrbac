@@ -5,6 +5,12 @@
 {% include "_mode.html" %}
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
+{% elif not allow_count and not root_folder_id %}
+<div class="card" id="next-step">
+  <h2>Next: choose files your assistant can use</h2>
+  <p>Google Drive is connected, but nothing is allowed yet. Your assistant can’t open anything until you allow a file or folder.</p>
+  <p><a class="btn primary" href="/browse">Choose files</a></p>
+</div>
 {% endif %}
 <div class="grid">
   <div class="card stat">
@@ -59,8 +65,8 @@
   {% for grant in grants %}
   <tr data-row>
     <td data-label="App">{{ grant.client_name }}</td>
-    <td data-label="Connected" class="muted">{{ grant.created_at }}</td>
-    <td data-label="Last used" class="muted">{{ grant.last_used or "Never" }}</td>
+    <td data-label="Connected" class="muted">{{ grant.created_at | when }}</td>
+    <td data-label="Last used" class="muted">{{ grant.last_used | when("Never") }}</td>
     <td data-label="Action">
       <form class="inline" method="post" action="/oauth/grants/revoke" data-async data-on-success="remove-row" data-confirm="Disconnect this app? It loses access immediately.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -75,7 +81,7 @@
 {% endif %}
 <div class="card empty" data-empty{% if grants %} hidden{% endif %}>
   <h2>No apps connected</h2>
-  <p>Use one of the setup cards above, then approve the connection when you are asked.</p>
+  <p>Copy the MCP URL above into your assistant, sign in when the browser opens, and choose Allow. The app then shows up here.</p>
 </div>
 
 {% if is_admin %}

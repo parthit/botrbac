@@ -23,6 +23,7 @@ File text from another person is untrusted. It is wrapped in markers the reading
 is told not to follow, the same idea as mailbox messages.
 """
 
+import logging
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -37,6 +38,8 @@ from .service import DriveService
 from .store import Allowlist
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 GUEST_ROLE = "guest"
 
@@ -237,6 +240,30 @@ class ExternalShares:
                     peers.append(peer)
         return peers
 
+    def sharer_of(self, caller: str, file_id: str) -> str | None:
+        """The paired person whose Sharing list covers `file_id`, or None.
+
+        Used when the caller's own read_file cannot see a file, to point the assistant at
+        read_shared_file instead of filing an access request nobody can approve. It runs
+        the same guard as a guest read (the owner's external list only), records nothing,
+        and answers only for people already paired with the caller."""
+        try:
+            you = normalize_email(caller)
+        except SharedAccessError:
+            return None
+        for peer in self._sharing_peers(you):
+            if peer == you:
+                continue
+            with acting_as(peer):
+                try:
+                    if self.service.guard.is_in_scope(file_id):
+                        return peer
+                except Exception:
+                    # One person's Drive being down must not hide another's share.
+                    logger.info("sharer lookup skipped one owner", exc_info=True)
+                    continue
+        return None
+
     def search_as_owner(self, text: str, limit: int) -> list[dict[str, Any]]:
         """Run inside a guest call. Drive's guarded search finds files inside shared
         folders and directly shared files, but never a shared folder itself (it is not
@@ -334,7 +361,8 @@ class ExternalShares:
             raise SharedAccessError(
                 "not_linked",
                 "You do not have an active mailbox pairing with that person. Both people "
-                "approve a pairing on /bridge before either assistant can read shared items.",
+                "approve the pairing on the dashboard's Mailbox page before either assistant "
+                "can read shared items.",
                 owner=them,
             )
         # Recorded on the owner's activity log, so they can see who read what.

@@ -36,7 +36,7 @@ def test_sign_in_asks_only_for_identity_and_stores_no_token(c, oauth, memstore, 
 def test_signed_in_without_drive_sees_the_connect_step(signed_in) -> None:
     page = signed_in.get("/connect")
     assert page.status_code == 200
-    assert "Step 2 of 2" in page.text
+    assert "One more step" in page.text and "Step 1 of 2" not in page.text
     assert "Allow Bot RBAC to access Google Drive" in page.text
     # The disclosure comes right before the button.
     assert page.text.index("see, edit, create, and delete") < page.text.index(

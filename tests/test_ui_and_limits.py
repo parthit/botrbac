@@ -163,12 +163,20 @@ def test_request_page_picker_approves_an_unopened_file(world, memstore, oauth) -
     )
     signed_in = client(app)
     assert login(signed_in).status_code == 303
+    # An older sign-in that only covers files this app opened (drive.file): a file it
+    # cannot see may still exist, so the request is filed and the picker can add it.
+    vault = app.state.dashboard.vault
+    record = vault.owner()
+    vault.set_owner(
+        record["t"], OWNER_EMAIL, "openid email https://www.googleapis.com/auth/drive.file"
+    )
     denied = mcp_call(signed_in, "get_metadata", file_id="stray-shared")
     request_id = denied["structuredContent"]["request_id"]
     page = signed_in.get(f"/requests/{request_id}")
     assert page.status_code == 200
     assert "Choose the file to approve" in page.text
-    assert "could not open that file" in page.text
+    assert "only covers some of your files" in page.text
+    assert "doesn\u2019t exist" not in page.text
     button = re.search(r"<button[^>]*id=\"pick-drive\"[^>]*>", page.text)
     assert button, page.text
     assert f'data-request="{request_id}"' in button.group(0)
