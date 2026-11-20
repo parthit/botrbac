@@ -13,7 +13,7 @@
 {% endif %}
 <form method="get" action="/browse" class="actions" role="search">
   {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
-  <label class="sr-only" for="q" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Search names</label>
+  <label class="sr-only" for="q">Search names</label>
   <input id="q" type="search" name="q" value="{{ q or '' }}" placeholder="Search names in your Drive">
   <button type="submit">Search</button>
   {% if q %}<a href="/browse?folder=root{{ keep('') }}">Clear search</a>{% endif %}
@@ -102,7 +102,7 @@
         <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="target_id" value="{{ r.id }}">
-          <button class="primary" type="submit">Share for this request</button>
+          <button class="primary" type="submit">Share for this request<span class="sr-only">: {{ r.name }}</span></button>
         </form>
       {% else %}
         {#- Under an allowed folder the item stays available after Remove, so the confirm
@@ -111,28 +111,28 @@
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.acts_on }}">
           <input type="hidden" name="next" value="{{ here }}">
-          <button class="danger" type="submit">{{ "Remove the target" if t else "Remove" }}</button>
+          <button class="danger" type="submit">{{ "Remove the target" if t else "Remove" }}<span class="sr-only"> {{ t.name if t else r.name }}</span></button>
         </form>
         {% if not r.covered_by %}
         <form class="inline" method="post" action="/grant" data-async data-flip="access" data-access-when="off"{% if r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
-          <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}</button>
+          <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}<span class="sr-only"> {{ r.name }}</span></button>
         </form>
         {% endif %}
         <form class="inline" method="post" action="/sharing/remove" data-async data-flip="share" data-share-when="on" data-confirm="{% if r.shared_by %}Stop sharing this item on its own? It stays shared through “{{ r.shared_by }}”.{% else %}Stop sharing this with other people’s assistants?{% endif %}"{% if not r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.acts_on }}">
           <input type="hidden" name="next" value="{{ here }}">
-          <button class="danger" type="submit">Stop sharing</button>
+          <button class="danger" type="submit">Stop sharing<span class="sr-only"> {{ r.name }}</span></button>
         </form>
         {% if not r.shared_by %}
         <form class="inline" method="post" action="/sharing/add" data-async data-flip="share" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
-          <button type="submit">{{ "Share the target with paired people" if r.is_shortcut else "Share with paired people" }}</button>
+          <button type="submit">{{ "Share the target with paired people" if r.is_shortcut else "Share with paired people" }}<span class="sr-only">: {{ r.name }}</span></button>
         </form>
         {% endif %}
       {% endif %}

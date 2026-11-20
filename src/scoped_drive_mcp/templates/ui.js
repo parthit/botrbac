@@ -2,9 +2,28 @@
   var navBtn = document.querySelector(".nav-toggle");
   var nav = document.getElementById("site-nav");
   if (navBtn && nav) {
-    navBtn.addEventListener("click", function () {
-      var open = nav.classList.toggle("open");
+    // The phone menu is a fixed overlay: close it on Escape, on a click or tap outside it,
+    // and when focus moves past it, so focus never sits on content hidden underneath.
+    var setNav = function (open, returnFocus) {
+      nav.classList.toggle("open", open);
       navBtn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (!open && returnFocus) navBtn.focus();
+    };
+    var navOpen = function () { return nav.classList.contains("open"); };
+    navBtn.addEventListener("click", function () { setNav(!navOpen(), false); });
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || !navOpen()) return;
+      // An open account menu inside the nav closes first (handled below).
+      var acct = nav.querySelector("details.account[open]");
+      if (acct) return;
+      setNav(false, true);
+    });
+    document.addEventListener("click", function (event) {
+      if (navOpen() && !nav.contains(event.target) && !navBtn.contains(event.target)) setNav(false, false);
+    });
+    nav.addEventListener("focusout", function (event) {
+      var to = event.relatedTarget;
+      if (navOpen() && to && !nav.contains(to) && to !== navBtn) setNav(false, false);
     });
   }
 
@@ -55,21 +74,59 @@
   // background and update only their own row. The server answers JSON when asked for it
   // and still redirects a plain form post, so the page works without JavaScript too.
 
+  // One persistent live region (in base.html) carries every announcement. Writing into a
+  // region that already exists is announced reliably; inserting a new role=status node is not.
+  var live = document.getElementById("live");
+  var liveAlert = document.getElementById("live-alert");
+  function announce(kind, message) {
+    var region = kind === "ok" ? live : (liveAlert || live);
+    if (!region || !message) return;
+    region.textContent = "";
+    // A fresh write on the next tick so the same message twice is still announced.
+    window.setTimeout(function () { region.textContent = message; }, 60);
+  }
+
+  // A flash rendered with the page is not announced on load; read it out once.
+  var pageFlash = document.querySelector("#main > .flash:not([id])");
+  if (pageFlash) announce(pageFlash.classList.contains("error") ? "error" : "ok", pageFlash.textContent.trim());
+
+  var toast = null;
+  var toastTimer = null;
+  function inView(el) {
+    var r = el.getBoundingClientRect();
+    return r.bottom > 64 && r.top < window.innerHeight;
+  }
+
   function showFlash(kind, message) {
     var main = document.getElementById("main");
     if (!main || !message) return;
+    var cls = kind === "ok" ? "ok" : "error";
+    announce(cls, message);
+    // A flash already at the top (from the last page load) is stale now. Update it in place
+    // so nothing moves; if it is on screen that is all the person needs to see.
     var old = main.querySelectorAll(":scope > .flash:not([id])");
-    for (var i = 0; i < old.length; i++) old[i].remove();
-    var note = document.createElement("div");
-    note.className = "flash " + (kind === "ok" ? "ok" : "error");
-    note.setAttribute("role", kind === "ok" ? "status" : "alert");
-    note.textContent = message;
-    note.tabIndex = -1;
-    main.insertBefore(note, main.firstChild);
-    return note;
+    for (var i = 1; i < old.length; i++) old[i].remove();
+    if (old.length) {
+      old[0].className = "flash " + cls;
+      old[0].removeAttribute("role");
+      old[0].textContent = message;
+      if (inView(old[0])) { if (toast) toast.hidden = true; return; }
+    }
+    // Otherwise show a fixed toast by the bottom edge: no layout shift, and visible on a
+    // long phone list where the top of the page is far away.
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.setAttribute("aria-hidden", "true");
+      document.body.appendChild(toast);
+    }
+    toast.className = "toast " + cls;
+    toast.textContent = message;
+    toast.hidden = false;
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () { toast.hidden = true; }, cls === "ok" ? 4000 : 8000);
   }
 
-  function flipRow(form, note) {
+  function flipRow(form) {
     var key = form.getAttribute("data-flip");
     var row = form.closest("[data-row]");
     if (!key || !row) return;
@@ -82,20 +139,42 @@
     // Keep keyboard focus on the row: move it to the button that replaced this one.
     var shown = row.querySelector("form[data-flip='" + key + "']:not([hidden]) button");
     if (shown) shown.focus();
-    else if (note) note.focus();
+  }
+
+  function rowTarget(row) {
+    // The row's own action is the natural next stop; else its first link.
+    return row && (row.querySelector("form:not([hidden]) button") || row.querySelector("a[href]"));
   }
 
   function removeRow(form) {
     var row = form.closest("[data-row]");
     if (!row) return;
     var body = row.parentNode;
+    var hadFocus = row.contains(document.activeElement);
+    var next = row.nextElementSibling;
+    while (next && !next.hasAttribute("data-row")) next = next.nextElementSibling;
+    var prev = row.previousElementSibling;
+    while (prev && !prev.hasAttribute("data-row")) prev = prev.previousElementSibling;
     row.remove();
+    var target = rowTarget(next) || rowTarget(prev);
     if (body && !body.querySelector("tr, li")) {
       var list = body.closest("[data-list]");
       if (list) list.hidden = true;
       var scope = list ? list.parentNode : document;
       var empty = scope.querySelector("[data-empty]");
-      if (empty) empty.hidden = false;
+      if (empty) {
+        empty.hidden = false;
+        target = empty.querySelector("h2, h3, p");
+        if (target) target.tabIndex = -1;
+      }
+    }
+    // Do not leave keyboard focus on <body> after its button disappeared.
+    if (hadFocus || document.activeElement === document.body) {
+      if (target) target.focus();
+      else {
+        var main = document.getElementById("main");
+        if (main) { main.tabIndex = -1; main.focus(); }
+      }
     }
   }
 
@@ -128,11 +207,11 @@
         return response.json();
       })
       .then(function (data) {
-        var note = showFlash(data.ok ? "ok" : "error", data.message);
+        showFlash(data.ok ? "ok" : "error", data.message);
         var changed = typeof data.changed === "boolean" ? data.changed : data.ok;
         if (!changed) return;
         if (form.getAttribute("data-on-success") === "remove-row") removeRow(form);
-        else flipRow(form, note);
+        else flipRow(form);
       })
       .catch(function () {
         // Signed out, CSRF expired or a server error page: say so instead of guessing.

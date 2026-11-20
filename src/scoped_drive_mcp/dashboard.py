@@ -370,6 +370,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         nav=request.url.path,
         pending_count=pending_count,
         reconsent=reconsent,
+        status_code=status_code,
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)

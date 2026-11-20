@@ -3,12 +3,12 @@
 {% block content %}
 <h1>Access request</h1>
 <div class="card">
-  <p>
+  <h2>{{ request_headline(req, owner_meta, apps) }}</h2>
+  <p class="status">
     {% if req.status == "pending" %}<span class="pill pending"><span aria-hidden="true">●</span> {{ status_label(req.status) }}</span>
     {% elif req.status == "approved" %}<span class="pill ok"><span aria-hidden="true">✓</span> {{ status_label(req.status) }}</span>
     {% else %}<span class="pill bad"><span aria-hidden="true">!</span> {{ status_label(req.status) }}</span>{% endif %}
   </p>
-  <h2>{{ request_headline(req, owner_meta, apps) }}</h2>
   {% if req.tool == "request_access" %}
     {% if req.description and (req.file_name or owner_meta) %}<p><b>Asked for:</b> {{ req.description }}</p>{% endif %}
     {% if req.reason %}

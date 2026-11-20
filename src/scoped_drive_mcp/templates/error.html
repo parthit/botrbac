@@ -1,9 +1,11 @@
 {% extends "base.html" %}
-{% block title %}{{ title or "Problem" }}{% endblock %}
+{% set not_found = status_code is defined and status_code == 404 %}
+{% set heading = title or ("Page not found" if not_found else "Something went wrong") %}
+{% block title %}{{ heading }}{% endblock %}
 {% block content %}
 <div class="card empty" role="alert">
-  <h1>{{ title or "Something went wrong" }}</h1>
-  <p>{{ message }}</p>
+  <h1>{{ heading }}</h1>
+  {% if not (not_found and message == "Page not found.") %}<p>{{ message }}</p>{% endif %}
   <div class="actions">
     {% if actions %}
     {% for a in actions %}

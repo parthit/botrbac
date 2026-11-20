@@ -32,17 +32,23 @@
   --card: #fffcf6;
   --ink: #1e1915;
   --ink2: #54473c;
-  --ink3: #8c7c6c;
+  /* ≥4.5:1 on --paper, --card and --wash (was #8c7c6c, 3.6:1). */
+  --ink3: #76675a;
   --line: #d8ccb9;
   --line2: #c1b29c;
   --wash: #f0eadf;
   --accent: #b8411b;
+  --accent-hover: #a53a17;
   --accent-fill: #e2562a;
   --accent-wash: #fcf2eb;
   --on-accent: #fffaf0;
-  --ok: #2b7d52;
+  /* ≥5:1 on its own 14% pill tint (was #2b7d52, 4.1:1 at 11px). */
+  --ok: #246b45;
   --bad: #8a3418;
+  --bad-wash: #f8e6df;
   --warn: #8a4b12;
+  --select: #ffc397;
+  --menu-shadow: 0 12px 32px rgba(30, 25, 21, 0.12);
   --hue: var(--ink);
   --c-sign: #2f6bd0;
   --c-pick: #b0640c;
@@ -50,7 +56,35 @@
   --mono: "Geist Mono", ui-monospace, monospace;
   --font: Geist, system-ui, sans-serif;
   --shadow: 5px 5px 0 -1.5px var(--wash), 5px 5px 0 0 var(--ink);
-  color-scheme: light;
+  color-scheme: light dark;
+}
+/* Dark: the same warm paper-and-ink look, inverted. Every text token is ≥4.5:1 on
+   --paper, --card and --wash; the Google button keeps its own white brand colors. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1a1613;
+    --card: #241f1b;
+    --ink: #f2ebe0;
+    --ink2: #c9bcab;
+    --ink3: #a69684;
+    --line: #3d342d;
+    --line2: #5a4e43;
+    --wash: #2e2722;
+    --accent: #ef8a5f;
+    --accent-hover: #f5a07b;
+    --accent-fill: #ef8a5f;
+    --accent-wash: #33231b;
+    --on-accent: #1d120c;
+    --ok: #7fcf9f;
+    --bad: #f19a7a;
+    --bad-wash: #3b221a;
+    --warn: #e9a35c;
+    --select: #7a3a1e;
+    --menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    --c-sign: #6f9ff0;
+    --c-pick: #e09a3e;
+    --c-revoke: #5cc0a8;
+  }
 }
 * { box-sizing: border-box; }
 html { scroll-padding-top: 80px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -61,7 +95,30 @@ body {
   background: var(--paper);
   -webkit-font-smoothing: antialiased;
 }
-::selection { background: #ffc397; color: var(--ink); }
+::selection { background: var(--select); color: var(--ink); }
+/* Visually hidden but read by screen readers (labels, row context on repeated buttons). */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+/* Names (file names, connection and client names) are user- or app-chosen and can be one
+   long unbroken string. Let text wrap anywhere rather than widen the page. */
+h1, h2, h3, p, li, dd, dt, legend, label, .card, .flash, .warn, .toast { overflow-wrap: anywhere; }
+/* In a table, only the name columns may break inside a word; short values ("Folder",
+   "Added here") keep their words whole instead of being squeezed to one letter. */
+td { overflow-wrap: break-word; }
+td:nth-child(-n+2), td > div { overflow-wrap: anywhere; }
+/* …but not squeezed to a few letters per line when the table is tight (tablets). */
+table.cards td:nth-child(-n+2) { min-width: 8em; }
+main { min-width: 0; }
 .skip {
   position: absolute;
   left: 12px;
@@ -103,6 +160,7 @@ header {
   color: var(--ink);
   text-decoration: none;
   white-space: nowrap;
+  min-height: 44px;
 }
 .brand:hover { color: var(--ink); }
 .mark { display: block; flex: none; }
@@ -177,7 +235,7 @@ header {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 14px;
-  box-shadow: 0 12px 32px rgba(30, 25, 21, 0.12);
+  box-shadow: var(--menu-shadow);
 }
 #site-nav .account-menu a { width: 100%; }
 .summary-email { display: none; }
@@ -255,7 +313,7 @@ p { margin: 0 0 12px; }
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
-.stat a { font-weight: 600; font-size: 15px; padding: 10px 0; margin: -10px 0; }
+.stat a { font-weight: 600; font-size: 15px; padding: 12px 0; margin: -12px 0; }
 .stat a::after { content: " →"; }
 a { color: var(--accent); }
 a:hover { color: var(--ink); }
@@ -281,7 +339,7 @@ button.primary, .btn.primary {
   border-color: var(--accent);
   color: var(--on-accent);
 }
-button.primary:hover, .btn.primary:hover { background: #a53a17; color: var(--on-accent); filter: none; }
+button.primary:hover, .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); filter: none; }
 button:hover, .btn:hover { background: var(--wash); color: var(--ink); filter: none; }
 button.danger, .btn.danger {
   color: var(--bad);
@@ -289,7 +347,7 @@ button.danger, .btn.danger {
   background: transparent;
 }
 button.danger:hover, .btn.danger:hover {
-  background: #f8e6df;
+  background: var(--bad-wash);
   color: var(--bad);
   border-color: var(--bad);
   filter: none;
@@ -336,11 +394,32 @@ input[type="text"], input[type="search"], input[type="url"], input[type="passwor
   white-space: nowrap;
 }
 .pill.ok { background: color-mix(in srgb, var(--ok) 14%, var(--card)); color: var(--ok); }
-.pill.bad { background: #f8e6df; color: var(--bad); }
+.pill.bad { background: var(--bad-wash); color: var(--bad); }
 .pill.pending { background: var(--accent-wash); color: var(--accent); }
 .flash { padding: 12px 14px; border-radius: 12px; margin-bottom: 12px; border: 1px solid var(--line); }
 .flash.ok { background: color-mix(in srgb, var(--ok) 12%, var(--card)); color: var(--ok); }
-.flash.error { background: #f8e6df; color: var(--bad); }
+.flash.error { background: var(--bad-wash); color: var(--bad); }
+/* Confirmation for in-place row actions. Fixed, so it never shifts the page, and shown
+   where the person is looking even when the top of the page is scrolled away. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 70;
+  width: max-content;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1.5px solid var(--ink);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 4px 4px 0 0 var(--ink);
+  font-size: 15px;
+  line-height: 1.4;
+}
+.toast.ok { border-color: var(--ok); box-shadow: 4px 4px 0 0 var(--ok); }
+.toast.error { border-color: var(--bad); box-shadow: 4px 4px 0 0 var(--bad); color: var(--bad); }
 .warn {
   background: var(--accent-wash);
   border: 1px solid var(--line);
@@ -350,8 +429,17 @@ input[type="text"], input[type="search"], input[type="url"], input[type="passwor
   margin-bottom: 16px;
 }
 .crumbs { font: 500 12px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink2); margin: 8px 0 16px; }
-.crumbs a { color: var(--ink3); text-decoration: none; }
-.crumbs a:hover { color: var(--ink); }
+.crumbs a {
+  color: var(--ink2);
+  text-decoration: underline;
+  text-decoration-color: var(--line2);
+  text-underline-offset: 3px;
+  /* 44px tall hit area without changing the line's height. */
+  display: inline-block;
+  padding: 14px 2px;
+  margin: -14px -2px;
+}
+.crumbs a:hover { color: var(--ink); text-decoration-color: currentColor; }
 .crumbs .sep { color: var(--ink3); margin: 0 6px; }
 code {
   font-family: var(--mono);
@@ -491,13 +579,13 @@ footer .brand { color: var(--ink2); margin: 0; font-size: 15px; }
   line-height: 26px;
   color: var(--ink2);
 }
-.trust li { display: flex; align-items: center; }
+.trust li { display: flex; align-items: flex-start; }
 .trust li + li::before {
   content: "";
   width: 1px;
   height: 18px;
   background: var(--line2);
-  margin: 0 20px;
+  margin: 4px 20px 0;
 }
 .trust b { color: var(--ink); font-weight: 600; }
 .sq {
@@ -506,7 +594,8 @@ footer .brand { color: var(--ink2); margin: 0; font-size: 15px; }
   height: 10px;
   border-radius: 2px;
   background: var(--ink);
-  margin-right: 8px;
+  /* Sit on the first line (26px line-height) when the item wraps. */
+  margin: 8px 8px 0 0;
 }
 .sq.ok { background: var(--ok); }
 .diagram { padding: 64px 0 16px; }
@@ -652,6 +741,24 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   .summary-email { display: inline; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .account .nav-user { display: none; }
   .account-menu { position: static; display: flex; box-shadow: none; border: 0; padding: 0; background: transparent; min-width: 0; }
+  .trust { flex-direction: column; align-items: flex-start; text-align: left; max-width: 420px; }
+  .trust li + li::before { display: none; }
+}
+/* Touch and narrow screens: every control is at least 44px tall. */
+@media (max-width: 1100px), (pointer: coarse) {
+  button, .btn, summary.btn, .gsi-button { height: 44px; }
+  .gsi-button { line-height: 44px; }
+  #site-nav a { height: 44px; }
+  .account summary { min-height: 44px; }
+  footer a { min-height: 44px; }
+  input[type="text"], input[type="search"], input[type="url"], input[type="password"], select { height: 44px; }
+  /* Names that are links (file rows, table cells) get a taller hit area, same layout. */
+  /* Vertical padding on an inline link grows its hit area without moving any line. */
+  .file-name a, table.cards td a:not(.btn) { padding: 11px 0; }
+  .actions > a:not(.btn) { display: inline-flex; align-items: center; min-height: 44px; }
+}
+/* Tables become stacked cards only on phones; tablets keep the table. */
+@media (max-width: 720px) {
   .file { grid-template-columns: 1fr; }
   .file-actions { grid-column: 1; grid-row: auto; }
   table.cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -667,10 +774,11 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   }
   table.cards td {
     border: 0;
-    border-bottom: 1px solid var(--line);
+    border-top: 1px solid var(--line);
     display: flex;
-    justify-content: space-between;
-    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px 12px;
     align-items: baseline;
     padding: 10px 0;
     text-align: right;
@@ -678,7 +786,11 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
     min-width: 0;
   }
   table.cards td > * { min-width: 0; }
-  table.cards tr td:last-child { border-bottom: 0; }
+  /* An empty value (no reason, no item id) is not worth a labelled line on a phone. */
+  table.cards td:empty,
+  table.cards td:has(> code:only-child:empty) { display: none; }
+  table.cards tr td:first-child { border-top: 0; }
+  table.cards tr td, table.cards tr:last-child td { border-bottom: 0; }
   table.cards td::before {
     content: attr(data-label);
     color: var(--ink3);
@@ -687,10 +799,52 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
     text-transform: uppercase;
     text-align: left;
     flex: 0 0 7.5em;
+    margin-right: auto;
   }
   dl { grid-template-columns: 1fr; }
-  .trust { flex-direction: column; align-items: flex-start; text-align: left; max-width: 420px; }
-  .trust li + li::before { display: none; }
+}
+/* Six-column tables (Requests, Activity) do not fit a portrait tablet either. */
+@media (min-width: 721px) and (max-width: 900px) {
+  table.cards:has(> thead th:nth-child(6)) thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.cards:has(> thead th:nth-child(6)) { display: block; }
+  table.cards:has(> thead th:nth-child(6)) tbody, table.cards:has(> thead th:nth-child(6)) tr, table.cards:has(> thead th:nth-child(6)) td { display: block; width: auto; }
+  table.cards:has(> thead th:nth-child(6)) { border: 0; background: transparent; }
+  table.cards:has(> thead th:nth-child(6)) tr {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    margin-bottom: 12px;
+    padding: 8px 14px;
+  }
+  table.cards:has(> thead th:nth-child(6)) td {
+    border: 0;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px 12px;
+    align-items: baseline;
+    padding: 10px 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  table.cards:has(> thead th:nth-child(6)) td > * { min-width: 0; }
+  /* An empty value (no reason, no item id) is not worth a labelled line on a phone. */
+  table.cards:has(> thead th:nth-child(6)) td:empty,
+  table.cards:has(> thead th:nth-child(6)) td:has(> code:only-child:empty) { display: none; }
+  table.cards:has(> thead th:nth-child(6)) tr td:first-child { border-top: 0; }
+  table.cards:has(> thead th:nth-child(6)) tr td, table.cards:has(> thead th:nth-child(6)) tr:last-child td { border-bottom: 0; }
+  table.cards:has(> thead th:nth-child(6)) td::before {
+    content: attr(data-label);
+    color: var(--ink3);
+    font: 500 11px var(--mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: left;
+    flex: 0 0 7.5em;
+    margin-right: auto;
+  }
 }
 @media (min-width: 1101px) {
   .bar { flex-wrap: nowrap; }

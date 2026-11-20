@@ -37,7 +37,7 @@
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <input type="hidden" name="next" value="/sharing">
-        <button class="danger" type="submit">Stop sharing</button>
+        <button class="danger" type="submit">Stop sharing<span class="sr-only"> {{ e.name or e.id }}</span></button>
       </form>
     </td>
   </tr>
