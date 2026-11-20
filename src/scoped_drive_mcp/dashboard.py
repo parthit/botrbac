@@ -2200,20 +2200,26 @@ def request_headline(
         name = str(req.description)
     item = name or "something in your Drive"
     tool = str(getattr(req, "tool", "") or "")
-    sentences = {
-        "read_file": f"{who} wants to read {item}.",
-        "get_metadata": f"{who} wants to see the details of {item}.",
-        "list_folder": f"{who} wants to list {item}.",
-        "search_files": f"{who} wants to search your Drive.",
-        "create_folder": f"{who} wants to create a folder in {item}.",
-        "create_doc": f"{who} wants to create a document in {item}.",
-        "upload_file": f"{who} wants to upload a file in {item}.",
-        "update_file_content": f"{who} wants to edit {item}.",
-        "rename_file": f"{who} wants to rename {item}.",
-        "trash_file": f"{who} wants to move {item} to trash.",
-        "request_access": f"{who} is asking to use {item}.",
+    actions = {
+        "read_file": f"read {item}",
+        "get_metadata": f"see the details of {item}",
+        "list_folder": f"list {item}",
+        "search_files": "search your Drive",
+        "create_folder": f"create a folder in {item}",
+        "create_doc": f"create a document in {item}",
+        "upload_file": f"upload a file in {item}",
+        "update_file_content": f"edit {item}",
+        "rename_file": f"rename {item}",
+        "trash_file": f"move {item} to trash",
+        "request_access": f"use {item}",
     }
-    return sentences.get(tool, f"{who} wants to use {item}.")
+    action = actions.get(tool, f"use {item}")
+    if str(getattr(req, "status", "pending") or "pending") != "pending":
+        # Decided requests are history: "Grok asked to read notes.txt."
+        return f"{who} asked to {action}."
+    if tool == "request_access":
+        return f"{who} is asking to {action}."
+    return f"{who} wants to {action}."
 
 
 def status_label(status: str | None) -> str:

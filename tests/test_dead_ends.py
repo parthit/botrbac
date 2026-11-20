@@ -400,5 +400,23 @@ def test_activity_names_missing_files_and_requests(owner_c) -> None:
     page = owner_c.get("/activity").text
     missing = "Your assistant (viewer token) tried to read a file that isn’t in your Drive."
     assert missing in page
-    row = page[page.index("asked for access to something in your Drive") :].split("</li>", 1)[0]
+    # The request's own description names the row, not "something in your Drive".
+    assert "asked for access to something in your Drive" not in page
+    row = page[page.index("asked for access to “the Q3 budget”") :].split("</li>", 1)[0]
     assert "Asked" in row and "Allowed" not in row
+
+
+def test_decided_request_headline_is_past_tense() -> None:
+    from types import SimpleNamespace
+
+    from scoped_drive_mcp.dashboard import request_headline
+
+    req = SimpleNamespace(
+        token_name="viewer-tok", file_name="old notes", description=None, tool="request_access"
+    )
+    req.status = "pending"
+    assert request_headline(req).endswith("is asking to use old notes.")
+    req.status = "denied"
+    assert request_headline(req).endswith("asked to use old notes.")
+    req.tool, req.status = "read_file", "approved"
+    assert request_headline(req).endswith("asked to read old notes.")

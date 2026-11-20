@@ -19,9 +19,9 @@
     </td>
     <td data-label="Decision">
       {% if r.status == 'pending' %}
-      <a class="btn primary" href="/requests/{{ r.id }}">Approve or deny<span class="sr-only">: {{ r.file_name or r.description or "a file" }}</span></a>
+      <a class="btn primary" href="/requests/{{ r.id }}">Approve or deny<span class="sr-only"> {{ r.file_name or r.description or "a file" }}</span></a>
       {% else %}
-      <a href="/requests/{{ r.id }}">Open<span class="sr-only">: {{ r.file_name or r.description or "a file" }}</span></a>
+      <a href="/requests/{{ r.id }}">Open<span class="sr-only"> {{ r.file_name or r.description or "a file" }}</span></a>
       {% endif %}
     </td>
   </tr>

@@ -48,7 +48,7 @@ def test_requests_last_column_has_a_header(owner_c) -> None:
     page = owner_c.get("/requests").text
     assert "<th></th>" not in page
     assert '<th><span class="sr-only">Decision</span></th>' in page
-    assert 'Approve or deny<span class="sr-only">: the Q3 memo</span>' in page
+    assert 'Approve or deny<span class="sr-only"> the Q3 memo</span>' in page
 
 
 def test_not_found_page_says_so(owner_c) -> None:

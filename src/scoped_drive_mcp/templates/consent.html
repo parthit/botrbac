@@ -4,7 +4,7 @@
 <div class="card" style="max-width:640px">
   <h1>Allow {{ client_name }}?</h1>
   <p id="consent-account">Signed in as <b>{{ owner }}</b>.</p>
-  <form class="inline" method="post" action="/logout">
+  <form class="switch-account" method="post" action="/logout">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="next" value="{{ switch_next }}">
     <button type="submit">Use a different account</button>

@@ -885,8 +885,10 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   .activity-when { grid-column: 1 / -1; }
 }
 .activity-filters .muted { font-size: 0.85em; }
-.btn.primary .muted { color: inherit; opacity: 0.8; }
+.btn.primary .muted { color: inherit; }
 
 /* An assistant's own words on an access request */
 .reason { margin: 12px 0; padding: 4px 0 4px 14px; border-left: 3px solid var(--line2); }
 .reason p { margin: 4px 0; }
+
+.switch-account { margin: 0 0 1em; }

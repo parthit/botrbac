@@ -194,6 +194,10 @@ def require(
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)
                 raise ToolError("Drive request failed; see server logs") from None
+            if tool == "request_access" and not ids.get("request_id") and isinstance(result, dict):
+                # Lets Activity name the row from the request ("asked for … budget sheet").
+                rid = result.get("request_id")
+                ids["request_id"] = rid if isinstance(rid, str) else None
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 
