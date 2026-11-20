@@ -2046,6 +2046,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
         data["webhook"] = await blocking(ctx.mailbox.get_webhook, email)
+        data["self_pairing"] = await blocking(ctx.mailbox.self_pairing, email)
         # Approving a pairing lets that person's assistant read the Sharing list, so each
         # card that asks for approval says what that list holds right now.
         ext = ctx.ext_allowlist
@@ -2092,6 +2093,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "until they expire."
             )
         result = ctx.mailbox.decide(email, link_id, action)
+        same = next(
+            (
+                link.get("same_account", False)
+                for link in ctx.mailbox.list_links(email)["links"]
+                if link["link_id"] == link_id
+            ),
+            False,
+        )
+        if same and result["status"] == "active":
+            return "Approved. Your two assistants can message each other now."
         if action == "deny" or result["status"] == "revoked":
             return "Pairing declined. Nothing is shared and no mail can be sent on it."
         if result["status"] == "active":
@@ -2144,6 +2155,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ):
             return action_done(request, "error", "That connection was not found.", "/")
         audit_owner("oauth_revoke")
+        if ctx.mailbox is not None:
+            # A pairing between this app and another of your assistants ends with it.
+            await blocking(
+                ctx.mailbox.end_assistant_links, str(request.session.get("owner") or ""), grant_id
+            )
         return action_done(request, "ok", "Disconnected the app. Its tokens no longer work.", "/")
 
     async def confirm_js(_: Request) -> Response:

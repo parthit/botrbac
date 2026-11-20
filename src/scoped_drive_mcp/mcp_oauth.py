@@ -880,7 +880,11 @@ class McpOAuth:
         # drop a refresh hash or access hash that was saved in between.
         self._note_use(grant.id)
         return Principal(
-            token_name=_principal_name(grant.client_name), role=Role.ADMIN, email=grant.email
+            token_name=_principal_name(grant.client_name),
+            role=Role.ADMIN,
+            email=grant.email,
+            grant_id=grant.id,
+            client_name=grant.client_name,
         )
 
     def list_grants(self, email: str | None) -> list[GrantView]:

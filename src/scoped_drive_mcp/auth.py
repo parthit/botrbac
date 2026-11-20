@@ -32,6 +32,10 @@ class Principal:
     # The dashboard user this caller acts for. API tokens leave this empty; the
     # middleware fills in the admin. OAuth grants set the user who approved them.
     email: str | None = None
+    # OAuth only: which approval (one per connected app) made this call, and the app's
+    # name. Lets one person's Grok and Claude be told apart in the mailbox.
+    grant_id: str | None = None
+    client_name: str | None = None
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)

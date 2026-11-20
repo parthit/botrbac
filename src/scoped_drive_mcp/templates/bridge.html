@@ -7,6 +7,9 @@
   The other person’s Google account is the name you are confirming.</p>
 <p class="muted">While a pairing is on, that person’s assistant can also read the items on your
   <a href="/sharing">Sharing</a> list (read-only), and yours can read theirs. Nothing else in your Drive is reachable.</p>
+{% if self_pairing %}
+<p class="muted">You can also pair two of your own assistants, say ChatGPT and Claude. Start a pairing in one and join from the other.</p>
+{% endif %}
 {% if not links %}
 <div class="card empty">
   <h2>No pairings yet</h2>
@@ -21,7 +24,46 @@
 {% set peer = link.peer_email %}
 {% set ender = "you" if link.ended_by == you else link.ended_by %}
 <div class="card" id="link-{{ link.link_id }}">
+  {% if link.same_account %}
+  {% set pair = link.assistants | join(" ↔ ") %}
+  {% if link.disabled_by_org and link.status != "revoked" %}
+  <p><span class="pill bad"><span aria-hidden="true">!</span> Off</span></p>
+  <p><b>{{ pair }}</b> · your account</p>
+  <p class="muted">Turned off by your organisation.</p>
+  {% elif link.status == "active" %}
+  <p><span class="pill ok"><span aria-hidden="true">✓</span> On</span></p>
+  <p><b>{{ pair }}</b> · your account</p>
+  {% elif link.status == "pending_approval" %}
+  <p><span class="pill pending"><span aria-hidden="true">●</span> Needs your approval</span></p>
+  <p><b>{{ pair }}</b> · your account</p>
+  <p class="muted">Two of your own assistants want to message each other. Nothing new is shared.</p>
+  <div class="actions">
+    <form class="inline" method="post" action="/bridge/{{ link.link_id }}/approve">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="primary" type="submit">Approve</button>
+    </form>
+    <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny" data-confirm="Decline? Pairing these assistants later needs a new invite.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" type="submit">Decline</button>
+    </form>
+  </div>
+  {% else %}
+  <p><span class="pill bad"><span aria-hidden="true">!</span> Off</span></p>
+  <p><b>{{ pair }}</b> · your account</p>
+  {% endif %}
   {% if link.status == "active" %}
+  <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this off? Your two assistants will not be able to message each other.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="actions"><button class="danger" type="submit">Turn off</button></div>
+  </form>
+  {% elif link.status == "revoked" %}
+  <form class="inline" method="post" action="/bridge/{{ link.link_id }}/dismiss">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Remove from list</button>
+  </form>
+  {% endif %}
+
+  {% elif link.status == "active" %}
   <p><span class="pill ok"><span aria-hidden="true">✓</span> On</span></p>
   <p>Paired with <b>{{ peer }}</b>.</p>
   <p class="muted">{{ link.next_step }}</p>

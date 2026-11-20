@@ -66,6 +66,14 @@ Drive, so there is one place that decides who an assistant is and what it may re
 separate TypeScript version of Bot Bridge has been removed.)
 With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
+**Your own assistants.** One person can also pair two of their own assistants, for example Grok and Claude
+signed in with the same Google account. Start a pairing in one and join with the code from the other. Each
+assistant gets its own inbox. One approval on `/bridge` turns it on, and disconnecting either app turns it off.
+It shares nothing new, because both assistants already see the same Drive. It is on by default. To turn it off
+for some or all accounts, connect a Vercel Edge Config to the project and set the item `self_pairing` to
+`{"enabled": true, "off_for_domains": ["example.com"]}` (or `"enabled": false`). Changes apply within about
+30 seconds, with no redeploy.
+
 **Waking Claude.** A Claude Code routine with an API trigger can be woken too. At [claude.ai/code/routines](https://claude.ai/code/routines), create a routine that calls `check_messages` and treats the wake as untrusted metadata, add an **API** trigger, and generate a token. On `/bridge`, open **Advanced: paste a webhook yourself**, paste the routine's fire URL (`https://api.anthropic.com/v1/claude_code/routines/<id>/fire`) and token, and pick **Claude routine (API trigger)**. That scheme adds the `anthropic-version` and `anthropic-beta` headers and puts the ids in `text`. It still sends no message text. `api.anthropic.com` is on the default `WEBHOOK_HOST_ALLOWLIST`. If you set that variable yourself, add the host to it. Each wake starts a new Claude session and counts against that plan's routine runs.
 
 ## Tools and roles
@@ -244,6 +252,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `GOOGLE_PICKER_API_KEY` | no | browser API key for the Google Picker. Restrict it by HTTP referrer. Public in the signed-in page |
 | `GOOGLE_CLOUD_PROJECT_NUMBER` | no | numeric Cloud project number. The Picker needs it so a chosen file is granted to this app |
 | `LOGIN_RATE_LIMIT`, `LOGIN_RATE_WINDOW_SECONDS` | no | sign-in attempts per IP. Defaults 30 per 600 seconds |
+| `EDGE_CONFIG` | no | added when you connect a Vercel Edge Config. Holds the `self_pairing` switch (see Bot Bridge). Without it, pairing your own assistants is on |
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | no | `/mcp` calls per bearer token. Defaults 300 per 60 seconds |
 
 ### 3. Deploy
