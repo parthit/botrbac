@@ -512,6 +512,12 @@ class Mailbox:
             raise MailboxError("invite_not_found", "That invite code does not exist.")
         if you == link["email_a"] and self._self_join(link):
             return self._redeem_self(you, link)
+        if link.get("same_account"):
+            assistant = current_assistant.get()
+            grants = (link.get("grant_a"), link.get("grant_b"))
+            if assistant is not None and assistant.grant_id not in grants:
+                self._charge_attempt(you)
+                raise MailboxError("invite_taken", "That invite was already used.")
         if you == link["email_a"] or you == self._peer(link_id):
             self.store.hset(f"bridge:user:{you}", link["link_id"], link["created_at"])
             return self._public_link(link, you)
@@ -545,20 +551,23 @@ class Mailbox:
         return self._public_link(link, you)
 
     def _self_join(self, link: dict[str, Any]) -> bool:
-        """Whether this call is a different assistant of the invite's creator joining it."""
-        if link.get("same_account") or self._peer(link["link_id"]):
+        """Whether this call is a different assistant of the invite's creator joining it.
+
+        Only a known grant joining an invite another known grant made counts. Anything
+        else (an API token, an invite from before grants were recorded, the creator asking
+        again) keeps the old behaviour: the invite is handed back."""
+        if link.get("same_account"):
             return False
         assistant = current_assistant.get()
         grant_a = link.get("grant_a")
-        if assistant is not None and assistant.grant_id == grant_a:
+        if assistant is None or not grant_a or assistant.grant_id == grant_a:
             return False
-        if assistant is None or not grant_a:
-            raise MailboxError(
-                "assistant_required",
-                "This is your own invite. To pair two of your own assistants, connect both "
-                "with Allow on the dashboard; one of them uses an API token.",
-            )
-        return True
+        peer = self._peer(link["link_id"])
+        if peer is None:
+            return True
+        # A join that claimed the invite but did not finish writing the link: resume it.
+        claim = self.store.get(f"bridge:selfclaim:{link['link_id']}")
+        return peer == link["email_a"] and claim == assistant.grant_id
 
     def _redeem_self(self, you: str, link: dict[str, Any]) -> dict[str, Any]:
         """Join your own invite from another assistant: a same-account link."""
@@ -607,16 +616,21 @@ class Mailbox:
         return self._public_link(link, you)
 
     def end_assistant_links(self, email: str, grant_id: str) -> int:
-        """Turn off every same-account link of this assistant (its access was revoked)."""
+        """End this assistant's same-account links and open invites (its access is gone)."""
         you = _email(email)
         ended = 0
         for link_id in self._user_link_ids(you):
             link = self._link(link_id)
-            if link is None or not link.get("same_account") or self._revoked(link_id):
+            if link is None or self._revoked(link_id):
                 continue
-            if grant_id in (link.get("grant_a"), link.get("grant_b")):
-                self._end(link, you, "turned_off")
-                ended += 1
+            if link.get("same_account"):
+                if grant_id not in (link.get("grant_a"), link.get("grant_b")):
+                    continue
+            elif link.get("grant_a") != grant_id or self._peer(link_id):
+                continue
+            status = self._status(link)
+            self._end(link, you, "turned_off" if status == "active" else "cancelled")
+            ended += 1
         return ended
 
     def get_webhook(self, email: str) -> dict[str, Any]:
@@ -714,6 +728,9 @@ class Mailbox:
             "hint": saved_hint,
             "enabled": current.get("enabled", True) if enabled is None else bool(enabled),
         }
+        assistant = current_assistant.get()
+        if assistant is not None:
+            record["grant_id"] = assistant.grant_id
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
         return self.get_webhook(you)
@@ -736,9 +753,14 @@ class Mailbox:
         if assistant is None:
             return you
         mine = _self_addr(you, assistant.grant_id)
-        if self.store.get(f"bridge:hook:{mine}") or self._live_self_link(
-            you, {assistant.grant_id}, partial=True
-        ):
+        if self.store.get(f"bridge:hook:{mine}"):
+            return mine
+        shared = self._hook(you)
+        # The account-wide hook this assistant saved (or one saved before hooks recorded
+        # who saved them) stays the one it sees and clears, since that is what fires.
+        if shared is not None and shared.get("grant_id") in (None, assistant.grant_id):
+            return you
+        if self._live_self_link(you, {assistant.grant_id}, partial=True):
             return mine
         return you
 
@@ -758,8 +780,12 @@ class Mailbox:
         recipient = str(message["to"])
         record = self._hook(recipient)
         if record is None and "#" in recipient:
-            recipient = recipient.split("#", 1)[0]
-            record = self._hook(recipient)
+            # Mail for one assistant may use the account-wide hook only if that assistant
+            # saved it; otherwise it would wake the other assistant (often the sender).
+            email, grant = recipient.split("#", 1)
+            shared = self._hook(email)
+            if shared is not None and shared.get("grant_id") == grant:
+                recipient, record = email, shared
         if not record or not record.get("enabled") or not record.get("url"):
             return
         mark = f"bridge:woke:{message['msg_id']}"
@@ -825,7 +851,8 @@ class Mailbox:
                     "That pairing is between two of your other assistants.",
                     link_id=link["link_id"],
                 )
-            # From here on the sender is this assistant, not the whole account.
+            # From here on the sender is this assistant, not the whole account. The hourly
+            # cap still counts the account (see _charge_send).
             you = sender
         if peer is None:
             raise MailboxError(
@@ -1038,6 +1065,7 @@ class Mailbox:
             )
 
     def _charge_send(self, you: str, link_id: str) -> None:
+        you = you.split("#", 1)[0]
         bucket = int(self._now()) // HOUR
         retry = _retry(self._now(), bucket)
         on_link = self.store.incr(f"bridge:rate:{you}:{link_id}:{bucket}", ex=HOUR)
@@ -1413,7 +1441,8 @@ class Mailbox:
         """Every address this call may read mail for."""
         found = {you}
         assistant = current_assistant.get()
-        if assistant is not None and self.self_pairing(you):
+        # Not gated on the switch: mail already delivered stays readable until it expires.
+        if assistant is not None:
             found.add(_self_addr(you, assistant.grant_id))
         return found
 

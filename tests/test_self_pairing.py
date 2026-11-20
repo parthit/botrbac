@@ -90,22 +90,29 @@ def test_another_assistant_does_not_reuse_your_open_invite() -> None:
     assert claude_invite["link_id"] != grok_invite["link_id"]
 
 
-def test_legacy_token_cannot_self_pair() -> None:
+def test_legacy_token_or_old_invite_keeps_old_behaviour() -> None:
     box = _box()
     with as_assistant(GROK):
         created = box.request_link(OWNER_EMAIL)
-    with pytest.raises(MailboxError) as exc:
-        box.request_link(OWNER_EMAIL, created["invite_code"])
-    assert exc.value.code == "assistant_required"
+    # An API token (no grant) re-entering its account's code just gets the invite back.
+    again = box.request_link(OWNER_EMAIL, created["invite_code"])
+    assert again["status"] == "awaiting_peer"
+    assert "same_account" not in again
+    # An invite made without a grant (before this feature, or over a token) is not joinable
+    # as a same-account pairing either.
+    legacy = box.request_link(OWNER_EMAIL, new_invite=True)
+    with as_assistant(CLAUDE):
+        back = box.request_link(OWNER_EMAIL, legacy["invite_code"])
+    assert back["status"] == "awaiting_peer"
 
 
 def test_second_join_by_a_third_assistant_is_refused_and_pair_is_unique() -> None:
     box = _box()
     link_id = _self_pair(box)
-    with as_assistant(CURSOR):
-        # The invite is used; this assistant just sees the card, it does not join.
-        link = next(x for x in box.list_links(OWNER_EMAIL)["links"] if x["link_id"] == link_id)
-        assert link["same_account"] is True
+    code = box._link(link_id)["invite_code"]
+    with as_assistant(CURSOR), pytest.raises(MailboxError) as taken:
+        box.request_link(OWNER_EMAIL, code)
+    assert taken.value.code == "invite_taken"
     with as_assistant(GROK):
         fresh = box.request_link(OWNER_EMAIL, new_invite=True)
     with as_assistant(CLAUDE), pytest.raises(MailboxError) as exc:
@@ -157,8 +164,8 @@ def test_self_pairing_off_for_domain_blocks_join_and_send() -> None:
         with pytest.raises(MailboxError) as exc:
             box.send_message(OWNER_EMAIL, link_id, "after")
         assert exc.value.code == "self_pairing_off"
-        # Mail on the switched-off feature is not surfaced either.
-        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
+        # Mail already delivered stays readable until it expires.
+        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 1
     link = box.list_links(OWNER_EMAIL)["links"][0]
     assert link["disabled_by_org"] is True
     with as_assistant(GROK):
@@ -243,3 +250,87 @@ def test_dashboard_shows_assistant_names_and_one_approve(p2_app) -> None:
     done = owner.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/bridge")})
     assert done.status_code == 303
     assert box.list_links(OWNER_EMAIL)["links"][0]["status"] == "active"
+
+
+def test_a_join_that_stopped_halfway_can_be_retried() -> None:
+    box = _box()
+    with as_assistant(GROK):
+        created = box.request_link(OWNER_EMAIL)
+    link_id = created["link_id"]
+    # Simulate a join that claimed the invite but failed before writing the link.
+    box.store.set(f"bridge:selfclaim:{link_id}", CLAUDE.grant_id)
+    box.store.set(f"bridge:peer:{link_id}", OWNER_EMAIL)
+    with as_assistant(CLAUDE):
+        joined = box.request_link(OWNER_EMAIL, created["invite_code"])
+    assert joined["same_account"] is True
+    assert box.decide(OWNER_EMAIL, link_id, "approve")["status"] == "active"
+
+
+def test_revoked_grant_ends_its_open_invites_and_pending_links_as_cancelled() -> None:
+    box = _box()
+    with as_assistant(GROK):
+        invite = box.request_link(OWNER_EMAIL)
+    pending = _self_pair(box, approve=False)
+    # Grok's first invite was reused by _self_pair, so make a separate open one.
+    with as_assistant(CURSOR):
+        cursor_invite = box.request_link(OWNER_EMAIL)
+    assert box.end_assistant_links(OWNER_EMAIL, CURSOR.grant_id) == 1
+    assert box.end_assistant_links(OWNER_EMAIL, CLAUDE.grant_id) == 1
+    links = {x["link_id"]: x for x in box.list_links(OWNER_EMAIL)["links"]}
+    assert links[pending]["ended_reason"] == "cancelled"
+    assert links[cursor_invite["link_id"]]["ended_reason"] == "cancelled"
+    assert invite["link_id"] == pending
+
+
+def test_oauth_revoke_calls_the_mailbox_hook() -> None:
+    from scoped_drive_mcp.mcp_oauth import McpOAuth
+
+    seen: list[tuple[str, str]] = []
+    oauth = McpOAuth(MemoryStore(), "https://drive-test.example.com", OWNER_EMAIL)
+    oauth.on_revoke = lambda email, grant: seen.append((email, grant))
+    assert oauth.revoke("not-a-grant") is False
+    assert seen == []
+
+
+def test_wake_does_not_go_to_the_other_assistants_shared_hook() -> None:
+    box = _box()
+    with as_assistant(CLAUDE):
+        assert box._hook_owner(OWNER_EMAIL) == OWNER_EMAIL
+    box.store.set(
+        f"bridge:hook:{OWNER_EMAIL}",
+        '{"url": "https://x", "enabled": true, "grant_id": "grant-claude"}',
+    )
+    _self_pair(box)
+    # Claude still sees and clears the hook it saved; Grok gets its own slot.
+    with as_assistant(CLAUDE):
+        assert box._hook_owner(OWNER_EMAIL) == OWNER_EMAIL
+    with as_assistant(GROK):
+        assert box._hook_owner(OWNER_EMAIL) == f"{OWNER_EMAIL}#{GROK.grant_id}"
+
+
+def test_account_send_cap_counts_both_assistants_together() -> None:
+    box = _box()
+    link_id = _self_pair(box)
+    with as_assistant(GROK):
+        box.send_message(OWNER_EMAIL, link_id, "one")
+    with as_assistant(CLAUDE):
+        box.send_message(OWNER_EMAIL, link_id, "two")
+    bucket = int(box._now()) // 3600
+    assert box.store.get(f"bridge:rate:{OWNER_EMAIL}:{bucket}") == "2"
+
+
+def test_flag_outage_costs_one_fetch_per_window() -> None:
+    now = {"t": 0.0}
+    calls = {"n": 0}
+
+    def fetch(_key: str) -> dict:
+        calls["n"] += 1
+        raise OSError("down")
+
+    flags = EdgeConfigFlags("https://edge-config.vercel.com/e?token=t", fetch, lambda: now["t"])
+    for _ in range(5):
+        assert flags.self_pairing_enabled("a@fine.io") is False
+    assert calls["n"] == 1
+    now["t"] = 31.0
+    flags.self_pairing_enabled("a@fine.io")
+    assert calls["n"] == 2

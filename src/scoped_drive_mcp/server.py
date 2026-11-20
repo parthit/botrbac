@@ -781,6 +781,9 @@ def build_app(
         if base_url and not settings.dashboard_missing()
         else None
     )
+    if mcp_oauth is not None:
+        # Disconnecting an app (or its grant being dropped) ends its own-assistant pairings.
+        mcp_oauth.on_revoke = mailbox.end_assistant_links
     ctx = DashboardContext(
         settings=settings,
         store=kv,

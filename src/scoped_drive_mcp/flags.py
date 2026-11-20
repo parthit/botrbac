@@ -62,6 +62,8 @@ class EdgeConfigFlags:
         self._lock = threading.Lock()
         # item -> (fetched_at, value); value None means "item not set".
         self._cache: dict[str, tuple[float, Any]] = {}
+        # item -> when a read last failed with nothing cached.
+        self._failed: dict[str, float] = {}
 
     def self_pairing_enabled(self, email: str) -> bool:
         if self.connection is None:
@@ -76,12 +78,22 @@ class EdgeConfigFlags:
         now = self._clock()
         with self._lock:
             cached = self._cache.get(key)
+            failed = self._failed.get(key)
         if cached is not None and now - cached[0] < self._ttl:
             return True, cached[1]
+        if cached is None and failed is not None and now - failed < self._ttl:
+            return False, None
         try:
             value = self._fetch(key)
         except Exception as exc:  # noqa: BLE001 - any failure falls back to the cache
             logging.getLogger(__name__).warning("edge_config_read_failed %s", type(exc).__name__)
+            # Remember the failure for one TTL too, so an outage costs one timeout per
+            # window instead of one per call.
+            with self._lock:
+                if cached is not None:
+                    self._cache[key] = (now, cached[1])
+                else:
+                    self._failed[key] = now
             if cached is not None:
                 return True, cached[1]
             return False, None

@@ -2155,11 +2155,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ):
             return action_done(request, "error", "That connection was not found.", "/")
         audit_owner("oauth_revoke")
-        if ctx.mailbox is not None:
-            # A pairing between this app and another of your assistants ends with it.
-            await blocking(
-                ctx.mailbox.end_assistant_links, str(request.session.get("owner") or ""), grant_id
-            )
         return action_done(request, "ok", "Disconnected the app. Its tokens no longer work.", "/")
 
     async def confirm_js(_: Request) -> Response:
