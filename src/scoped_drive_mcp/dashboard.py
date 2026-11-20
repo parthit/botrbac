@@ -1998,14 +1998,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if not expected or not hmac.compare_digest(
             expected.encode(), str(form.get("consent_id") or "").encode()
         ):
-            request.session.pop("mcp_auth", None)
+            # The newer request stays pending: its own page can still be answered.
             return render(
                 request,
                 "error.html",
                 400,
                 message=(
                     "A newer connection request replaced this page, so nothing was approved. "
-                    "Start the connection again from the app."
+                    "Use the newest page, or start the connection again from the app."
                 ),
             )
         try:

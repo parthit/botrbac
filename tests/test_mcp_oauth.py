@@ -721,6 +721,9 @@ def test_allow_only_approves_the_request_the_page_showed(owner_c) -> None:
     assert stale.status_code == 400
     assert "nothing was approved" in stale.text
     assert "No apps connected" in owner_c.get("/").text
+    # The page that is still current keeps working after the stale one was refused.
+    live = post(owner_c, "/oauth/authorize", decision="allow")
+    assert parse_qs(urlparse(posted_redirect(owner_c, live)).query)["state"] == ["other"]
 
 
 def test_replaying_a_code_ends_the_tokens_it_issued(owner_c) -> None:
