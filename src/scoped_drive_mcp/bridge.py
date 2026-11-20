@@ -620,6 +620,8 @@ class Mailbox:
         hook (its access is gone)."""
         you = _email(email)
         slot = _self_addr(you, grant_id)
+        if self.get_primary(you) == grant_id:
+            self.store.delete(f"bridge:primary:{you}")
         self.store.delete(f"bridge:hook:{slot}")
         self.store.delete(f"bridge:hookerr:{slot}")
         self._index_hook(you, slot, present=False)
@@ -780,6 +782,23 @@ class Mailbox:
         self.store.delete(f"bridge:hookerr:{you}")
         return self.get_webhook(you, app)
 
+    def get_primary(self, email: str) -> str | None:
+        """The app (grant id) that handles mail from other people, if one was chosen."""
+        return self.store.get(f"bridge:primary:{_email(email)}") or None
+
+    def set_primary(self, email: str, app: str) -> dict[str, Any]:
+        """Dashboard only: choose the app that is woken for mail from other people, or
+        "" for none (then every app with a wake-up is woken)."""
+        you = _email(email)
+        key = f"bridge:primary:{you}"
+        if not app:
+            self.store.delete(key)
+            return {"primary": None}
+        if not _TOKEN_SHAPE.fullmatch(app):
+            raise MailboxError("invalid_input", "Unknown app.")
+        self.store.set(key, app)
+        return {"primary": app}
+
     def webhook_apps(self, email: str) -> list[str]:
         """Grant ids that have their own wake-up hook saved."""
         you = _email(email)
@@ -847,15 +866,25 @@ class Mailbox:
 
         - Mail for one of your assistants (`email#grant`): that app's own hook, nothing
           else. Another app's hook would wake the wrong assistant (often the sender).
-        - Mail from another person (addressed to the account): the account-wide hook if
-          one is saved, else every app's own hook, since any of them may answer it.
+        - Mail from another person (addressed to the account): the Primary app's own hook
+          when one is chosen; else the account-wide hook; else, with no Primary, every
+          app's own hook, since any of them may answer it. With a Primary, nobody else
+          is woken: that is the point of choosing one.
         """
         if "#" in recipient:
             own = self._hook(recipient)
             return [(recipient, own)] if own is not None else []
+        primary = self.get_primary(recipient)
+        if primary:
+            slot = _self_addr(recipient, primary)
+            record = self._hook(slot)
+            if record is not None:
+                return [(slot, record)]
         shared = self._hook(recipient)
         if shared is not None:
             return [(recipient, shared)]
+        if primary:
+            return []
         found: list[tuple[str, dict[str, Any]]] = []
         grants = set(self.store.hgetall(f"bridge:hookapps:{recipient}"))
         # Hooks saved in an app's own slot before the index existed (paired apps only).

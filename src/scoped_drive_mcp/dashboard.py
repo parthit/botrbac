@@ -2071,6 +2071,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             }
             for g in apps
         ]
+        primary = await blocking(ctx.mailbox.get_primary, email)
+        data["primary"] = primary if primary in {g.id for g in apps} else None
         data["app_hooks"] = []
         for app in data["apps"]:
             hook = await blocking(ctx.mailbox.get_webhook, email, app["id"])
@@ -2171,6 +2173,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if action == "remove":
                 await blocking(ctx.mailbox.clear_webhook, email, app)
                 flash(request, "ok", "Wake-up removed. Mail still waits for check_messages.")
+            elif action == "primary":
+                await blocking(ctx.mailbox.set_primary, email, app)
+                flash(
+                    request,
+                    "ok",
+                    "Saved. Mail from other people now wakes only that app."
+                    if app
+                    else "Saved. Mail from other people wakes every app with a wake-up.",
+                )
             elif action == "move":
                 await blocking(ctx.mailbox.move_webhook, email, app)
                 flash(request, "ok", "Wake-up moved to that app. Its key moved with it.")
