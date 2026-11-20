@@ -50,10 +50,11 @@
   </div>
 
   {% elif link.status == "pending_approval" %}
-  <p><span class="pill pending"><span aria-hidden="true">●</span> Waiting for {{ peer }}</span></p>
+  <p><span class="pill pending"><span aria-hidden="true">●</span> Waiting for {{ peer.split("@")[0] }}</span></p>
   <p>Pairing with <b>{{ peer }}</b>.</p>
+  <p>Waiting for <b>{{ peer }}</b> to approve. You already approved.</p>
   {# A line listing what approving exposes from the Sharing list goes here. #}
-  <p class="muted">You approved. It turns on when {{ peer }} approves too.</p>
+  <p class="muted">It turns on as soon as {{ peer }} approves too.</p>
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Cancel this pairing with {{ peer }}? It will not turn on, even if they approve.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit">Cancel pairing</button>

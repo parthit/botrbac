@@ -250,7 +250,7 @@ def test_cards_say_who_is_waiting_on_whom(p2_app) -> None:
     )
     assert approve.status_code == 303
     owner_page = owner.get("/bridge").text
-    assert f"Waiting for {EVE}" in owner_page
+    assert f"Waiting for <b>{EVE}</b> to approve" in owner_page
     eve_page = eve.get("/bridge").text
     assert "Needs your approval" in eve_page
     assert f"<b>{OWNER_EMAIL}</b> already approved" in eve_page
