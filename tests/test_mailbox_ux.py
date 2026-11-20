@@ -361,7 +361,7 @@ def test_consent_names_the_account_mailbox_and_return_host(p2_app) -> None:
     # A foreign next is ignored.
     c2 = _signed_in(p2_app, "owner-code")
     away = c2.post("/logout", data={"csrf": csrf(c2, "/"), "next": "//evil.example/"})
-    assert away.headers["location"] == "/login"
+    assert away.headers["location"] == "/login?signed_out=1"
 
 
 # ---- MCP errors --------------------------------------------------------------------

@@ -713,3 +713,26 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   background: var(--wash);
   font: 13px/1.5 var(--mono);
 }
+
+/* Activity: one readable sentence per event */
+.activity { list-style: none; padding: 0; margin: 8px 0 16px; border-top: 1px solid var(--line); }
+.activity-row {
+  display: grid;
+  grid-template-columns: 11rem 1fr auto;
+  gap: 4px 16px;
+  align-items: baseline;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.activity-when { font-size: 14px; }
+.activity-text { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .activity-row { grid-template-columns: 1fr auto; }
+  .activity-when { grid-column: 1 / -1; }
+}
+.activity-filters .muted { font-size: 0.85em; }
+.btn.primary .muted { color: inherit; opacity: 0.8; }
+
+/* An assistant's own words on an access request */
+.reason { margin: 12px 0; padding: 4px 0 4px 14px; border-left: 3px solid var(--line2); }
+.reason p { margin: 4px 0; }

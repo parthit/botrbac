@@ -2,29 +2,36 @@
 {% block title %}Activity{% endblock %}
 {% block content %}
 <h1>Recent activity</h1>
-<p class="muted">The last 500 audit events (newest first). Contents, names and search text are never logged.
-  The Item column is a Drive id, not a file name.</p>
-{% if records %}
-<table class="cards">
-  <thead><tr><th>Time (UTC)</th><th>Who</th><th>What</th><th>Item</th><th>Decision</th><th>Reason</th></tr></thead>
-  <tbody>
-  {% for r in records %}
-  <tr>
-    <td data-label="Time (UTC)" class="muted">{{ r.ts }}</td>
-    <td data-label="Who">{% if r.event == "owner" %}You{% elif r.event == "auth" %}<span class="muted">Unknown</span>{% else %}{{ r.token_name or "—" }}{% endif %}</td>
-    <td data-label="What">{{ r.tool or r.action or r.path or r.event }}</td>
-    <td data-label="Item"><code>{{ r.file_id or r.folder_id or r.parent_id or r.request_id or "" }}</code></td>
-    <td data-label="Decision">
-      <span class="pill {{ 'ok' if r.decision == 'allow' else 'bad' }}">
-        <span aria-hidden="true">{{ '✓' if r.decision == 'allow' else '!' }}</span>
-        {{ status_label(r.decision) }}
-      </span>
-    </td>
-    <td data-label="Reason" class="muted">{{ r.reason or "" }}</td>
-  </tr>
+<p class="muted">What your assistants, the people you share with, and you have done, newest first. File contents and search text are never recorded.</p>
+<nav class="actions activity-filters" aria-label="Filter activity">
+  {% for key, label, href, count in filters %}
+  <a class="btn{{ ' primary' if key == view }}" href="{{ href }}"{% if key == view %} aria-current="page"{% endif %}>{{ label }} <span class="muted">{{ count }}</span></a>
   {% endfor %}
-  </tbody>
-</table>
+</nav>
+{% if hidden_checks %}
+<p class="muted" id="routine-checks">
+  {% if show_checks %}Showing {{ hidden_checks }} routine check{{ "s" if hidden_checks != 1 }} (an assistant asking whether a request was answered or mail arrived). <a href="{{ checks_href }}">Hide them</a>
+  {% else %}{{ hidden_checks }} routine check{{ "s" if hidden_checks != 1 }} by your assistants {{ "are" if hidden_checks != 1 else "is" }} hidden (asking whether a request was answered or mail arrived). <a href="{{ checks_href }}">Show them</a>{% endif %}
+</p>
+{% endif %}
+{% if rows %}
+<ol class="activity">
+  {% for r in rows %}
+  <li class="activity-row">
+    <span class="activity-when muted">{{ r.ts | when }}</span>
+    <span class="activity-text"{% if r.detail %} title="{{ r.detail }}"{% endif %}>{{ r.text }}</span>
+    <span class="pill{{ ' ' ~ r.badge.tone if r.badge.tone }}"><span aria-hidden="true">{{ r.badge.mark }}</span> {{ r.badge.label }}</span>
+  </li>
+  {% endfor %}
+</ol>
+{% if more_href %}
+<p><a class="btn" href="{{ more_href }}" id="show-more">Show more</a></p>
+{% endif %}
+{% elif total %}
+<div class="card empty">
+  <h2>Nothing to show here</h2>
+  <p>{% if view == "attention" %}Nothing needs your attention.{% else %}No activity matches this filter.{% endif %} <a href="/activity">Show all activity</a></p>
+</div>
 {% else %}
 <div class="card empty">
   <h2>No activity yet</h2>

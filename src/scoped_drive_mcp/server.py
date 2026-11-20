@@ -36,7 +36,7 @@ from .bridge import Mailbox, MailboxError
 from .config import Settings
 from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
 from .drive_client import (
-    OWNER_NOT_SIGNED_IN,
+    DRIVE_SCOPE,
     BotNotConnectedError,
     DriveClient,
     GoogleDriveClient,
@@ -44,6 +44,7 @@ from .drive_client import (
     LazyBotDriveClient,
     OwnerDriveClient,
     RoutingDriveClient,
+    drive_not_connected_message,
     oauth_credentials,
 )
 from .external import ExternalShares, SharedAccessError
@@ -648,18 +649,20 @@ def build_app(
         record = directory.vault_for(email).owner()
         return record.get("t") if record else None
 
+    not_connected = drive_not_connected_message(settings.app_base_url)
     if drive_client is None:
         drive_client = LazyBotDriveClient(
             settings.env_bot_refresh_token,
             stored_owner_token,
             bot_drive_factory or _bot_factory(settings),
-            not_connected_message=OWNER_NOT_SIGNED_IN,
+            not_connected_message=not_connected,
         )
     routed = RoutingDriveClient(
         drive_client,
         settings.owner_email,
         user_owner_token,
         bot_drive_factory or _bot_factory(settings),
+        not_connected_message=not_connected,
     )
 
     if guard_factory is None:
@@ -674,11 +677,6 @@ def build_app(
     else:
         guard = guard_factory(routed, settings, allowlist.mime_map)
     service = DriveService(routed, guard, settings)
-    access = (
-        AccessService(requests, settings.app_base_url, guard, service.peek_name)
-        if settings.app_base_url
-        else None
-    )
     webhook_hosts = tuple(
         host.strip().lower() for host in settings.webhook_host_allowlist.split(",") if host.strip()
     ) or DEFAULT_ALLOWLIST
@@ -714,6 +712,37 @@ def build_app(
     # The human side of the same shares: the dashboard's "Shared with me" page. Each
     # source runs through the same guest checks as the MCP tools above.
     shared_with_me = SharedWithMe([DriveSharedSource(shares)], mailbox.active_peers)
+
+    def caller_email() -> str | None:
+        principal = current_principal.get()
+        return (principal.email if principal else None) or settings.owner_email
+
+    def sharer_of(file_id: str) -> str | None:
+        email = caller_email()
+        return shares.sharer_of(email, file_id) if email else None
+
+    def limited_sign_in() -> bool:
+        # Same rule as the dashboard's reconnect banner: no full-Drive scope stamp.
+        if not vault.enabled:
+            return False
+        record = vault.owner()
+        if not record or not record.get("t"):
+            return False
+        return DRIVE_SCOPE not in str(record.get("scopes") or "").split()
+
+    access = (
+        AccessService(
+            requests,
+            settings.app_base_url,
+            guard,
+            service.peek_name,
+            probe=service.probe,
+            sharer_of=sharer_of,
+            limited_sign_in=limited_sign_in,
+        )
+        if settings.app_base_url
+        else None
+    )
     mcp = create_mcp(service, access, mailbox, shares)
 
     if oauth is None and settings.oauth_client_configured and settings.app_base_url:

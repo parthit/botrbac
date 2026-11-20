@@ -122,8 +122,8 @@ MAX_NAME_LEN = 255
 MAX_QUERY_LEN = 200
 MAX_TOP_LEVEL = 500
 TOP_LEVEL_NOTE = (
-    "These are the items the owner shared with you. Call list_folder with a folder's id to "
-    "see inside it."
+    "These are the items the user allowed you to use. Call list_folder with a folder's id "
+    "to see inside it."
 )
 
 # MCP returns the payload twice (text content and structured content), and base64 grows by
@@ -187,6 +187,20 @@ class DriveService:
             return str(self.drive.get_file(file_id, fields="id,name").get("name") or "") or None
         except Exception:
             return None
+
+    def probe(self, file_id: str) -> tuple[str, str | None]:
+        """Whether this sign-in can open the file: ("found", name), ("missing", None) when
+        Drive says it does not exist for this account, or ("unknown", None) on any other
+        failure (a transient error must not be reported as a missing file)."""
+        try:
+            meta = self.drive.get_file(file_id, fields="id,name,trashed")
+        except DriveNotFoundError:
+            return "missing", None
+        except Exception:
+            return "unknown", None
+        if meta.get("trashed"):
+            return "missing", None
+        return "found", str(meta.get("name") or "") or None
 
     def _public(self, meta: dict[str, Any], memo: dict[str, bool] | None = None) -> dict[str, Any]:
         """public_meta with `parents` cut down to in-scope folder ids (dropped if none)."""

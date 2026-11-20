@@ -1,6 +1,7 @@
 """Owner dashboard: sign-in, bot connection, CSRF, separation from /mcp, browse/grant/revoke."""
 
 import re
+from html import unescape
 
 import pytest
 
@@ -256,7 +257,9 @@ def test_logout_form_post_as_the_browser(owner_c) -> None:
 
     logged_out = owner_c.post("/logout", data={"csrf": match.group(1)}, headers={"Origin": origin})
     assert logged_out.status_code == 303, logged_out.text
-    assert logged_out.headers["location"] == "/login"
+    assert logged_out.headers["location"] == "/login?signed_out=1"
+    landing = owner_c.get(logged_out.headers["location"])
+    assert landing.status_code == 200 and "You\u2019ve signed out." in landing.text
     home = owner_c.get("/")
     assert home.status_code == 200 and "Privacy policy" in home.text
     assert "Sign out" not in home.text
@@ -311,7 +314,8 @@ def test_sign_in_is_the_only_drive_token(no_env_bot_app, memstore, world) -> Non
     c = client(no_env_bot_app)
     result = mcp_call(c, "read_file", file_id="loose-doc")
     text = result["content"][0]["text"]
-    assert result["isError"] and "owner has not signed in" in text
+    assert result["isError"] and "Google Drive is not connected" in text
+    assert f"{BASE_URL}/connect" in text and "sign in with Google" not in text
     assert "Connect bot" not in text
 
     login(c)
@@ -454,7 +458,8 @@ def test_browse_stays_up_when_drive_list_fails(owner_c, monkeypatch) -> None:
     assert page.status_code == 200
     assert "Google Drive did not return files" in page.text
     assert "Something went wrong" not in page.text
-    assert "The file picker is not set up" in page.text
+    assert "Reload the page to try again" in page.text
+    assert "picker is not set up" not in page.text and "Google Picker" not in page.text
 
 
 def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
@@ -493,11 +498,57 @@ def test_grant_shortcut_from_browse(owner_c, world) -> None:
 
 def test_activity_page(owner_c) -> None:
     post(owner_c, "/grant", file_id="loose-doc")
+    mcp_call(owner_c, "read_file", file_id="loose-doc")
     mcp_call(owner_c, "read_file", file_id="priv-secret")
     page = owner_c.get("/activity").text
-    assert "grant" in page and "read_file" in page and "priv-secret" in page
-    assert "Drive id, not a file name" in page
-    assert "TOP SECRET" not in page and "payroll" not in page
+    assert "You allowed \u201cLoose memo\u201d for your assistant." in page
+    assert "Your assistant (viewer token) read \u201cLoose memo\u201d." in page
+    # A denied read names the file from the access request it filed.
+    assert (
+        "Your assistant (viewer token) tried to read \u201cpayroll.txt\u201d. "
+        "Blocked: it isn\u2019t on your list." in page
+    )
+    assert "TOP SECRET" not in page
+    # Raw tool names, reasons and UTC milliseconds are not shown as text.
+    assert ">read_file<" not in page and "out_of_scope<" not in page
+    assert re.search(r'<time datetime="[0-9T:-]+Z" data-time', page)
+    assert ".000+00:00" not in page.replace('title="', "")
+
+
+def test_activity_badges_filters_and_polling(owner_c, p2_app) -> None:
+    payload = mcp_call(owner_c, "read_file", file_id="priv-other")["structuredContent"]
+    rid = payload["request_id"]
+    for _ in range(3):
+        mcp_call(owner_c, "check_access_request", request_id=rid)
+    post(owner_c, f"/requests/{rid}/deny")
+    page = owner_c.get("/activity").text
+    assert "You denied a request for \u201cother.txt\u201d." in page
+    row = page[page.index("You denied a request") :].split("</li>", 1)[0]
+    assert "Denied" in row and "Allowed" not in row and "pill bad" in row
+    # The assistant asking "answered yet?" is hidden, with a way to show it.
+    assert "checked on an access request" not in page
+    assert "3 routine checks by your assistants are hidden" in page
+    shown = owner_c.get("/activity?checks=1").text
+    assert shown.count("checked on an access request") == 3
+    attention = owner_c.get("/activity?view=attention").text
+    assert "tried to read \u201cother.txt\u201d" in attention
+    assert "You denied a request" not in attention
+    mine = owner_c.get("/activity?view=you").text
+    assert "You denied a request" in mine and "tried to read" not in mine
+    assert 'aria-current="page"' in mine
+
+
+def test_activity_shows_more_on_request(owner_c, p2_app) -> None:
+    log = p2_app.state.dashboard.activity
+    for _ in range(120):
+        log({"ts": "2026-11-19T23:58:10.123+00:00", "event": "owner", "action": "login"})
+    page = owner_c.get("/activity").text
+    assert page.count('class="activity-row"') == 50
+    more = re.search(r'href="([^"]+)" id="show-more"', page)
+    assert more
+    bigger = owner_c.get(unescape(more.group(1))).text
+    assert bigger.count('class="activity-row"') == 100
+    assert "Nov 19, 2026, 23:58 UTC" in bigger
 
 
 def test_activity_is_capped(p2_app) -> None:

@@ -2,8 +2,8 @@
 {% block title %}Browse{% endblock %}
 {% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
-<h1>Files this app can see</h1>
-<p class="muted">Allow the items your assistant may use. A folder you allow includes the files inside it. Files the assistant creates in an allowed folder are included. The Google Picker, when it is set up, is another way to choose a file.</p>
+<h1>Your Google Drive</h1>
+<p class="muted">Allow the items your assistant may use. A folder you allow includes the files inside it. Files the assistant creates in an allowed folder are included.</p>
 {% if picking %}
 <div class="warn">Choosing an item for this request:
   <b>{{ picking.description or picking.file_name or "a file the assistant asked for" }}</b>.
@@ -37,7 +37,7 @@
 </p>
 {% if covered_by %}
 <div class="actions">
-  <p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed. Google may still hide files this app has not opened.</p>
+  <p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed.</p>
   {% if covered_id and not picking %}
   <form class="inline" method="post" action="/revoke" data-confirm="Remove “{{ covered_by }}” and everything in it from the assistant?">
     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -59,7 +59,7 @@
   {% if picker_ready %}
   <p>Use <b>Add from Google Drive</b> and choose the document. A file created in Google Docs stays closed to this app until you choose it. Choosing it is what lets the assistant open it.</p>
   {% else %}
-  <p>The file picker is not set up on this server yet, so a document created in Google Docs cannot be added from this page.</p>
+  <p>Reload the page to try again. If this keeps happening, reconnect Google Drive on <a href="/connect">Connections</a>.</p>
   {% endif %}
 </div>
 {% elif rows %}
@@ -96,7 +96,9 @@
       {% if r.shared_by %}<span class="pill ok" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared via folder “{{ r.shared_by }}”</span>{% endif %}
     </div>
     <div class="file-actions">
-      {% if picking %}
+      {% if picking and (r.granted or r.covered_by) %}
+        <span class="muted">Already allowed</span>
+      {% elif picking %}
         <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="target_id" value="{{ r.id }}">
@@ -147,10 +149,7 @@
 {% else %}
 <div class="card empty">
   <h2>Nothing here yet</h2>
-  <p>This folder has no files this app can open. A document created in Google Docs stays closed until you add it with the picker above. Files an assistant creates inside a folder you have allowed show up here.</p>
-  {% if not picker_ready %}
-  <p>The file picker is not set up on this server yet. Files the assistant creates in an allowed folder will show up here.</p>
-  {% endif %}
+  <p>This folder is empty. Files an assistant creates inside a folder you have allowed show up here.</p>
 </div>
 {% endif %}
 

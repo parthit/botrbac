@@ -258,11 +258,29 @@ class AccessRequests:
 class AccessService:
     """What the MCP tools see: build `access_required` payloads and the two request tools."""
 
-    def __init__(self, requests: AccessRequests, app_base_url: str, guard: Any, peek_name: Any):
+    def __init__(
+        self,
+        requests: AccessRequests,
+        app_base_url: str,
+        guard: Any,
+        peek_name: Any,
+        *,
+        probe: Callable[[str], tuple[str, str | None]] | None = None,
+        sharer_of: Callable[[str], str | None] | None = None,
+        limited_sign_in: Callable[[], bool] | None = None,
+    ):
         self.requests = requests
         self.app_base_url = app_base_url.rstrip("/")
         self.guard = guard
         self.peek_name = peek_name
+        # probe(file_id) -> ("found", name) | ("missing", None) | ("unknown", None).
+        # Without it every denial files a request, as before.
+        self.probe = probe
+        # The paired person who shares file_id with this caller, if any (external.py).
+        self.sharer_of = sharer_of
+        # True when the stored sign-in only covers some files (drive.file): a file this
+        # app cannot see may still exist, and the approval page can pick it.
+        self.limited_sign_in = limited_sign_in
 
     def approval_url(self, request_id: str) -> str:
         return f"{self.app_base_url}/requests/{request_id}"
@@ -294,20 +312,63 @@ class AccessService:
             ),
         }
 
+    def _lookup(self, file_id: str) -> tuple[dict[str, Any] | None, str | None]:
+        """(payload, name). A payload means no request should be filed for this id: the
+        person cannot approve something that is not in their Drive."""
+        if self.probe is None:
+            return None, self.peek_name(file_id)
+        state, name = self.probe(file_id)
+        if state != "missing":
+            return None, name
+        owner = None
+        if self.sharer_of is not None:
+            try:
+                owner = self.sharer_of(file_id)
+            except Exception:
+                owner = None
+        if owner:
+            return {
+                "error": "shared_with_you",
+                "file_id": file_id,
+                "owner": owner,
+                "message": (
+                    f"This file is not in the user's own Drive. {owner} shares it with them "
+                    f'through a mailbox pairing. Use read_shared_file(owner="{owner}", '
+                    f'file_id="{file_id}") or download_shared_file with the same owner. '
+                    "No approval is needed, and none was requested."
+                ),
+            }, None
+        if self.limited_sign_in is not None and self.limited_sign_in():
+            return None, None
+        return {
+            "error": "not_found",
+            "file_id": file_id,
+            "message": (
+                "No file with this id is in the user's Google Drive, or their account cannot "
+                "open it, so there is nothing to approve and no approval link was created. "
+                "Check the id with search_files or list_folder, or call request_access "
+                "without file_id and describe what you need."
+            ),
+        }, None
+
     def handle_denial(self, file_id: str, tool: str, token_name: str | None) -> dict[str, Any]:
         """Called by the policy wrapper when a tool is denied because of scope.
 
         A recent denial for the same file and assistant is returned as is: no new
-        request is opened (see DENIAL_WINDOW)."""
+        request is opened (see DENIAL_WINDOW). Ids that cannot be approved here (not in
+        the person's Drive, or shared by a paired person) file no request either."""
         denied = self.requests.recent_denial(file_id, token_name)
         if denied is not None:
             return self._denied_payload(denied)
+        unreachable, name = self._lookup(file_id)
+        if unreachable is not None:
+            return unreachable
         req, _created = self.requests.create(
             tool=tool,
             token_name=token_name,
             reason=f"{tool} was refused because the item is not shared with the assistant",
             file_id=file_id,
-            file_name=self.peek_name(file_id),
+            file_name=name,
         )
         return self._payload(req)
 
@@ -334,12 +395,17 @@ class AccessService:
                 return self._denied_payload(denied)
         else:
             file_id = None
+        name = None
+        if file_id is not None:
+            unreachable, name = self._lookup(file_id)
+            if unreachable is not None:
+                return {"status": unreachable.pop("error"), **unreachable}
         req, _created = self.requests.create(
             tool="request_access",
             token_name=token_name,
             reason=reason_clean,
             file_id=file_id,
-            file_name=self.peek_name(file_id) if file_id else None,
+            file_name=name,
             description=description_clean,
         )
         return {
@@ -360,12 +426,18 @@ class AccessService:
         out: dict[str, Any] = {"request_id": req.id, "status": req.status, "file_id": req.file_id}
         if req.status == APPROVED:
             out["granted_id"] = req.granted_id
-            out["message"] = "Approved. Retry your call" + (
-                f"; the owner shared item {req.granted_id}." if req.granted_id else "."
-            )
+            out["granted_name"] = req.granted_name
+            if req.granted_id:
+                label = f"\u201c{req.granted_name}\u201d" if req.granted_name else "the item"
+                out["message"] = (
+                    f"Approved. The user shared {label} (id {req.granted_id}) with you. "
+                    "Retry your call; if they shared a folder, use list_folder with that id."
+                )
+            else:
+                out["message"] = "Approved. Retry your call."
         elif req.status == DENIED:
-            out["message"] = "The owner denied this request. Do not retry it."
+            out["message"] = "The user denied this request. Do not retry it."
         else:
-            out["message"] = "Still waiting for the owner. Remind the user of the approval link."
+            out["message"] = "Still waiting for the user. Remind them of the approval link."
             out["approval_url"] = self.approval_url(req.id)
         return out

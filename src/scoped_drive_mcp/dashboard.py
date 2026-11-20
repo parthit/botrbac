@@ -23,7 +23,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import anyio.to_thread
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -53,11 +53,27 @@ from .drive_client import (
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
 from .grants import OWNER_FIELDS, GrantError, GrantService
+from .humanize import (
+    ACTIVITY_FILTERS,
+    MISSING,
+    app_names,
+    assistant_label,
+    describe,
+    item_ids,
+    matches,
+    when,
+)
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
-from .store import AUDIENCE_LINKED, ActivityLog, Allowlist, TokenVault
+from .store import (
+    AUDIENCE_LINKED,
+    EXTERNAL_ALLOWLIST_KEY,
+    ActivityLog,
+    Allowlist,
+    TokenVault,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +82,9 @@ SESSION_MAX_AGE = 8 * 3600
 STATE_MAX_AGE = 600
 STATE_SALT = "sdm-oauth-state"
 BROWSE_PAGE_SIZE = 200
+ACTIVITY_PAGE = 50
+# Drive lookups for names the activity page cannot find in the person's own lists.
+ACTIVITY_LOOKUPS = 10
 MAX_BREADCRUMBS = 25
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -605,7 +624,22 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def login(request: Request) -> Response:
         if session_user(request):
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
-        return render(request, "login.html", next=safe_next(request.query_params.get("next")))
+        next_url = safe_next(request.query_params.get("next"))
+        purpose = hint = None
+        if next_url.startswith("/requests/"):
+            purpose = "review an access request"
+            hint = "Use the Google account that owns the assistant that asked."
+        elif next_url.startswith("/oauth/authorize"):
+            purpose = "connect an assistant"
+            hint = "Use the Google account whose files the assistant should work with."
+        return render(
+            request,
+            "login.html",
+            next=next_url,
+            purpose=purpose,
+            purpose_hint=hint,
+            signed_out=request.query_params.get("signed_out") == "1",
+        )
 
     def supplied_login_hint(request: Request) -> str | None:
         """A hint only when this visitor typed one. Never the server's owner address."""
@@ -627,7 +661,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def auth_callback(request: Request) -> Response:
         params = request.query_params
         if params.get("error"):
-            return render(request, "error.html", 400, message="Google sign-in was cancelled.")
+            return oauth_cancelled(request, params)
         try:
             data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
         except BadSignature:
@@ -666,6 +700,57 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if flow == "connect":
             return await finish_connect(request, data, tokens, email)
         return await finish_sign_in(request, email)
+
+    def oauth_cancelled(request: Request, params: Any) -> Response:
+        """Google sent the person back without a code (they chose Cancel, or Google
+        refused). Say which step it was and offer to try that step again."""
+        flow = None
+        connection = None
+        try:
+            data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+        except BadSignature:
+            data = None
+        if isinstance(data, dict):
+            flow = data.get("flow")
+            connection = get_connection(str(data.get("connection") or ""))
+        request.session.pop("oauth_nonce", None)
+        next_url = safe_next(request.session.get("oauth_next"))
+        cancelled = params.get("error") == "access_denied"
+        if flow == "connect" and session_user(request):
+            name = connection.name if connection else "Google Drive"
+            retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
+            return render(
+                request,
+                "error.html",
+                400,
+                title=f"You didn’t connect {name}" if cancelled else f"{name} isn’t connected",
+                message=(
+                    f"You cancelled on Google’s screen, so nothing changed. Your assistant "
+                    f"can’t reach {name} until you connect it."
+                    if cancelled
+                    else f"Google didn’t finish connecting {name}. Nothing changed."
+                ),
+                actions=[
+                    {"label": "Try again", "href": retry, "primary": True},
+                    {"label": "Back to Overview", "href": "/"},
+                ],
+            )
+        retry = "/login" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
+        return render(
+            request,
+            "error.html",
+            400,
+            title="Sign-in cancelled" if cancelled else "Sign-in didn’t finish",
+            message=(
+                "You cancelled on Google’s screen, so you are not signed in."
+                if cancelled
+                else "Google didn’t finish signing you in. Nothing was changed."
+            ),
+            actions=[
+                {"label": "Try again", "href": retry, "primary": True},
+                {"label": "Back to home", "href": "/"},
+            ],
+        )
 
     async def finish_sign_in(request: Request, email: str) -> Response:
         """Step 1 done. Nothing from Google is stored except that this address signed in."""
@@ -715,14 +800,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # The Drive an assistant uses must belong to the person who signed in.
             await refuse_token()
             audit_owner("connect", "deny", reason="different_account")
+            next_url = safe_next(request.session.get("oauth_next"))
+            retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
             return render(
                 request,
                 "error.html",
                 403,
+                title="That was a different Google account",
                 message=(
                     f"You are signed in as {signed_in}, but Google returned a different "
                     f"account. Connect {connection.name} with {signed_in}."
                 ),
+                actions=[
+                    {"label": "Try again", "href": retry, "primary": True},
+                    {"label": "Back to Overview", "href": "/"},
+                ],
             )
         if connection.required_scope not in tokens.scopes:
             await refuse_token()
@@ -760,12 +852,30 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- connections (step 2) -------------------------------------------
 
+    def waiting_client(next_url: str) -> str | None:
+        """The app whose connection sent this person here (/oauth/authorize?...), if any."""
+        if ctx.mcp_oauth is None or not next_url.startswith("/oauth/authorize?"):
+            return None
+        params = dict(parse_qsl(urlsplit(next_url).query, keep_blank_values=True))
+        try:
+            return ctx.mcp_oauth.parse_authorize(QueryMapping(params)).client_name
+        except AuthorizeError:
+            return None
+
     async def connect_page(request: Request) -> Response:
         rows = await blocking(ctx.connection_rows)
         next_url = safe_next(request.query_params.get("next"))
         if next_url.startswith("/connect"):
             next_url = "/"
-        return render(request, "connect.html", rows=rows, next=next_url)
+        client_name = await blocking(waiting_client, next_url)
+        return render(
+            request,
+            "connect.html",
+            rows=rows,
+            next=next_url,
+            waiting_client=client_name,
+            drive_connected=any(r["connected"] for r in rows),
+        )
 
     async def connect_start(request: Request, form: dict[str, str]) -> Response:
         connection = get_connection(request.path_params.get("key"))
@@ -799,11 +909,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
         request.session.clear()
+        # "Switch account" on a request page and "Use a different account" on the consent
+        # page sign out, then signs in with ?next back.
+        pairs = [("signed_out", "1")]
         next_url = safe_next(form.get("next"))
         if next_url != "/":
-            # "Use a different account" on the consent page comes back to that page.
-            return RedirectResponse(f"/login?{urlencode({'next': next_url})}", status_code=303)
-        return RedirectResponse("/login", status_code=303)
+            pairs.append(("next", next_url))
+        return RedirectResponse(f"/login?{urlencode(pairs)}", status_code=303)
 
     # ---- pages -----------------------------------------------------------
 
@@ -1256,12 +1368,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         def gather() -> dict[str, Any]:
             peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
-            return {"entries": ctx.ext_allowlist.entries(), "peers": peers}
+            return {
+                "entries": ctx.ext_allowlist.entries(),
+                "peers": peers,
+                "drive_connected": ctx.drive_connected(),
+            }
 
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
         return render(
-            request, "sharing.html", rows=rows, peers=data["peers"], describe_mime=describe_mime
+            request,
+            "sharing.html",
+            rows=rows,
+            peers=data["peers"],
+            describe_mime=describe_mime,
+            drive_connected=data["drive_connected"],
         )
 
     # ---- shared with me ------------------------------------------------
@@ -1277,7 +1398,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "no_bytes": 404,
         }.get(exc.code, 403)
         message = exc.message
-        if exc.code == "invalid_input" and ("_shared_" in message or "read_file" in message):
+        if exc.code == "own_drive":
+            # The MCP wording names tools. A person opens their own files from Browse.
+            message = "This is in your own Drive. Open it from Browse."
+        elif exc.code == "invalid_input" and ("_shared_" in message or "read_file" in message):
             # Drive's wording for an assistant (it names tools). Say it for a person.
             message = (
                 "This item can't be opened that way. If it is a folder, open it from the list."
@@ -1390,7 +1514,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def access(request: Request) -> Response:
         def gather() -> dict[str, Any]:
-            return {"entries": ctx.allowlist.entries(), "bot": ctx.bot_status()}
+            return {
+                "entries": ctx.allowlist.entries(),
+                "bot": ctx.bot_status(),
+                "drive_connected": ctx.drive_connected(),
+            }
 
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
@@ -1401,22 +1529,90 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
             bot=data["bot"],
+            drive_connected=data["drive_connected"],
         )
+
+    def my_app_names() -> dict[str, str]:
+        if ctx.mcp_oauth is None:
+            return {}
+        return app_names(ctx.mcp_oauth.list_grants(current_actor.get()))
 
     async def requests_page(request: Request) -> Response:
         reqs = await blocking(ctx.requests.recent, 100)
         pending = [r for r in reqs if r.status == PENDING]
         decided = [r for r in reqs if r.status != PENDING]
-        return render(request, "requests.html", pending=pending, decided=decided)
+        apps = await blocking(my_app_names)
+        return render(request, "requests.html", pending=pending, decided=decided, apps=apps)
+
+    def request_elsewhere(rid: str, email: str | None) -> bool:
+        """Whether this request id belongs to another signed-in person. Ids are 192 random
+        bits, so this only ever matches a link someone was sent. It says nothing about whose
+        request it is."""
+        if ctx.directory is None:
+            return False
+        for person in ctx.directory.known_users():
+            if person == email:
+                continue
+            if AccessRequests(ctx.directory.store_for(person)).get(rid) is not None:
+                return True
+        return False
+
+    async def missing_request(request: Request, rid: str) -> Response:
+        email = current_actor.get()
+        if await blocking(request_elsewhere, rid, email):
+            return render(
+                request,
+                "error.html",
+                403,
+                title="This request is for a different account",
+                message=(
+                    f"This request isn\u2019t for {email}. Sign in with the Google account "
+                    "that owns this assistant to approve or deny it."
+                ),
+                actions=[
+                    {
+                        "label": "Switch account",
+                        "logout_next": f"/requests/{rid}",
+                        "primary": True,
+                    },
+                    {"label": "All requests", "href": "/requests"},
+                ],
+            )
+        return render(
+            request,
+            "error.html",
+            404,
+            title="Request not found",
+            message=(
+                "This request doesn\u2019t exist or has expired. Requests expire after 7 days."
+            ),
+            actions=[
+                {"label": "All requests", "href": "/requests", "primary": True},
+                {"label": "Back to Overview", "href": "/"},
+            ],
+        )
+
+    def paired_sharer(file_id: str) -> str | None:
+        """A paired person whose Sharing list holds this id (a request filed before
+        read_file pointed assistants at read_shared_file)."""
+        if ctx.mailbox is None or ctx.ext_allowlist is None or ctx.directory is None:
+            return None
+        me = current_actor.get()
+        for peer in ctx.mailbox.active_peers(me):
+            store = ctx.directory.store_for(peer)
+            if Allowlist(store, EXTERNAL_ALLOWLIST_KEY).get(file_id) is not None:
+                return peer
+        return None
 
     async def request_detail(request: Request) -> Response:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
-            return render(request, "error.html", 404, message="Request not found or expired.")
+            return await missing_request(request, rid)
         options = []
         owner_meta = None
         drive_error = False
+        shared_by = None
         if req.file_id and req.status == PENDING:
             grants = ctx.grants()
             try:
@@ -1429,6 +1625,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 options = []
                 owner_meta = None
                 drive_error = True
+            if owner_meta is None and not drive_error:
+                shared_by = await blocking(paired_sharer, req.file_id)
         return render(
             request,
             "request.html",
@@ -1436,6 +1634,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             options=options,
             owner_meta=owner_meta,
             drive_error=drive_error,
+            shared_by=shared_by,
+            apps=await blocking(my_app_names),
             picker_ready=settings.picker_configured,
             describe_mime=describe_mime,
         )
@@ -1444,7 +1644,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
-            return render(request, "error.html", 404, message="Request not found or expired.")
+            return await missing_request(request, rid)
         target = form.get("target_id") or req.file_id
         if not target:
             flash(request, "error", "Pick an item to share first.")
@@ -1460,7 +1660,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
-            return render(request, "error.html", 404, message="Request not found or expired.")
+            return await missing_request(request, rid)
         try:
             await blocking(ctx.grants().deny, req)
             flash(request, "ok", "Request denied.")
@@ -1468,9 +1668,81 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(request, "error", str(exc))
         return RedirectResponse(f"/requests/{quote(req.id)}", status_code=303)
 
+    def activity_names(records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Names for the ids on this page, from what this person already has: their two
+        lists, their requests, and (for a few ids) their own Drive. The log keeps ids only."""
+        names: dict[str, str] = {}
+        for entry in ctx.allowlist.entries().values():
+            if entry.name:
+                names[entry.id] = entry.name
+        if ctx.ext_allowlist is not None:
+            for entry in ctx.ext_allowlist.entries().values():
+                if entry.name:
+                    names.setdefault(entry.id, entry.name)
+        request_names: dict[str, str] = {}
+        for req in ctx.requests.recent(300):
+            if req.file_id and req.file_name:
+                names.setdefault(req.file_id, req.file_name)
+            if req.granted_id and req.granted_name:
+                names.setdefault(req.granted_id, req.granted_name)
+            label = req.granted_name or req.file_name or req.description
+            if label:
+                request_names[req.id] = str(label)
+        unknown = [i for i in item_ids(records) if i not in names][:ACTIVITY_LOOKUPS]
+        if unknown and ctx.drive_connected():
+            try:
+                drive = ctx.owner_drive()
+                for item in unknown:
+                    try:
+                        meta = drive.get_file(item, fields="id,name")
+                    except DriveNotFoundError:
+                        names[item] = MISSING
+                        continue
+                    if meta.get("name"):
+                        names[item] = str(meta["name"])
+            except Exception:
+                logger.warning("activity name lookup failed", exc_info=True)
+        return {"names": names, "request_names": request_names, "apps": my_app_names()}
+
     async def activity(request: Request) -> Response:
+        view = request.query_params.get("view") or "all"
+        if view not in ACTIVITY_FILTERS:
+            view = "all"
+        show_checks = request.query_params.get("checks") == "1"
+        try:
+            limit = int(request.query_params.get("show") or ACTIVITY_PAGE)
+        except ValueError:
+            limit = ACTIVITY_PAGE
+        limit = max(ACTIVITY_PAGE, min(limit, 500))
         records = await blocking(ctx.activity.recent)
-        return render(request, "activity.html", records=records)
+        rows = [describe(r) for r in records]
+        shown_ids = [i for i, row in enumerate(rows) if matches(row, view, show_checks)]
+        page = shown_ids[:limit]
+        lookup = await blocking(activity_names, [records[i] for i in page])
+        page_rows = [
+            describe(records[i], lookup["names"], lookup["request_names"], lookup["apps"])
+            for i in page
+        ]
+        counts = {k: sum(1 for r in rows if matches(r, k, show_checks)) for k in ACTIVITY_FILTERS}
+
+        def href(**changes: Any) -> str:
+            params = {"view": view, "checks": "1" if show_checks else "", "show": ""}
+            params.update({k: str(v) for k, v in changes.items()})
+            pairs = [(k, v) for k, v in params.items() if v and not (k == "view" and v == "all")]
+            return "/activity" + (f"?{urlencode(pairs)}" if pairs else "")
+
+        return render(
+            request,
+            "activity.html",
+            rows=page_rows,
+            total=len(records),
+            more_href=href(show=limit + ACTIVITY_PAGE) if len(shown_ids) > limit else None,
+            view=view,
+            filters=[(k, label, href(view=k), counts[k]) for k, label in ACTIVITY_FILTERS.items()],
+            show_checks=show_checks,
+            hidden_checks=sum(1 for r in rows if r.polling),
+            checks_href=href(checks="" if show_checks else "1"),
+        )
 
     async def not_found(request: Request) -> Response:
         return render(request, "error.html", 404, message="Page not found.")
@@ -1913,9 +2185,11 @@ def human_size(size: int | None) -> str:
     return ""
 
 
-def request_headline(req: Any, owner_meta: dict[str, Any] | None = None) -> str:
+def request_headline(
+    req: Any, owner_meta: dict[str, Any] | None = None, apps: dict[str, str] | None = None
+) -> str:
     """Plain-language summary of an access request. Technical fields stay out of this sentence."""
-    who = str(getattr(req, "token_name", None) or "").strip() or "An assistant"
+    who = assistant_label(getattr(req, "token_name", None), apps)
     name = None
     if owner_meta and owner_meta.get("name"):
         name = str(owner_meta["name"])
@@ -2013,3 +2287,5 @@ _env.globals["tool_label"] = tool_label
 _env.globals["describe_mime"] = describe_mime
 _env.globals["shared_href"] = shared_href
 _env.globals["human_size"] = human_size
+_env.globals["assistant_label"] = assistant_label
+_env.filters["when"] = when

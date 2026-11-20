@@ -144,6 +144,37 @@
       });
   });
 
+  // ---- Times ---------------------------------------------------------------------
+  // The server writes <time datetime="…" data-time>Nov 19, 2026, 23:58 UTC</time>. Show it
+  // in the reader's own time zone, as "5 minutes ago" or "Yesterday, 3:04 PM" when recent.
+  // The full local date and time stays in the tooltip.
+  function localTimes() {
+    var nodes = document.querySelectorAll("time[data-time]");
+    if (!nodes.length || !window.Intl || !Intl.DateTimeFormat) return;
+    var full = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+    var clock = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+    var rel = Intl.RelativeTimeFormat ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }) : null;
+    var now = new Date();
+    var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    var day = 24 * 3600 * 1000;
+    Array.prototype.forEach.call(nodes, function (el) {
+      var t = Date.parse(el.getAttribute("datetime") || "");
+      if (isNaN(t)) return;
+      var d = new Date(t);
+      var secs = (now.getTime() - t) / 1000;
+      var text;
+      if (rel && secs >= -60 && secs < 60) text = "just now";
+      else if (rel && secs >= 0 && secs < 3600) text = rel.format(-Math.round(secs / 60), "minute");
+      else if (rel && secs >= 0 && secs < 6 * 3600) text = rel.format(-Math.round(secs / 3600), "hour");
+      else if (t >= startOfToday && t < startOfToday + day) text = "Today, " + clock.format(d);
+      else if (t >= startOfToday - day && t < startOfToday) text = "Yesterday, " + clock.format(d);
+      else text = full.format(d);
+      el.textContent = text;
+      el.title = full.format(d);
+    });
+  }
+  localTimes();
+
   var pick = document.getElementById("pick-drive");
   if (!pick) return;
 

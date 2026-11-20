@@ -8,9 +8,9 @@
   {% for r in items %}
   <tr>
     <td data-label="Asked for">{{ r.file_name or r.description or "A file" }}</td>
-    <td data-label="Assistant">{{ r.token_name or "Assistant" }}</td>
+    <td data-label="Assistant">{{ assistant_label(r.token_name, apps) }}</td>
     <td data-label="Action">{{ tool_label(r.tool) }}</td>
-    <td data-label="Created" class="muted">{{ r.created_at }}</td>
+    <td data-label="Created" class="muted">{{ r.created_at | when }}</td>
     <td data-label="Status">
       <span class="pill {{ 'pending' if r.status == 'pending' else ('ok' if r.status == 'approved' else 'bad') }}">
         <span aria-hidden="true">{% if r.status == 'pending' %}●{% elif r.status == 'approved' %}✓{% else %}!{% endif %}</span>

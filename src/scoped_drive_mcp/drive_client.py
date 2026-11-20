@@ -53,10 +53,17 @@ def _http_status(exc: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-OWNER_NOT_SIGNED_IN = (
-    "The owner has not signed in to the dashboard yet. Ask the owner to open the "
-    "dashboard and sign in with Google."
-)
+def drive_not_connected_message(base_url: str | None = None) -> str:
+    """What an assistant is told when its person has no Google Drive connection stored."""
+    where = f" ({base_url.rstrip('/')}/connect)" if base_url else ""
+    return (
+        "Google Drive is not connected for this account, so there is nothing to read yet. "
+        f"Ask the user to open Connections on the Bot RBAC dashboard{where}, choose "
+        "Connect Google Drive, then try again."
+    )
+
+
+OWNER_NOT_SIGNED_IN = drive_not_connected_message()
 BOT_NOT_CONNECTED = OWNER_NOT_SIGNED_IN
 
 
@@ -450,8 +457,10 @@ class RoutingDriveClient:
         admin_email: str | None,
         token_for: Callable[[str], str | None],
         factory: Callable[[str], DriveClient],
+        not_connected_message: str = OWNER_NOT_SIGNED_IN,
     ):
         self._admin = admin_client
+        self._not_connected_message = not_connected_message
         self._admin_email = admin_email
         self._token_for = token_for
         self._factory = factory
@@ -476,7 +485,7 @@ class RoutingDriveClient:
             return self._admin
         token = self._token_for(actor)
         if not token:
-            raise BotNotConnectedError("the owner has not signed in", OWNER_NOT_SIGNED_IN)
+            raise BotNotConnectedError("Google Drive is not connected", self._not_connected_message)
         with self._lock:
             cached = self._clients.get(actor)
             if cached is not None and cached[0] == token:
