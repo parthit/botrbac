@@ -1867,7 +1867,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if not await blocking(ctx.drive_connected):
                 # An assistant can only be allowed once there is something to reach.
                 return connect_redirect(request)
-            request.session["mcp_auth"] = pending.to_dict()
+            # The form carries this id back, so Allow only ever approves the request this
+            # page describes. A second authorize request in another tab replaces it.
+            consent_id = secrets.token_urlsafe(16)
+            request.session["mcp_auth"] = {**pending.to_dict(), "consent_id": consent_id}
             await remember_pending(request)
             return_host = urlsplit(pending.redirect_uri).hostname or pending.redirect_uri
             here = request.url.path + ("?" + request.url.query if request.url.query else "")
@@ -1878,6 +1881,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 scope=SCOPE,
                 requested_scope=pending.requested_scope,
                 return_host=return_host,
+                consent_id=consent_id,
                 switch_next=here,
                 mailbox_on=ctx.mailbox is not None,
                 shared_on=ctx.shared_with_me is not None,
@@ -1898,6 +1902,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "error.html",
                 400,
                 message="This approval expired. Start the connection again from the app.",
+            )
+        expected = str(raw.get("consent_id") or "")
+        if not expected or not hmac.compare_digest(
+            expected.encode(), str(form.get("consent_id") or "").encode()
+        ):
+            request.session.pop("mcp_auth", None)
+            return render(
+                request,
+                "error.html",
+                400,
+                message=(
+                    "A newer connection request replaced this page, so nothing was approved. "
+                    "Start the connection again from the app."
+                ),
             )
         try:
             pending = ctx.mcp_oauth.parse_authorize(QueryMapping(raw))

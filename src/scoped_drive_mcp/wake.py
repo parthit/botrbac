@@ -168,21 +168,24 @@ def deliver(settings: WakeSettings, record: dict[str, Any], message: dict[str, A
         "body": body_for(scheme, message),
         **headers_for(scheme, secret),
     }
-    poster = settings.poster or _post
-    status = poster(request)
-    if status != 200:
+    if settings.poster is not None:
+        status = settings.poster(request)
+    else:
+        status = _post(request, settings.timeout)
+    # 202 and 204 are how many webhook receivers acknowledge a ping.
+    if not 200 <= status < 300:
         raise ValueError(f"http_{status}")
     return status
 
 
-def _post(request: dict[str, str]) -> int:
+def _post(request: dict[str, str], timeout: float = 4.0) -> int:
     class Pinned(HTTPSConnection):
         def connect(self) -> None:
             raw = socket.create_connection((request["address"], 443), self.timeout)
             context = self._context or ssl.create_default_context()
             self.sock = context.wrap_socket(raw, server_hostname=self.host)
 
-    conn = Pinned(request["hostname"], timeout=4)
+    conn = Pinned(request["hostname"], timeout=timeout)
     try:
         conn.request(
             "POST",

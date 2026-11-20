@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+import anyio.to_thread
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .audit import audit_auth_failure
@@ -108,7 +109,8 @@ class BearerAuthMiddleware:
         token = extract_token(header)
         principal = verify_token(token, self.tokens) if token else None
         if principal is None and token and self.oauth_resolve is not None:
-            principal = self.oauth_resolve(token)
+            # The resolver reads the store over the network; keep the event loop free.
+            principal = await anyio.to_thread.run_sync(self.oauth_resolve, token)
         if principal is None:
             reason = "missing_token" if header is None else "invalid_token"
             audit_auth_failure(reason, scope.get("path", ""))

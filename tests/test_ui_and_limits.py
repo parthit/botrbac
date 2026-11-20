@@ -301,4 +301,5 @@ def test_mcp_is_rate_limited_per_token(world, memstore, oauth) -> None:
     assert blocked.status_code == 429
     assert blocked.json() == {"error": "rate_limited"}
     assert blocked.headers["retry-after"] == "60"
-    assert post("someone-else").status_code == 401
+    # A different made-up token must not start a fresh allowance for the same address.
+    assert post("someone-else").status_code == 429

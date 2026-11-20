@@ -758,7 +758,16 @@ def build_app(
         )
     base_url = settings.app_base_url
     mcp_oauth = (
-        McpOAuth(kv, base_url, settings.owner_email, signed_in=directory.has_owner_refresh)
+        McpOAuth(
+            kv,
+            base_url,
+            settings.owner_email,
+            # Removing someone from ALLOWED_EMAILS also ends their assistants' access.
+            signed_in=lambda email: (
+                settings.sign_in_allowed(email) and directory.has_owner_refresh(email)
+            ),
+            rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
+        )
         if base_url and not settings.dashboard_missing()
         else None
     )

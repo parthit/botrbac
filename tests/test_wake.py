@@ -262,3 +262,14 @@ def test_saved_key_is_not_carried_to_a_different_claude_routine() -> None:
 def test_anthropic_is_on_the_default_allowlist() -> None:
     assert "api.anthropic.com" in WakeSettings().allowlist
     assert "api2.cursor.sh" in WakeSettings().allowlist
+
+
+@pytest.mark.parametrize(("status", "error"), [(204, None), (202, None), (302, "http_status")])
+def test_any_2xx_counts_as_delivered(status: int, error: str | None) -> None:
+    posts: list[dict[str, str]] = []
+    box = _box(posts, status=status)
+    link_id = _pair(box)
+    box.set_webhook(EVE, URL, sender_key=SECRET)
+    box.send_message(OWNER_EMAIL, link_id, "hello")
+    assert len(posts) == 1
+    assert box.get_webhook(EVE).get("last_error") == error
