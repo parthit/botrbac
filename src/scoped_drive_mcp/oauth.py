@@ -110,12 +110,15 @@ class GoogleOAuthClient:
             raise OAuthError("could not reach Google") from None
         if resp.status_code != 200:
             raise OAuthError("Google rejected the sign-in code")
-        data = resp.json()
-        return OAuthTokens(
-            access_token=str(data["access_token"]),
-            refresh_token=data.get("refresh_token"),
-            scopes=frozenset(str(data.get("scope", "")).split()),
-        )
+        try:
+            data = resp.json()
+            return OAuthTokens(
+                access_token=str(data["access_token"]),
+                refresh_token=data.get("refresh_token"),
+                scopes=frozenset(str(data.get("scope", "")).split()),
+            )
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise OAuthError("Google returned an unexpected sign-in response") from None
 
     def userinfo(self, access_token: str) -> dict[str, Any]:
         try:
@@ -128,7 +131,13 @@ class GoogleOAuthClient:
             raise OAuthError("could not reach Google") from None
         if resp.status_code != 200:
             raise OAuthError("Google did not return the account's email")
-        return resp.json()
+        try:
+            info = resp.json()
+        except ValueError:
+            info = None
+        if not isinstance(info, dict):
+            raise OAuthError("Google did not return the account's email")
+        return info
 
     def revoke(self, token: str) -> None:
         with contextlib.suppress(httpx.HTTPError):

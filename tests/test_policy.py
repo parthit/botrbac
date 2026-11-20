@@ -3,6 +3,7 @@ import json
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
+from scoped_drive_mcp.audit import audit
 from scoped_drive_mcp.auth import Principal, current_principal
 from scoped_drive_mcp.config import Role
 from scoped_drive_mcp.policy import (
@@ -192,3 +193,16 @@ async def test_audit_never_contains_content(service, capsys) -> None:
     for line in out.splitlines():
         record = json.loads(line)
         assert {"ts", "token_name", "role", "tool", "decision", "reason"} <= record.keys()
+
+
+def test_audit_caps_caller_supplied_ids(capsys) -> None:
+    audit(
+        tool="read_file",
+        decision="deny",
+        reason="x",
+        token_name="t",
+        role="viewer",
+        file_id="a" * 5000,
+    )
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert len(line["file_id"]) == 200

@@ -48,8 +48,10 @@
     area.style.left = "-9999px";
     document.body.appendChild(area);
     area.select();
-    try { document.execCommand("copy"); } catch (err) { /* ignore */ }
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { /* ignore */ }
     area.remove();
+    return ok;
   }
 
   document.addEventListener("click", function (event) {
@@ -57,15 +59,19 @@
     if (!btn) return;
     var value = btn.getAttribute("data-copy") || "";
     var label = btn.textContent;
-    var done = function () {
-      btn.textContent = "Copied";
+    // Only say "Copied" when it was, and say it to screen readers too.
+    var done = function (ok) {
+      btn.textContent = ok ? "Copied" : "Copy failed";
+      announce(ok ? "ok" : "error", ok ? "Copied to the clipboard." : "Could not copy. Select the text and copy it yourself.");
       window.setTimeout(function () { btn.textContent = label; }, 1500);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(value).then(done, function () { fallbackCopy(value); done(); });
+      navigator.clipboard.writeText(value).then(
+        function () { done(true); },
+        function () { done(fallbackCopy(value)); }
+      );
     } else {
-      fallbackCopy(value);
-      done();
+      done(fallbackCopy(value));
     }
   });
 
@@ -149,7 +155,8 @@
       }
     });
     // Keep keyboard focus on the row: move it to the button that replaced this one.
-    var shown = row.querySelector("form[data-flip='" + key + "']:not([hidden]) button");
+    // When no button replaced it (the item is still covered by a folder), stay on the row.
+    var shown = row.querySelector("form[data-flip='" + key + "']:not([hidden]) button") || rowTarget(row);
     if (shown) shown.focus();
   }
 
@@ -216,6 +223,7 @@
       .then(function (response) {
         var type = response.headers.get("content-type") || "";
         if (type.indexOf("application/json") === -1) throw new Error("not json");
+        // Refusals (signed out, expired page, bad input) are JSON too and carry their own message.
         return response.json();
       })
       .then(function (data) {
@@ -226,8 +234,8 @@
         else flipRow(form);
       })
       .catch(function () {
-        // Signed out, CSRF expired or a server error page: say so instead of guessing.
-        showFlash("error", "That did not save. Reload the page and try again.");
+        // A network failure or a server error page: say so instead of guessing.
+        showFlash("error", "That did not save. Check your connection, reload the page and try again.");
       })
       .then(function () {
         form.removeAttribute("aria-busy");
@@ -286,7 +294,9 @@
   }
 
   function safeBrowsePath(value) {
-    if (!value || value.charAt(0) !== "/" || value.indexOf("//") === 0 || value.indexOf("\\") !== -1) {
+    // Same rule as the server's safe_next: a same-site path with no control characters.
+    if (!value || value.charAt(0) !== "/" || value.indexOf("//") === 0 || value.indexOf("\\") !== -1 ||
+        /[\u0000-\u0020\u007f]/.test(value)) {
       return "/browse";
     }
     return value;

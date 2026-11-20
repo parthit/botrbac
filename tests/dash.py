@@ -1,5 +1,7 @@
 """Helpers for driving the dashboard and /mcp in one TestClient."""
 
+import base64
+import json
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -52,8 +54,23 @@ def csrf(c: TestClient, page: str = "/") -> str:
     return m.group(1)
 
 
+def pending_consent_id(c: TestClient) -> str:
+    """The id of the consent page this browser last opened (it lives in the session cookie)."""
+    cookie = c.cookies.get("sdm_session") or ""
+    try:
+        session = json.loads(base64.b64decode(cookie.split(".")[0]))
+    except ValueError:
+        return ""
+    pending = session.get("mcp_auth")
+    return str(pending.get("consent_id") or "") if isinstance(pending, dict) else ""
+
+
 def post(c: TestClient, path: str, **data):
     token = csrf(c)
+    if path == "/oauth/authorize":
+        # What the consent form itself submits. csrf() above loads another page, as a
+        # person might in between, and that must not change which request is pending.
+        data.setdefault("consent_id", pending_consent_id(c))
     return c.post(path, data={"csrf": token, **data})
 
 

@@ -5,7 +5,7 @@ import re
 
 import pytest
 
-from scoped_drive_mcp.access import REQUEST_TTL, AccessRequests
+from scoped_drive_mcp.access import INDEX_MAX, PENDING_INDEX, REQUEST_TTL, AccessRequests
 from scoped_drive_mcp.store import MemoryStore, PrefixedStore
 from tests.conftest import BASE_URL, OWNER_EMAIL, FakeClock
 from tests.dash import client, login, mcp_call, post
@@ -395,3 +395,11 @@ def test_no_access_service_without_base_url(world) -> None:
     assert result["isError"] and "Forbidden" in result["content"][0]["text"]
     result = mcp_call(c, "request_access", description="d", reason="r")
     assert result["isError"] and "not configured" in result["content"][0]["text"]
+
+
+def test_waiting_list_is_capped_like_the_history(memstore) -> None:
+    requests = AccessRequests(memstore)
+    for n in range(INDEX_MAX + 20):
+        requests.create(tool="request_access", token_name="t", reason=None, description=f"item {n}")
+    assert len(memstore.lrange(PENDING_INDEX, 0, -1)) == INDEX_MAX
+    assert requests.pending_count() == INDEX_MAX

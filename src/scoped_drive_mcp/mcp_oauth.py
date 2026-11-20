@@ -25,12 +25,14 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import anyio.to_thread
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from .auth import Principal, hash_token
 from .config import Role
+from .ratelimit import allow, ip_identity
 from .store import KeyValueStore, utc_now
 
 logger = logging.getLogger(__name__)
@@ -238,7 +240,8 @@ def pkce_s256(verifier: str) -> str:
 
 
 def _same(left: str, right: str) -> bool:
-    return hmac.compare_digest(left, right)
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII text.
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
 def _safe_state(value: str) -> bool:
@@ -322,6 +325,14 @@ def _bounce_key(digest: str) -> str:
     return f"oauth:bounce:{digest}"
 
 
+def _code_used_key(digest: str) -> str:
+    return f"oauth:codeused:{digest}"
+
+
+def _revoked_key(grant_id: str) -> str:
+    return f"oauth:revoked:{grant_id}"
+
+
 class McpOAuth:
     def __init__(
         self,
@@ -329,7 +340,11 @@ class McpOAuth:
         base_url: str,
         owner_email: str | None,
         signed_in: Callable[[str], bool] | None = None,
+        *,
+        rate_limit: tuple[int, int] | None = None,
     ):
+        # (requests, window seconds) per address for the two unauthenticated endpoints.
+        self.rate_limit = rate_limit
         self.store = store
         self.base_url = base_url.rstrip("/")
         self.owner_email = owner_email
@@ -445,10 +460,24 @@ class McpOAuth:
             },
         )
 
+    async def _limited(self, request: Request, name: str) -> JSONResponse | None:
+        if self.rate_limit is None:
+            return None
+        limit, window = self.rate_limit
+        ident = ip_identity(request.scope)
+        if await anyio.to_thread.run_sync(allow, self.store, name, ident, limit, window):
+            return None
+        response = _oauth_error("slow_down", "Too many requests. Try again shortly.", 429)
+        response.headers["retry-after"] = str(window)
+        return response
+
     async def _register(self, request: Request) -> JSONResponse:
+        limited = await self._limited(request, "oauth-register")
+        if limited is not None:
+            return limited
         try:
             payload = await _json_object(request)
-            body = self.register(payload)
+            body = await anyio.to_thread.run_sync(self.register, payload)
         except RegistrationError as exc:
             return _oauth_error(exc.error, exc.description, exc.status)
         except Exception:
@@ -457,9 +486,12 @@ class McpOAuth:
         return JSONResponse(body, status_code=201, headers=_NO_STORE)
 
     async def _token(self, request: Request) -> JSONResponse:
+        limited = await self._limited(request, "oauth-token")
+        if limited is not None:
+            return limited
         try:
             form = await _token_form(request)
-            body = self.exchange(form)
+            body = await anyio.to_thread.run_sync(self.exchange, form)
         except TokenError as exc:
             return _oauth_error(exc.error, exc.description, exc.status)
         except Exception:
@@ -492,7 +524,7 @@ class McpOAuth:
         if not isinstance(grant_types, list) or not grant_types:
             raise RegistrationError("invalid_client_metadata", "grant_types is invalid.")
         allowed_grants = {"authorization_code", "refresh_token"}
-        if any(item not in allowed_grants for item in grant_types):
+        if any(not isinstance(item, str) or item not in allowed_grants for item in grant_types):
             raise RegistrationError("invalid_client_metadata", "unsupported grant_types.")
         if "authorization_code" not in grant_types:
             raise RegistrationError("invalid_client_metadata", "authorization_code is required.")
@@ -693,28 +725,43 @@ class McpOAuth:
         code = form.get("code") or ""
         if not code:
             raise TokenError("invalid_request", "code is required")
-        raw = self._consume(_code_key(hash_token(code)))
+        code_digest = hash_token(code)
+        raw = self._consume(_code_key(code_digest))
         if not raw:
+            # A code presented twice may have been stolen: end whatever the first use got.
+            used = self.store.get(_code_used_key(code_digest))
+            if used:
+                self.revoke(used)
             raise TokenError("invalid_grant", "code is invalid or expired")
         try:
             saved = json.loads(raw)
         except ValueError:
             raise TokenError("invalid_grant", "code is invalid or expired") from None
         grant = self._grant(str(saved.get("grant_id", "")))
-        if grant is None or not self._may_act(grant.email):
+        if grant is None:
             raise TokenError("invalid_grant", "code is invalid or expired")
+        try:
+            if not self._may_act(grant.email):
+                raise TokenError("invalid_grant", "code is invalid or expired")
+            if not _same(str(saved.get("client_id", "")), client.client_id):
+                raise TokenError("invalid_grant", "code was issued to a different client")
+            if not _same(str(saved.get("redirect_uri", "")), form.get("redirect_uri") or ""):
+                raise TokenError("invalid_grant", "redirect_uri does not match")
+            if (
+                str(saved.get("resource", "")) != self.resource
+                or form.get("resource") != self.resource
+            ):
+                raise TokenError("invalid_target", "resource must be the MCP endpoint")
+            verifier = form.get("code_verifier") or ""
+            challenge = str(saved.get("code_challenge", ""))
+            if not _pkce_ok(verifier, challenge):
+                raise TokenError("invalid_grant", "PKCE verification failed")
+        except TokenError:
+            # The code is spent, so this grant can never get tokens. Do not leave it listed.
+            self.revoke(grant.id)
+            raise
         grant.code_hash = None
-        self._save_grant(grant)
-        if not _same(str(saved.get("client_id", "")), client.client_id):
-            raise TokenError("invalid_grant", "code was issued to a different client")
-        if not _same(str(saved.get("redirect_uri", "")), form.get("redirect_uri") or ""):
-            raise TokenError("invalid_grant", "redirect_uri does not match")
-        if str(saved.get("resource", "")) != self.resource or form.get("resource") != self.resource:
-            raise TokenError("invalid_target", "resource must be the MCP endpoint")
-        verifier = form.get("code_verifier") or ""
-        challenge = str(saved.get("code_challenge", ""))
-        if not _pkce_ok(verifier, challenge):
-            raise TokenError("invalid_grant", "PKCE verification failed")
+        self.store.set(_code_used_key(code_digest), grant.id, ex=CODE_TTL)
         return self._issue_tokens(grant)
 
     def _refresh(self, form: Mapping[str, str]) -> dict[str, Any]:
@@ -743,12 +790,16 @@ class McpOAuth:
             or grant.refresh_hash is None
             or not _same(grant.refresh_hash, digest)
         ):
-            if (
-                grant is not None
-                and grant.refresh_hash is not None
-                and not _same(grant.refresh_hash, digest)
-            ):
-                self.revoke(grant.id)
+            if grant is not None and grant.refresh_hash is not None:
+                if not _same(grant.refresh_hash, digest):
+                    self.revoke(grant.id)
+                else:
+                    # The token itself is current; the request was wrong (another client's
+                    # id, or Drive is disconnected right now). Put it back so the grant is
+                    # not left listed with a refresh token nobody can use.
+                    left = grant.refresh_until - int(time.time())
+                    if left > 0:
+                        self.store.set(_rt_key(digest), raw, ex=left)
             raise TokenError("invalid_grant", "refresh token is not valid")
         remaining = grant.refresh_until - int(time.time())
         if remaining <= 0:
@@ -784,6 +835,11 @@ class McpOAuth:
         grant.refresh_hash = refresh_digest
         grant.last_used = utc_now()
         self._save_grant(grant)
+        if self.store.get(_revoked_key(grant.id)):
+            # Revoked while these tokens were being written: that save just put the
+            # grant back. Remove it and the new tokens again.
+            self.revoke(grant.id)
+            raise TokenError("invalid_grant", "this connection was removed")
         return {
             "access_token": access,
             "token_type": "Bearer",
@@ -836,7 +892,8 @@ class McpOAuth:
                 grant = OAuthGrant.from_json(raw)
             except (ValueError, KeyError, TypeError):
                 continue
-            if grant.email == email:
+            # A grant with no tokens is an approval whose code was never redeemed.
+            if grant.email == email and (grant.refresh_hash or grant.access_hashes):
                 views.append(
                     GrantView(
                         id=grant.id,
@@ -856,6 +913,8 @@ class McpOAuth:
             return False
         if email is not None and grant.email != email:
             return False
+        # Marker for a token request that loaded the grant before this ran (see _issue_tokens).
+        self.store.set(_revoked_key(grant.id), "1", ex=ACCESS_TTL)
         for digest in grant.access_hashes:
             self.store.delete(_at_key(digest))
         if grant.refresh_hash:

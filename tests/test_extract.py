@@ -91,3 +91,26 @@ def test_password_note_and_garbage_do_not_raise_past_extract_error() -> None:
 
 def test_empty_pdf_has_no_text() -> None:
     assert extract_text(minimal_pdf(""), "pdf", char_limit=100).strip() == ""
+
+
+def test_doc_overlapping_pieces_stop_at_the_character_limit() -> None:
+    """Pieces may point at the same bytes; the output must not grow to pieces x stream size."""
+    import struct
+
+    from scoped_drive_mcp.extract import _doc_text
+
+    pieces = 5000
+    body = b"A" * 4000
+    word = bytearray(0x200) + body
+    count = len(body)
+    cps = [i * count for i in range(pieces + 1)]
+    plc = struct.pack(f"<{pieces + 1}I", *cps)
+    # Compressed pieces: fc holds byte offset * 2 with bit 30 set.
+    fc = (0x200 * 2) | 0x40000000
+    plc += b"".join(struct.pack("<HIH", 0, fc, 0) for _ in range(pieces))
+    clx = b"\x02" + struct.pack("<I", len(plc)) + plc
+    struct.pack_into("<II", word, 0x1A2, 0, len(clx))
+
+    text = _doc_text(bytes(word), clx, char_limit=10_000)
+    assert text.startswith("AAAA")
+    assert len(text) <= 10_000 + count

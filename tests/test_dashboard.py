@@ -268,7 +268,8 @@ def test_logout_form_post_as_the_browser(owner_c) -> None:
     login(owner_c)
     denied = owner_c.post("/logout", headers={"Origin": origin})
     assert denied.status_code == 403
-    assert denied.text == "CSRF check failed."
+    assert "reload the page and try again" in denied.text
+    assert "Back to home" in denied.text
     assert owner_c.get("/").status_code == 200
 
 

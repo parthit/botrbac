@@ -81,7 +81,7 @@
     <p>Find the item the assistant asked for and share it.</p>
     <p><a class="btn primary" href="/browse?request={{ req.id }}">Pick an item</a></p>
   {% endif %}
-  <form method="post" action="/requests/{{ req.id }}/deny">
+  <form method="post" action="/requests/{{ req.id }}/deny" data-confirm="Deny this request? The assistant is told it was denied, and this cannot be undone.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="danger" type="submit">Deny</button>
   </form>

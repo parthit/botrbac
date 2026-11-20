@@ -15,8 +15,8 @@ from scoped_drive_mcp.dashboard import SESSION_COOKIE
 from scoped_drive_mcp.mcp_oauth import ALLOWED_REDIRECT_URIS, GRANTS_KEY, OAuthGrant, done_redirect
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import MemoryStore
-from tests.conftest import BASE_URL, SESSION_SECRET, TOKENS
-from tests.dash import MCP_HEADERS, client, login, post
+from tests.conftest import BASE_URL, OWNER_EMAIL, SESSION_SECRET, TOKENS, make_settings
+from tests.dash import MCP_HEADERS, client, login, pending_consent_id, post
 
 RESOURCE = f"{BASE_URL}/mcp"
 METADATA = f"{BASE_URL}/.well-known/oauth-protected-resource/mcp"
@@ -682,3 +682,96 @@ def test_access_check_does_not_clobber_rotated_grant(owner_c) -> None:
     assert original(grant_id) is not None
     assert original(grant_id).refresh_hash == issued["hash"]
     assert issued["hash"] != json.loads(before)["refresh_hash"]
+
+
+def _approved(c, client_id: str, redirect: str = GROK) -> tuple[str, str]:
+    """Open the consent page, click Allow, and return (code, verifier)."""
+    verifier, params = auth_params(client_id, redirect)
+    assert c.get("/oauth/authorize", params=params).status_code == 200
+    return code_from(posted_redirect(c, post(c, "/oauth/authorize", decision="allow"))), verifier
+
+
+def _refresh(c, client_id: str, refresh_token: str):
+    return c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "resource": RESOURCE,
+        },
+    )
+
+
+def _mcp_status(c, access: str) -> int:
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {access}"}
+    return c.post("/mcp", json=LIST, headers=headers).status_code
+
+
+def test_allow_only_approves_the_request_the_page_showed(owner_c) -> None:
+    shown = register(owner_c, GROK, name="Shown App").json()["client_id"]
+    other = register(owner_c, GROK, name="Other App").json()["client_id"]
+    _, params = auth_params(shown, GROK)
+    assert "Shown App" in owner_c.get("/oauth/authorize", params=params).text
+    shown_id = pending_consent_id(owner_c)
+    # A second request (another tab, or a link someone sent) replaces the pending one.
+    _, params = auth_params(other, GROK, state="other")
+    assert "Other App" in owner_c.get("/oauth/authorize", params=params).text
+    stale = post(owner_c, "/oauth/authorize", decision="allow", consent_id=shown_id)
+    assert stale.status_code == 400
+    assert "nothing was approved" in stale.text
+    assert "No apps connected" in owner_c.get("/").text
+    # The page that is still current keeps working after the stale one was refused.
+    live = post(owner_c, "/oauth/authorize", decision="allow")
+    assert parse_qs(urlparse(posted_redirect(owner_c, live)).query)["state"] == ["other"]
+
+
+def test_replaying_a_code_ends_the_tokens_it_issued(owner_c) -> None:
+    client_id = register(owner_c, GROK).json()["client_id"]
+    code, verifier = _approved(owner_c, client_id)
+    access = exchange(owner_c, client_id, code, verifier, GROK).json()["access_token"]
+    assert _mcp_status(owner_c, access) == 200
+    assert exchange(owner_c, client_id, code, verifier, GROK).status_code == 400
+    assert _mcp_status(owner_c, access) == 401
+
+
+def test_a_failed_exchange_leaves_no_connected_app(owner_c) -> None:
+    client_id = register(owner_c, GROK, name="Half Done").json()["client_id"]
+    code, _ = _approved(owner_c, client_id)
+    assert "Half Done" not in owner_c.get("/").text  # approved, but no tokens yet
+    assert exchange(owner_c, client_id, code, secrets.token_urlsafe(32), GROK).status_code == 400
+    assert "Half Done" not in owner_c.get("/").text
+
+
+def test_refresh_with_the_wrong_client_does_not_strand_the_grant(owner_c) -> None:
+    client_id = register(owner_c, GROK).json()["client_id"]
+    stranger = register(owner_c, GROK, name="Stranger").json()["client_id"]
+    code, verifier = _approved(owner_c, client_id)
+    refresh = exchange(owner_c, client_id, code, verifier, GROK).json()["refresh_token"]
+    assert _refresh(owner_c, stranger, refresh).status_code == 400
+    again = _refresh(owner_c, client_id, refresh)
+    assert again.status_code == 200, again.text
+
+
+def test_odd_client_input_is_a_400_not_a_500(owner_c) -> None:
+    bad = register(owner_c, GROK, grant_types=[{"a": 1}])
+    assert bad.status_code == 400
+    client_id = register(owner_c, GROK).json()["client_id"]
+    code, verifier = _approved(owner_c, client_id)
+    assert exchange(owner_c, client_id, code, verifier, "https://é.example/").status_code == 400
+
+
+def test_registration_is_rate_limited_per_address(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(root_folder_id=None, mcp_rate_limit=2, mcp_rate_window_seconds=60),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    assert register(c, GROK).status_code == 201
+    assert register(c, GROK).status_code == 201
+    blocked = register(c, GROK)
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"] == "60"

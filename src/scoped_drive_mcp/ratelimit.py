@@ -10,7 +10,7 @@ import logging
 import time
 
 import anyio.to_thread
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,14 @@ def client_ip(headers: list[tuple[bytes, bytes]], fallback: str) -> str:
     return (fallback or "unknown")[:80]
 
 
+def ip_identity(scope: Scope) -> str:
+    host = "unknown"
+    client = scope.get("client")
+    if client:
+        host = str(client[0])
+    return "ip:" + client_ip(list(scope.get("headers") or []), host)
+
+
 def _identity_from_scope(scope: Scope) -> str:
     headers = list(scope.get("headers") or [])
     token = ""
@@ -37,30 +45,45 @@ def _identity_from_scope(scope: Scope) -> str:
     if token:
         digest = hashlib.sha256(token.encode()).hexdigest()[:24]
         return f"t:{digest}"
-    host = "unknown"
-    client = scope.get("client")
-    if client:
-        host = str(client[0])
-    return "ip:" + client_ip(headers, host)
+    return ip_identity(scope)
+
+
+def _key(name: str, ident: str, window: int, now: float | None = None) -> str:
+    bucket = int((now if now is not None else time.time()) // window)
+    safe = "".join(ch for ch in ident if ch.isalnum() or ch in ":-_@.")[:80] or "anon"
+    return f"rl:{name}:{safe}:{bucket}"
 
 
 def allow(
     store: object, name: str, ident: str, limit: int, window: int, now: float | None = None
 ) -> bool:
     """True when this identity is still inside the window. Fail open on store errors."""
-    bucket = int((now if now is not None else time.time()) // window)
-    safe = "".join(ch for ch in ident if ch.isalnum() or ch in ":-_@.")[:80] or "anon"
-    key = f"rl:{name}:{safe}:{bucket}"
     try:
-        count = store.incr(key, ex=window + 5)  # type: ignore[attr-defined]
+        count = store.incr(_key(name, ident, window, now), ex=window + 5)  # type: ignore[attr-defined]
     except Exception:
         logger.warning("rate limit store failed for %s", name)
         return True
     return int(count) <= limit
 
 
+def over(store: object, name: str, ident: str, limit: int, window: int) -> bool:
+    """True when this identity already used up its window. Reads only; fails open."""
+    try:
+        count = store.get(_key(name, ident, window))  # type: ignore[attr-defined]
+        return count is not None and int(count) >= limit
+    except Exception:
+        logger.warning("rate limit store failed for %s", name)
+        return False
+
+
 class RateLimitApp:
-    """ASGI wrapper. Over-limit requests get 429 JSON and never reach the inner app."""
+    """ASGI wrapper. Over-limit requests get 429 JSON and never reach the inner app.
+
+    Requests are counted per bearer token, so one busy assistant does not throttle
+    others behind the same address. A made-up token would get a fresh bucket each
+    time, so requests the inner app answers with 401 are also counted per address,
+    and an address that keeps failing is refused before the inner app runs.
+    """
 
     def __init__(self, app: ASGIApp, store: object, *, name: str, limit: int, window: int):
         self.app = app
@@ -74,11 +97,29 @@ class RateLimitApp:
             await self.app(scope, receive, send)
             return
         ident = _identity_from_scope(scope)
-        allowed = await anyio.to_thread.run_sync(
-            lambda: allow(self.store, self.name, ident, self.limit, self.window)
-        )
-        if allowed:
-            await self.app(scope, receive, send)
+        ip = ip_identity(scope)
+        failures = f"{self.name}-401"
+
+        def check() -> bool:
+            if over(self.store, failures, ip, self.limit, self.window):
+                return False
+            return allow(self.store, self.name, ident, self.limit, self.window)
+
+        if await anyio.to_thread.run_sync(check):
+            rejected = False
+
+            async def watch(message: Message) -> None:
+                nonlocal rejected
+                if message["type"] == "http.response.start" and message["status"] == 401:
+                    rejected = True
+                await send(message)
+
+            await self.app(scope, receive, watch)
+            # A request with no token already counts against the address above.
+            if rejected and ident != ip:
+                await anyio.to_thread.run_sync(
+                    lambda: allow(self.store, failures, ip, self.limit, self.window)
+                )
             return
         body = b'{"error":"rate_limited"}'
         await send(
