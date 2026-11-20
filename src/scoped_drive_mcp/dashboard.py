@@ -12,6 +12,8 @@ ASGI app behind BearerAuthMiddleware). Every POST requires the per-session CSRF 
 a cross-origin `Origin` is refused.
 """
 
+import functools
+import hashlib
 import hmac
 import html
 import logging
@@ -127,6 +129,8 @@ SHARED_SEARCH_LIMIT = 20
 # Folder lookups one Browse page may make to work out search-result paths and
 # folder-inherited access. Past this, the remaining rows say to open their folder.
 SEARCH_LOOKUPS = 40
+# Name matches shown for one Browse search. More than this and the page says to narrow it.
+SEARCH_PAGE = 100
 # Item ids in "Shared with me" links. Drive ids fit; other sources must too.
 _SHARED_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,200}")
 
@@ -280,7 +284,11 @@ async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
 
 def safe_next(value: str | None) -> str:
+    """A same-site path, else "/". Browsers drop tabs and newlines from a URL, so
+    "/\t/evil.example" in a link would become "//evil.example"; refuse those too."""
     if not value or not value.startswith("/") or value.startswith("//") or "\\" in value:
+        return "/"
+    if any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in value):
         return "/"
     return value
 
@@ -290,9 +298,14 @@ def origin_of(url: str) -> str:
     return f"{scheme}://{rest.split('/', 1)[0]}"
 
 
+# Two years, the value browsers' preload lists expect. Only sent over HTTPS deployments.
+HSTS_HEADER = (b"strict-transport-security", b"max-age=63072000; includeSubDomains")
+
+
 class SecurityHeadersMiddleware:
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp, *, hsts: bool = False):
         self.app = app
+        self.hsts = hsts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -301,8 +314,17 @@ class SecurityHeadersMiddleware:
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
-                message.setdefault("headers", [])
-                message["headers"] = list(message["headers"]) + SECURITY_HEADERS
+                headers = list(message.get("headers") or [])
+                # Pages are never cached. A static asset sets its own policy and keeps it.
+                cacheable = any(key.lower() == b"cache-control" for key, _ in headers)
+                headers += [
+                    item
+                    for item in SECURITY_HEADERS
+                    if not (cacheable and item[0] == b"cache-control")
+                ]
+                if self.hsts:
+                    headers.append(HSTS_HEADER)
+                message["headers"] = headers
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
@@ -396,8 +418,20 @@ async def privacy_page(_: Request) -> Response:
     return render_plain("privacy.html")
 
 
-def _file_response(name: str, media: str) -> Response:
-    return Response((TEMPLATES_DIR / name).read_bytes(), media_type=media)
+@functools.lru_cache(maxsize=16)
+def _asset(name: str) -> tuple[bytes, str]:
+    data = (TEMPLATES_DIR / name).read_bytes()
+    return data, '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
+
+
+def _file_response(request: Request, name: str, media: str, cache: str = "no-cache") -> Response:
+    """A bundled asset. `no-cache` still lets the browser keep it: it revalidates with the
+    ETag and gets a 304, so a new deployment's CSS and JS are picked up at once."""
+    data, etag = _asset(name)
+    headers = {"etag": etag, "cache-control": cache}
+    if etag in (request.headers.get("if-none-match") or ""):
+        return Response(status_code=304, headers=headers)
+    return Response(data, media_type=media, headers=headers)
 
 
 def favicon(_: Request) -> Response:
@@ -424,7 +458,8 @@ def font_asset(request: Request) -> Response:
     rel = _FONT_FILES.get(request.path_params["name"])
     if rel is None:
         return Response(status_code=404)
-    return _file_response(rel, "font/woff2")
+    # Font files never change under the same name.
+    return _file_response(request, rel, "font/woff2", "public, max-age=2592000")
 
 
 def robots(_: Request) -> Response:
@@ -432,12 +467,12 @@ def robots(_: Request) -> Response:
     return Response(body, media_type="text/plain; charset=utf-8")
 
 
-def stylesheet(_: Request) -> Response:
-    return _file_response("app.css", "text/css; charset=utf-8")
+def stylesheet(request: Request) -> Response:
+    return _file_response(request, "app.css", "text/css; charset=utf-8")
 
 
-def ui_script(_: Request) -> Response:
-    return _file_response("ui.js", "text/javascript; charset=utf-8")
+def ui_script(request: Request) -> Response:
+    return _file_response(request, "ui.js", "text/javascript; charset=utf-8")
 
 
 def legal_routes() -> list[Route]:
@@ -520,12 +555,42 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             target = "/"
         return RedirectResponse(f"/connect?{urlencode({'next': target})}", status_code=303)
 
+    def refused(
+        request: Request, status: int, message: str, *, title: str | None = None
+    ) -> Response:
+        """An error for a dashboard request: JSON for a background row action (ui.js
+        shows the message next to the row), otherwise the styled error page."""
+        if wants_json(request):
+            return JSONResponse(
+                {"ok": False, "kind": "error", "message": message, "changed": False},
+                status_code=status,
+            )
+        return render(request, "error.html", status, message=message, title=title)
+
+    def safely(handler: Handler) -> Handler:
+        """For pages that handle sign-in themselves: a store or network failure becomes
+        the styled error page (with the security headers) instead of a bare 500."""
+
+        async def wrapped(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except Exception as exc:
+                report_exception(exc, where="dashboard")
+                return refused(request, 500, "Something went wrong on our side. Try again.")
+
+        return wrapped
+
     def owner_only(handler: Handler) -> Handler:
         async def wrapped(request: Request) -> Response:
             email = session_user(request)
             if not email:
                 if request.method != "GET":
-                    return Response("Sign in first.", status_code=403)
+                    return refused(
+                        request,
+                        403,
+                        "You are signed out. Sign in again, then repeat that step.",
+                        title="Signed out",
+                    )
                 target = request.url.path
                 if request.url.query:
                     target += "?" + request.url.query
@@ -535,14 +600,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 await remember_pending(request)
                 return await handler(request)
             except OwnerNotConnectedError:
+                if wants_json(request):
+                    return refused(
+                        request, 409, "Google Drive is not connected. Open Connections first."
+                    )
                 return connect_redirect(request)
             except InvalidInputError as exc:
-                return render(request, "error.html", 400, message=str(exc))
+                return refused(request, 400, str(exc))
             except Exception as exc:
                 report_exception(exc, where="dashboard")
-                return render(
-                    request, "error.html", 502, message="A Google Drive request failed. Try again."
-                )
+                return refused(request, 502, "A Google Drive request failed. Try again.")
             finally:
                 current_actor.reset(reset)
 
@@ -555,7 +622,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         form = await request.form()
         sent = form.get("csrf")
         expected = request.session.get("csrf")
-        if not isinstance(sent, str) or not expected or not hmac.compare_digest(sent, expected):
+        if (
+            not isinstance(sent, str)
+            or not isinstance(expected, str)
+            or not expected
+            # Bytes: compare_digest raises TypeError on non-ASCII text.
+            or not hmac.compare_digest(sent.encode(), expected.encode())
+        ):
             return None
         return {k: v for k, v in form.items() if isinstance(v, str)}
 
@@ -566,7 +639,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             form = await check_csrf(request)
             if form is None:
                 audit_owner("csrf", "deny", path=request.url.path)
-                return Response("CSRF check failed.", status_code=403)
+                return refused(
+                    request,
+                    403,
+                    "This page was open too long to be sure the request came from you. "
+                    "Go back, reload the page and try again.",
+                    title="Please try again",
+                )
             return await handler(request, form)
 
         return owner_only(wrapped)
@@ -1003,12 +1082,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         shared_by: str | None = None
         shared_id: str | None = None
         next_token: str | None = None
+        more_matches = False
         current: dict[str, Any] | None = None
         if q:
             term = clean_search_text(q)
             query = f"trashed=false and name contains '{term}'"
-            resp = drive.list_files(query, fields=OWNER_FIELDS, page_size=100)
+            resp = drive.list_files(query, fields=OWNER_FIELDS, page_size=SEARCH_PAGE)
             items = resp.get("files", [])
+            more_matches = bool(resp.get("nextPageToken"))
         else:
             if folder == "root":
                 folder_id = root_id or "root"
@@ -1197,6 +1278,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 str(current["id"]) == root_id or (root_id is None and str(current["id"]) == "root")
             ),
             "next_token": next_token,
+            "more_matches": more_matches,
             "drive_error": False,
         }
 
@@ -1225,6 +1307,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # The picker has to stay on the page. A Drive failure used to replace the
             # whole screen, which also removed the only way to approve a file.
             report_exception(exc, where="browse")
+            if page_token:
+                # Most often a page link that went stale (Back, or a bookmark). Show the
+                # folder's first page instead of an error.
+                first = {"folder": folder}
+                if q:
+                    first["q"] = q
+                if picking:
+                    first["request"] = picking.id
+                return RedirectResponse(f"/browse?{urlencode(first)}", status_code=303)
             data = {
                 "rows": [],
                 "crumbs": [{"id": "root", "name": "My Drive"}],
@@ -2069,14 +2160,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     routes = [
         Route("/confirm.js", confirm_js, methods=["GET"]),
-        Route("/login", login, methods=["GET"]),
-        Route("/auth/login", auth_login, methods=["GET"]),
-        Route("/auth/callback", auth_callback, methods=["GET"]),
+        Route("/login", safely(login), methods=["GET"]),
+        Route("/auth/login", safely(auth_login), methods=["GET"]),
+        Route("/auth/callback", safely(auth_callback), methods=["GET"]),
         Route("/connect", owner_only(connect_page), methods=["GET"]),
         Route("/connect/{key}", csrf_protected(connect_start), methods=["POST"]),
         Route("/connect/{key}/disconnect", csrf_protected(connect_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
-        Route("/", home, methods=["GET"]),
+        Route("/", safely(home), methods=["GET"]),
         Route("/browse", owner_only(browse), methods=["GET"]),
         Route("/picker/session", owner_only(picker_session), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
@@ -2098,8 +2189,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/bridge", owner_only(bridge_page), methods=["GET"]),
         Route("/bridge/webhook", csrf_protected(bridge_webhook), methods=["POST"]),
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
-        Route("/admin", admin_page, methods=["GET"]),
-        Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
+        Route("/admin", safely(admin_page), methods=["GET"]),
+        Route("/oauth/authorize", safely(oauth_authorize), methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
@@ -2109,7 +2200,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     app = Starlette(
         routes=routes,
         middleware=[
-            Middleware(SecurityHeadersMiddleware),
+            Middleware(SecurityHeadersMiddleware, hsts=settings.secure_cookies),
             Middleware(
                 SessionMiddleware,
                 secret_key=settings.session_secret.get_secret_value(),

@@ -141,6 +141,9 @@
   </li>
   {% endfor %}
 </ul>
+{% if more_matches %}
+<p class="muted" role="status">Showing the first {{ rows|length }} matches. Add more of the name to narrow the search.</p>
+{% endif %}
 {% elif q %}
 <div class="card empty">
   <h2>No names match “{{ q }}”</h2>

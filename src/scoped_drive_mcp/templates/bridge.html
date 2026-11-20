@@ -27,8 +27,8 @@
   <p class="muted">{{ link.next_step }}</p>
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this mailbox off? Neither assistant will be able to send to the other, and you will each stop being able to read the other's Sharing list. Messages already delivered stay readable by the person they were sent to until they expire, unless you also delete stored messages.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label><input type="checkbox" name="purge" value="on"> Also delete stored messages for both of us</label>
-    <button class="danger" type="submit">Turn off</button>
+    <p><label><input type="checkbox" name="purge" value="on"> Also delete stored messages for both of us</label></p>
+    <div class="actions"><button class="danger" type="submit">Turn off</button></div>
   </form>
 
   {% elif link.status == "pending_approval" and not link.you_approved %}
@@ -57,7 +57,7 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="primary" type="submit">Approve pairing</button>
     </form>
-    <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny">
+    <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny" data-confirm="Decline pairing with {{ peer }}? This cannot be undone; pairing later needs a new invite.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="danger" type="submit">Decline</button>
     </form>
@@ -159,7 +159,7 @@
       <button class="primary" type="submit">Save webhook</button>
     </form>
     {% if webhook.configured %}
-    <form method="post" action="/bridge/webhook">
+    <form method="post" action="/bridge/webhook" data-confirm="Remove this webhook? The saved key is deleted and the assistant is no longer pinged when mail arrives.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="remove">
       <button type="submit">Remove webhook</button>
