@@ -499,3 +499,20 @@ def test_disconnecting_the_primary_clears_it() -> None:
     box.set_primary(OWNER_EMAIL, CLAUDE.grant_id)
     box.set_primary(OWNER_EMAIL, "")
     assert box.get_primary(OWNER_EMAIL) is None
+
+
+def test_move_a_hook_from_one_app_to_another() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    link_id = _self_pair(box)
+    with as_assistant(CURSOR):  # an older connection that is not paired
+        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
+    box.move_webhook(OWNER_EMAIL, GROK.grant_id, from_app=CURSOR.grant_id)
+    with as_assistant(CURSOR):
+        assert box.get_webhook(OWNER_EMAIL)["configured"] is False
+    assert CURSOR.grant_id not in box.webhook_apps(OWNER_EMAIL)
+    with as_assistant(CLAUDE):
+        box.send_message(OWNER_EMAIL, link_id, "wake grok")
+    assert _urls(posts) == [HOOK + "cursor"]
+    with pytest.raises(MailboxError):
+        box.move_webhook(OWNER_EMAIL, GROK.grant_id, from_app=GROK.grant_id)

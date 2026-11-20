@@ -2163,9 +2163,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         # "" is the account-wide slot; otherwise one of this person's connected apps.
         app = (form.get("app") or "").strip()
-        if app:
+        from_app = (form.get("from_app") or "").strip()
+        if app or from_app:
             grants = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
-            if app not in {g.id for g in grants}:
+            ids = {g.id for g in grants}
+            if (app and app not in ids) or (from_app and from_app not in ids):
                 flash(request, "error", "That app is not connected.")
                 return RedirectResponse("/bridge", status_code=303)
         try:
@@ -2183,7 +2185,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     else "Saved. Mail from other people wakes every app with a wake-up.",
                 )
             elif action == "move":
-                await blocking(ctx.mailbox.move_webhook, email, app)
+                await blocking(ctx.mailbox.move_webhook, email, app, from_app)
                 flash(request, "ok", "Wake-up moved to that app. Its key moved with it.")
             else:
                 enabled = form.get("enabled", "true") != "false"
