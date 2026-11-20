@@ -658,7 +658,7 @@ def test_access_check_does_not_clobber_rotated_grant(owner_c) -> None:
     assert json.loads(after)["access_hashes"] == json.loads(before)["access_hashes"]
     assert json.loads(after)["refresh_hash"] == json.loads(before)["refresh_hash"]
     store.set(f"oauth:seen:{grant_id}", "2099-01-01T00:00:00+00:00", ex=3600)
-    assert "2099-01-01T00:00:00+00:00" in owner_c.get("/").text
+    assert 'datetime="2099-01-01T00:00:00Z"' in owner_c.get("/").text
 
     original = oauth._grant
     issued: dict[str, str] = {}

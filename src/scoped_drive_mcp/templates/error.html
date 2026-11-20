@@ -1,12 +1,30 @@
 {% extends "base.html" %}
-{% block title %}Problem{% endblock %}
+{% set not_found = status_code is defined and status_code == 404 %}
+{% set heading = title or ("Page not found" if not_found else "Something went wrong") %}
+{% block title %}{{ heading }}{% endblock %}
 {% block content %}
 <div class="card empty" role="alert">
-  <h1>Something went wrong</h1>
-  <p>{{ message }}</p>
+  <h1>{{ heading }}</h1>
+  {% if not (not_found and message == "Page not found.") %}<p>{{ message }}</p>{% endif %}
   <div class="actions">
+    {% if actions %}
+    {% for a in actions %}
+    {% if a.logout_next %}
+    {% if csrf %}
+    <form class="inline" method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ a.logout_next }}">
+      <button class="{{ 'primary' if a.primary }}" type="submit">{{ a.label }}</button>
+    </form>
+    {% endif %}
+    {% else %}
+    <a class="btn{{ ' primary' if a.primary }}" href="{{ a.href }}">{{ a.label }}</a>
+    {% endif %}
+    {% endfor %}
+    {% else %}
     <a class="btn primary" href="/">Back to home</a>
     {% if not owner %}<a class="btn" href="/login">Sign in</a>{% endif %}
+    {% endif %}
   </div>
 </div>
 {% endblock %}

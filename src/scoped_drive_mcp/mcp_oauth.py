@@ -294,6 +294,10 @@ def _principal_name(client_name: str) -> str:
     return f"oauth:{slug}"[:64]
 
 
+# The activity log and access requests name an OAuth app by this; the dashboard maps it back.
+principal_name = _principal_name
+
+
 def _at_key(digest: str) -> str:
     return f"oauth:at:{digest}"
 
@@ -668,7 +672,7 @@ class McpOAuth:
             pending.redirect_uri,
             {
                 "error": "access_denied",
-                "error_description": "The owner denied access.",
+                "error_description": "The user denied access.",
                 "state": pending.state,
                 "iss": self.base_url,
             },

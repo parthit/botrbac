@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import anyio.to_thread
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -52,11 +52,27 @@ from .drive_client import (
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
 from .grants import OWNER_FIELDS, GrantError, GrantService
+from .humanize import (
+    ACTIVITY_FILTERS,
+    MISSING,
+    app_names,
+    assistant_label,
+    describe,
+    item_ids,
+    matches,
+    when,
+)
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
-from .store import AUDIENCE_LINKED, ActivityLog, Allowlist, TokenVault
+from .store import (
+    AUDIENCE_LINKED,
+    EXTERNAL_ALLOWLIST_KEY,
+    ActivityLog,
+    Allowlist,
+    TokenVault,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +81,9 @@ SESSION_MAX_AGE = 8 * 3600
 STATE_MAX_AGE = 600
 STATE_SALT = "sdm-oauth-state"
 BROWSE_PAGE_SIZE = 200
+ACTIVITY_PAGE = 50
+# Drive lookups for names the activity page cannot find in the person's own lists.
+ACTIVITY_LOOKUPS = 10
 MAX_BREADCRUMBS = 25
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -105,6 +124,9 @@ SECURITY_HEADERS = [
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Searches per person per minute on "Shared with me". Each one reads every sharer's Drive.
 SHARED_SEARCH_LIMIT = 20
+# Folder lookups one Browse page may make to work out search-result paths and
+# folder-inherited access. Past this, the remaining rows say to open their folder.
+SEARCH_LOOKUPS = 40
 # Item ids in "Shared with me" links. Drive ids fit; other sources must too.
 _SHARED_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,200}")
 
@@ -135,6 +157,9 @@ class DashboardContext:
     # What paired people share with this person, across every source (shared_sources.py).
     # None hides the "Shared with me" pages.
     shared_with_me: Any = None
+    # (caller email, file id) -> the paired person whose Sharing list covers that id,
+    # including files inside a shared folder (ExternalShares.sharer_of).
+    sharer_of: Callable[[str, str], str | None] | None = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -340,6 +365,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     reconsent = ctx.pop("reconsent", None)
     if reconsent is None:
         reconsent = getattr(request.state, "reconsent", False)
+    ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -349,6 +375,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         nav=request.url.path,
         pending_count=pending_count,
         reconsent=reconsent,
+        status_code=status_code,
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)
@@ -470,6 +497,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except Exception:
             logger.exception("reconsent check failed")
             request.state.reconsent = False
+        # Mailbox nav badge: pairings waiting on this person's approval.
+        actor = current_actor.get()
+        request.state.mailbox_count = 0
+        if ctx.mailbox is not None and actor:
+            try:
+                request.state.mailbox_count = await blocking(
+                    ctx.mailbox.needs_approval_count, actor
+                )
+            except Exception:
+                logger.exception("mailbox approval count failed")
 
     def session_user(request: Request) -> str | None:
         """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
@@ -593,7 +630,22 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def login(request: Request) -> Response:
         if session_user(request):
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
-        return render(request, "login.html", next=safe_next(request.query_params.get("next")))
+        next_url = safe_next(request.query_params.get("next"))
+        purpose = hint = None
+        if next_url.startswith("/requests/"):
+            purpose = "review an access request"
+            hint = "Use the Google account that owns the assistant that asked."
+        elif next_url.startswith("/oauth/authorize"):
+            purpose = "connect an assistant"
+            hint = "Use the Google account whose files the assistant should work with."
+        return render(
+            request,
+            "login.html",
+            next=next_url,
+            purpose=purpose,
+            purpose_hint=hint,
+            signed_out=request.query_params.get("signed_out") == "1",
+        )
 
     def supplied_login_hint(request: Request) -> str | None:
         """A hint only when this visitor typed one. Never the server's owner address."""
@@ -615,7 +667,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def auth_callback(request: Request) -> Response:
         params = request.query_params
         if params.get("error"):
-            return render(request, "error.html", 400, message="Google sign-in was cancelled.")
+            return oauth_cancelled(request, params)
         try:
             data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
         except BadSignature:
@@ -654,6 +706,57 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if flow == "connect":
             return await finish_connect(request, data, tokens, email)
         return await finish_sign_in(request, email)
+
+    def oauth_cancelled(request: Request, params: Any) -> Response:
+        """Google sent the person back without a code (they chose Cancel, or Google
+        refused). Say which step it was and offer to try that step again."""
+        flow = None
+        connection = None
+        try:
+            data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+        except BadSignature:
+            data = None
+        if isinstance(data, dict):
+            flow = data.get("flow")
+            connection = get_connection(str(data.get("connection") or ""))
+        request.session.pop("oauth_nonce", None)
+        next_url = safe_next(request.session.get("oauth_next"))
+        cancelled = params.get("error") == "access_denied"
+        if flow == "connect" and session_user(request):
+            name = connection.name if connection else "Google Drive"
+            retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
+            return render(
+                request,
+                "error.html",
+                400,
+                title=f"You didn’t connect {name}" if cancelled else f"{name} isn’t connected",
+                message=(
+                    f"You cancelled on Google’s screen, so nothing changed. Your assistant "
+                    f"can’t reach {name} until you connect it."
+                    if cancelled
+                    else f"Google didn’t finish connecting {name}. Nothing changed."
+                ),
+                actions=[
+                    {"label": "Try again", "href": retry, "primary": True},
+                    {"label": "Back to Overview", "href": "/"},
+                ],
+            )
+        retry = "/login" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
+        return render(
+            request,
+            "error.html",
+            400,
+            title="Sign-in cancelled" if cancelled else "Sign-in didn’t finish",
+            message=(
+                "You cancelled on Google’s screen, so you are not signed in."
+                if cancelled
+                else "Google didn’t finish signing you in. Nothing was changed."
+            ),
+            actions=[
+                {"label": "Try again", "href": retry, "primary": True},
+                {"label": "Back to home", "href": "/"},
+            ],
+        )
 
     async def finish_sign_in(request: Request, email: str) -> Response:
         """Step 1 done. Nothing from Google is stored except that this address signed in."""
@@ -703,14 +806,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # The Drive an assistant uses must belong to the person who signed in.
             await refuse_token()
             audit_owner("connect", "deny", reason="different_account")
+            next_url = safe_next(request.session.get("oauth_next"))
+            retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
             return render(
                 request,
                 "error.html",
                 403,
+                title="That was a different Google account",
                 message=(
                     f"You are signed in as {signed_in}, but Google returned a different "
                     f"account. Connect {connection.name} with {signed_in}."
                 ),
+                actions=[
+                    {"label": "Try again", "href": retry, "primary": True},
+                    {"label": "Back to Overview", "href": "/"},
+                ],
             )
         if connection.required_scope not in tokens.scopes:
             await refuse_token()
@@ -748,12 +858,30 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- connections (step 2) -------------------------------------------
 
+    def waiting_client(next_url: str) -> str | None:
+        """The app whose connection sent this person here (/oauth/authorize?...), if any."""
+        if ctx.mcp_oauth is None or not next_url.startswith("/oauth/authorize?"):
+            return None
+        params = dict(parse_qsl(urlsplit(next_url).query, keep_blank_values=True))
+        try:
+            return ctx.mcp_oauth.parse_authorize(QueryMapping(params)).client_name
+        except AuthorizeError:
+            return None
+
     async def connect_page(request: Request) -> Response:
         rows = await blocking(ctx.connection_rows)
         next_url = safe_next(request.query_params.get("next"))
         if next_url.startswith("/connect"):
             next_url = "/"
-        return render(request, "connect.html", rows=rows, next=next_url)
+        client_name = await blocking(waiting_client, next_url)
+        return render(
+            request,
+            "connect.html",
+            rows=rows,
+            next=next_url,
+            waiting_client=client_name,
+            drive_connected=any(r["connected"] for r in rows),
+        )
 
     async def connect_start(request: Request, form: dict[str, str]) -> Response:
         connection = get_connection(request.path_params.get("key"))
@@ -787,7 +915,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
         request.session.clear()
-        return RedirectResponse("/login", status_code=303)
+        # "Switch account" on a request page and "Use a different account" on the consent
+        # page sign out, then signs in with ?next back.
+        pairs = [("signed_out", "1")]
+        next_url = safe_next(form.get("next"))
+        if next_url != "/":
+            pairs.append(("next", next_url))
+        return RedirectResponse(f"/login?{urlencode(pairs)}", status_code=303)
 
     # ---- pages -----------------------------------------------------------
 
@@ -818,6 +952,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
                 ),
+                **people_summary(str(current_actor.get() or "")),
             }
 
         data = await blocking(gather)
@@ -835,6 +970,26 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             **data,
         )
 
+    def people_summary(email: str) -> dict[str, Any]:
+        """Mailbox and Shared with me counts for Overview. Store reads only, no Drive call."""
+        mailbox = None
+        if ctx.mailbox is not None and email:
+            try:
+                mailbox = ctx.mailbox.summary(email)
+            except Exception:
+                logger.exception("mailbox summary failed")
+        shared = None
+        if ctx.shared_with_me is not None and email:
+            try:
+                people = ctx.shared_with_me.overview(email)
+                shared = {
+                    "people": len(people),
+                    "item_count": sum(p.item_count for p in people),
+                }
+            except Exception:
+                logger.exception("shared with me summary failed")
+        return {"mailbox_summary": mailbox, "shared_summary": shared}
+
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
         drive = ctx.owner_drive()
         # drive.file cannot files.get("root") until the app has opened My Drive.
@@ -848,10 +1003,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         entries = ctx.allowlist.entries()
         shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
+        # The nearest allowed folder at or above the one being browsed, and its id so
+        # the breadcrumb can offer to remove that folder's own entry.
         covered_by: str | None = None
+        covered_id: str | None = None
         # The nearest folder on the Sharing list above the one being browsed. Everything
         # inside it is readable by paired people's assistants, as the guest guard allows.
         shared_by: str | None = None
+        shared_id: str | None = None
         next_token: str | None = None
         current: dict[str, Any] | None = None
         if q:
@@ -888,9 +1047,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 name = "My Drive" if nid == root_id or nid == "root" else str(node.get("name", ""))
                 crumbs.insert(0, {"id": "root" if nid == root_id else nid, "name": name})
                 if covered_by is None and nid in entries:
-                    covered_by = name
+                    covered_by, covered_id = name, nid
                 if shared_by is None and nid in shared:
-                    shared_by = name
+                    shared_by, shared_id = name, nid
                 parents = node.get("parents") or []
                 if nid == root_id or nid == "root" or not parents:
                     break
@@ -913,28 +1072,132 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 items = [i for i in items if folder_id in (i.get("parents") or [])]
             next_token = resp.get("nextPageToken")
         items.sort(key=lambda i: (i.get("mimeType") != FOLDER_MIME, str(i.get("name", "")).lower()))
+
+        # Folder metadata looked up while working out search results and shortcut
+        # targets. Many results share folders, so each folder is fetched once.
+        metas: dict[str, dict[str, Any] | None] = {}
+        if current is not None:
+            metas[str(current["id"])] = current
+
+        lookups = [0]
+
+        class _OutOfLookups(Exception):
+            pass
+
+        def meta_of(fid: str) -> dict[str, Any] | None:
+            if fid not in metas:
+                if lookups[0] >= SEARCH_LOOKUPS:
+                    raise _OutOfLookups
+                lookups[0] += 1
+                try:
+                    metas[fid] = drive.get_file(fid, fields=OWNER_FIELDS)
+                except DriveNotFoundError:
+                    metas[fid] = None
+            return metas[fid]
+
+        def lineage(item: dict[str, Any]) -> list[tuple[str, str]] | None:
+            """(id, name) of the folders above `item`, nearest first, up to My Drive.
+            Follows the first parent, as the breadcrumbs do. None when the page's lookup
+            budget ran out before reaching the top, so the answer would be a guess."""
+            out: list[tuple[str, str]] = []
+            seen_ids = {str(item.get("id", ""))}
+            parents = item.get("parents") or []
+            try:
+                while parents and len(out) < MAX_BREADCRUMBS:
+                    pid = str(parents[0])
+                    if pid in seen_ids or pid == root_id or pid == "root":
+                        break
+                    seen_ids.add(pid)
+                    node_meta = meta_of(pid)
+                    if node_meta is None:
+                        break
+                    out.append((pid, str(node_meta.get("name", ""))))
+                    parents = node_meta.get("parents") or []
+            except _OutOfLookups:
+                return None
+            return out
+
+        def nearest(chain: list[tuple[str, str]], ids: Any) -> tuple[str, str] | None:
+            return next(((fid, name) for fid, name in chain if fid in ids), None)
+
+        # In a folder view every row sits under the same folders, so the folder-level
+        # answer applies. Search results come from anywhere, so each works out its own.
+        folder_cover = (covered_id, covered_by) if covered_by and covered_id else None
+        folder_share = (shared_id, shared_by) if shared_by and shared_id else None
         rows = []
         for item in items:
             iid = str(item["id"])
             mime = str(item.get("mimeType", ""))
+            is_shortcut = mime == SHORTCUT_MIME
+            path: str | None = None
+            unsure = False
+            if q:
+                chain = lineage(item)
+                if chain is None:
+                    # Too many folders to look up on one page: don't guess the status.
+                    unsure, cover, share, parent_id = True, None, None, None
+                else:
+                    cover = nearest(chain, entries)
+                    share = nearest(chain, shared)
+                    path = " / ".join(["My Drive", *(name for _, name in reversed(chain))])
+                    parent_id = chain[0][0] if chain else "root"
+            else:
+                cover, share = folder_cover, folder_share
+                parent_id = None
+            # A shortcut is not on the lists itself: Allow stores its target. So the row
+            # shows the target's state, and Remove / Stop sharing act on the target.
+            acts_on = iid
+            target: dict[str, Any] | None = None
+            if is_shortcut:
+                target_id = str((item.get("shortcutDetails") or {}).get("targetId") or "")
+                try:
+                    target_meta = meta_of(target_id) if target_id else None
+                except _OutOfLookups:
+                    target_meta, unsure = None, True
+                tchain = lineage(target_meta) if target_meta is not None else None
+                if target_meta is not None and tchain is None:
+                    unsure = True
+                if unsure and target_id:
+                    # Out of lookups: still act on the target (Allow stores the target),
+                    # but don't guess its folder state from the shortcut's own folder.
+                    acts_on, cover, share = target_id, None, None
+                if target_meta is not None and tchain is not None:
+                    # The row's state is the target's, and that is known.
+                    acts_on, unsure = target_id, False
+                    cover = nearest(tchain, entries)
+                    share = nearest(tchain, shared)
+                    item_parents = [str(p) for p in item.get("parents") or []]
+                    target_parents = [str(p) for p in target_meta.get("parents") or []]
+                    target = {
+                        "id": target_id,
+                        "name": str(target_meta.get("name", "")),
+                        "folder": tchain[0][1] if tchain else "My Drive",
+                        "elsewhere": not set(item_parents) & set(target_parents),
+                    }
             rows.append(
                 {
                     "id": iid,
+                    "acts_on": acts_on,
                     "name": str(item.get("name", "")),
                     "is_folder": mime == FOLDER_MIME,
-                    "is_shortcut": mime == SHORTCUT_MIME,
+                    "is_shortcut": is_shortcut,
+                    "target": target,
                     "kind": describe_mime(mime),
                     "link": item.get("webViewLink"),
-                    "granted": iid in entries,
-                    "covered": covered_by is not None and iid not in entries,
-                    "ext_shared": iid in shared,
-                    "ext_covered": shared_by is not None and iid not in shared,
+                    "path": path,
+                    "parent_id": parent_id,
+                    "unsure": unsure,
+                    "granted": acts_on in entries,
+                    "covered_by": cover[1] if cover else None,
+                    "ext_shared": acts_on in shared,
+                    "shared_by": share[1] if share else None,
                 }
             )
         return {
             "rows": rows,
             "crumbs": crumbs,
             "covered_by": covered_by,
+            "covered_id": covered_id,
             "shared_by": shared_by,
             "current": current,
             "current_granted": current is not None and str(current["id"]) in entries,
@@ -976,6 +1239,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "rows": [],
                 "crumbs": [{"id": "root", "name": "My Drive"}],
                 "covered_by": None,
+                "covered_id": None,
+                "shared_by": None,
                 "current": {"id": "root", "name": "My Drive", "mimeType": FOLDER_MIME},
                 "current_granted": False,
                 "is_root": True,
@@ -1036,19 +1301,54 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             entry = await blocking(ctx.grants().grant, file_id)
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
-        return action_done(
-            request, "ok", f"Allowed \u201c{entry.name}\u201d for the assistant.", next_url
-        )
+        what = f"\u201c{entry.name}\u201d"
+        if entry.id != file_id:
+            what += ", the shortcut\u2019s target,"
+        return action_done(request, "ok", f"Allowed {what} for the assistant.", next_url)
 
     async def revoke(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
         next_url = safe_next(form.get("next"))
+        grants = ctx.grants()
+        entry = await blocking(ctx.allowlist.get, file_id)
         try:
-            await blocking(ctx.grants().revoke, file_id)
+            await blocking(grants.revoke, file_id)
         except GrantError as exc:
             gone = await blocking(lambda: ctx.allowlist.get(file_id) is None)
             return action_done(request, "error", str(exc), next_url, changed=gone)
-        return action_done(request, "ok", "Removed. The assistant can no longer use it.", next_url)
+        root = ctx.visible_root_folder_id()
+        extra = {root: "the folder set on the server"} if root else None
+        cover = await still_covered(grants, file_id, extra)
+        name = (entry.name if entry else "") or "it"
+        if cover is None:
+            message = f"Removed “{name}”. The assistant can no longer use it."
+        elif cover:
+            message = (
+                f"Removed “{name}”, but the assistant can still use it "
+                f"because “{cover}” is allowed."
+            )
+        else:
+            message = (
+                f"Removed “{name}”. If a folder above it is allowed, "
+                "the assistant can still use it through that folder."
+            )
+        return action_done(request, "ok", message, next_url)
+
+    async def still_covered(
+        grants: GrantService, file_id: str, extra: dict[str, str] | None = None
+    ) -> str | None:
+        """Name of an allowed folder that still includes `file_id`.
+
+        None means no folder on the list includes it. An empty string means Drive could
+        not be asked; only the wording depends on this, so the completed removal is not
+        turned into an error, and the message does not claim the item is unreachable.
+        """
+        try:
+            found = await blocking(grants.covering_entry, file_id, extra)
+        except Exception as exc:
+            report_exception(exc, where="covering_entry")
+            return ""
+        return found[1] if found else None
 
     async def share_add(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
@@ -1067,8 +1367,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def share_remove(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
         next_url = safe_next(form.get("next") or "/sharing")
+        ext_grants = ctx.ext_grants()
         try:
-            await blocking(ctx.ext_grants().revoke, file_id)
+            await blocking(ext_grants.revoke, file_id)
         except GrantError as exc:
             ext = ctx.ext_allowlist
             gone = ext is not None and await blocking(lambda: ext.get(file_id) is None)
@@ -1079,12 +1380,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 next_url,
                 changed=gone,
             )
-        return action_done(
-            request,
-            "ok",
-            "Stopped sharing. Other people's assistants can no longer read it.",
-            next_url,
-        )
+        cover = await still_covered(ext_grants, file_id)
+        if cover is None:
+            message = "Stopped sharing. Other people's assistants can no longer read it."
+        elif cover:
+            message = (
+                "Stopped sharing it on its own, but other people's assistants can still "
+                f"read it because “{cover}” is on your Sharing list."
+            )
+        else:
+            message = (
+                "Stopped sharing it on its own. If a folder above it is on your Sharing "
+                "list, other people's assistants can still read it through that folder."
+            )
+        return action_done(request, "ok", message, next_url)
 
     async def sharing(request: Request) -> Response:
         if ctx.ext_allowlist is None:
@@ -1093,12 +1402,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         def gather() -> dict[str, Any]:
             peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
-            return {"entries": ctx.ext_allowlist.entries(), "peers": peers}
+            return {
+                "entries": ctx.ext_allowlist.entries(),
+                "peers": peers,
+                "drive_connected": ctx.drive_connected(),
+            }
 
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
         return render(
-            request, "sharing.html", rows=rows, peers=data["peers"], describe_mime=describe_mime
+            request,
+            "sharing.html",
+            rows=rows,
+            peers=data["peers"],
+            describe_mime=describe_mime,
+            drive_connected=data["drive_connected"],
         )
 
     # ---- shared with me ------------------------------------------------
@@ -1114,7 +1432,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "no_bytes": 404,
         }.get(exc.code, 403)
         message = exc.message
-        if exc.code == "invalid_input" and ("_shared_" in message or "read_file" in message):
+        if exc.code == "own_drive":
+            # The MCP wording names tools. A person opens their own files from Browse.
+            message = "This is in your own Drive. Open it from Browse."
+        elif exc.code == "invalid_input" and ("_shared_" in message or "read_file" in message):
             # Drive's wording for an assistant (it names tools). Say it for a person.
             message = (
                 "This item can't be opened that way. If it is a folder, open it from the list."
@@ -1227,7 +1548,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def access(request: Request) -> Response:
         def gather() -> dict[str, Any]:
-            return {"entries": ctx.allowlist.entries(), "bot": ctx.bot_status()}
+            return {
+                "entries": ctx.allowlist.entries(),
+                "bot": ctx.bot_status(),
+                "drive_connected": ctx.drive_connected(),
+            }
 
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
@@ -1238,22 +1563,93 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
             bot=data["bot"],
+            drive_connected=data["drive_connected"],
         )
+
+    def my_app_names() -> dict[str, str]:
+        if ctx.mcp_oauth is None:
+            return {}
+        return app_names(ctx.mcp_oauth.list_grants(current_actor.get()))
 
     async def requests_page(request: Request) -> Response:
         reqs = await blocking(ctx.requests.recent, 100)
         pending = [r for r in reqs if r.status == PENDING]
         decided = [r for r in reqs if r.status != PENDING]
-        return render(request, "requests.html", pending=pending, decided=decided)
+        apps = await blocking(my_app_names)
+        return render(request, "requests.html", pending=pending, decided=decided, apps=apps)
+
+    def request_elsewhere(rid: str, email: str | None) -> bool:
+        """Whether this request id belongs to another signed-in person. Ids are 192 random
+        bits, so this only ever matches a link someone was sent. It says nothing about whose
+        request it is."""
+        if ctx.directory is None:
+            return False
+        for person in ctx.directory.known_users():
+            if person == email:
+                continue
+            if AccessRequests(ctx.directory.store_for(person)).get(rid) is not None:
+                return True
+        return False
+
+    async def missing_request(request: Request, rid: str) -> Response:
+        email = current_actor.get()
+        if await blocking(request_elsewhere, rid, email):
+            return render(
+                request,
+                "error.html",
+                403,
+                title="This request is for a different account",
+                message=(
+                    f"This request isn\u2019t for {email}. Sign in with the Google account "
+                    "that owns this assistant to approve or deny it."
+                ),
+                actions=[
+                    {
+                        "label": "Switch account",
+                        "logout_next": f"/requests/{rid}",
+                        "primary": True,
+                    },
+                    {"label": "All requests", "href": "/requests"},
+                ],
+            )
+        return render(
+            request,
+            "error.html",
+            404,
+            title="Request not found",
+            message=(
+                "This request doesn\u2019t exist or has expired. Requests expire after 7 days."
+            ),
+            actions=[
+                {"label": "All requests", "href": "/requests", "primary": True},
+                {"label": "Back to Overview", "href": "/"},
+            ],
+        )
+
+    def paired_sharer(file_id: str) -> str | None:
+        """A paired person whose Sharing list covers this id (a request filed before
+        read_file pointed assistants at read_shared_file). Uses the same guard as a guest
+        read, so a file inside a shared folder counts, not only the exact shared id."""
+        me = current_actor.get()
+        if ctx.sharer_of is not None:
+            return ctx.sharer_of(me, file_id) if me else None
+        if ctx.mailbox is None or ctx.ext_allowlist is None or ctx.directory is None:
+            return None
+        for peer in ctx.mailbox.active_peers(me):
+            store = ctx.directory.store_for(peer)
+            if Allowlist(store, EXTERNAL_ALLOWLIST_KEY).get(file_id) is not None:
+                return peer
+        return None
 
     async def request_detail(request: Request) -> Response:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
-            return render(request, "error.html", 404, message="Request not found or expired.")
+            return await missing_request(request, rid)
         options = []
         owner_meta = None
         drive_error = False
+        shared_by = None
         if req.file_id and req.status == PENDING:
             grants = ctx.grants()
             try:
@@ -1266,6 +1662,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 options = []
                 owner_meta = None
                 drive_error = True
+            if owner_meta is None and not drive_error:
+                shared_by = await blocking(paired_sharer, req.file_id)
         return render(
             request,
             "request.html",
@@ -1273,6 +1671,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             options=options,
             owner_meta=owner_meta,
             drive_error=drive_error,
+            shared_by=shared_by,
+            apps=await blocking(my_app_names),
             picker_ready=settings.picker_configured,
             describe_mime=describe_mime,
         )
@@ -1281,7 +1681,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
-            return render(request, "error.html", 404, message="Request not found or expired.")
+            return await missing_request(request, rid)
         target = form.get("target_id") or req.file_id
         if not target:
             flash(request, "error", "Pick an item to share first.")
@@ -1297,7 +1697,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
-            return render(request, "error.html", 404, message="Request not found or expired.")
+            return await missing_request(request, rid)
         try:
             await blocking(ctx.grants().deny, req)
             flash(request, "ok", "Request denied.")
@@ -1305,9 +1705,85 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(request, "error", str(exc))
         return RedirectResponse(f"/requests/{quote(req.id)}", status_code=303)
 
+    def activity_names(records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Names for the ids on this page, from what this person already has: their two
+        lists, their requests, and (for a few ids) their own Drive. The log keeps ids only."""
+        names: dict[str, str] = {}
+        for entry in ctx.allowlist.entries().values():
+            if entry.name:
+                names[entry.id] = entry.name
+        if ctx.ext_allowlist is not None:
+            for entry in ctx.ext_allowlist.entries().values():
+                if entry.name:
+                    names.setdefault(entry.id, entry.name)
+        request_names: dict[str, str] = {}
+        for req in ctx.requests.recent(300):
+            if req.file_id and req.file_name:
+                names.setdefault(req.file_id, req.file_name)
+            if req.granted_id and req.granted_name:
+                names.setdefault(req.granted_id, req.granted_name)
+            label = req.granted_name or req.file_name or req.description
+            if label:
+                request_names[req.id] = str(label)
+        unknown = [i for i in item_ids(records) if i not in names][:ACTIVITY_LOOKUPS]
+        if unknown and ctx.drive_connected():
+            # Under a limited (drive.file) sign-in Google also answers 404 for real files
+            # this app never opened, so a 404 proves nothing: don't call them missing.
+            limited = ctx.reconsent_needed()
+            try:
+                drive = ctx.owner_drive()
+                for item in unknown:
+                    try:
+                        meta = drive.get_file(item, fields="id,name")
+                    except DriveNotFoundError:
+                        if not limited:
+                            names[item] = MISSING
+                        continue
+                    if meta.get("name"):
+                        names[item] = str(meta["name"])
+            except Exception:
+                logger.warning("activity name lookup failed", exc_info=True)
+        return {"names": names, "request_names": request_names, "apps": my_app_names()}
+
     async def activity(request: Request) -> Response:
+        view = request.query_params.get("view") or "all"
+        if view not in ACTIVITY_FILTERS:
+            view = "all"
+        show_checks = request.query_params.get("checks") == "1"
+        try:
+            limit = int(request.query_params.get("show") or ACTIVITY_PAGE)
+        except ValueError:
+            limit = ACTIVITY_PAGE
+        limit = max(ACTIVITY_PAGE, min(limit, 500))
         records = await blocking(ctx.activity.recent)
-        return render(request, "activity.html", records=records)
+        rows = [describe(r) for r in records]
+        shown_ids = [i for i, row in enumerate(rows) if matches(row, view, show_checks)]
+        page = shown_ids[:limit]
+        lookup = await blocking(activity_names, [records[i] for i in page])
+        page_rows = [
+            describe(records[i], lookup["names"], lookup["request_names"], lookup["apps"])
+            for i in page
+        ]
+        counts = {k: sum(1 for r in rows if matches(r, k, show_checks)) for k in ACTIVITY_FILTERS}
+
+        def href(**changes: Any) -> str:
+            params = {"view": view, "checks": "1" if show_checks else "", "show": ""}
+            params.update({k: str(v) for k, v in changes.items()})
+            pairs = [(k, v) for k, v in params.items() if v and not (k == "view" and v == "all")]
+            return "/activity" + (f"?{urlencode(pairs)}" if pairs else "")
+
+        return render(
+            request,
+            "activity.html",
+            rows=page_rows,
+            total=len(records),
+            more_href=href(show=limit + ACTIVITY_PAGE) if len(shown_ids) > limit else None,
+            view=view,
+            filters=[(k, label, href(view=k), counts[k]) for k, label in ACTIVITY_FILTERS.items()],
+            show_checks=show_checks,
+            hidden_checks=sum(1 for r in rows if r.polling),
+            checks_href=href(checks="" if show_checks else "1"),
+        )
 
     async def not_found(request: Request) -> Response:
         return render(request, "error.html", 404, message="Page not found.")
@@ -1403,12 +1879,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return connect_redirect(request)
             request.session["mcp_auth"] = pending.to_dict()
             await remember_pending(request)
+            return_host = urlsplit(pending.redirect_uri).hostname or pending.redirect_uri
+            here = request.url.path + ("?" + request.url.query if request.url.query else "")
             return render(
                 request,
                 "consent.html",
                 client_name=pending.client_name,
                 scope=SCOPE,
                 requested_scope=pending.requested_scope,
+                return_host=return_host,
+                switch_next=here,
+                mailbox_on=ctx.mailbox is not None,
+                shared_on=ctx.shared_with_me is not None,
             )
         finally:
             current_actor.reset(reset)
@@ -1465,16 +1947,54 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
         data["webhook"] = await blocking(ctx.mailbox.get_webhook, email)
+        # Approving a pairing lets that person's assistant read the Sharing list, so each
+        # card that asks for approval says what that list holds right now.
+        ext = ctx.ext_allowlist
+        data["sharing_on"] = ext is not None
+        data["shared_items"] = []
+        if ext is not None:
+            entries = await blocking(ext.entries)
+            data["shared_items"] = sorted(
+                entries.values(), key=lambda e: e.granted_at, reverse=True
+            )
         return render(request, "bridge.html", **data)
 
     def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
         email = str(request.session.get("owner") or "")
+        if action == "cancel":
+            ctx.mailbox.cancel_invite(email, link_id)
+            return "Invite cancelled. That code no longer works."
+        if action == "dismiss":
+            ctx.mailbox.dismiss(email, link_id)
+            return "Removed from your list."
+        if action == "purge":
+            count = ctx.mailbox.delete_messages(email, link_id)["purged_messages"]
+            return f"Deleted {count} stored message{'' if count == 1 else 's'} for both of you."
         if action == "revoke":
+            peer = next(
+                (
+                    link["peer_email"]
+                    for link in ctx.mailbox.list_links(email)["links"]
+                    if link["link_id"] == link_id
+                ),
+                None,
+            )
             ctx.mailbox.revoke(email, link_id, purge)
-            return "Pairing revoked. Both assistants have lost send and receive."
+            message = (
+                "Mailbox turned off. Neither assistant can send on it, and neither of you can "
+                "read the other's Sharing list through it any more."
+            )
+            if peer and ctx.mailbox.is_linked(email, peer):
+                message += f" You still have another active pairing with {peer}."
+            if purge:
+                return message + " Stored messages were deleted for both of you."
+            return message + (
+                " Messages already delivered stay readable by the person they were sent to "
+                "until they expire."
+            )
         result = ctx.mailbox.decide(email, link_id, action)
         if action == "deny" or result["status"] == "revoked":
-            return "Pairing denied. Neither assistant can send on it."
+            return "Pairing declined. Nothing is shared and no mail can be sent on it."
         if result["status"] == "active":
             return "You approved. The mailbox is on."
         return "You approved. The mailbox stays off until the other person approves."
@@ -1484,7 +2004,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         link_id = request.path_params["link_id"]
         action = request.path_params["action"]
-        if action not in ("approve", "deny", "revoke"):
+        if action not in ("approve", "deny", "revoke", "cancel", "dismiss", "purge"):
             return render(request, "error.html", 404, message="That page is not available.")
         purge = form.get("purge") == "on"
         try:
@@ -1692,9 +2212,11 @@ def human_size(size: int | None) -> str:
     return ""
 
 
-def request_headline(req: Any, owner_meta: dict[str, Any] | None = None) -> str:
+def request_headline(
+    req: Any, owner_meta: dict[str, Any] | None = None, apps: dict[str, str] | None = None
+) -> str:
     """Plain-language summary of an access request. Technical fields stay out of this sentence."""
-    who = str(getattr(req, "token_name", None) or "").strip() or "An assistant"
+    who = assistant_label(getattr(req, "token_name", None), apps)
     name = None
     if owner_meta and owner_meta.get("name"):
         name = str(owner_meta["name"])
@@ -1704,20 +2226,26 @@ def request_headline(req: Any, owner_meta: dict[str, Any] | None = None) -> str:
         name = str(req.description)
     item = name or "something in your Drive"
     tool = str(getattr(req, "tool", "") or "")
-    sentences = {
-        "read_file": f"{who} wants to read {item}.",
-        "get_metadata": f"{who} wants to see the details of {item}.",
-        "list_folder": f"{who} wants to list {item}.",
-        "search_files": f"{who} wants to search your Drive.",
-        "create_folder": f"{who} wants to create a folder in {item}.",
-        "create_doc": f"{who} wants to create a document in {item}.",
-        "upload_file": f"{who} wants to upload a file in {item}.",
-        "update_file_content": f"{who} wants to edit {item}.",
-        "rename_file": f"{who} wants to rename {item}.",
-        "trash_file": f"{who} wants to move {item} to trash.",
-        "request_access": f"{who} is asking to use {item}.",
+    actions = {
+        "read_file": f"read {item}",
+        "get_metadata": f"see the details of {item}",
+        "list_folder": f"list {item}",
+        "search_files": "search your Drive",
+        "create_folder": f"create a folder in {item}",
+        "create_doc": f"create a document in {item}",
+        "upload_file": f"upload a file in {item}",
+        "update_file_content": f"edit {item}",
+        "rename_file": f"rename {item}",
+        "trash_file": f"move {item} to trash",
+        "request_access": f"use {item}",
     }
-    return sentences.get(tool, f"{who} wants to use {item}.")
+    action = actions.get(tool, f"use {item}")
+    if str(getattr(req, "status", "pending") or "pending") != "pending":
+        # Decided requests are history: "Grok asked to read notes.txt."
+        return f"{who} asked to {action}."
+    if tool == "request_access":
+        return f"{who} is asking to {action}."
+    return f"{who} wants to {action}."
 
 
 def status_label(status: str | None) -> str:
@@ -1792,3 +2320,5 @@ _env.globals["tool_label"] = tool_label
 _env.globals["describe_mime"] = describe_mime
 _env.globals["shared_href"] = shared_href
 _env.globals["human_size"] = human_size
+_env.globals["assistant_label"] = assistant_label
+_env.filters["when"] = when

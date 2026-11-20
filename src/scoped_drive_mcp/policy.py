@@ -98,6 +98,29 @@ def check_permission(principal: Principal | None, tool: str) -> Principal:
     return principal
 
 
+class PayloadToolError(ToolError):
+    """A tool error with a machine-readable payload (`{"error": code, "message": ...}`).
+
+    `require` turns it into an error result that carries the payload as structuredContent,
+    and keeps the text FastMCP always used (`Error executing tool <name>: <json>`), so
+    clients that parse the text keep working.
+    """
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(json.dumps(payload))
+        self.payload = payload
+
+
+def payload_error_result(tool: str, payload: dict[str, Any]) -> CallToolResult:
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=f"Error executing tool {tool}: {json.dumps(payload)}")
+        ],
+        structuredContent=payload,
+        isError=True,
+    )
+
+
 def access_required_result(payload: dict[str, Any]) -> CallToolResult:
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload))],
@@ -157,6 +180,10 @@ def require(
             except InvalidInputError as exc:
                 audit(tool=tool, decision="error", reason=str(exc), **who, **ids)
                 raise ToolError(f"Invalid input: {exc}") from None
+            except PayloadToolError as exc:
+                reason = str(exc.payload.get("error") or "error")
+                audit(tool=tool, decision="error", reason=reason, **who, **ids)
+                return payload_error_result(tool, exc.payload)  # type: ignore[return-value]
             except ToolError as exc:
                 audit(tool=tool, decision="error", reason=str(exc), **who, **ids)
                 raise
@@ -167,6 +194,10 @@ def require(
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)
                 raise ToolError("Drive request failed; see server logs") from None
+            if tool == "request_access" and not ids.get("request_id") and isinstance(result, dict):
+                # Lets Activity name the row from the request ("asked for … budget sheet").
+                rid = result.get("request_id")
+                ids["request_id"] = rid if isinstance(rid, str) else None
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 

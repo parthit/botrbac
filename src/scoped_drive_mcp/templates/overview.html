@@ -5,12 +5,18 @@
 {% include "_mode.html" %}
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
+{% elif not allow_count and not root_folder_id %}
+<div class="card" id="next-step">
+  <h2>Next: choose files your assistant can use</h2>
+  <p>Google Drive is connected, but nothing is allowed yet. Your assistant can’t open anything until you allow a file or folder.</p>
+  <p><a class="btn primary" href="/browse">Choose files</a></p>
+</div>
 {% endif %}
 <div class="grid">
   <div class="card stat">
     <span class="muted">Allowed items</span>
     <b>{{ allow_count }}</b>
-    <a href="/access">Manage</a>
+    <a href="/access">Manage<span class="sr-only"> allowed items</span></a>
   </div>
   <div class="card stat">
     <span class="muted">Pending requests</span>
@@ -27,8 +33,30 @@
     </p>
     {% endfor %}
     <span class="muted">Signed in as {{ owner }}</span>
-    <a href="/connect">Manage</a>
+    <a href="/connect">Manage<span class="sr-only"> connections</span></a>
   </div>
+  {% if mailbox_summary %}
+  <div class="card stat" id="mailbox-summary">
+    <span class="muted">Mailbox</span>
+    <b>{{ mailbox_summary.active }}</b>
+    <span class="muted">active pairing{{ "" if mailbox_summary.active == 1 else "s" }}</span>
+    {% if mailbox_summary.needs_approval %}<span class="pill pending"><span aria-hidden="true">●</span> {{ mailbox_summary.needs_approval }} need{{ "s" if mailbox_summary.needs_approval == 1 }} your approval</span>{% endif %}
+    {% if mailbox_summary.unread %}<span class="muted">{{ mailbox_summary.unread }} unread message{{ "" if mailbox_summary.unread == 1 else "s" }} waiting for your assistant</span>{% endif %}
+    <a href="/bridge">{{ "Review" if mailbox_summary.needs_approval else "Manage" }}</a>
+  </div>
+  {% endif %}
+  {% if shared_summary %}
+  <div class="card stat" id="shared-summary">
+    <span class="muted">Shared with me</span>
+    <b>{{ shared_summary.item_count }}</b>
+    {% if shared_summary.item_count %}
+    <span class="muted">item{{ "" if shared_summary.item_count == 1 else "s" }} from {{ shared_summary.people }} {{ "person" if shared_summary.people == 1 else "people" }}</span>
+    {% else %}
+    <span class="muted">Nothing shared with you yet</span>
+    {% endif %}
+    <a href="/shared">Open</a>
+  </div>
+  {% endif %}
 </div>
 
 <h2>Connect an assistant</h2>
@@ -59,13 +87,13 @@
   {% for grant in grants %}
   <tr data-row>
     <td data-label="App">{{ grant.client_name }}</td>
-    <td data-label="Connected" class="muted">{{ grant.created_at }}</td>
-    <td data-label="Last used" class="muted">{{ grant.last_used or "Never" }}</td>
+    <td data-label="Connected" class="muted">{{ grant.created_at | when }}</td>
+    <td data-label="Last used" class="muted">{{ grant.last_used | when("Never") }}</td>
     <td data-label="Action">
       <form class="inline" method="post" action="/oauth/grants/revoke" data-async data-on-success="remove-row" data-confirm="Disconnect this app? It loses access immediately.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="grant_id" value="{{ grant.id }}">
-        <button class="danger" type="submit">Disconnect</button>
+        <button class="danger" type="submit">Disconnect<span class="sr-only"> {{ grant.client_name }}</span></button>
       </form>
     </td>
   </tr>
@@ -75,7 +103,7 @@
 {% endif %}
 <div class="card empty" data-empty{% if grants %} hidden{% endif %}>
   <h2>No apps connected</h2>
-  <p>Use one of the setup cards above, then approve the connection when you are asked.</p>
+  <p>Copy the MCP URL above into your assistant, sign in when the browser opens, and choose Allow. The app then shows up here.</p>
 </div>
 
 {% if is_admin %}

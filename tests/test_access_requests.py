@@ -43,7 +43,41 @@ def test_request_record_contents(c, p2_app) -> None:
     assert req.file_id == "priv-secret"
     assert req.file_name == "payroll.txt"  # the signed-in user can already see it
     assert req.reason and req.created_at
-    payload = mcp_call(c, "get_metadata", file_id="stray-shared")["structuredContent"]
+
+
+def test_unknown_file_id_files_no_request(c, p2_app) -> None:
+    """An id the person's Drive cannot open has nothing to approve: no dead-end request."""
+    for tool, args in (
+        ("get_metadata", {"file_id": "stray-shared"}),  # someone else's file
+        ("read_file", {"file_id": "no-such-file-123"}),
+    ):
+        result = mcp_call(c, tool, **args)
+        assert result["isError"] is True
+        payload = result["structuredContent"]
+        assert payload["error"] == "not_found", tool
+        assert "request_id" not in payload and "approval_url" not in payload
+        assert "search_files" in payload["message"]
+    asked = mcp_call(
+        c, "request_access", description="the budget", reason="r", file_id="no-such-file-123"
+    )["structuredContent"]
+    assert asked["status"] == "not_found" and "approval_url" not in asked
+    assert requests_of(p2_app).recent() == []
+    assert c.get("/").text.count('class="count"') == 0
+
+
+def test_transient_drive_error_still_files_a_request(c, p2_app, monkeypatch) -> None:
+    from tests.fake_drive import FakeDrive
+
+    real = FakeDrive.get_file
+
+    def flaky(self, file_id, fields):
+        if file_id == "priv-secret" and fields == "id,name,trashed":
+            raise RuntimeError("drive 503")
+        return real(self, file_id, fields)
+
+    monkeypatch.setattr(FakeDrive, "get_file", flaky)
+    payload = mcp_call(c, "read_file", file_id="priv-secret")["structuredContent"]
+    assert payload["error"] == "access_required"
     assert requests_of(p2_app).get(payload["request_id"]).file_name is None
 
 
@@ -140,19 +174,29 @@ def test_drive_alias_does_not_open_an_access_request(c, p2_app) -> None:
     assert requests_of(p2_app).recent() == []
 
 
-def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(c, world) -> None:
-    payload = mcp_call(c, "get_metadata", file_id="stray-shared")["structuredContent"]
-    path = payload["approval_url"].removeprefix(BASE_URL)
+def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(
+    c, world, p2_app
+) -> None:
+    # A request saved before read_file stopped filing them for unknown ids.
+    req, _ = requests_of(p2_app).create(
+        tool="get_metadata", token_name="viewer-tok", reason="r", file_id="stray-shared"
+    )
+    path = f"/requests/{req.id}"
     page = c.get(path).text
-    assert "pick a different item" in page and "Share just this item" not in page
-    assert "could not open that file" in page
-    assert "Choose the file to approve" not in page  # picker is not configured here
+    assert "This file doesn\u2019t exist or you can\u2019t open it" in page
+    assert "pick it from Browse" in page and "Share just this item" not in page
+    assert "Deny" in page
+    # No advice that does not apply: there is no banner, and no picker on this server.
+    assert "Sign in again" not in page and "picker" not in page.lower()
+    assert "could not open that file" not in page
     listing = c.get("/requests").text
     assert "Approve or deny" in listing
     post(c, f"{path}/approve", target_id="loose-two")
     assert [p["emailAddress"] for p in world.files["loose-two"].permissions] == []
-    status = mcp_call(c, "check_access_request", request_id=payload["request_id"])
+    status = mcp_call(c, "check_access_request", request_id=req.id)
     assert status["structuredContent"]["granted_id"] == "loose-two"
+    assert status["structuredContent"]["granted_name"] == "Second memo"
+    assert "\u201cSecond memo\u201d (id loose-two)" in status["structuredContent"]["message"]
 
 
 def test_my_drive_root_itself_cannot_be_approved(c, world, p2_app) -> None:

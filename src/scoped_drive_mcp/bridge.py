@@ -100,12 +100,60 @@ class Mailbox:
         self._fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
         self.wake = wake or WakeSettings()
 
-    def request_link(self, email: str, invite_code: str | None = None) -> dict[str, Any]:
+    def request_link(
+        self, email: str, invite_code: str | None = None, new_invite: bool = False
+    ) -> dict[str, Any]:
+        """Join with `invite_code`, or start a pairing.
+
+        Without a code, an invite of yours that nobody joined yet and that has not expired
+        is returned again (`reused: true`) instead of minting another one, so repeated
+        calls do not leave a trail of dead invites. `new_invite=True` always starts a
+        fresh one, for pairing with a second person in parallel.
+        """
         you = _email(email)
         code = (invite_code or "").strip().upper()
         if not code:
-            return self._create(you)
-        return self._redeem(you, code)
+            if not new_invite:
+                open_invite = self._open_invite(you)
+                if open_invite is not None:
+                    return {**self._public_link(open_invite, you), "reused": True}
+            return {**self._create(you), "reused": False}
+        return {**self._redeem(you, code), "reused": False}
+
+    def summary(self, email: str) -> dict[str, int]:
+        """Counts for the dashboard: pairings that need this person's approval, active
+        pairings, and unread mail (inbox rows only, no bodies)."""
+        you = _email(email)
+        needs = active = 0
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or you not in _parties(link, self._peer(link_id)):
+                continue
+            status = self._status(link)
+            if status == "active":
+                active += 1
+            elif status == "pending_approval":
+                side = "a" if you == link["email_a"] else "b"
+                if not self._approved(link_id, side):
+                    needs += 1
+        unread = len(self._inbox_index(you, None, unread_only=True))
+        return {"needs_approval": needs, "active": active, "unread": unread}
+
+    def needs_approval_count(self, email: str) -> int:
+        """Pairings waiting on this person's approval. Cheap enough for every page's nav."""
+        you = _email(email)
+        count = 0
+        for link_id in self._user_link_ids(you):
+            peer = self._peer(link_id)
+            if not peer or self._revoked(link_id):
+                continue
+            link = self._link(link_id)
+            if link is None or you not in _parties(link, peer):
+                continue
+            side = "a" if you == link["email_a"] else "b"
+            if not self._approved(link_id, side):
+                count += 1
+        return count
 
     def list_links(self, email: str) -> dict[str, Any]:
         you = _email(email)
@@ -202,7 +250,9 @@ class Mailbox:
         you = _email(email)
         size = _limit(limit)
         if link_id:
-            self._require_active(you, link_id)
+            # Mail already delivered stays readable after the pairing is turned off, until
+            # it expires (or someone deletes stored messages). Only party membership counts.
+            self._require_party(you, link_id)
         entries = self._inbox_index(you, link_id, unread_only)
         start = 0
         if cursor:
@@ -216,11 +266,12 @@ class Mailbox:
         messages: list[dict[str, Any]] = []
         index = start
         while index < len(entries) and len(messages) < size:
-            message = self._message(entries[index]["msg_id"])
+            entry = entries[index]
+            message = self._message(entry["msg_id"])
             index += 1
             if message is None or message["to"] != you:
                 continue
-            messages.append(message)
+            messages.append({**message, "link_status": entry["link_status"]})
         next_cursor = messages[-1]["msg_id"] if messages and index < len(entries) else None
         return {
             "content_trust": "untrusted_peer",
@@ -251,6 +302,7 @@ class Mailbox:
                     "preview": preview_untrusted(message["body"]),
                     "created_at": message["created_at"],
                     "thread_id": message["thread_id"],
+                    "link_status": entry["link_status"],
                 }
             )
         return {
@@ -270,8 +322,7 @@ class Mailbox:
             message = self._message(msg_id)
             if message is None or message["to"] != you or message.get("read_at"):
                 continue
-            link = self._link(message["link_id"])
-            if link is None or self._status(link) != "active":
+            if self._link(message["link_id"]) is None:
                 continue
             message["read_at"] = now
             self._save_message(message)
@@ -280,11 +331,17 @@ class Mailbox:
         return {"ok": True, "marked": marked}
 
     def revoke(self, email: str, link_id: str, purge: bool = False) -> dict[str, Any]:
+        """Turn a pairing off. Sending, replying and Sharing between the two stop at once.
+
+        Mail already delivered stays readable by the person it was sent to until it expires,
+        unless `purge` deletes every stored message on the link for both people.
+        """
         you = _email(email)
         link = self._require_party(you, link_id)
-        already = self._status(link) == "revoked"
+        status = self._status(link)
+        already = status == "revoked"
         if not already:
-            self.store.set(f"bridge:revoked:{link['link_id']}", self._iso())
+            self._end(link, you, "turned_off" if status == "active" else "cancelled")
         deleted = self._purge(link["link_id"]) if purge else 0
         return {
             "link_id": link["link_id"],
@@ -292,6 +349,53 @@ class Mailbox:
             "purged_messages": deleted,
             "already_revoked": already,
         }
+
+    def delete_messages(self, email: str, link_id: str) -> dict[str, Any]:
+        """Delete every stored message on a pairing that is already off, for both people."""
+        you = _email(email)
+        link = self._require_party(you, link_id)
+        if self._status(link) != "revoked":
+            raise MailboxError(
+                "invalid_state",
+                "Turn the pairing off first. Messages on a pairing that is on are not deleted.",
+                link_id=link["link_id"],
+            )
+        return {"link_id": link["link_id"], "purged_messages": self._purge(link["link_id"])}
+
+    def cancel_invite(self, email: str, link_id: str) -> dict[str, Any]:
+        """The creator withdraws an invite nobody joined. The code stops working and the
+        card goes away."""
+        you = _email(email)
+        link = self._require_party(you, link_id)
+        if link["email_a"] != you or self._peer(link["link_id"]):
+            raise MailboxError(
+                "invalid_state",
+                "Someone already joined with this invite. Approve, deny or turn it off instead.",
+                link_id=link["link_id"],
+            )
+        if not self._revoked(link["link_id"]):
+            self._end(link, you, "cancelled")
+        self.store.delete(f"bridge:invite:{link['invite_code']}")
+        self.store.hdel(f"bridge:user:{you}", link["link_id"])
+        return {"link_id": link["link_id"], "status": "revoked", "removed": True}
+
+    def dismiss(self, email: str, link_id: str) -> dict[str, Any]:
+        """Remove a dead card (off, declined or expired) from this person's list only."""
+        you = _email(email)
+        link = self._require_party(you, link_id)
+        status = self._status(link)
+        expired = status == "awaiting_peer" and not self._invite_live(link)
+        if status != "revoked" and not expired:
+            raise MailboxError(
+                "invalid_state",
+                "Only a pairing that is off, declined or expired can be removed.",
+                link_id=link["link_id"],
+                status=status,
+            )
+        if expired:
+            self._end(link, you, "cancelled")
+        self.store.hdel(f"bridge:user:{you}", link["link_id"])
+        return {"link_id": link["link_id"], "removed": True}
 
     def decide(self, email: str, link_id: str, decision: str) -> dict[str, Any]:
         you = _email(email)
@@ -308,7 +412,9 @@ class Mailbox:
             )
         side = "a" if you == link["email_a"] else "b"
         if decision == "deny":
-            self.store.set(f"bridge:revoked:{link['link_id']}", self._iso())
+            # A Decline from a stale page on a pairing that is already on is a turn-off:
+            # it was on and mail may have moved, so it must not read as "never turned on".
+            self._end(link, you, "turned_off" if status == "active" else "declined")
             return {"link_id": link["link_id"], "status": "revoked"}
         if not self._peer(link["link_id"]):
             raise MailboxError(
@@ -364,6 +470,16 @@ class Mailbox:
         if self._stamp(link["invite_expires_at"]) <= self._now():
             self._charge_attempt(you)
             raise MailboxError("invite_not_found", "That invite code does not exist.")
+        existing = self._live_link_between(you, str(link["email_a"]))
+        if existing is not None:
+            raise MailboxError(
+                "already_paired",
+                f"You already have a pairing with {link['email_a']}. Use that one, or turn it "
+                "off on the Mailbox page before joining a new one.",
+                link_id=existing["link_id"],
+                status=self._status(existing),
+                manage_url=self._page(),
+            )
         claim = f"bridge:peer:{link_id}"
         if not self.store.set_if_absent(claim, you, ex=PEER_TTL):
             current = self.store.get(claim)
@@ -777,6 +893,13 @@ class Mailbox:
             )
 
     def _public_link(self, link: dict[str, Any], you: str) -> dict[str, Any]:
+        """One pairing as this person sees it.
+
+        `status` is awaiting_peer, pending_approval, active or revoked, plus two values
+        that only describe a dead link: `declined` (someone chose Deny; it behaves exactly
+        like revoked) and `expired` (an invite nobody joined in time). `ended_reason`,
+        `ended_by` and `ended_at` say who ended a link and how, when that was recorded.
+        """
         peer = self._other(link, you)
         status = self._status(link)
         you_approved = self._approved(link["link_id"], "a" if you == link["email_a"] else "b")
@@ -784,23 +907,93 @@ class Mailbox:
         if peer:
             peer_side = "b" if you == link["email_a"] else "a"
             peer_approved = self._approved(link["link_id"], peer_side)
-        page = f"{self.base_url}/bridge" if self.base_url else "/bridge"
-        code_live = self._stamp(link["invite_expires_at"]) > self._now()
+        page = self._page()
+        code_live = self._invite_live(link)
         show_code = status in ("awaiting_peer", "pending_approval") and code_live
         needs_you = status == "pending_approval" and not you_approved
+        ended = self._ended(link["link_id"]) if status == "revoked" else None
+        shown = status
+        if ended is not None and ended.get("how") == "declined":
+            shown = "declined"
+        elif status == "awaiting_peer" and not code_live:
+            shown = "expired"
         return {
             "link_id": link["link_id"],
-            "status": status,
+            "status": shown,
             "you": you,
             "you_approved": you_approved,
             "peer_approved": peer_approved,
             "peer_email": peer,
+            "created_by_you": link["email_a"] == you,
             **({"invite_code": link["invite_code"]} if show_code else {}),
+            **(
+                {"invite_expires_at": link["invite_expires_at"]}
+                if status == "awaiting_peer"
+                else {}
+            ),
             **({"approval_url": page} if needs_you else {}),
+            **(
+                {
+                    "ended_reason": ended.get("how"),
+                    "ended_by": ended.get("by"),
+                    "ended_at": ended.get("at"),
+                }
+                if ended
+                else {}
+            ),
             "manage_url": page,
             "created_at": link["created_at"],
-            "next_step": _next_step(status, you_approved, peer),
+            "next_step": _next_step(shown, you_approved, peer, ended, you),
         }
+
+    def _page(self) -> str:
+        return f"{self.base_url}/bridge" if self.base_url else "/bridge"
+
+    def _invite_live(self, link: dict[str, Any]) -> bool:
+        return self._stamp(link["invite_expires_at"]) > self._now()
+
+    def _open_invite(self, you: str) -> dict[str, Any] | None:
+        """Newest invite this person created that nobody joined, still live."""
+        found: dict[str, Any] | None = None
+        for link_id in self._user_link_ids(you):
+            if self._revoked(link_id) or self._peer(link_id):
+                continue
+            link = self._link(link_id)
+            if link is None or link["email_a"] != you or not self._invite_live(link):
+                continue
+            if self.store.get(f"bridge:invite:{link['invite_code']}") != link_id:
+                continue
+            if found is None or link["created_at"] > found["created_at"]:
+                found = link
+        return found
+
+    def _live_link_between(self, you: str, other: str) -> dict[str, Any] | None:
+        """An active or pending pairing between these two people, if there is one."""
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or self._status(link) not in ("active", "pending_approval"):
+                continue
+            if self._other(link, you) == other:
+                return link
+        return None
+
+    def _end(self, link: dict[str, Any], you: str, how: str) -> None:
+        """Mark a link dead. `bridge:revoked:` is what every check reads; `bridge:ended:`
+        only records who ended it and how, for the people looking at it."""
+        at = self._iso()
+        record = json.dumps({"by": you, "at": at, "how": how})
+        self.store.set_if_absent(f"bridge:ended:{link['link_id']}", record, ex=PEER_TTL)
+        self.store.set(f"bridge:revoked:{link['link_id']}", at)
+
+    def _ended(self, link_id: str) -> dict[str, Any] | None:
+        raw = self.store.get(f"bridge:ended:{link_id}")
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _public_message(self, message: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -814,6 +1007,7 @@ class Mailbox:
             "created_at": message["created_at"],
             "read_at": message.get("read_at"),
             "expires_at": message["expires_at"],
+            "link_status": message.get("link_status", "active"),
         }
 
     def _inbox_index(
@@ -824,7 +1018,7 @@ class Mailbox:
         self.store.ldrop_expired(inbox_key, int(self._now()))
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        active: dict[str, bool] = {}
+        statuses: dict[str, str | None] = {}
         for raw in self.store.lrange(inbox_key, 0, -1):
             parsed = parse_inbox_token(raw)
             if parsed is None:
@@ -838,12 +1032,21 @@ class Mailbox:
                 continue
             if unread_only and not unread:
                 continue
-            if token_link not in active:
+            if token_link not in statuses:
                 link = self._link(token_link)
-                active[token_link] = link is not None and self._status(link) == "active"
-            if not active[token_link]:
+                statuses[token_link] = self._status(link) if link is not None else None
+            # Delivered mail stays readable after the pairing is turned off. Only mail on a
+            # link that no longer exists at all is skipped.
+            if statuses[token_link] is None:
                 continue
-            rows.append({"msg_id": msg_id, "link_id": token_link, "created": float(created)})
+            rows.append(
+                {
+                    "msg_id": msg_id,
+                    "link_id": token_link,
+                    "created": float(created),
+                    "link_status": statuses[token_link],
+                }
+            )
         return rows
 
     def _link_for_thread(self, you: str, thread_id: str) -> dict[str, Any]:
@@ -1042,9 +1245,32 @@ def _sent(message: dict[str, Any], replay: bool) -> dict[str, Any]:
     }
 
 
-def _next_step(status: str, you_approved: bool, peer: str | None) -> str:
+def _next_step(
+    status: str,
+    you_approved: bool,
+    peer: str | None,
+    ended: dict[str, Any] | None = None,
+    you: str = "",
+) -> str:
+    again = "To pair again, ask your assistant for a new invite code."
+    by = (ended or {}).get("by")
+    who = "You" if by and by == you else by
+    if status == "declined":
+        return (
+            f"{who or 'The other person'} declined this pairing. Nothing was shared and no "
+            f"mail can be sent on it. {again}"
+        )
+    if status == "expired":
+        return f"Nobody joined with this invite code before it expired. {again}"
     if status == "revoked":
-        return "This pairing is off. Neither assistant can send or receive on it."
+        if (ended or {}).get("how") == "cancelled" and who:
+            return f"{who} cancelled this pairing before it was on. {again}"
+        lead = f"{who} turned this pairing off." if who else "This pairing is off."
+        return (
+            f"{lead} Neither assistant can send on it, and neither can read the other's "
+            f"Sharing list through it. Mail already delivered stays readable by the person it "
+            f"was sent to until it expires. {again}"
+        )
     if status == "awaiting_peer":
         return (
             "Give this invite code to the other person. Their assistant joins with that code. "

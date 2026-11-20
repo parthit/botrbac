@@ -19,7 +19,7 @@
   </dl>
   {% if doc.downloadable %}
   <div class="actions">
-    <a class="btn primary" href="{{ shared_href('download', source.key, shared_owner, doc.node.id) }}" download>Download</a>
+    <a class="btn primary" href="{{ shared_href('download', source.key, shared_owner, doc.node.id) }}" download>{{ doc.download_label }}</a>
   </div>
   {% endif %}
 </div>

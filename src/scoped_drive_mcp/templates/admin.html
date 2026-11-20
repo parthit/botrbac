@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Directory{% endblock %}
+{% block title %}People{% endblock %}
 {% block content %}
 <h1>People</h1>
 <p class="muted">Everyone who has signed in. This page lists accounts only: not their files, requests, or activity.</p>
@@ -16,13 +16,13 @@
   {% for person in people %}
   <tr>
     <td data-label="Email">{{ person.email }}</td>
-    <td data-label="First signed in" class="muted">{{ person.created_at or "Unknown" }}</td>
+    <td data-label="First signed in" class="muted">{{ person.created_at | when("Unknown") }}</td>
     <td data-label="Connected app">
       {% if person.grants %}
       {% for grant in person.grants %}
       <div>
         <span class="pill ok"><span aria-hidden="true">✓</span> connected</span> {{ grant.client_name }}
-        <span class="muted">since {{ grant.created_at }}, last used {{ grant.last_used or "never" }}</span>
+        <span class="muted">since {{ grant.created_at | when }}, last used {{ grant.last_used | when("never") }}</span>
       </div>
       {% endfor %}
       {% else %}

@@ -94,15 +94,18 @@ def test_each_grok_bot_sees_only_that_users_files(world, memstore, oauth) -> Non
     assert admin_read["structuredContent"]["content"] == "memo beta"
     admin_denied = _mcp(admin, admin_token, "read_file", file_id=EVE_DOC)
     assert admin_denied["isError"] is True
-    assert admin_denied["structuredContent"]["error"] == "access_required"
+    # Eve's file is not in the admin's Drive: nothing the admin could approve, so no
+    # request is filed in the admin's queue.
+    assert admin_denied["structuredContent"]["error"] == "not_found"
     assert admin_denied["structuredContent"]["file_id"] == EVE_DOC
+    assert "request_id" not in admin_denied["structuredContent"]
 
     eve_read = _mcp(eve, eve_token, "read_file", file_id=EVE_DOC)
     assert eve_read["isError"] is False
     assert eve_read["structuredContent"]["content"] == "eve only text"
     eve_denied = _mcp(eve, eve_token, "read_file", file_id="loose-doc")
     assert eve_denied["isError"] is True
-    assert eve_denied["structuredContent"]["error"] == "access_required"
+    assert eve_denied["structuredContent"]["error"] == "not_found"
     assert eve_denied["structuredContent"]["file_id"] == "loose-doc"
 
     allow = memstore.hgetall(KEY_PREFIX + "allowlist")
@@ -140,7 +143,8 @@ def test_each_person_uses_their_own_sign_in(world, memstore, oauth) -> None:
     carol_token = _grok(carol, "Grok Carol")
     assert _mcp(eve, eve_token, "read_file", file_id=EVE_DOC)["isError"] is False
     denied = _mcp(carol, carol_token, "read_file", file_id=EVE_DOC)
-    assert denied["structuredContent"]["error"] == "access_required"
+    assert denied["structuredContent"]["error"] == "not_found"
+    assert "eve only text" not in json.dumps(denied)
 
 
 def test_root_folder_id_is_only_the_admins(world, memstore, oauth) -> None:
