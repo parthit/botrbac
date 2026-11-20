@@ -370,13 +370,15 @@ def _doc(data: bytes, char_limit: int) -> str:
             raise ExtractError("Word .doc document has no table stream")
     finally:
         ole.close()
-    text = _doc_text(word, table)
+    text = _doc_text(word, table, char_limit)
     if not _mostly_text(text):
         raise ExtractError("could not extract readable text from Word .doc")
     return text[: char_limit + 1]
 
 
-def _doc_text(word: bytes, table: bytes) -> str:
+def _doc_text(word: bytes, table: bytes, char_limit: int) -> str:
+    """Text from the piece table. Stops once `char_limit` is passed: pieces may overlap,
+    so a small crafted file could otherwise expand to pieces x stream-size characters."""
     fc_clx, lcb_clx = struct.unpack_from("<II", word, 0x1A2)
     if lcb_clx <= 0 or fc_clx < 0 or fc_clx + lcb_clx > len(table):
         raise ExtractError("Word .doc piece table is missing")
@@ -400,7 +402,10 @@ def _doc_text(word: bytes, table: bytes) -> str:
         raise ExtractError("Word .doc document has too many text pieces")
     cps = struct.unpack_from(f"<{pieces + 1}I", plc, 0)
     chars: list[str] = []
+    size = 0
     for index in range(pieces):
+        if size > char_limit:
+            break
         count = cps[index + 1] - cps[index]
         if count < 0 or count > len(word):
             raise ExtractError("Word .doc piece table is invalid")
@@ -413,8 +418,10 @@ def _doc_text(word: bytes, table: bytes) -> str:
         if byte_at < 0 or end > len(word):
             raise ExtractError("Word .doc text is outside the document stream")
         blob = word[byte_at:end]
-        piece = blob.decode("cp1252" if compressed else "utf-16le")
-        chars.append(_clean_word_chars(piece))
+        piece = blob.decode("cp1252" if compressed else "utf-16le", errors="replace")
+        cleaned = _clean_word_chars(piece)
+        chars.append(cleaned)
+        size += len(cleaned)
     return "".join(chars)
 
 
