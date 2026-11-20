@@ -1157,8 +1157,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 tchain = lineage(target_meta) if target_meta is not None else None
                 if target_meta is not None and tchain is None:
                     unsure = True
+                if unsure and target_id:
+                    # Out of lookups: still act on the target (Allow stores the target),
+                    # but don't guess its folder state from the shortcut's own folder.
+                    acts_on, cover, share = target_id, None, None
                 if target_meta is not None and tchain is not None:
-                    acts_on = target_id
+                    # The row's state is the target's, and that is known.
+                    acts_on, unsure = target_id, False
                     cover = nearest(tchain, entries)
                     share = nearest(tchain, shared)
                     item_parents = [str(p) for p in item.get("parents") or []]

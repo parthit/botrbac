@@ -417,3 +417,19 @@ def test_search_stops_guessing_when_the_lookup_budget_runs_out(c, monkeypatch) -
     row = _row(c.get("/browse?q=notes").text, "notes.txt")
     assert "Open its folder to check" in row
     assert "Not allowed" not in row
+
+
+def test_shortcut_row_still_acts_on_its_target_when_lookups_run_out(c, monkeypatch) -> None:
+    import scoped_drive_mcp.dashboard as dashboard_module
+
+    assert post(c, "/grant", file_id="proj").status_code == 303
+    monkeypatch.setattr(dashboard_module, "SEARCH_LOOKUPS", 0)
+    row = _row(c.get("/browse?q=link").text, "link to payroll")
+    # Not "Allowed via folder Projects" (the shortcut's own folder). Remove / Stop sharing
+    # post the target's id (Allow / Share post the shortcut, which the server resolves).
+    assert "Allowed via folder" not in row
+    assert "Open its folder to check" in row
+    assert 'data-acts-on="priv-secret"' in row
+    for action in ("/revoke", "/sharing/remove"):
+        form = row[row.index(f'action="{action}"') :].split("</form>", 1)[0]
+        assert 'name="file_id" value="priv-secret"' in form
