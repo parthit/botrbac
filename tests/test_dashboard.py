@@ -693,11 +693,18 @@ def test_revoke_json_reports_change_when_drive_cleanup_fails(owner_c, monkeypatc
     assert r.json()["changed"] is False
 
 
-def test_shortcut_rows_keep_full_page_posts(owner_c) -> None:
-    page = owner_c.get("/browse?folder=proj").text + owner_c.get("/browse").text
+def test_shortcut_rows_update_in_place_and_remove_acts_on_the_target(owner_c) -> None:
+    """A shortcut row renders its target's state, so ui.js can flip it like any row.
+    Remove posts the target's id, since that is what Allow stored."""
+    page = owner_c.get("/browse?folder=proj").text
     assert "Allow the target" in page
     allow_target = r"<form[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Allow the target"
     forms = re.findall(allow_target, page)
     assert forms
     for form in forms:
-        assert "data-async" not in form
+        assert "data-async" in form and 'value="proj-shortcut"' in form
+    remove = re.findall(
+        r'<form[^>]*action="/revoke"[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Remove the target',
+        page,
+    )
+    assert remove and all('value="priv-secret"' in form for form in remove)

@@ -1,6 +1,7 @@
 """Sharing with other people's assistants: the external list, pairing, and guest reads."""
 
 import json
+import re
 
 import pytest
 
@@ -304,9 +305,15 @@ def test_browse_marks_items_inside_a_shared_folder(people) -> None:
     assert post(owner, "/sharing/add", file_id="proj").status_code == 303
     inside = owner.get("/browse?folder=proj").text
     assert "Shared with paired people through Projects" in inside
-    assert inside.count("Shared via folder") >= 3  # proj-sub, proj-notes, proj-shortcut
-    # Items already covered by the folder do not offer a separate share button.
-    assert 'action="/sharing/add"' not in inside
+    assert inside.count("Shared via folder") >= 2  # proj-sub, proj-notes
+    # Items already covered by the folder do not offer a separate share button. The
+    # shortcut is the exception: its target (payroll.txt in Private) is not in the
+    # shared folder, so it is not readable through it and can still be shared.
+    share_forms = re.findall(
+        r'action="/sharing/add".*?name="file_id" value="([^"]+)"', inside, re.S
+    )
+    assert share_forms == ["proj-shortcut"]
+    assert "Share the target with paired people" in inside
     # Outside the shared folder nothing changes.
     other = owner.get("/browse?folder=priv").text
     assert "Shared via folder" not in other

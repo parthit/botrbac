@@ -7,11 +7,21 @@ Storage (all keys expire after 7 days):
 - `req:pending:<file>` id of the pending request for that file (dedupe)
 - `requests:index`     newest-first list of request ids (capped)
 - `requests:pending`   ids that are still pending, so the nav count is not a scan of the history
+- `req:denied:<file>`  hash: assistant name -> "<request id> <unix time>" of its last denied
+                       request for that file
+
+A denial holds for DENIAL_WINDOW (24 hours) for the same file and the same assistant (the
+token or connection name on the request): asking again in that time returns the denied
+request instead of opening a new one, so a "no" does not come straight back to the owner
+as a fresh request. The hold ends early when the owner changes that file's entry on Access
+(Allow or Remove), and another assistant asking for the same file is still a new request.
 """
 
 import json
 import re
 import secrets
+import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -19,6 +29,7 @@ from .scope import InvalidInputError, validate_drive_id
 from .store import KeyValueStore, utc_now
 
 REQUEST_TTL = 7 * 24 * 3600
+DENIAL_WINDOW = 24 * 3600
 INDEX_KEY = "requests:index"
 PENDING_INDEX = "requests:pending"
 PENDING_READY = "requests:pending_ready"
@@ -81,9 +92,40 @@ class AccessRequest:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def _denied_key(file_id: str) -> str:
+    return f"req:denied:{file_id}"
+
+
+def _actor_field(token_name: str | None) -> str:
+    # An assistant with no name (rare) still gets its own slot, apart from named ones.
+    return token_name or "-"
+
+
 class AccessRequests:
-    def __init__(self, store: KeyValueStore):
+    def __init__(self, store: KeyValueStore, clock: Callable[[], float] = time.time):
         self.store = store
+        self.clock = clock
+
+    def recent_denial(self, file_id: str, token_name: str | None) -> AccessRequest | None:
+        """The request the owner denied for this file and assistant within DENIAL_WINDOW."""
+        key, actor = _denied_key(file_id), _actor_field(token_name)
+        raw = self.store.hget(key, actor)
+        if not raw:
+            return None
+        rid, _, when = raw.partition(" ")
+        try:
+            fresh = self.clock() - float(when) < DENIAL_WINDOW
+        except ValueError:
+            fresh = False
+        req = self.get(rid) if fresh else None
+        if req is None or req.status != DENIED:
+            self.store.hdel(key, actor)
+            return None
+        return req
+
+    def clear_denials(self, file_id: str) -> None:
+        """The owner changed this file's access, so earlier denials no longer hold."""
+        self.store.delete(_denied_key(file_id))
 
     def get(self, request_id: str) -> AccessRequest | None:
         try:
@@ -160,6 +202,12 @@ class AccessRequests:
             self.store.delete(f"req:pending:{req.file_id}")
         if status != PENDING:
             self.store.lrem(PENDING_INDEX, req.id)
+        if status == DENIED and req.file_id is not None:
+            self.store.hset(
+                _denied_key(req.file_id),
+                _actor_field(req.token_name),
+                f"{req.id} {self.clock():.0f}",
+            )
         return req
 
     def pending_count(self) -> int:
@@ -233,8 +281,27 @@ class AccessService:
             ),
         }
 
+    def _denied_payload(self, req: AccessRequest) -> dict[str, Any]:
+        return {
+            "error": "access_denied",
+            "status": DENIED,
+            "request_id": req.id,
+            "file_id": req.file_id,
+            "message": (
+                "The owner denied access to this item. Do not retry it or ask again. "
+                "Tell the user you cannot open it. If they change their mind, they can "
+                "allow it themselves on the dashboard."
+            ),
+        }
+
     def handle_denial(self, file_id: str, tool: str, token_name: str | None) -> dict[str, Any]:
-        """Called by the policy wrapper when a tool is denied because of scope."""
+        """Called by the policy wrapper when a tool is denied because of scope.
+
+        A recent denial for the same file and assistant is returned as is: no new
+        request is opened (see DENIAL_WINDOW)."""
+        denied = self.requests.recent_denial(file_id, token_name)
+        if denied is not None:
+            return self._denied_payload(denied)
         req, _created = self.requests.create(
             tool=tool,
             token_name=token_name,
@@ -262,6 +329,9 @@ class AccessService:
                     "file_id": file_id,
                     "message": "You already have access to this item.",
                 }
+            denied = self.requests.recent_denial(file_id, token_name)
+            if denied is not None:
+                return self._denied_payload(denied)
         else:
             file_id = None
         req, _created = self.requests.create(

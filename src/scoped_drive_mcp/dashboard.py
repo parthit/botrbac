@@ -848,10 +848,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         entries = ctx.allowlist.entries()
         shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
+        # The nearest allowed folder at or above the one being browsed, and its id so
+        # the breadcrumb can offer to remove that folder's own entry.
         covered_by: str | None = None
+        covered_id: str | None = None
         # The nearest folder on the Sharing list above the one being browsed. Everything
         # inside it is readable by paired people's assistants, as the guest guard allows.
         shared_by: str | None = None
+        shared_id: str | None = None
         next_token: str | None = None
         current: dict[str, Any] | None = None
         if q:
@@ -888,9 +892,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 name = "My Drive" if nid == root_id or nid == "root" else str(node.get("name", ""))
                 crumbs.insert(0, {"id": "root" if nid == root_id else nid, "name": name})
                 if covered_by is None and nid in entries:
-                    covered_by = name
+                    covered_by, covered_id = name, nid
                 if shared_by is None and nid in shared:
-                    shared_by = name
+                    shared_by, shared_id = name, nid
                 parents = node.get("parents") or []
                 if nid == root_id or nid == "root" or not parents:
                     break
@@ -913,28 +917,104 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 items = [i for i in items if folder_id in (i.get("parents") or [])]
             next_token = resp.get("nextPageToken")
         items.sort(key=lambda i: (i.get("mimeType") != FOLDER_MIME, str(i.get("name", "")).lower()))
+
+        # Folder metadata looked up while working out search results and shortcut
+        # targets. Many results share folders, so each folder is fetched once.
+        metas: dict[str, dict[str, Any] | None] = {}
+        if current is not None:
+            metas[str(current["id"])] = current
+
+        def meta_of(fid: str) -> dict[str, Any] | None:
+            if fid not in metas:
+                try:
+                    metas[fid] = drive.get_file(fid, fields=OWNER_FIELDS)
+                except DriveNotFoundError:
+                    metas[fid] = None
+            return metas[fid]
+
+        def lineage(item: dict[str, Any]) -> list[tuple[str, str]]:
+            """(id, name) of the folders above `item`, nearest first, up to My Drive.
+            Follows the first parent, as the breadcrumbs do."""
+            out: list[tuple[str, str]] = []
+            seen_ids = {str(item.get("id", ""))}
+            parents = item.get("parents") or []
+            while parents and len(out) < MAX_BREADCRUMBS:
+                pid = str(parents[0])
+                if pid in seen_ids or pid == root_id or pid == "root":
+                    break
+                seen_ids.add(pid)
+                node_meta = meta_of(pid)
+                if node_meta is None:
+                    break
+                out.append((pid, str(node_meta.get("name", ""))))
+                parents = node_meta.get("parents") or []
+            return out
+
+        def nearest(chain: list[tuple[str, str]], ids: Any) -> tuple[str, str] | None:
+            return next(((fid, name) for fid, name in chain if fid in ids), None)
+
+        # In a folder view every row sits under the same folders, so the folder-level
+        # answer applies. Search results come from anywhere, so each works out its own.
+        folder_cover = (covered_id, covered_by) if covered_by and covered_id else None
+        folder_share = (shared_id, shared_by) if shared_by and shared_id else None
         rows = []
         for item in items:
             iid = str(item["id"])
             mime = str(item.get("mimeType", ""))
+            is_shortcut = mime == SHORTCUT_MIME
+            path: str | None = None
+            if q:
+                chain = lineage(item)
+                cover = nearest(chain, entries)
+                share = nearest(chain, shared)
+                path = " / ".join(["My Drive", *(name for _, name in reversed(chain))])
+                parent_id = chain[0][0] if chain else "root"
+            else:
+                cover, share = folder_cover, folder_share
+                parent_id = None
+            # A shortcut is not on the lists itself: Allow stores its target. So the row
+            # shows the target's state, and Remove / Stop sharing act on the target.
+            acts_on = iid
+            target: dict[str, Any] | None = None
+            if is_shortcut:
+                target_id = str((item.get("shortcutDetails") or {}).get("targetId") or "")
+                target_meta = meta_of(target_id) if target_id else None
+                if target_meta is not None:
+                    acts_on = target_id
+                    tchain = lineage(target_meta)
+                    cover = nearest(tchain, entries)
+                    share = nearest(tchain, shared)
+                    item_parents = [str(p) for p in item.get("parents") or []]
+                    target_parents = [str(p) for p in target_meta.get("parents") or []]
+                    target = {
+                        "id": target_id,
+                        "name": str(target_meta.get("name", "")),
+                        "folder": tchain[0][1] if tchain else "My Drive",
+                        "elsewhere": not set(item_parents) & set(target_parents),
+                    }
             rows.append(
                 {
                     "id": iid,
+                    "acts_on": acts_on,
                     "name": str(item.get("name", "")),
                     "is_folder": mime == FOLDER_MIME,
-                    "is_shortcut": mime == SHORTCUT_MIME,
+                    "is_shortcut": is_shortcut,
+                    "target": target,
                     "kind": describe_mime(mime),
                     "link": item.get("webViewLink"),
-                    "granted": iid in entries,
-                    "covered": covered_by is not None and iid not in entries,
-                    "ext_shared": iid in shared,
-                    "ext_covered": shared_by is not None and iid not in shared,
+                    "path": path,
+                    "parent_id": parent_id,
+                    "granted": acts_on in entries,
+                    "covered_by": cover[1] if cover else None,
+                    "ext_shared": acts_on in shared,
+                    "shared_by": share[1] if share else None,
                 }
             )
         return {
             "rows": rows,
             "crumbs": crumbs,
             "covered_by": covered_by,
+            "covered_id": covered_id,
             "shared_by": shared_by,
             "current": current,
             "current_granted": current is not None and str(current["id"]) in entries,
@@ -976,6 +1056,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "rows": [],
                 "crumbs": [{"id": "root", "name": "My Drive"}],
                 "covered_by": None,
+                "covered_id": None,
+                "shared_by": None,
                 "current": {"id": "root", "name": "My Drive", "mimeType": FOLDER_MIME},
                 "current_granted": False,
                 "is_root": True,
@@ -1036,19 +1118,54 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             entry = await blocking(ctx.grants().grant, file_id)
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
-        return action_done(
-            request, "ok", f"Allowed \u201c{entry.name}\u201d for the assistant.", next_url
-        )
+        what = f"\u201c{entry.name}\u201d"
+        if entry.id != file_id:
+            what += ", the shortcut\u2019s target,"
+        return action_done(request, "ok", f"Allowed {what} for the assistant.", next_url)
 
     async def revoke(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
         next_url = safe_next(form.get("next"))
+        grants = ctx.grants()
+        entry = await blocking(ctx.allowlist.get, file_id)
         try:
-            await blocking(ctx.grants().revoke, file_id)
+            await blocking(grants.revoke, file_id)
         except GrantError as exc:
             gone = await blocking(lambda: ctx.allowlist.get(file_id) is None)
             return action_done(request, "error", str(exc), next_url, changed=gone)
-        return action_done(request, "ok", "Removed. The assistant can no longer use it.", next_url)
+        root = ctx.visible_root_folder_id()
+        extra = {root: "the folder set on the server"} if root else None
+        cover = await still_covered(grants, file_id, extra)
+        name = (entry.name if entry else "") or "it"
+        if cover is None:
+            message = f"Removed “{name}”. The assistant can no longer use it."
+        elif cover:
+            message = (
+                f"Removed “{name}”, but the assistant can still use it "
+                f"because “{cover}” is allowed."
+            )
+        else:
+            message = (
+                f"Removed “{name}”. If a folder above it is allowed, "
+                "the assistant can still use it through that folder."
+            )
+        return action_done(request, "ok", message, next_url)
+
+    async def still_covered(
+        grants: GrantService, file_id: str, extra: dict[str, str] | None = None
+    ) -> str | None:
+        """Name of an allowed folder that still includes `file_id`.
+
+        None means no folder on the list includes it. An empty string means Drive could
+        not be asked; only the wording depends on this, so the completed removal is not
+        turned into an error, and the message does not claim the item is unreachable.
+        """
+        try:
+            found = await blocking(grants.covering_entry, file_id, extra)
+        except Exception as exc:
+            report_exception(exc, where="covering_entry")
+            return ""
+        return found[1] if found else None
 
     async def share_add(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
@@ -1067,8 +1184,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def share_remove(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
         next_url = safe_next(form.get("next") or "/sharing")
+        ext_grants = ctx.ext_grants()
         try:
-            await blocking(ctx.ext_grants().revoke, file_id)
+            await blocking(ext_grants.revoke, file_id)
         except GrantError as exc:
             ext = ctx.ext_allowlist
             gone = ext is not None and await blocking(lambda: ext.get(file_id) is None)
@@ -1079,12 +1197,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 next_url,
                 changed=gone,
             )
-        return action_done(
-            request,
-            "ok",
-            "Stopped sharing. Other people's assistants can no longer read it.",
-            next_url,
-        )
+        cover = await still_covered(ext_grants, file_id)
+        if cover is None:
+            message = "Stopped sharing. Other people's assistants can no longer read it."
+        elif cover:
+            message = (
+                "Stopped sharing it on its own, but other people's assistants can still "
+                f"read it because “{cover}” is on your Sharing list."
+            )
+        else:
+            message = (
+                "Stopped sharing it on its own. If a folder above it is on your Sharing "
+                "list, other people's assistants can still read it through that folder."
+            )
+        return action_done(request, "ok", message, next_url)
 
     async def sharing(request: Request) -> Response:
         if ctx.ext_allowlist is None:
@@ -1465,6 +1591,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
         data["webhook"] = await blocking(ctx.mailbox.get_webhook, email)
+        # Approving a pairing lets that person's assistant read the Sharing list, so each
+        # card that asks for approval says what that list holds right now.
+        ext = ctx.ext_allowlist
+        data["sharing_on"] = ext is not None
+        data["shared_items"] = []
+        if ext is not None:
+            entries = await blocking(ext.entries)
+            data["shared_items"] = sorted(
+                entries.values(), key=lambda e: e.granted_at, reverse=True
+            )
         return render(request, "bridge.html", **data)
 
     def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:

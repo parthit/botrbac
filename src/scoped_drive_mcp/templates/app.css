@@ -401,6 +401,10 @@ code {
 .file-name { font-weight: 500; overflow-wrap: anywhere; }
 .file-name a { color: var(--ink); text-decoration: none; }
 .file-name a:hover { color: var(--accent); }
+.file-name .file-path { display: block; font-weight: 400; font-size: 13px; }
+.file-name .file-path a { color: var(--ink2); text-decoration: underline; }
+.warn > p:first-child { margin-top: 0; }
+.warn > p:last-child { margin-bottom: 0; }
 .file-meta { grid-column: 1; color: var(--ink2); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; }
 .file-actions { grid-column: 2; grid-row: 1 / span 2; }
 .empty { text-align: left; }

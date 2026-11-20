@@ -16,6 +16,9 @@ from .scope import validate_drive_id
 from .store import AllowEntry, Allowlist
 
 OWNER_FIELDS = "id,name,mimeType,parents,trashed,webViewLink,shortcutDetails"
+# Bounds for covering_entry's walk up the folder tree (levels, and folders looked at).
+MAX_COVER_DEPTH = 25
+MAX_COVER_NODES = 200
 
 
 class GrantError(Exception):
@@ -97,8 +100,16 @@ class GrantService:
         )
         self.allowlist.add(entry)
         self._on_change()
+        self._access_changed(item_id)
         audit_owner(self._grant_action, file_id=item_id, request_id=request_id)
         return entry
+
+    def _access_changed(self, item_id: str) -> None:
+        """The owner changed what the assistant may use, so an earlier denial for this
+        item stops holding back new requests. The Sharing list is about other people's
+        assistants and leaves those denials alone."""
+        if self.audience is None:
+            self.requests.clear_denials(item_id)
 
     def _share(self, item_id: str) -> str:
         assert self.bot_email is not None
@@ -164,6 +175,7 @@ class GrantService:
             raise GrantError("That item is not in the allowlist.")
         self.allowlist.remove(file_id)
         self._on_change()
+        self._access_changed(file_id)
         if entry.permission_id:
             try:
                 self.owner_drive().delete_permission(file_id, entry.permission_id)
@@ -178,6 +190,43 @@ class GrantService:
                     "Remove the bot from this item's Share dialog in Drive."
                 ) from None
         audit_owner(self._revoke_action, file_id=file_id)
+
+    def covering_entry(
+        self, file_id: str, extra: dict[str, str] | None = None
+    ) -> tuple[str, str] | None:
+        """The nearest folder above `file_id` that is on this list, as (id, name).
+
+        A folder on the list includes what is inside it, so after removing an item's own
+        entry it can still be reachable through one of its folders. This walks every
+        parent chain, the same way the scope guard does, so the dashboard can say so
+        instead of claiming the item is gone. `extra` adds ids that count as allowed
+        without being on the list (the server's root folder), mapped to a display name.
+        """
+        entries = self.allowlist.entries()
+        drive = self.owner_drive()
+        seen: set[str] = {file_id}
+        frontier = [file_id]
+        for _ in range(MAX_COVER_DEPTH):
+            next_frontier: list[str] = []
+            for fid in frontier:
+                try:
+                    meta = drive.get_file(fid, fields="id,parents")
+                except DriveNotFoundError:
+                    continue
+                for parent in meta.get("parents") or []:
+                    pid = str(parent)
+                    if pid in seen:
+                        continue
+                    seen.add(pid)
+                    if pid in entries:
+                        return pid, entries[pid].name or pid
+                    if extra and pid in extra:
+                        return pid, extra[pid]
+                    next_frontier.append(pid)
+            if not next_frontier or len(seen) > MAX_COVER_NODES:
+                return None
+            frontier = next_frontier
+        return None
 
     # ---- access request decisions --------------------------------------
 
