@@ -1246,6 +1246,7 @@ class Mailbox:
             "peer_email": you,
             "peer_label": peer_label,
             "assistants": [link.get("label_a") or "Assistant", link.get("label_b") or "Assistant"],
+            "grant_ids": [link.get("grant_a"), link.get("grant_b")],
             "created_by_you": side in (None, "a"),
             **({"disabled_by_org": True} if not allowed else {}),
             **({"approval_url": page} if needs_you else {}),

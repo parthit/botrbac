@@ -2049,7 +2049,28 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         # Each connected app has its own wake-up slot; the account one is for mail from
         # other people. Names come from the app list, so a removed app shows no slot.
         apps = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
-        data["apps"] = [{"id": g.id, "name": g.client_name} for g in apps]
+        # Two connections can share a name (two "Cursor"s), so each choice also says
+        # which of your assistants it is paired with, when it was added and last used.
+        paired: dict[str, str] = {}
+        for link in data["links"]:
+            if not link.get("same_account") or link["status"] not in (
+                "active",
+                "pending_approval",
+            ):
+                continue
+            (grant_a, grant_b), (label_a, label_b) = link["grant_ids"], link["assistants"]
+            paired.setdefault(str(grant_a), label_b)
+            paired.setdefault(str(grant_b), label_a)
+        data["apps"] = [
+            {
+                "id": g.id,
+                "name": g.client_name,
+                "created_at": g.created_at,
+                "last_used": g.last_used,
+                "paired_with": paired.get(g.id),
+            }
+            for g in apps
+        ]
         data["app_hooks"] = []
         for app in data["apps"]:
             hook = await blocking(ctx.mailbox.get_webhook, email, app["id"])

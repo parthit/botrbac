@@ -446,3 +446,12 @@ def test_unindexed_app_hook_of_a_paired_app_still_wakes_for_outside_mail() -> No
     assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [
         f"{OWNER_EMAIL}#{GROK.grant_id}"
     ]
+
+
+def test_same_account_link_names_its_two_apps() -> None:
+    # The dashboard uses these to tell apart two connections with the same name.
+    box = _box()
+    _self_pair(box)
+    link = box.list_links(OWNER_EMAIL)["links"][0]
+    assert link["grant_ids"] == [GROK.grant_id, CLAUDE.grant_id]
+    assert link["assistants"] == ["Grok", "Claude"]
