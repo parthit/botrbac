@@ -232,6 +232,7 @@
     if (!nodes.length || !window.Intl || !Intl.DateTimeFormat) return;
     var full = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
     var clock = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+    var dateOnly = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
     var rel = Intl.RelativeTimeFormat ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }) : null;
     var now = new Date();
     var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -242,7 +243,8 @@
       var d = new Date(t);
       var secs = (now.getTime() - t) / 1000;
       var text;
-      if (rel && secs >= -60 && secs < 60) text = "just now";
+      if (el.getAttribute("data-time") === "date") text = dateOnly.format(d);
+      else if (rel && secs >= -60 && secs < 60) text = "just now";
       else if (rel && secs >= 0 && secs < 3600) text = rel.format(-Math.round(secs / 60), "minute");
       else if (rel && secs >= 0 && secs < 6 * 3600) text = rel.format(-Math.round(secs / 3600), "hour");
       else if (t >= startOfToday && t < startOfToday + day) text = "Today, " + clock.format(d);

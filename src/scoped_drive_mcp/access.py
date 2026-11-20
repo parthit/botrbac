@@ -7,8 +7,10 @@ Storage (all keys expire after 7 days):
 - `req:pending:<file>` id of the pending request for that file (dedupe)
 - `requests:index`     newest-first list of request ids (capped)
 - `requests:pending`   ids that are still pending, so the nav count is not a scan of the history
-- `req:denied:<file>`  hash: assistant name -> "<request id> <unix time>" of its last denied
-                       request for that file
+- `req:denied:<file>:<assistant>`  "<request id> <unix time>" of that assistant's last denied
+                       request for that file; expires after DENIAL_WINDOW
+- `req:denied-cleared:<file>`  unix time the owner last changed that file's access; a denial
+                       older than this no longer holds; expires after DENIAL_WINDOW
 
 A denial holds for DENIAL_WINDOW (24 hours) for the same file and the same assistant (the
 token or connection name on the request): asking again in that time returns the denied
@@ -17,6 +19,7 @@ as a fresh request. The hold ends early when the owner changes that file's entry
 (Allow or Remove), and another assistant asking for the same file is still a new request.
 """
 
+import hashlib
 import json
 import re
 import secrets
@@ -92,13 +95,15 @@ class AccessRequest:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
-def _denied_key(file_id: str) -> str:
-    return f"req:denied:{file_id}"
+def _denied_key(file_id: str, token_name: str | None) -> str:
+    # An assistant with no name (rare) still gets its own slot, apart from named ones. The
+    # name is hashed so any characters in it are safe inside a key.
+    actor = hashlib.sha256((token_name or "-").encode()).hexdigest()[:24]
+    return f"req:denied:{file_id}:{actor}"
 
 
-def _actor_field(token_name: str | None) -> str:
-    # An assistant with no name (rare) still gets its own slot, apart from named ones.
-    return token_name or "-"
+def _cleared_key(file_id: str) -> str:
+    return f"req:denied-cleared:{file_id}"
 
 
 class AccessRequests:
@@ -108,24 +113,28 @@ class AccessRequests:
 
     def recent_denial(self, file_id: str, token_name: str | None) -> AccessRequest | None:
         """The request the owner denied for this file and assistant within DENIAL_WINDOW."""
-        key, actor = _denied_key(file_id), _actor_field(token_name)
-        raw = self.store.hget(key, actor)
+        key = _denied_key(file_id, token_name)
+        raw = self.store.get(key)
         if not raw:
             return None
         rid, _, when = raw.partition(" ")
         try:
-            fresh = self.clock() - float(when) < DENIAL_WINDOW
+            denied_at = float(when)
+            fresh = self.clock() - denied_at < DENIAL_WINDOW
+            cleared = self.store.get(_cleared_key(file_id))
+            if fresh and cleared is not None and float(cleared) >= denied_at:
+                fresh = False
         except ValueError:
             fresh = False
         req = self.get(rid) if fresh else None
         if req is None or req.status != DENIED:
-            self.store.hdel(key, actor)
+            self.store.delete(key)
             return None
         return req
 
     def clear_denials(self, file_id: str) -> None:
         """The owner changed this file's access, so earlier denials no longer hold."""
-        self.store.delete(_denied_key(file_id))
+        self.store.set(_cleared_key(file_id), f"{self.clock():.3f}", ex=DENIAL_WINDOW)
 
     def get(self, request_id: str) -> AccessRequest | None:
         try:
@@ -203,10 +212,10 @@ class AccessRequests:
         if status != PENDING:
             self.store.lrem(PENDING_INDEX, req.id)
         if status == DENIED and req.file_id is not None:
-            self.store.hset(
-                _denied_key(req.file_id),
-                _actor_field(req.token_name),
-                f"{req.id} {self.clock():.0f}",
+            self.store.set(
+                _denied_key(req.file_id, req.token_name),
+                f"{req.id} {self.clock():.3f}",
+                ex=DENIAL_WINDOW,
             )
         return req
 

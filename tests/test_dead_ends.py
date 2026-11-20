@@ -420,3 +420,23 @@ def test_decided_request_headline_is_past_tense() -> None:
     assert request_headline(req).endswith("asked to use old notes.")
     req.tool, req.status = "read_file", "approved"
     assert request_headline(req).endswith("asked to read old notes.")
+
+
+def test_old_request_for_a_file_inside_a_shared_folder_names_the_sharer(
+    world, memstore, oauth
+) -> None:
+    """The request page uses the same guest guard as read_file: a file inside a folder on
+    the sharer's list counts as shared, not only the exact id that was shared."""
+    app = _app(world, memstore, oauth)
+    owner, eve = client(app), client(app)
+    login(owner)
+    login(eve, "eve-code")
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    _pair(app, OWNER_EMAIL, EVE)
+    store = app.state.dashboard.directory.store_for(EVE)
+    req, _ = AccessRequests(store).create(
+        tool="read_file", token_name="oauth:Grok_Eve", reason="r", file_id="proj-notes"
+    )
+    page = eve.get(f"/requests/{req.id}").text
+    assert "This file isn’t in your Drive" in page
+    assert OWNER_EMAIL in page and "read_shared_file" in page

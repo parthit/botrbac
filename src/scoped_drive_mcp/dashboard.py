@@ -19,7 +19,6 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -155,6 +154,9 @@ class DashboardContext:
     # What paired people share with this person, across every source (shared_sources.py).
     # None hides the "Shared with me" pages.
     shared_with_me: Any = None
+    # (caller email, file id) -> the paired person whose Sharing list covers that id,
+    # including files inside a shared folder (ExternalShares.sharer_of).
+    sharer_of: Callable[[str, str], str | None] | None = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -1594,11 +1596,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         )
 
     def paired_sharer(file_id: str) -> str | None:
-        """A paired person whose Sharing list holds this id (a request filed before
-        read_file pointed assistants at read_shared_file)."""
+        """A paired person whose Sharing list covers this id (a request filed before
+        read_file pointed assistants at read_shared_file). Uses the same guard as a guest
+        read, so a file inside a shared folder counts, not only the exact shared id."""
+        me = current_actor.get()
+        if ctx.sharer_of is not None:
+            return ctx.sharer_of(me, file_id) if me else None
         if ctx.mailbox is None or ctx.ext_allowlist is None or ctx.directory is None:
             return None
-        me = current_actor.get()
         for peer in ctx.mailbox.active_peers(me):
             store = ctx.directory.store_for(peer)
             if Allowlist(store, EXTERNAL_ALLOWLIST_KEY).get(file_id) is not None:
@@ -1917,9 +1922,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             data["shared_items"] = sorted(
                 entries.values(), key=lambda e: e.granted_at, reverse=True
             )
-        for link in data["links"]:
-            link["expires_label"] = mailbox_date(link.get("invite_expires_at"))
-            link["ended_label"] = mailbox_date(link.get("ended_at"))
         return render(request, "bridge.html", **data)
 
     def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
@@ -2150,17 +2152,6 @@ def shared_href(view: str, source: str, owner: str, item_id: str | None = None) 
     if item_id:
         pairs.append(("id", item_id))
     return f"/shared/{view}?" + urlencode(pairs)
-
-
-def mailbox_date(value: str | None) -> str | None:
-    """`2026-11-27T10:00:00+00:00` as `Nov 27, 2026` (UTC) for Mailbox cards."""
-    if not value:
-        return None
-    try:
-        when = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return f"{when:%b} {when.day}, {when.year}"
 
 
 def attachment_disposition(filename: str) -> str:

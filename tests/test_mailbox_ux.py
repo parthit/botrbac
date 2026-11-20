@@ -384,3 +384,11 @@ def test_mailbox_and_shared_errors_carry_structured_content(app) -> None:
 
     again = mcp_call(c, "request_link")["structuredContent"]
     assert again["reused"] is True and again["link_id"] == created["link_id"]
+
+
+def test_mailbox_dates_are_local_time_elements() -> None:
+    from scoped_drive_mcp.humanize import when
+
+    html = str(when("2026-11-27T01:30:00+00:00", date_only=True))
+    assert html.startswith('<time datetime="2026-11-27T01:30:00Z" data-time="date"')
+    assert ">Nov 27, 2026</time>" in html

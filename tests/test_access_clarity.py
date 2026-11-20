@@ -373,3 +373,35 @@ def test_shortcut_target_in_allowed_folder_shows_via_folder(c) -> None:
     row = _row(c.get("/browse?folder=proj").text, "link to payroll")
     assert "Target allowed via folder “Private”: payroll.txt (in Private" in _shown(row)
     assert 'action="/grant"' not in row
+
+
+def test_denial_records_expire_with_the_window() -> None:
+    """Denial records must not pile up: each is stored with DENIAL_WINDOW as its TTL."""
+    from scoped_drive_mcp.access import DENIED, AccessRequests
+    from scoped_drive_mcp.store import MemoryStore, PrefixedStore
+
+    class Spy(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ttls: dict[str, int | None] = {}
+
+        def set(self, key: str, value: str, ex: int | None = None) -> None:
+            self.ttls[key] = ex
+            super().set(key, value, ex=ex)
+
+    spy = Spy()
+    now = [1000.0]
+    reqs = AccessRequests(PrefixedStore(spy), clock=lambda: now[0])
+    req, _ = reqs.create(tool="read_file", token_name="viewer-tok", reason="r", file_id="f1")
+    reqs.decide(req, DENIED)
+    denial_keys = [k for k in spy.ttls if ":denied:" in k]
+    assert denial_keys and all(spy.ttls[k] == DENIAL_WINDOW for k in denial_keys)
+    assert reqs.recent_denial("f1", "viewer-tok") is not None
+    assert reqs.recent_denial("f1", "other-tok") is None
+
+    # Changing the file's access ends the hold, and that marker expires too.
+    now[0] += 5
+    reqs.clear_denials("f1")
+    cleared = [k for k in spy.ttls if "denied-cleared" in k]
+    assert cleared and all(spy.ttls[k] == DENIAL_WINDOW for k in cleared)
+    assert reqs.recent_denial("f1", "viewer-tok") is None

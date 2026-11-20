@@ -777,6 +777,7 @@ def build_app(
         ext_allowlist=ext_allowlist,
         on_ext_change=ext_guard.invalidate_allowlist,
         shared_with_me=shared_with_me,
+        sharer_of=shares.sharer_of,
     )
     dashboard = build_dashboard(ctx)
 

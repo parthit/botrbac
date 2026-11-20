@@ -33,14 +33,20 @@ def readable_utc(moment: datetime) -> str:
     return f"{moment:%b} {moment.day}, {moment.year}, {moment:%H:%M} UTC"
 
 
-def when(value: Any, empty: str = "—") -> Markup:
+def when(value: Any, empty: str = "—", date_only: bool = False) -> Markup:
     """A <time> element for a stored ISO timestamp. ui.js turns it into local or relative
-    time; without JavaScript the readable UTC text stays."""
+    time (or a local calendar date with `date_only`); without JavaScript the readable UTC
+    text stays."""
     moment = parse_ts(value)
     if moment is None:
         return Markup("{}").format(value if isinstance(value, str) and value else empty)
     iso = moment.isoformat(timespec="seconds").replace("+00:00", "Z")
     text = readable_utc(moment)
+    if date_only:
+        day = f"{moment:%b} {moment.day}, {moment.year}"
+        return Markup('<time datetime="{}" data-time="date" title="{}">{}</time>').format(
+            iso, text, day
+        )
     return Markup('<time datetime="{}" data-time title="{}">{}</time>').format(iso, text, text)
 
 
