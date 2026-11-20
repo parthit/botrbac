@@ -2045,7 +2045,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
-        data["webhook"] = await blocking(ctx.mailbox.get_webhook, email)
+        data["webhook"] = await blocking(ctx.mailbox.get_webhook, email, "")
+        # Each connected app has its own wake-up slot; the account one is for mail from
+        # other people. Names come from the app list, so a removed app shows no slot.
+        apps = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
+        data["apps"] = [{"id": g.id, "name": g.client_name} for g in apps]
+        data["app_hooks"] = []
+        for app in data["apps"]:
+            hook = await blocking(ctx.mailbox.get_webhook, email, app["id"])
+            if hook.get("configured"):
+                data["app_hooks"].append({**hook, "app": app})
         data["self_pairing"] = await blocking(ctx.mailbox.self_pairing, email)
         # Approving a pairing lets that person's assistant read the Sharing list, so each
         # card that asks for approval says what that list holds right now.
@@ -2129,10 +2138,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if ctx.mailbox is None:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         email = str(request.session.get("owner") or "")
+        # "" is the account-wide slot; otherwise one of this person's connected apps.
+        app = (form.get("app") or "").strip()
+        if app:
+            grants = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
+            if app not in {g.id for g in grants}:
+                flash(request, "error", "That app is not connected.")
+                return RedirectResponse("/bridge", status_code=303)
         try:
-            if form.get("action") == "remove":
-                await blocking(ctx.mailbox.clear_webhook, email)
+            action = form.get("action")
+            if action == "remove":
+                await blocking(ctx.mailbox.clear_webhook, email, app)
                 flash(request, "ok", "Wake-up removed. Mail still waits for check_messages.")
+            elif action == "move":
+                await blocking(ctx.mailbox.move_webhook, email, app)
+                flash(request, "ok", "Wake-up moved to that app. Its key moved with it.")
             else:
                 enabled = form.get("enabled", "true") != "false"
                 await blocking(
@@ -2142,6 +2162,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     sender_key=form.get("sender_key") or None,
                     auth_scheme=form.get("auth_scheme") or "bearer",
                     enabled=enabled,
+                    app=app,
                 )
                 flash(request, "ok", "Wake-up saved. The key is not shown again.")
         except MailboxError as exc:

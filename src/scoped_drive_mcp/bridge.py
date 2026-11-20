@@ -616,8 +616,13 @@ class Mailbox:
         return self._public_link(link, you)
 
     def end_assistant_links(self, email: str, grant_id: str) -> int:
-        """End this assistant's same-account links and open invites (its access is gone)."""
+        """End this assistant's same-account links and open invites, and drop its wake-up
+        hook (its access is gone)."""
         you = _email(email)
+        slot = _self_addr(you, grant_id)
+        self.store.delete(f"bridge:hook:{slot}")
+        self.store.delete(f"bridge:hookerr:{slot}")
+        self._index_hook(you, slot, present=False)
         ended = 0
         for link_id in self._user_link_ids(you):
             link = self._link(link_id)
@@ -633,11 +638,13 @@ class Mailbox:
             ended += 1
         return ended
 
-    def get_webhook(self, email: str) -> dict[str, Any]:
+    def get_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
+        """The wake-up hook this caller uses. `app` (dashboard only) picks a slot: "" for
+        the account, or an app's grant id. Without it an assistant sees its own slot."""
         you = _email(email)
         if not self.wake.ready:
             return {"available": False, "configured": False, "enabled": False}
-        owner = self._hook_owner(you)
+        owner = self._hook_owner(you, app)
         record = self._hook(owner)
         if record is None:
             return {
@@ -666,6 +673,7 @@ class Mailbox:
         sender_key: str | None = None,
         auth_scheme: str = "bearer",
         enabled: bool | None = None,
+        app: str | None = None,
     ) -> dict[str, Any]:
         you = _email(email)
         if not self.wake.ready:
@@ -700,7 +708,7 @@ class Mailbox:
                 "invalid_webhook_url",
                 "That webhook host did not resolve to a public address.",
             ) from None
-        owner = self._hook_owner(you)
+        owner = self._hook_owner(you, app)
         current = self._hook(owner) or {}
         key = (sender_key or "").strip()
         if not key and current and not _key_carries(current, host, path, scheme):
@@ -728,41 +736,74 @@ class Mailbox:
             "hint": saved_hint,
             "enabled": current.get("enabled", True) if enabled is None else bool(enabled),
         }
-        assistant = current_assistant.get()
-        if assistant is not None:
-            record["grant_id"] = assistant.grant_id
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
-        return self.get_webhook(you)
+        self._index_hook(you, owner, present=True)
+        return self.get_webhook(you, app)
 
-    def clear_webhook(self, email: str) -> dict[str, Any]:
+    def clear_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
         you = _email(email)
         if not self.wake.ready:
             raise MailboxError(
                 "webhook_disabled", "Webhook wake-ups are turned off on this server."
             )
-        owner = self._hook_owner(you)
+        owner = self._hook_owner(you, app)
         self.store.delete(f"bridge:hook:{owner}")
         self.store.delete(f"bridge:hookerr:{owner}")
-        return self.get_webhook(you)
+        self._index_hook(you, owner, present=False)
+        return self.get_webhook(you, app)
 
-    def _hook_owner(self, you: str) -> str:
-        """Whose webhook slot this call uses. An assistant in a same-account pairing gets
-        its own, so the two assistants of one person do not overwrite each other's."""
+    def move_webhook(self, email: str, app: str) -> dict[str, Any]:
+        """Dashboard only: give the account-wide hook to one app (its own slot). The key
+        moves with it; nothing is re-entered."""
+        you = _email(email)
+        if not self.wake.ready:
+            raise MailboxError(
+                "webhook_disabled", "Webhook wake-ups are turned off on this server."
+            )
+        if not app:
+            raise MailboxError("invalid_input", "Choose an app.")
+        record = self._hook(you)
+        if record is None:
+            raise MailboxError("not_found", "There is no account-wide wake-up to move.")
+        owner = self._hook_owner(you, app)
+        self.store.set(f"bridge:hook:{owner}", json.dumps(record))
+        self.store.delete(f"bridge:hookerr:{owner}")
+        self._index_hook(you, owner, present=True)
+        self.store.delete(f"bridge:hook:{you}")
+        self.store.delete(f"bridge:hookerr:{you}")
+        return self.get_webhook(you, app)
+
+    def webhook_apps(self, email: str) -> list[str]:
+        """Grant ids that have their own wake-up hook saved."""
+        you = _email(email)
+        return sorted(self.store.hgetall(f"bridge:hookapps:{you}"))
+
+    def _index_hook(self, you: str, owner: str, present: bool) -> None:
+        if "#" not in owner:
+            return
+        grant = owner.split("#", 1)[1]
+        if present:
+            self.store.hset(f"bridge:hookapps:{you}", grant, "1")
+        else:
+            self.store.hdel(f"bridge:hookapps:{you}", grant)
+
+    def _hook_owner(self, you: str, app: str | None = None) -> str:
+        """Which webhook slot a call uses.
+
+        Every connected app (OAuth grant) has its own slot, so one app's wake-up never
+        replaces another's. The account-wide slot is for API-token callers and for hooks
+        pasted on the dashboard "for the whole account"; it is woken only by mail from
+        another person. `app` is the dashboard's choice: "" for the account, else a grant.
+        """
+        if app is not None:
+            if not app:
+                return you
+            if not _TOKEN_SHAPE.fullmatch(app):
+                raise MailboxError("invalid_input", "Unknown app.")
+            return _self_addr(you, app)
         assistant = current_assistant.get()
-        if assistant is None:
-            return you
-        mine = _self_addr(you, assistant.grant_id)
-        if self.store.get(f"bridge:hook:{mine}"):
-            return mine
-        shared = self._hook(you)
-        # The account-wide hook this assistant saved (or one saved before hooks recorded
-        # who saved them) stays the one it sees and clears, since that is what fires.
-        if shared is not None and shared.get("grant_id") in (None, assistant.grant_id):
-            return you
-        if self._live_self_link(you, {assistant.grant_id}, partial=True):
-            return mine
-        return you
+        return _self_addr(you, assistant.grant_id) if assistant is not None else you
 
     def _hook(self, email: str) -> dict[str, Any] | None:
         raw = self.store.get(f"bridge:hook:{email}")
@@ -798,33 +839,19 @@ class Mailbox:
     def _wake_targets(self, recipient: str) -> list[tuple[str, dict[str, Any]]]:
         """Which saved hooks to ping for mail addressed to `recipient`.
 
-        - Mail for one assistant (`email#grant`): its own hook, else the account-wide hook
-          unless another assistant saved it (that would wake the other one, often the
-          sender). A hook pasted on the dashboard belongs to no assistant, so it counts.
-        - Mail for the account (from another person): the account-wide hook, else the
-          hooks of this person's assistants that moved to their own slot when paired.
+        - Mail for one of your assistants (`email#grant`): that app's own hook, nothing
+          else. Another app's hook would wake the wrong assistant (often the sender).
+        - Mail from another person (addressed to the account): the account-wide hook if
+          one is saved, else every app's own hook, since any of them may answer it.
         """
-        own = self._hook(recipient)
-        if own is not None:
-            return [(recipient, own)]
         if "#" in recipient:
-            email, grant = recipient.split("#", 1)
-            shared = self._hook(email)
-            if shared is not None and shared.get("grant_id") in (None, grant):
-                return [(email, shared)]
-            return []
+            own = self._hook(recipient)
+            return [(recipient, own)] if own is not None else []
+        shared = self._hook(recipient)
+        if shared is not None:
+            return [(recipient, shared)]
         found: list[tuple[str, dict[str, Any]]] = []
-        grants: set[str] = set()
-        for link_id in self._user_link_ids(recipient):
-            link = self._link(link_id)
-            if link is None or not link.get("same_account"):
-                continue
-            if self._status(link) not in ("active", "pending_approval"):
-                continue
-            grants.update(
-                str(link[f"grant_{side}"]) for side in ("a", "b") if link.get(f"grant_{side}")
-            )
-        for grant in sorted(grants):
+        for grant in sorted(self.store.hgetall(f"bridge:hookapps:{recipient}")):
             slot = _self_addr(recipient, grant)
             record = self._hook(slot)
             if record is not None:
@@ -1256,11 +1283,8 @@ class Mailbox:
                 return link
         return None
 
-    def _live_self_link(
-        self, you: str, grants: set[str], partial: bool = False
-    ) -> dict[str, Any] | None:
-        """An active or pending same-account pairing between exactly these two grants, or
-        (`partial`) any one that includes them."""
+    def _live_self_link(self, you: str, grants: set[str]) -> dict[str, Any] | None:
+        """An active or pending same-account pairing between exactly these two grants."""
         for link_id in self._user_link_ids(you):
             link = self._link(link_id)
             if link is None or not link.get("same_account"):
@@ -1268,7 +1292,7 @@ class Mailbox:
             if self._status(link) not in ("active", "pending_approval"):
                 continue
             pair = {str(link.get("grant_a")), str(link.get("grant_b"))}
-            if (grants <= pair) if partial else (grants == pair):
+            if grants == pair:
                 return link
         return None
 

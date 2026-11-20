@@ -175,19 +175,6 @@ def test_self_pairing_off_for_domain_blocks_join_and_send() -> None:
     assert exc.value.code == "self_pairing_off"
 
 
-def test_each_assistant_gets_its_own_webhook_slot_once_paired() -> None:
-    box = _box()
-    _self_pair(box)
-    assert box._hook_owner(OWNER_EMAIL) == OWNER_EMAIL
-    with as_assistant(GROK):
-        assert box._hook_owner(OWNER_EMAIL) == f"{OWNER_EMAIL}#{GROK.grant_id}"
-    with as_assistant(CURSOR):
-        assert box._hook_owner(OWNER_EMAIL) == OWNER_EMAIL
-
-
-# ---- Edge Config switch ------------------------------------------------------------
-
-
 def test_self_pairing_rules() -> None:
     assert self_pairing_allowed(None, "a@acme.com") is True
     assert self_pairing_allowed({"enabled": True}, "a@acme.com") is True
@@ -292,22 +279,6 @@ def test_oauth_revoke_calls_the_mailbox_hook() -> None:
     assert seen == []
 
 
-def test_wake_does_not_go_to_the_other_assistants_shared_hook() -> None:
-    box = _box()
-    with as_assistant(CLAUDE):
-        assert box._hook_owner(OWNER_EMAIL) == OWNER_EMAIL
-    box.store.set(
-        f"bridge:hook:{OWNER_EMAIL}",
-        '{"url": "https://x", "enabled": true, "grant_id": "grant-claude"}',
-    )
-    _self_pair(box)
-    # Claude still sees and clears the hook it saved; Grok gets its own slot.
-    with as_assistant(CLAUDE):
-        assert box._hook_owner(OWNER_EMAIL) == OWNER_EMAIL
-    with as_assistant(GROK):
-        assert box._hook_owner(OWNER_EMAIL) == f"{OWNER_EMAIL}#{GROK.grant_id}"
-
-
 def test_account_send_cap_counts_both_assistants_together() -> None:
     box = _box()
     link_id = _self_pair(box)
@@ -336,25 +307,6 @@ def test_flag_outage_costs_one_fetch_per_window() -> None:
     assert calls["n"] == 2
 
 
-def test_wake_targets_cover_cross_person_and_dashboard_hooks() -> None:
-    box = _box()
-    _self_pair(box)
-    grok_slot = f"{OWNER_EMAIL}#{GROK.grant_id}"
-    box.store.set(f"bridge:hook:{grok_slot}", '{"url": "https://g", "enabled": true}')
-    # Mail from another person goes to the account inbox and wakes Grok's own hook.
-    assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [grok_slot]
-    # A hook pasted on the dashboard belongs to no assistant, so Claude's mail can use it.
-    box.store.set(f"bridge:hook:{OWNER_EMAIL}", '{"url": "https://d", "enabled": true}')
-    claude_slot = f"{OWNER_EMAIL}#{CLAUDE.grant_id}"
-    assert [slot for slot, _ in box._wake_targets(claude_slot)] == [OWNER_EMAIL]
-    # One another assistant saved does not.
-    box.store.set(
-        f"bridge:hook:{OWNER_EMAIL}",
-        '{"url": "https://d", "enabled": true, "grant_id": "grant-grok"}',
-    )
-    assert box._wake_targets(claude_slot) == []
-
-
 def test_disabled_pending_pairing_can_still_be_ended(p2_app) -> None:
     box = p2_app.state.mailbox
     link_id = _self_pair(box, approve=False)
@@ -364,3 +316,108 @@ def test_disabled_pending_pairing_can_still_be_ended(p2_app) -> None:
     page = owner.get("/bridge")
     assert "Turned off by your organisation" in page.text
     assert f"/bridge/{link_id}/revoke" in page.text
+
+
+# ---- wake-ups: one slot per app ------------------------------------------------------
+
+HOOK = "https://api2.cursor.sh/automations/webhook/"
+
+
+def _wake_box(posts: list[dict]) -> Mailbox:
+    import base64
+
+    from scoped_drive_mcp.wake import WakeSettings
+
+    store = MemoryStore(clock=lambda: 1_700_000_000.0)
+    return Mailbox(
+        store,
+        base_url="https://drive-test.example.com",
+        clock=store._clock,
+        wake=WakeSettings(
+            enabled=True,
+            kek=base64.b64decode(base64.b64encode(b"k" * 32)),
+            allowlist=("api2.cursor.sh",),
+            lookup=lambda _host: ["8.8.8.8"],
+            poster=lambda request: posts.append(request) or 200,
+        ),
+    )
+
+
+def _urls(posts: list[dict]) -> list[str]:
+    return [f"https://{post['hostname']}{post['path']}" for post in posts]
+
+
+def test_each_app_saves_its_own_hook_and_only_its_mail_wakes_it() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    with as_assistant(CURSOR):
+        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
+    with as_assistant(CLAUDE):
+        assert box.get_webhook(OWNER_EMAIL)["configured"] is False  # not Cursor's
+        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
+    with as_assistant(CURSOR):
+        assert box.get_webhook(OWNER_EMAIL)["url"] == HOOK + "cursor"  # not replaced
+    assert box.webhook_apps(OWNER_EMAIL) == sorted([CLAUDE.grant_id, CURSOR.grant_id])
+
+    with as_assistant(CURSOR):
+        created = box.request_link(OWNER_EMAIL)
+    with as_assistant(CLAUDE):
+        box.request_link(OWNER_EMAIL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+
+    with as_assistant(CURSOR):
+        box.send_message(OWNER_EMAIL, created["link_id"], "hi claude")
+    assert _urls(posts) == [HOOK + "claude"]
+    with as_assistant(CLAUDE):
+        box.send_message(OWNER_EMAIL, created["link_id"], "hi cursor")
+    assert _urls(posts) == [HOOK + "claude", HOOK + "cursor"]
+
+
+def test_mail_from_another_person_wakes_account_hook_else_every_app() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    with as_assistant(CURSOR):
+        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
+    with as_assistant(CLAUDE):
+        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
+    created = box.request_link(EVE)
+    box.request_link(OWNER_EMAIL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+    box.decide(EVE, created["link_id"], "approve")
+
+    box.send_message(EVE, created["link_id"], "hello")
+    assert sorted(_urls(posts)) == [HOOK + "claude", HOOK + "cursor"]
+
+    posts.clear()
+    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
+    box.send_message(EVE, created["link_id"], "again")
+    assert _urls(posts) == [HOOK + "account"]
+
+
+def test_account_hook_never_wakes_for_one_apps_mail_and_can_be_moved() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    # A hook saved before apps had their own slots sits on the account.
+    box.set_webhook(OWNER_EMAIL, HOOK + "old", sender_key="old-key-12345")
+    link_id = _self_pair(box)
+    with as_assistant(GROK):
+        box.send_message(OWNER_EMAIL, link_id, "to claude")
+    assert posts == []  # it would have woken whoever saved it, maybe the sender
+
+    box.move_webhook(OWNER_EMAIL, GROK.grant_id)
+    assert box.get_webhook(OWNER_EMAIL, "")["configured"] is False
+    with as_assistant(GROK):
+        assert box.get_webhook(OWNER_EMAIL)["url"] == HOOK + "old"
+    with as_assistant(CLAUDE):
+        box.send_message(OWNER_EMAIL, link_id, "to grok")
+    assert _urls(posts) == [HOOK + "old"]
+
+
+def test_disconnecting_an_app_drops_its_hook() -> None:
+    box = _wake_box([])
+    with as_assistant(CLAUDE):
+        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
+    box.end_assistant_links(OWNER_EMAIL, CLAUDE.grant_id)
+    assert box.webhook_apps(OWNER_EMAIL) == []
+    with as_assistant(CLAUDE):
+        assert box.get_webhook(OWNER_EMAIL)["configured"] is False
