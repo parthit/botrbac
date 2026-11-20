@@ -283,9 +283,7 @@ def test_turning_off_says_sharing_stops_and_mail_stays(p2_app) -> None:
     assert "To pair again, ask your assistant for a new invite code" in owner_page
     assert "Remove from list" in owner_page
 
-    purge = owner.post(
-        f"/bridge/{created['link_id']}/purge", data={"csrf": csrf(owner, "/bridge")}
-    )
+    purge = owner.post(f"/bridge/{created['link_id']}/purge", data={"csrf": csrf(owner, "/bridge")})
     assert purge.status_code == 303
     assert "Deleted 1 stored message" in owner.get("/bridge").text
     assert box.list_inbox(OWNER_EMAIL)["messages"] == []
