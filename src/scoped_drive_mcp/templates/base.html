@@ -9,6 +9,7 @@
 {% if csrf %}<meta name="csrf" content="{{ csrf }}">{% endif %}
 </head>
 <body>
+{% macro current(on) %}{% if on %}class="on" aria-current="page"{% endif %}{% endmacro %}
 <a class="skip" href="#main">Skip to content</a>
 <header>
   <div class="bar">
@@ -19,21 +20,21 @@
     {% if owner %}
     <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav id="site-nav" aria-label="Dashboard">
-      <a href="/" class="{{ 'on' if nav == '/' }}">Overview</a>
-      <a href="/connect" class="{{ 'on' if nav.startswith('/connect') }}">Connections</a>
-      <a href="/browse" class="{{ 'on' if nav == '/browse' }}">Browse</a>
-      <a href="/access" class="{{ 'on' if nav == '/access' }}">Access</a>
-      <a href="/sharing" class="{{ 'on' if nav == '/sharing' }}">Sharing</a>
-      <a href="/shared" class="{{ 'on' if nav.startswith('/shared') }}">Shared with me</a>
-      <a href="/requests" class="{{ 'on' if nav.startswith('/requests') }}">Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
-      <a href="/activity" class="{{ 'on' if nav == '/activity' }}">Activity</a>
-      <a href="/bridge" class="{{ 'on' if nav.startswith('/bridge') }}">Mailbox</a>
+      <a href="/" {{ current(nav == '/') }}>Overview</a>
+      <a href="/connect" {{ current(nav.startswith('/connect')) }}>Connections</a>
+      <a href="/browse" {{ current(nav == '/browse') }}>Browse</a>
+      <a href="/access" {{ current(nav == '/access') }}>Access</a>
+      <a href="/sharing" {{ current(nav == '/sharing') }}>Sharing</a>
+      <a href="/shared" {{ current(nav.startswith('/shared')) }}>Shared with me</a>
+      <a href="/requests" {{ current(nav.startswith('/requests')) }}>Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
+      <a href="/activity" {{ current(nav == '/activity') }}>Activity</a>
+      <a href="/bridge" {{ current(nav.startswith('/bridge')) }}>Mailbox</a>
       <details class="account">
         <summary aria-label="Account menu for {{ owner }}"><span class="avatar" aria-hidden="true">{{ owner[:1] | upper }}</span><span class="summary-email">{{ owner }}</span></summary>
         <div class="account-menu">
           <span class="nav-user">{{ owner }}</span>
           {% if is_admin %}
-          <a href="/admin" class="{{ 'on' if nav == '/admin' }}">Directory</a>
+          <a href="/admin" {{ current(nav == '/admin') }}>People</a>
           {% endif %}
           <form class="inline" method="post" action="/logout">
             <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -48,9 +49,11 @@
   </div>
 </header>
 <main id="main">
+  <div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <div id="live-alert" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
   {% if reconsent %}{% include "_reconsent.html" %}{% endif %}
   {% for kind, message in flashes %}
-  <div class="flash {{ kind }}" role="status">{{ message }}</div>
+  <div class="flash {{ kind }}">{{ message }}</div>
   {% endfor %}
   {% block content %}{% endblock %}
 </main>

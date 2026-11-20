@@ -3,7 +3,7 @@
 {% macro table(items, empty) %}
 {% if items %}
 <table class="cards">
-  <thead><tr><th>Asked for</th><th>Assistant</th><th>Action</th><th>Created</th><th>Status</th><th></th></tr></thead>
+  <thead><tr><th>Asked for</th><th>Assistant</th><th>Action</th><th>Created</th><th>Status</th><th><span class="sr-only">Decision</span></th></tr></thead>
   <tbody>
   {% for r in items %}
   <tr>
@@ -19,9 +19,9 @@
     </td>
     <td data-label="Decision">
       {% if r.status == 'pending' %}
-      <a class="btn primary" href="/requests/{{ r.id }}">Approve or deny</a>
+      <a class="btn primary" href="/requests/{{ r.id }}">Approve or deny<span class="sr-only">: {{ r.file_name or r.description or "a file" }}</span></a>
       {% else %}
-      <a href="/requests/{{ r.id }}">Open</a>
+      <a href="/requests/{{ r.id }}">Open<span class="sr-only">: {{ r.file_name or r.description or "a file" }}</span></a>
       {% endif %}
     </td>
   </tr>
