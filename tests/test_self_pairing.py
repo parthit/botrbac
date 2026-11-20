@@ -455,3 +455,47 @@ def test_same_account_link_names_its_two_apps() -> None:
     link = box.list_links(OWNER_EMAIL)["links"][0]
     assert link["grant_ids"] == [GROK.grant_id, CLAUDE.grant_id]
     assert link["assistants"] == ["Grok", "Claude"]
+
+
+def _outside_mail(box: Mailbox) -> None:
+    created = box.request_link(EVE)
+    box.request_link(OWNER_EMAIL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+    box.decide(EVE, created["link_id"], "approve")
+    box.send_message(EVE, created["link_id"], "hello from eve")
+
+
+def test_primary_app_alone_is_woken_for_outside_mail() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    with as_assistant(CURSOR):
+        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
+    with as_assistant(CLAUDE):
+        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
+    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
+    box.set_primary(OWNER_EMAIL, CURSOR.grant_id)
+    _outside_mail(box)
+    assert _urls(posts) == [HOOK + "cursor"]  # not Claude, not the account hook
+
+
+def test_primary_without_its_own_hook_uses_account_hook_else_nobody() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    with as_assistant(CLAUDE):
+        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
+    box.set_primary(OWNER_EMAIL, CURSOR.grant_id)
+    _outside_mail(box)
+    assert posts == []  # a Primary was chosen, so Claude is not woken
+    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
+    assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [OWNER_EMAIL]
+
+
+def test_disconnecting_the_primary_clears_it() -> None:
+    box = _wake_box([])
+    box.set_primary(OWNER_EMAIL, CURSOR.grant_id)
+    assert box.get_primary(OWNER_EMAIL) == CURSOR.grant_id
+    box.end_assistant_links(OWNER_EMAIL, CURSOR.grant_id)
+    assert box.get_primary(OWNER_EMAIL) is None
+    box.set_primary(OWNER_EMAIL, CLAUDE.grant_id)
+    box.set_primary(OWNER_EMAIL, "")
+    assert box.get_primary(OWNER_EMAIL) is None

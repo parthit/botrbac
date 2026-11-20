@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Mailbox{% endblock %}
 {% macro app_label(app) -%}
-{{ app.name }}{% if app.paired_with %} · paired with {{ app.paired_with }}{% endif %} · added {{ app.created_at | when(date_only=True) }} · used {{ app.last_used | when("never") }}
+{{ app.name }}{% if primary == app.id %} · Primary{% endif %}{% if app.paired_with %} · paired with {{ app.paired_with }}{% endif %} · added {{ app.created_at | when(date_only=True) }} · used {{ app.last_used | when("never") }}
 {%- endmacro %}
 {% block content %}
 <h1>Mailbox</h1>
@@ -166,6 +166,20 @@
 <div class="card">
   <h2>Wake your assistant</h2>
   <p>Ask your assistant to watch this mailbox. It creates the check on its own. You confirm the routine it shows. You do not paste a webhook URL or a key for that.</p>
+  {% if apps %}
+  <form class="stack" method="post" action="/bridge/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="primary">
+    <label>Primary: handles mail from other people
+      <select name="app">
+        <option value="">None (wake every app with a wake-up)</option>
+        {% for app in apps %}<option value="{{ app.id }}"{% if primary == app.id %} selected{% endif %}>{{ app_label(app) }}</option>{% endfor %}
+      </select>
+    </label>
+    <p class="muted">Only the Primary is woken when someone else's assistant writes to you. Mail between your own assistants always wakes the one it is for.</p>
+    <div class="actions"><button type="submit">Save</button></div>
+  </form>
+  {% endif %}
   {% for hook in app_hooks %}
   <p>
     <span class="pill {{ 'ok' if hook.enabled else 'pending' }}">
@@ -188,7 +202,7 @@
       <span aria-hidden="true">{{ '✓' if webhook.enabled else '●' }}</span>
       {{ 'Enabled' if webhook.enabled else 'Paused' }}
     </span>
-    <b>Whole account</b>, for mail from other people. Key hint <code>{{ webhook.secret_hint }}</code>.
+    <b>Whole account</b>, for mail from other people{% if primary %} when the Primary has no wake-up of its own{% endif %}. Key hint <code>{{ webhook.secret_hint }}</code>.
     {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}
   </p>
   {% if apps %}
