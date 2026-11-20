@@ -32,7 +32,7 @@ from starlette.types import Receive, Scope, Send
 from . import audit as audit_module
 from .access import AccessRequests, AccessService
 from .auth import BearerAuthMiddleware, current_principal
-from .bridge import Mailbox, MailboxError
+from .bridge import Assistant, Mailbox, MailboxError, as_assistant
 from .config import Settings
 from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
 from .drive_client import (
@@ -48,6 +48,7 @@ from .drive_client import (
     oauth_credentials,
 )
 from .external import ExternalShares, SharedAccessError
+from .flags import EdgeConfigFlags
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .oauth import GoogleOAuthClient, OAuthClient
 from .policy import PayloadToolError, is_allowed, require
@@ -276,8 +277,13 @@ def create_mcp(
         return email
 
     def run_mail(fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
+        principal = current_principal.get()
+        assistant = None
+        if principal is not None and principal.grant_id:
+            assistant = Assistant(principal.grant_id, principal.client_name or "Assistant")
         try:
-            return fn(caller(), *args, **kwargs)
+            with as_assistant(assistant):
+                return fn(caller(), *args, **kwargs)
         except MailboxError as exc:
             raise PayloadToolError(exc.payload()) from None
 
@@ -683,9 +689,13 @@ def build_app(
         )
         or DEFAULT_ALLOWLIST
     )
+    flags = EdgeConfigFlags(
+        settings.edge_config.get_secret_value() if settings.edge_config else None
+    )
     mailbox = Mailbox(
         kv,
         base_url=settings.app_base_url or "",
+        self_pairing=flags.self_pairing_enabled,
         encryption_key=enc_key,
         wake=WakeSettings(
             enabled=settings.webhooks_enabled,
@@ -771,6 +781,9 @@ def build_app(
         if base_url and not settings.dashboard_missing()
         else None
     )
+    if mcp_oauth is not None:
+        # Disconnecting an app (or its grant being dropped) ends its own-assistant pairings.
+        mcp_oauth.on_revoke = mailbox.end_assistant_links
     ctx = DashboardContext(
         settings=settings,
         store=kv,

@@ -4,6 +4,11 @@ Each person is their Google account. The record lives on the root key-value stor
 (global `bridge:` keys), not in one person's actor prefix. A link can carry text
 only after both humans approve on the dashboard. Message bodies are stored as
 written and wrapped as untrusted data when a tool reads them.
+
+A same-account link pairs two assistants of one person (say Grok and Claude, both
+signed in with the same Google account). Its sides are OAuth grants, not emails: mail
+is addressed to `email#grant_id`, so each assistant has its own inbox. The human
+approves it once. `self_pairing` (see flags.py) can turn the feature off.
 """
 
 import hashlib
@@ -13,6 +18,10 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -41,6 +50,30 @@ _INJECTION = re.compile(
     r"ignore\s+(all\s+|any\s+)?(previous|prior|above)\s+instructions",
     re.IGNORECASE,
 )
+
+SELF_PAIRING_OFF = "Pairing your own assistants is turned off for your organisation."
+
+
+@dataclass(frozen=True)
+class Assistant:
+    """The OAuth grant making this call, and the app name it registered with."""
+
+    grant_id: str
+    label: str
+
+
+# Set per MCP call by the server. Unset for the dashboard (the human) and legacy tokens.
+current_assistant: ContextVar[Assistant | None] = ContextVar("current_assistant", default=None)
+
+
+@contextmanager
+def as_assistant(assistant: Assistant | None) -> Iterator[None]:
+    token = current_assistant.set(assistant)
+    try:
+        yield
+    finally:
+        current_assistant.reset(token)
+
 
 UNTRUSTED_START = "<<<UNTRUSTED BOT-BRIDGE MESSAGE>>>"
 UNTRUSTED_END = "<<<END UNTRUSTED BOT-BRIDGE MESSAGE>>>"
@@ -92,8 +125,11 @@ class Mailbox:
         clock: Any = None,
         encryption_key: str | None = None,
         wake: WakeSettings | None = None,
+        self_pairing: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
+        # Whether this person may pair two of their own assistants (Edge Config switch).
+        self.self_pairing = self_pairing or (lambda _email: True)
         self.base_url = base_url.rstrip("/")
         self.clock = clock or time.time
         self._lock = threading.Lock()
@@ -177,7 +213,7 @@ class Mailbox:
         peers: set[str] = set()
         for link_id in self._user_link_ids(you):
             link = self._link(link_id)
-            if link is None or self._status(link) != "active":
+            if link is None or link.get("same_account") or self._status(link) != "active":
                 continue
             other = self._other(link, you)
             if other and other != you:
@@ -218,7 +254,7 @@ class Mailbox:
             raise MailboxError("invalid_input", "Provide msg_id or thread_id to reply.")
         if msg_id:
             message = self._message(msg_id)
-            if message is None or you not in (message["from"], message["to"]):
+            if message is None or not self._mine(you) & {message["from"], message["to"]}:
                 raise MailboxError("not_found", "No matching message for this person.")
             if thread_id and thread_id != message["thread_id"]:
                 raise MailboxError("thread_mismatch", "That message is in a different thread.")
@@ -253,6 +289,7 @@ class Mailbox:
             # Mail already delivered stays readable after the pairing is turned off, until
             # it expires (or someone deletes stored messages). Only party membership counts.
             self._require_party(you, link_id)
+        mine = self._mine(you)
         entries = self._inbox_index(you, link_id, unread_only)
         start = 0
         if cursor:
@@ -269,7 +306,7 @@ class Mailbox:
             entry = entries[index]
             message = self._message(entry["msg_id"])
             index += 1
-            if message is None or message["to"] != you:
+            if message is None or message["to"] not in mine:
                 continue
             messages.append({**message, "link_status": entry["link_status"]})
         next_cursor = messages[-1]["msg_id"] if messages and index < len(entries) else None
@@ -288,17 +325,19 @@ class Mailbox:
         if after is not None:
             visible = [entry for entry in entries if entry["created"] > after]
         previews = []
+        mine = self._mine(you)
         for entry in visible:
             if len(previews) == 5:
                 break
             message = self._message(entry["msg_id"])
-            if message is None or message["to"] != you:
+            if message is None or message["to"] not in mine:
                 continue
             previews.append(
                 {
                     "msg_id": message["msg_id"],
                     "link_id": message["link_id"],
                     "from": message["from"],
+                    **_from_assistant(message),
                     "preview": preview_untrusted(message["body"]),
                     "created_at": message["created_at"],
                     "thread_id": message["thread_id"],
@@ -318,15 +357,16 @@ class Mailbox:
             raise MailboxError("invalid_input", "msg_ids must contain 1 to 50 ids.")
         marked = 0
         now = self._iso()
+        mine = self._mine(you)
         for msg_id in msg_ids:
             message = self._message(msg_id)
-            if message is None or message["to"] != you or message.get("read_at"):
+            if message is None or message["to"] not in mine or message.get("read_at"):
                 continue
             if self._link(message["link_id"]) is None:
                 continue
             message["read_at"] = now
             self._save_message(message)
-            self._mark_inbox_read(you, message)
+            self._mark_inbox_read(message["to"], message)
             marked += 1
         return {"ok": True, "marked": marked}
 
@@ -424,7 +464,14 @@ class Mailbox:
                 status=status,
                 invite_code=link["invite_code"],
             )
-        self.store.hset(f"bridge:appr:{link['link_id']}", side, self._iso())
+        if link.get("same_account"):
+            if not self.self_pairing(you):
+                raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
+            # One person, one click: approving covers both of their assistants.
+            for both in ("a", "b"):
+                self.store.hset(f"bridge:appr:{link['link_id']}", both, self._iso())
+        else:
+            self.store.hset(f"bridge:appr:{link['link_id']}", side, self._iso())
         updated = self._status(link)
         return {"link_id": link["link_id"], "status": updated}
 
@@ -445,6 +492,10 @@ class Mailbox:
                     "created_at": _iso(now),
                     "invite_expires_at": _iso(expires),
                 }
+                assistant = current_assistant.get()
+                if assistant is not None:
+                    link["grant_a"] = assistant.grant_id
+                    link["label_a"] = assistant.label
                 self.store.set(f"bridge:link:{link_id}", json.dumps(link))
                 self.store.hset(f"bridge:user:{you}", link_id, link["created_at"])
                 return self._public_link(link, you)
@@ -459,6 +510,14 @@ class Mailbox:
         if link is None or link["invite_code"] != code:
             self._charge_attempt(you)
             raise MailboxError("invite_not_found", "That invite code does not exist.")
+        if you == link["email_a"] and self._self_join(link):
+            return self._redeem_self(you, link)
+        if link.get("same_account"):
+            assistant = current_assistant.get()
+            grants = (link.get("grant_a"), link.get("grant_b"))
+            if assistant is not None and assistant.grant_id not in grants:
+                self._charge_attempt(you)
+                raise MailboxError("invite_taken", "That invite was already used.")
         if you == link["email_a"] or you == self._peer(link_id):
             self.store.hset(f"bridge:user:{you}", link["link_id"], link["created_at"])
             return self._public_link(link, you)
@@ -491,11 +550,95 @@ class Mailbox:
         self.store.hset(f"bridge:user:{you}", link_id, link["created_at"])
         return self._public_link(link, you)
 
+    def _self_join(self, link: dict[str, Any]) -> bool:
+        """Whether this call is a different assistant of the invite's creator joining it.
+
+        Only a known grant joining an invite another known grant made counts. Anything
+        else (an API token, an invite from before grants were recorded, the creator asking
+        again) keeps the old behaviour: the invite is handed back."""
+        if link.get("same_account"):
+            return False
+        assistant = current_assistant.get()
+        grant_a = link.get("grant_a")
+        if assistant is None or not grant_a or assistant.grant_id == grant_a:
+            return False
+        peer = self._peer(link["link_id"])
+        if peer is None:
+            return True
+        # A join that claimed the invite but did not finish writing the link: resume it.
+        claim = self.store.get(f"bridge:selfclaim:{link['link_id']}")
+        return peer == link["email_a"] and claim == assistant.grant_id
+
+    def _redeem_self(self, you: str, link: dict[str, Any]) -> dict[str, Any]:
+        """Join your own invite from another assistant: a same-account link."""
+        assistant = current_assistant.get()
+        assert assistant is not None
+        link_id = link["link_id"]
+        if not self.self_pairing(you):
+            raise MailboxError("self_pairing_off", SELF_PAIRING_OFF)
+        if self._revoked(link_id):
+            self._charge_attempt(you)
+            raise MailboxError(
+                "link_revoked", "That invite was revoked.", link_id=link_id, status="revoked"
+            )
+        if not self._invite_live(link):
+            self._charge_attempt(you)
+            raise MailboxError("invite_not_found", "That invite code does not exist.")
+        existing = self._live_self_link(you, {str(link["grant_a"]), assistant.grant_id})
+        if existing is not None:
+            raise MailboxError(
+                "already_paired",
+                "These two assistants are already paired. Use that pairing, or turn it off "
+                "on the Mailbox page before joining a new one.",
+                link_id=existing["link_id"],
+                status=self._status(existing),
+                manage_url=self._page(),
+            )
+        claim = f"bridge:selfclaim:{link_id}"
+        peer_key = f"bridge:peer:{link_id}"
+        taken = MailboxError("invite_taken", "That invite was already used.")
+        # The first assistant to claim the invite wins; a second one of yours is refused.
+        claimed = self.store.set_if_absent(claim, assistant.grant_id, ex=PEER_TTL)
+        if not claimed and self.store.get(claim) != assistant.grant_id:
+            self._charge_attempt(you)
+            raise taken
+        joined = self.store.set_if_absent(peer_key, you, ex=PEER_TTL)
+        if not joined and self.store.get(peer_key) != you:
+            self._charge_attempt(you)
+            raise taken
+        link = {
+            **link,
+            "same_account": True,
+            "grant_b": assistant.grant_id,
+            "label_b": assistant.label,
+        }
+        self.store.set(f"bridge:link:{link_id}", json.dumps(link))
+        return self._public_link(link, you)
+
+    def end_assistant_links(self, email: str, grant_id: str) -> int:
+        """End this assistant's same-account links and open invites (its access is gone)."""
+        you = _email(email)
+        ended = 0
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or self._revoked(link_id):
+                continue
+            if link.get("same_account"):
+                if grant_id not in (link.get("grant_a"), link.get("grant_b")):
+                    continue
+            elif link.get("grant_a") != grant_id or self._peer(link_id):
+                continue
+            status = self._status(link)
+            self._end(link, you, "turned_off" if status == "active" else "cancelled")
+            ended += 1
+        return ended
+
     def get_webhook(self, email: str) -> dict[str, Any]:
         you = _email(email)
         if not self.wake.ready:
             return {"available": False, "configured": False, "enabled": False}
-        record = self._hook(you)
+        owner = self._hook_owner(you)
+        record = self._hook(owner)
         if record is None:
             return {
                 "available": True,
@@ -513,7 +656,7 @@ class Mailbox:
             "url": record.get("url"),
             "auth_scheme": record.get("scheme"),
             "secret_hint": record.get("hint"),
-            "last_error": self.store.get(f"bridge:hookerr:{you}"),
+            "last_error": self.store.get(f"bridge:hookerr:{owner}"),
         }
 
     def set_webhook(
@@ -557,7 +700,8 @@ class Mailbox:
                 "invalid_webhook_url",
                 "That webhook host did not resolve to a public address.",
             ) from None
-        current = self._hook(you) or {}
+        owner = self._hook_owner(you)
+        current = self._hook(owner) or {}
         key = (sender_key or "").strip()
         if not key and current and not _key_carries(current, host, path, scheme):
             # Never carry a saved key to a different host (a Grok key must not reach
@@ -584,8 +728,11 @@ class Mailbox:
             "hint": saved_hint,
             "enabled": current.get("enabled", True) if enabled is None else bool(enabled),
         }
-        self.store.set(f"bridge:hook:{you}", json.dumps(record))
-        self.store.delete(f"bridge:hookerr:{you}")
+        assistant = current_assistant.get()
+        if assistant is not None:
+            record["grant_id"] = assistant.grant_id
+        self.store.set(f"bridge:hook:{owner}", json.dumps(record))
+        self.store.delete(f"bridge:hookerr:{owner}")
         return self.get_webhook(you)
 
     def clear_webhook(self, email: str) -> dict[str, Any]:
@@ -594,9 +741,28 @@ class Mailbox:
             raise MailboxError(
                 "webhook_disabled", "Webhook wake-ups are turned off on this server."
             )
-        self.store.delete(f"bridge:hook:{you}")
-        self.store.delete(f"bridge:hookerr:{you}")
+        owner = self._hook_owner(you)
+        self.store.delete(f"bridge:hook:{owner}")
+        self.store.delete(f"bridge:hookerr:{owner}")
         return self.get_webhook(you)
+
+    def _hook_owner(self, you: str) -> str:
+        """Whose webhook slot this call uses. An assistant in a same-account pairing gets
+        its own, so the two assistants of one person do not overwrite each other's."""
+        assistant = current_assistant.get()
+        if assistant is None:
+            return you
+        mine = _self_addr(you, assistant.grant_id)
+        if self.store.get(f"bridge:hook:{mine}"):
+            return mine
+        shared = self._hook(you)
+        # The account-wide hook this assistant saved (or one saved before hooks recorded
+        # who saved them) stays the one it sees and clears, since that is what fires.
+        if shared is not None and shared.get("grant_id") in (None, assistant.grant_id):
+            return you
+        if self._live_self_link(you, {assistant.grant_id}, partial=True):
+            return mine
+        return you
 
     def _hook(self, email: str) -> dict[str, Any] | None:
         raw = self.store.get(f"bridge:hook:{email}")
@@ -611,22 +777,59 @@ class Mailbox:
     def _maybe_wake(self, message: dict[str, Any]) -> None:
         if not self.wake.ready:
             return
-        record = self._hook(str(message["to"]))
-        if not record or not record.get("enabled") or not record.get("url"):
-            return
-        mark = f"bridge:woke:{message['msg_id']}"
-        if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
-            return
-        recipient = str(message["to"])
-        try:
-            deliver(self.wake, record, message)
-        except Exception as exc:
-            self.store.delete(mark)
-            logged = _wake_error(exc)
-            logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
-            self._note_wake(recipient, record, logged)
-        else:
-            self._note_wake(recipient, record, None)
+        for slot, record in self._wake_targets(str(message["to"])):
+            if not record.get("enabled") or not record.get("url"):
+                continue
+            # One mark per message and hook, so a retry does not ping a hook twice.
+            suffix = "" if slot == message["to"] else f":{slot}"
+            mark = f"bridge:woke:{message['msg_id']}{suffix}"
+            if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
+                continue
+            try:
+                deliver(self.wake, record, message)
+            except Exception as exc:
+                self.store.delete(mark)
+                logged = _wake_error(exc)
+                logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
+                self._note_wake(slot, record, logged)
+            else:
+                self._note_wake(slot, record, None)
+
+    def _wake_targets(self, recipient: str) -> list[tuple[str, dict[str, Any]]]:
+        """Which saved hooks to ping for mail addressed to `recipient`.
+
+        - Mail for one assistant (`email#grant`): its own hook, else the account-wide hook
+          unless another assistant saved it (that would wake the other one, often the
+          sender). A hook pasted on the dashboard belongs to no assistant, so it counts.
+        - Mail for the account (from another person): the account-wide hook, else the
+          hooks of this person's assistants that moved to their own slot when paired.
+        """
+        own = self._hook(recipient)
+        if own is not None:
+            return [(recipient, own)]
+        if "#" in recipient:
+            email, grant = recipient.split("#", 1)
+            shared = self._hook(email)
+            if shared is not None and shared.get("grant_id") in (None, grant):
+                return [(email, shared)]
+            return []
+        found: list[tuple[str, dict[str, Any]]] = []
+        grants: set[str] = set()
+        for link_id in self._user_link_ids(recipient):
+            link = self._link(link_id)
+            if link is None or not link.get("same_account"):
+                continue
+            if self._status(link) not in ("active", "pending_approval"):
+                continue
+            grants.update(
+                str(link[f"grant_{side}"]) for side in ("a", "b") if link.get(f"grant_{side}")
+            )
+        for grant in sorted(grants):
+            slot = _self_addr(recipient, grant)
+            record = self._hook(slot)
+            if record is not None:
+                found.append((slot, record))
+        return found
 
     def _note_wake(self, email: str, used: dict[str, Any], error: str | None) -> None:
         """Record the outcome only while the saved webhook is still the one we called."""
@@ -668,6 +871,19 @@ class Mailbox:
         link = self._require_active(you, link_id)
         _check_body(body)
         peer = self._other(link, you)
+        sender = self._addr(link, you)
+        if link.get("same_account"):
+            if not self.self_pairing(you):
+                raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
+            if sender is None:
+                raise MailboxError(
+                    "not_found",
+                    "That pairing is between two of your other assistants.",
+                    link_id=link["link_id"],
+                )
+            # From here on the sender is this assistant, not the whole account. The hourly
+            # cap still counts the account (see _charge_send).
+            you = sender
         if peer is None:
             raise MailboxError(
                 "link_pending",
@@ -687,6 +903,7 @@ class Mailbox:
             "link_id": link["link_id"],
             "from": you,
             "to": peer,
+            **_labels(link, you),
             "body": body,
             "thread_id": thread,
             "created_at": _iso(now),
@@ -744,6 +961,7 @@ class Mailbox:
                 "link_id": link["link_id"],
                 "from": you,
                 "to": peer,
+                **_labels(link, you),
                 "body": body,
                 "thread_id": thread,
                 "created_at": _iso(created),
@@ -877,6 +1095,7 @@ class Mailbox:
             )
 
     def _charge_send(self, you: str, link_id: str) -> None:
+        you = you.split("#", 1)[0]
         bucket = int(self._now()) // HOUR
         retry = _retry(self._now(), bucket)
         on_link = self.store.incr(f"bridge:rate:{you}:{link_id}:{bucket}", ex=HOUR)
@@ -902,6 +1121,8 @@ class Mailbox:
         like revoked) and `expired` (an invite nobody joined in time). `ended_reason`,
         `ended_by` and `ended_at` say who ended a link and how, when that was recorded.
         """
+        if link.get("same_account"):
+            return self._public_self_link(link, you)
         peer = self._other(link, you)
         status = self._status(link)
         you_approved = self._approved(link["link_id"], "a" if you == link["email_a"] else "b")
@@ -948,6 +1169,59 @@ class Mailbox:
             "next_step": _next_step(shown, you_approved, peer, ended, you),
         }
 
+    def _public_self_link(self, link: dict[str, Any], you: str) -> dict[str, Any]:
+        """A pairing between two assistants of one person, as that person (or one of the
+        two assistants) sees it."""
+        side = self._side(link, you)
+        other = {"a": "b", "b": "a"}.get(side or "", "b")
+        status = self._status(link)
+        ended = self._ended(link["link_id"]) if status == "revoked" else None
+        allowed = self.self_pairing(you)
+        approved = self._approved(link["link_id"], "a")
+        page = self._page()
+        needs_you = status == "pending_approval" and not approved and allowed
+        you_label = str(link.get(f"label_{side}") or link.get("label_a") or "") if side else None
+        peer_label = str(link.get(f"label_{other}") or "your other assistant")
+        if not allowed and status != "revoked":
+            step = SELF_PAIRING_OFF
+        elif status == "pending_approval":
+            step = "Approve on the Mailbox page to connect your two assistants."
+        elif status == "active":
+            step = (
+                f"Your assistants are connected. Send to {peer_label} on this link_id."
+                if side
+                else "Your assistants are connected."
+            )
+        else:
+            step = _next_step("revoked", approved, None, ended, you)
+        return {
+            "link_id": link["link_id"],
+            "status": status,
+            "same_account": True,
+            "you": you,
+            "you_label": you_label,
+            "you_approved": approved,
+            "peer_approved": approved,
+            "peer_email": you,
+            "peer_label": peer_label,
+            "assistants": [link.get("label_a") or "Assistant", link.get("label_b") or "Assistant"],
+            "created_by_you": side in (None, "a"),
+            **({"disabled_by_org": True} if not allowed else {}),
+            **({"approval_url": page} if needs_you else {}),
+            **(
+                {
+                    "ended_reason": ended.get("how"),
+                    "ended_by": ended.get("by"),
+                    "ended_at": ended.get("at"),
+                }
+                if ended
+                else {}
+            ),
+            "manage_url": page,
+            "created_at": link["created_at"],
+            "next_step": step,
+        }
+
     def _page(self) -> str:
         return f"{self.base_url}/bridge" if self.base_url else "/bridge"
 
@@ -963,6 +1237,9 @@ class Mailbox:
             link = self._link(link_id)
             if link is None or link["email_a"] != you or not self._invite_live(link):
                 continue
+            assistant = current_assistant.get()
+            if assistant is not None and link.get("grant_a") not in (None, assistant.grant_id):
+                continue
             if self.store.get(f"bridge:invite:{link['invite_code']}") != link_id:
                 continue
             if found is None or link["created_at"] > found["created_at"]:
@@ -975,7 +1252,23 @@ class Mailbox:
             link = self._link(link_id)
             if link is None or self._status(link) not in ("active", "pending_approval"):
                 continue
-            if self._other(link, you) == other:
+            if not link.get("same_account") and self._other(link, you) == other:
+                return link
+        return None
+
+    def _live_self_link(
+        self, you: str, grants: set[str], partial: bool = False
+    ) -> dict[str, Any] | None:
+        """An active or pending same-account pairing between exactly these two grants, or
+        (`partial`) any one that includes them."""
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or not link.get("same_account"):
+                continue
+            if self._status(link) not in ("active", "pending_approval"):
+                continue
+            pair = {str(link.get("grant_a")), str(link.get("grant_b"))}
+            if (grants <= pair) if partial else (grants == pair):
                 return link
         return None
 
@@ -1002,6 +1295,7 @@ class Mailbox:
             "msg_id": message["msg_id"],
             "link_id": message["link_id"],
             "from": message["from"],
+            **_from_assistant(message),
             "body": present_untrusted(message["body"]),
             "body_trust": "untrusted_peer",
             "handling": HANDLING,
@@ -1015,12 +1309,27 @@ class Mailbox:
     def _inbox_index(
         self, you: str, link_id: str | None, unread_only: bool
     ) -> list[dict[str, Any]]:
-        """Newest-first ids from the inbox list. Message bodies are loaded later, per page."""
-        inbox_key = f"bridge:inbox:{you}"
-        self.store.ldrop_expired(inbox_key, int(self._now()))
+        """Newest-first ids from the inbox list. Message bodies are loaded later, per page.
+
+        An assistant in a same-account pairing also has its own inbox; both are read."""
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         statuses: dict[str, str | None] = {}
+        for address in sorted(self._mine(you)):
+            self._read_inbox(f"bridge:inbox:{address}", link_id, unread_only, rows, seen, statuses)
+        rows.sort(key=lambda row: row["created"], reverse=True)
+        return rows
+
+    def _read_inbox(
+        self,
+        inbox_key: str,
+        link_id: str | None,
+        unread_only: bool,
+        rows: list[dict[str, Any]],
+        seen: set[str],
+        statuses: dict[str, str | None],
+    ) -> None:
+        self.store.ldrop_expired(inbox_key, int(self._now()))
         for raw in self.store.lrange(inbox_key, 0, -1):
             parsed = parse_inbox_token(raw)
             if parsed is None:
@@ -1049,7 +1358,6 @@ class Mailbox:
                     "link_status": statuses[token_link],
                 }
             )
-        return rows
 
     def _link_for_thread(self, you: str, thread_id: str) -> dict[str, Any]:
         active: list[dict[str, Any]] = []
@@ -1085,9 +1393,10 @@ class Mailbox:
 
     def _thread_has_person(self, link_id: str, thread_id: str, you: str) -> bool:
         key = f"bridge:threadmsgs:{link_id}:{thread_id}"
+        mine = self._mine(you)
         for msg_id in self.store.lrange(key, 0, -1):
             message = self._message(msg_id)
-            if message and you in (message["from"], message["to"]):
+            if message and mine & {message["from"], message["to"]}:
                 return True
         return False
 
@@ -1132,7 +1441,49 @@ class Mailbox:
         value = self.store.get(f"bridge:peer:{link_id}")
         return value or None
 
+    def _side(self, link: dict[str, Any], you: str) -> str | None:
+        """Which side of the link this call is: "a", "b", or None (not a side). On a
+        same-account link the side is the calling assistant; the human is neither."""
+        if link.get("same_account"):
+            assistant = current_assistant.get()
+            if you != link["email_a"] or assistant is None:
+                return None
+            for side in ("a", "b"):
+                if assistant.grant_id == link.get(f"grant_{side}"):
+                    return side
+            return None
+        if you == link["email_a"]:
+            return "a"
+        if you == self._peer(link["link_id"]):
+            return "b"
+        return None
+
+    def _addr(self, link: dict[str, Any], you: str) -> str | None:
+        """Where this caller's mail on this link is addressed."""
+        side = self._side(link, you)
+        if side is None:
+            return None
+        if link.get("same_account"):
+            return _self_addr(you, str(link[f"grant_{side}"]))
+        return you
+
+    def _mine(self, you: str) -> set[str]:
+        """Every address this call may read mail for."""
+        found = {you}
+        assistant = current_assistant.get()
+        # Not gated on the switch: mail already delivered stays readable until it expires.
+        if assistant is not None:
+            found.add(_self_addr(you, assistant.grant_id))
+        return found
+
     def _other(self, link: dict[str, Any], you: str) -> str | None:
+        if link.get("same_account"):
+            side = self._side(link, you)
+            if side is None:
+                return None
+            other = "b" if side == "a" else "a"
+            grant = link.get(f"grant_{other}")
+            return _self_addr(you, str(grant)) if grant else None
         peer = self._peer(link["link_id"])
         if you == link["email_a"]:
             return peer
@@ -1185,6 +1536,10 @@ class Mailbox:
         peer = self._peer(link_id)
         if peer and peer not in people:
             people.append(peer)
+        if link and link.get("same_account"):
+            for side in ("a", "b"):
+                if link.get(f"grant_{side}"):
+                    people.append(_self_addr(link["email_a"], str(link[f"grant_{side}"])))
         for msg_id in self.store.lrange(f"bridge:linkmsgs:{link_id}", 0, -1):
             message = self._message(msg_id)
             row_key = f"bridge:row:{msg_id}"
@@ -1226,6 +1581,25 @@ def _parties(link: dict[str, Any], peer: str | None) -> set[str]:
     if peer:
         found.add(peer)
     return found
+
+
+def _self_addr(email: str, grant_id: str) -> str:
+    return f"{email}#{grant_id}"
+
+
+def _labels(link: dict[str, Any], sender: str) -> dict[str, Any]:
+    """On a same-account link, name the sending assistant ("Grok") for the reader."""
+    if not link.get("same_account"):
+        return {}
+    for side in ("a", "b"):
+        if sender.endswith(f"#{link.get(f'grant_{side}')}"):
+            return {"from_assistant": link.get(f"label_{side}") or "Assistant"}
+    return {}
+
+
+def _from_assistant(message: dict[str, Any]) -> dict[str, Any]:
+    label = message.get("from_assistant")
+    return {"from_assistant": label} if label else {}
 
 
 def _wake_error(exc: Exception) -> str:

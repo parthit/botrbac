@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     webhooks_enabled: bool = False
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"
+    # Vercel Edge Config connection string (set when an Edge Config is connected to the
+    # project). Holds server-side switches such as `self_pairing`; see flags.py.
+    edge_config: SecretStr | None = None
 
     redis_rest_url: str | None = Field(
         default=None,

@@ -355,6 +355,8 @@ class McpOAuth:
         self.signed_in = signed_in
         self.resource = resource_identifier(self.base_url)
         self.metadata_url = protected_resource_metadata_url(self.base_url)
+        # Called with (email, grant_id) after any grant is removed, whatever the reason.
+        self.on_revoke: Callable[[str, str], None] | None = None
 
     def _may_act(self, email: str | None) -> bool:
         if not email:
@@ -880,7 +882,11 @@ class McpOAuth:
         # drop a refresh hash or access hash that was saved in between.
         self._note_use(grant.id)
         return Principal(
-            token_name=_principal_name(grant.client_name), role=Role.ADMIN, email=grant.email
+            token_name=_principal_name(grant.client_name),
+            role=Role.ADMIN,
+            email=grant.email,
+            grant_id=grant.id,
+            client_name=grant.client_name,
         )
 
     def list_grants(self, email: str | None) -> list[GrantView]:
@@ -923,6 +929,11 @@ class McpOAuth:
             self.store.delete(_code_key(grant.code_hash))
         self.store.delete(_seen_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
+        if self.on_revoke is not None:
+            try:
+                self.on_revoke(grant.email, grant.id)
+            except Exception:  # noqa: BLE001 - the grant is gone either way
+                logging.getLogger(__name__).exception("oauth_on_revoke_failed")
         return True
 
     def _note_use(self, grant_id: str) -> None:
