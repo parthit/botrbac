@@ -19,10 +19,11 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import anyio.to_thread
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -340,6 +341,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     reconsent = ctx.pop("reconsent", None)
     if reconsent is None:
         reconsent = getattr(request.state, "reconsent", False)
+    ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -470,6 +472,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except Exception:
             logger.exception("reconsent check failed")
             request.state.reconsent = False
+        # Mailbox nav badge: pairings waiting on this person's approval.
+        actor = current_actor.get()
+        request.state.mailbox_count = 0
+        if ctx.mailbox is not None and actor:
+            try:
+                request.state.mailbox_count = await blocking(
+                    ctx.mailbox.needs_approval_count, actor
+                )
+            except Exception:
+                logger.exception("mailbox approval count failed")
 
     def session_user(request: Request) -> str | None:
         """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
@@ -787,6 +799,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
         request.session.clear()
+        next_url = safe_next(form.get("next"))
+        if next_url != "/":
+            # "Use a different account" on the consent page comes back to that page.
+            return RedirectResponse(f"/login?{urlencode({'next': next_url})}", status_code=303)
         return RedirectResponse("/login", status_code=303)
 
     # ---- pages -----------------------------------------------------------
@@ -818,6 +834,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
                 ),
+                **people_summary(str(current_actor.get() or "")),
             }
 
         data = await blocking(gather)
@@ -834,6 +851,26 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             ),
             **data,
         )
+
+    def people_summary(email: str) -> dict[str, Any]:
+        """Mailbox and Shared with me counts for Overview. Store reads only, no Drive call."""
+        mailbox = None
+        if ctx.mailbox is not None and email:
+            try:
+                mailbox = ctx.mailbox.summary(email)
+            except Exception:
+                logger.exception("mailbox summary failed")
+        shared = None
+        if ctx.shared_with_me is not None and email:
+            try:
+                people = ctx.shared_with_me.overview(email)
+                shared = {
+                    "people": len(people),
+                    "item_count": sum(p.item_count for p in people),
+                }
+            except Exception:
+                logger.exception("shared with me summary failed")
+        return {"mailbox_summary": mailbox, "shared_summary": shared}
 
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
         drive = ctx.owner_drive()
@@ -1529,12 +1566,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return connect_redirect(request)
             request.session["mcp_auth"] = pending.to_dict()
             await remember_pending(request)
+            return_host = urlsplit(pending.redirect_uri).hostname or pending.redirect_uri
+            here = request.url.path + ("?" + request.url.query if request.url.query else "")
             return render(
                 request,
                 "consent.html",
                 client_name=pending.client_name,
                 scope=SCOPE,
                 requested_scope=pending.requested_scope,
+                return_host=return_host,
+                switch_next=here,
+                mailbox_on=ctx.mailbox is not None,
+                shared_on=ctx.shared_with_me is not None,
             )
         finally:
             current_actor.reset(reset)
@@ -1601,16 +1644,47 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             data["shared_items"] = sorted(
                 entries.values(), key=lambda e: e.granted_at, reverse=True
             )
+        for link in data["links"]:
+            link["expires_label"] = mailbox_date(link.get("invite_expires_at"))
+            link["ended_label"] = mailbox_date(link.get("ended_at"))
         return render(request, "bridge.html", **data)
 
     def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
         email = str(request.session.get("owner") or "")
+        if action == "cancel":
+            ctx.mailbox.cancel_invite(email, link_id)
+            return "Invite cancelled. That code no longer works."
+        if action == "dismiss":
+            ctx.mailbox.dismiss(email, link_id)
+            return "Removed from your list."
+        if action == "purge":
+            count = ctx.mailbox.delete_messages(email, link_id)["purged_messages"]
+            return f"Deleted {count} stored message{'' if count == 1 else 's'} for both of you."
         if action == "revoke":
+            peer = next(
+                (
+                    link["peer_email"]
+                    for link in ctx.mailbox.list_links(email)["links"]
+                    if link["link_id"] == link_id
+                ),
+                None,
+            )
             ctx.mailbox.revoke(email, link_id, purge)
-            return "Pairing revoked. Both assistants have lost send and receive."
+            message = (
+                "Mailbox turned off. Neither assistant can send on it, and neither of you can "
+                "read the other's Sharing list through it any more."
+            )
+            if peer and ctx.mailbox.is_linked(email, peer):
+                message += f" You still have another active pairing with {peer}."
+            if purge:
+                return message + " Stored messages were deleted for both of you."
+            return message + (
+                " Messages already delivered stay readable by the person they were sent to "
+                "until they expire."
+            )
         result = ctx.mailbox.decide(email, link_id, action)
         if action == "deny" or result["status"] == "revoked":
-            return "Pairing denied. Neither assistant can send on it."
+            return "Pairing declined. Nothing is shared and no mail can be sent on it."
         if result["status"] == "active":
             return "You approved. The mailbox is on."
         return "You approved. The mailbox stays off until the other person approves."
@@ -1620,7 +1694,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         link_id = request.path_params["link_id"]
         action = request.path_params["action"]
-        if action not in ("approve", "deny", "revoke"):
+        if action not in ("approve", "deny", "revoke", "cancel", "dismiss", "purge"):
             return render(request, "error.html", 404, message="That page is not available.")
         purge = form.get("purge") == "on"
         try:
@@ -1803,6 +1877,17 @@ def shared_href(view: str, source: str, owner: str, item_id: str | None = None) 
     if item_id:
         pairs.append(("id", item_id))
     return f"/shared/{view}?" + urlencode(pairs)
+
+
+def mailbox_date(value: str | None) -> str | None:
+    """`2026-11-27T10:00:00+00:00` as `Nov 27, 2026` (UTC) for Mailbox cards."""
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return f"{when:%b} {when.day}, {when.year}"
 
 
 def attachment_disposition(filename: str) -> str:

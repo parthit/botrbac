@@ -79,7 +79,7 @@ With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wa
 | `download_file(file_id)` | ✓ | ✓ | ✓ |
 | `request_access(description, reason, file_id?)` | ✓ | ✓ | ✓ |
 | `check_access_request(request_id)` | ✓ | ✓ | ✓ |
-| `request_link(invite_code?)` | ✓ | ✓ | ✓ |
+| `request_link(invite_code?, new_invite?)` | ✓ | ✓ | ✓ |
 | `list_links()` | ✓ | ✓ | ✓ |
 | `send_message(link_id, body, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
 | `list_inbox(link_id?, unread_only?, limit?, cursor?)` | ✓ | ✓ | ✓ |
@@ -133,6 +133,15 @@ The same `/mcp` connection can carry short text between two people. Each person 
 3. Each person opens `/bridge` while signed in, checks the other Google account, and chooses **Approve pairing**. One approval leaves the link pending.
 4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person turns the mailbox off on `/bridge`. There is no revoke tool for the assistant.
 
+Invites and pairing states:
+
+- `request_link()` without a code returns your newest invite that nobody has joined and that has not expired, with `reused: true`, instead of minting another code. Pass `new_invite: true` to start a second pairing in parallel. Every result carries `reused` (false for a new invite) and, while nobody has joined, `invite_expires_at`.
+- Joining with a code while you already have an active or pending pairing with that same person returns the error `already_paired` (with that pairing's `link_id`) and leaves the invite open.
+- `list_links` `status` is `awaiting_peer`, `pending_approval`, `active` or `revoked`, plus two values that only describe a dead link: `declined` (someone chose Decline; it behaves exactly like `revoked`) and `expired` (nobody joined the invite within 7 days). A dead link also carries `ended_reason` (`declined`, `turned_off` or `cancelled`), `ended_by` and `ended_at` when they were recorded. Sending on any dead link still returns `link_revoked`. Each link also has `created_by_you`.
+- On `/bridge`, each person sees **Needs your approval**, or **Waiting for &lt;the other person&gt;** once they approved, and whether the other person already approved. An invite nobody joined shows its code, its expiry and **Cancel invite**. Off, declined and expired pairings say who ended them and when, and have **Remove from list** (it only hides the card for you). The **Mailbox** nav item shows how many pairings wait for your approval, and Overview shows pairings, approvals and unread mail.
+- Turning a pairing off stops sending, replying and reading each other's Sharing list through it at once. Mail already delivered stays readable by the person it was sent to until it expires (`list_inbox` and `check_messages` mark it `link_status: "revoked"`; it cannot be replied to), unless someone chooses **Also delete stored messages** when turning off, or **Delete stored messages** afterwards, which deletes it for both people.
+- Mailbox and Shared-with-me tool errors are error results whose `structuredContent` is `{"error": <code>, "message": ..., ...}`. The text content is unchanged (`Error executing tool <name>: <same JSON>`).
+
 `list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
 
 ## Sharing with paired people
@@ -143,7 +152,7 @@ things like a resume that any paired person's assistant may see.
 
 - **Shared with me:** the dashboard's **Shared with me** page shows what paired people share with *you*,
   grouped by person and source. Open folders to any depth, preview or download files, and search names and
-  text across everything shared with you. It uses the same guest checks as the tools below, and the owner's
+  text across everything shared with you. Google Docs and Slides download as `.txt` and Sheets as `.csv`, the same export `read_shared_file` returns. It uses the same guest checks as the tools below, and the owner's
   Activity page shows these reads as `guest:<you> (dashboard)`.
 - **Add or remove:** on **Browse**, choose **Share with paired people** (or **Stop sharing**) next to a file or
   folder. **Sharing** lists what you share and who can currently read it. A folder includes what is inside it.

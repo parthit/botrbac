@@ -3,15 +3,32 @@
 {% block content %}
 <div class="card" style="max-width:640px">
   <h1>Allow {{ client_name }}?</h1>
-  <p><b>{{ client_name }}</b> wants to connect to the files you have shared through this server.</p>
-  <p>On the items you have allowed, it can search, read, create, edit, and rename.
-     It can also move those items to Drive trash. Trash is recoverable for 30 days.</p>
-  <p>Anything you have not allowed is refused by this server, even though your connected Drive is visible to it. The app cannot change who a file is shared with, or permanently delete a file.</p>
-  <p>You can disconnect {{ client_name }} later from the overview page.</p>
+  <p id="consent-account">Signed in as <b>{{ owner }}</b>.</p>
+  <form class="inline" method="post" action="/logout">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="{{ switch_next }}">
+    <button type="submit">Use a different account</button>
+  </form>
+  <p><b>{{ client_name }}</b> wants to act as {{ owner }} on this server. If you allow it, it can:</p>
+  <ul>
+    <li><b>Use the items on your Access list.</b> On those items it can search, read, create, edit and rename,
+      and move them to Drive trash (recoverable for 30 days). Anything not on that list is refused by this server,
+      even though your connected Drive is visible to it. It cannot change who a file is shared with, or permanently delete a file.</li>
+    {% if mailbox_on %}
+    <li><b>Use your Mailbox.</b> It can start or join a pairing with another person (nothing turns on
+      until you both approve on the Mailbox page), and send and read short messages with people you are paired with.</li>
+    {% endif %}
+    {% if shared_on %}
+    <li><b>Read what paired people share with you</b> (Shared with me), read-only. Your own
+      Sharing list is what their assistants can read; this does not change it.</li>
+    {% endif %}
+  </ul>
+  <p>After you choose, you go back to <b>{{ return_host }}</b>.</p>
+  <p class="muted">You can disconnect {{ client_name }} later from the Overview page.</p>
   {% if requested_scope and requested_scope != scope %}
   <details>
     <summary>Technical details</summary>
-    <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server still only grants the items you have allowed.</p>
+    <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server still only grants the items on your Access list.</p>
   </details>
   {% endif %}
   <form method="post" action="/oauth/authorize">
