@@ -179,7 +179,7 @@
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="action" value="remove">
     <input type="hidden" name="app" value="{{ hook.app.id }}">
-    <button type="submit">Remove</button>
+    <div class="actions"><button type="submit">Remove</button></div>
   </form>
   {% endfor %}
   {% if webhook.configured %}
@@ -192,7 +192,7 @@
     {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}
   </p>
   {% if apps %}
-  <form class="inline" method="post" action="/bridge/webhook">
+  <form class="stack" method="post" action="/bridge/webhook">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="action" value="move">
     <label>This belongs to
@@ -200,7 +200,7 @@
         {% for app in apps %}<option value="{{ app.id }}">{{ app_label(app) }}</option>{% endfor %}
       </select>
     </label>
-    <button type="submit">Move</button>
+    <div class="actions"><button type="submit">Move</button></div>
   </form>
   {% endif %}
   {% endif %}
@@ -237,13 +237,13 @@
           <option value="false" {% if webhook.configured and not webhook.enabled %}selected{% endif %}>Paused</option>
         </select>
       </label>
-      <button class="primary" type="submit">Save webhook</button>
+      <div class="actions"><button class="primary" type="submit">Save webhook</button></div>
     </form>
     {% if webhook.configured %}
     <form method="post" action="/bridge/webhook" data-confirm="Remove this webhook? The saved key is deleted and the assistant is no longer pinged when mail arrives.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="remove">
-      <button type="submit">Remove webhook</button>
+      <div class="actions"><button type="submit">Remove webhook</button></div>
     </form>
     {% endif %}
   </details>
