@@ -418,9 +418,7 @@ def create_mcp(
 
     def run_shared(method: str, *args: Any) -> dict[str, Any]:
         if shares is None:
-            raise PayloadToolError(
-                {"error": "not_configured", "message": "Sharing is not set up."}
-            )
+            raise PayloadToolError({"error": "not_configured", "message": "Sharing is not set up."})
         principal = current_principal.get()
         email = principal.email if principal else None
         if not email:
@@ -677,9 +675,14 @@ def build_app(
     else:
         guard = guard_factory(routed, settings, allowlist.mime_map)
     service = DriveService(routed, guard, settings)
-    webhook_hosts = tuple(
-        host.strip().lower() for host in settings.webhook_host_allowlist.split(",") if host.strip()
-    ) or DEFAULT_ALLOWLIST
+    webhook_hosts = (
+        tuple(
+            host.strip().lower()
+            for host in settings.webhook_host_allowlist.split(",")
+            if host.strip()
+        )
+        or DEFAULT_ALLOWLIST
+    )
     mailbox = Mailbox(
         kv,
         base_url=settings.app_base_url or "",

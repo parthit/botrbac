@@ -771,9 +771,7 @@ class Mailbox:
         self.store.set(idem_key, msg_id, ex=MESSAGE_TTL)
         return _sent(message, replay=already_queued)
 
-    def _release_pending(
-        self, idem_key: str | None, pending: str, peer: str, msg_id: str
-    ) -> None:
+    def _release_pending(self, idem_key: str | None, pending: str, peer: str, msg_id: str) -> None:
         if idem_key and self.store.get(idem_key) == pending and not self._queued(peer, msg_id):
             self.store.delete(idem_key)
 

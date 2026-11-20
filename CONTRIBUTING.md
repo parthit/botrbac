@@ -17,9 +17,14 @@ Fill in `.env` on your own machine. It is git-ignored. Do not commit secrets, to
 ```bash
 uv run pytest
 uv run ruff check .
+uv run ruff format --check .
 ```
 
 The suite uses an in-memory fake Drive. No network is required.
+
+CI runs these three on every pull request and on `main` (`.github/workflows/ci.yml`).
+Run ruff through `uv run`, not a globally installed copy: CI uses the version locked in
+`uv.lock`, and other versions format some lines differently.
 
 After you change dependencies, regenerate the Vercel requirements file:
 

@@ -42,9 +42,7 @@ def minimal_pdf(*pages: str) -> bytes:
     out += b"0000000000 65535 f \n"
     for offset in offsets[1:]:
         out += f"{offset:010d} 00000 n \n".encode()
-    out += (
-        f"trailer<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
-    )
+    out += f"trailer<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
     return bytes(out)
 
 
@@ -63,9 +61,7 @@ def minimal_docx(*paragraphs: str, header: str = "") -> bytes:
     document_type = (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
     )
-    header_type = (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
-    )
+    header_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
     table = "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
     parts = {
         "[Content_Types].xml": f"""<?xml version="1.0" encoding="UTF-8"?>

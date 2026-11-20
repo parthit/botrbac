@@ -428,14 +428,7 @@ def font_asset(request: Request) -> Response:
 
 
 def robots(_: Request) -> Response:
-    body = (
-        "User-agent: *\n"
-        "Allow: /$\n"
-        "Allow: /login\n"
-        "Allow: /privacy\n"
-        "Allow: /terms\n"
-        "Disallow: /\n"
-    )
+    body = "User-agent: *\nAllow: /$\nAllow: /login\nAllow: /privacy\nAllow: /terms\nDisallow: /\n"
     return Response(body, media_type="text/plain; charset=utf-8")
 
 
@@ -949,9 +942,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "drive_connected": ctx.drive_connected(),
                 "connections": ctx.connection_rows(),
                 "allow_count": len(entries),
-                "grants": (
-                    ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
-                ),
+                "grants": (ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []),
                 **people_summary(str(current_actor.get() or "")),
             }
 
@@ -1203,8 +1194,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "current_granted": current is not None and str(current["id"]) in entries,
             "is_root": current is not None
             and (
-                str(current["id"]) == root_id
-                or (root_id is None and str(current["id"]) == "root")
+                str(current["id"]) == root_id or (root_id is None and str(current["id"]) == "root")
             ),
             "next_token": next_token,
             "drive_error": False,
