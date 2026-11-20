@@ -104,8 +104,16 @@ def test_nested_folders_breadcrumbs_open_and_download(pair) -> None:
     assert raw.headers["content-disposition"].startswith("attachment;")
     assert raw.headers["cache-control"] == "no-store"
 
-    # A Google Doc has no raw bytes.
-    assert eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-deep-doc")).status_code == 404
+    # A Google Doc has no raw bytes. Download gives the same text export read_shared_file
+    # returns, as an attachment with the same safety headers.
+    assert "Download as .txt" in doc.text
+    exported = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-deep-doc"))
+    assert exported.status_code == 200
+    assert exported.content == b"roadmap secret"
+    assert exported.headers["content-type"] == "application/octet-stream"
+    assert exported.headers["content-disposition"].startswith("attachment;")
+    assert "Deep roadmap.txt" in exported.headers["content-disposition"]
+    assert exported.headers["cache-control"] == "no-store"
 
     # Opening a folder goes to the folder view.
     r = open_item(eve, "proj-sub")
@@ -313,8 +321,8 @@ def test_failed_downloads_are_audited_and_explained(pair, memstore) -> None:
     _pair(app, OWNER_EMAIL, EVE)
     assert post(owner, "/sharing/add", file_id="proj").status_code == 303
 
-    doc = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-deep-doc"))
-    assert doc.status_code == 404 and "no file to download" in doc.text
+    shortcut = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-shortcut"))
+    assert shortcut.status_code == 404 and "no file to download" in shortcut.text
     folder = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-sub"))
     assert folder.status_code == 400
     assert "_shared_" not in folder.text and "open it from the list" in folder.text
@@ -325,7 +333,7 @@ def test_failed_downloads_are_audited_and_explained(pair, memstore) -> None:
         for r in log
         if r.get("role") == "guest" and r["decision"] == "error"
     }
-    assert ("download_shared_file", "proj-deep-doc", "no_bytes") in errors
+    assert ("download_shared_file", "proj-shortcut", "no_bytes") in errors
     assert ("download_shared_file", "proj-sub", "invalid_input") in errors
 
 

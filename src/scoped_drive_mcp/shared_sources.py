@@ -42,6 +42,11 @@ from .external import (
     normalize_email,
 )
 from .scope import ForbiddenError, OutOfScopeError
+from .service import EXPORT_FORMATS
+
+# Google Docs, Sheets and Slides have no file bytes. "Download" on the dashboard gives the
+# same export read_shared_file returns (text for Docs and Slides, CSV for Sheets).
+EXPORT_EXTENSIONS = {"text/plain": ".txt", "text/csv": ".csv"}
 
 # How many containers above the current one the breadcrumb walk may fetch.
 MAX_PATH_DEPTH = 20
@@ -86,6 +91,7 @@ class SharedDocument:
     note: str | None
     truncated: bool
     downloadable: bool
+    download_label: str = "Download"
 
 
 @dataclass(frozen=True)
@@ -230,7 +236,7 @@ def drive_node(meta: dict[str, Any]) -> SharedNode:
         is_container=mime == FOLDER_MIME,
         modified=meta.get("modifiedTime"),
         size=_int(meta.get("size")),
-        can_download=_downloadable(mime),
+        can_download=_can_download(mime),
     )
 
 
@@ -239,7 +245,23 @@ def _sorted(nodes: list[SharedNode]) -> list[SharedNode]:
 
 
 def _downloadable(mime: str) -> bool:
+    """The item has file bytes of its own."""
     return mime not in (FOLDER_MIME, SHORTCUT_MIME) and not mime.startswith(GOOGLE_APPS_PREFIX)
+
+
+def _export_extension(mime: str) -> str | None:
+    """`.txt` or `.csv` for a Google file the dashboard downloads as an export."""
+    export = EXPORT_FORMATS.get(mime)
+    return EXPORT_EXTENSIONS.get(export) if export else None
+
+
+def _can_download(mime: str) -> bool:
+    return _downloadable(mime) or _export_extension(mime) is not None
+
+
+def _download_label(mime: str) -> str:
+    extension = _export_extension(mime)
+    return f"Download as {extension}" if extension else "Download"
 
 
 def _person_note(result: dict[str, Any], mime: str, owner: str) -> str | None:
@@ -279,7 +301,7 @@ class DriveSharedSource:
                     name=e.name,
                     mime_type=e.mime_type,
                     is_container=e.mime_type == FOLDER_MIME,
-                    can_download=_downloadable(e.mime_type),
+                    can_download=_can_download(e.mime_type),
                 )
                 for e in entries.values()
             ]
@@ -359,7 +381,8 @@ class DriveSharedSource:
                 text=content if isinstance(content, str) else None,
                 note=_person_note(result, mime, them),
                 truncated=bool(result.get("truncated")),
-                downloadable=_downloadable(mime),
+                downloadable=_can_download(mime),
+                download_label=_download_label(mime),
             )
 
         return self.shares.guest_call(
@@ -368,8 +391,13 @@ class DriveSharedSource:
 
     def download(self, caller: str, owner: str, item_id: str) -> SharedDownload:
         def run() -> SharedDownload:
-            result = self.shares.service.download_file(item_id)
+            service = self.shares.service
+            result = service.download_file(item_id)
             raw = result.get("content_base64")
+            meta = result.get("file") or {}
+            extension = _export_extension(str(meta.get("mimeType") or ""))
+            if raw is None and extension is not None:
+                return self._export(item_id, meta, extension)
             if raw is None:
                 raise SharedAccessError(
                     "no_bytes", "This item has no file to download. Open it to read it instead."
@@ -384,6 +412,20 @@ class DriveSharedSource:
         return self.shares.guest_call(
             caller, owner, "download_shared_file", item_id, run, via=VIA_DASHBOARD
         )
+
+    def _export(self, item_id: str, meta: dict[str, Any], extension: str) -> SharedDownload:
+        """A Google Doc, Sheet or Slides file, exported exactly as read_shared_file reads it
+        (same size caps). Runs inside the caller's guest call."""
+        result = self.shares.service.read_file(item_id)
+        content = result.get("content")
+        if not isinstance(content, str):
+            raise SharedAccessError(
+                "no_bytes", "This file could not be exported. Open it to read it instead."
+            )
+        name = str(meta.get("name") or "download")
+        if not name.lower().endswith(extension):
+            name += extension
+        return SharedDownload(name, content.encode("utf-8"), bool(result.get("truncated")))
 
     def search(self, caller: str, owner: str, query: str, limit: int) -> builtins.list[SharedHit]:
         """Names and full text, plus shared folders by name, run as the owner's guest."""

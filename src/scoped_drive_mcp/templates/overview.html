@@ -29,6 +29,28 @@
     <span class="muted">Signed in as {{ owner }}</span>
     <a href="/connect">Manage</a>
   </div>
+  {% if mailbox_summary %}
+  <div class="card stat" id="mailbox-summary">
+    <span class="muted">Mailbox</span>
+    <b>{{ mailbox_summary.active }}</b>
+    <span class="muted">active pairing{{ "" if mailbox_summary.active == 1 else "s" }}</span>
+    {% if mailbox_summary.needs_approval %}<span class="pill pending"><span aria-hidden="true">●</span> {{ mailbox_summary.needs_approval }} need{{ "s" if mailbox_summary.needs_approval == 1 }} your approval</span>{% endif %}
+    {% if mailbox_summary.unread %}<span class="muted">{{ mailbox_summary.unread }} unread message{{ "" if mailbox_summary.unread == 1 else "s" }} waiting for your assistant</span>{% endif %}
+    <a href="/bridge">{{ "Review" if mailbox_summary.needs_approval else "Manage" }}</a>
+  </div>
+  {% endif %}
+  {% if shared_summary %}
+  <div class="card stat" id="shared-summary">
+    <span class="muted">Shared with me</span>
+    <b>{{ shared_summary.item_count }}</b>
+    {% if shared_summary.item_count %}
+    <span class="muted">item{{ "" if shared_summary.item_count == 1 else "s" }} from {{ shared_summary.people }} {{ "person" if shared_summary.people == 1 else "people" }}</span>
+    {% else %}
+    <span class="muted">Nothing shared with you yet</span>
+    {% endif %}
+    <a href="/shared">Open</a>
+  </div>
+  {% endif %}
 </div>
 
 <h2>Connect an assistant</h2>

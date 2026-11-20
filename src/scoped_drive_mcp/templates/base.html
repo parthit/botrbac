@@ -27,7 +27,7 @@
       <a href="/shared" class="{{ 'on' if nav.startswith('/shared') }}">Shared with me</a>
       <a href="/requests" class="{{ 'on' if nav.startswith('/requests') }}">Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
       <a href="/activity" class="{{ 'on' if nav == '/activity' }}">Activity</a>
-      <a href="/bridge" class="{{ 'on' if nav.startswith('/bridge') }}">Mailbox</a>
+      <a href="/bridge" class="{{ 'on' if nav.startswith('/bridge') }}">Mailbox{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
       <details class="account">
         <summary aria-label="Account menu for {{ owner }}"><span class="avatar" aria-hidden="true">{{ owner[:1] | upper }}</span><span class="summary-email">{{ owner }}</span></summary>
         <div class="account-menu">
