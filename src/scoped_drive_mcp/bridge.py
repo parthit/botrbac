@@ -655,12 +655,12 @@ class Mailbox:
         idempotency_key: str | None,
     ) -> dict[str, Any]:
         key = (idempotency_key or "").strip() or None
-        if key and not _TOKEN_SHAPE.match(key):
+        if key and not _TOKEN_SHAPE.fullmatch(key):
             raise MailboxError(
                 "invalid_input",
                 "idempotency_key must be 1–80 letters, numbers, underscores, or hyphens.",
             )
-        if thread_id and not _TOKEN_SHAPE.match(thread_id):
+        if thread_id and not _TOKEN_SHAPE.fullmatch(thread_id):
             raise MailboxError(
                 "invalid_input",
                 "thread_id must be 1–80 letters, numbers, underscores, or hyphens.",
@@ -803,7 +803,11 @@ class Mailbox:
         token = self._inbox_token(message, read=False)
         remaining = max(int(self._stamp(message["expires_at"]) - self._now()), 1)
         self.store.set(f"bridge:row:{message['msg_id']}", token, ex=remaining)
-        self._push_once(f"bridge:inbox:{message['to']}", message["msg_id"], token)
+        inbox_key = f"bridge:inbox:{message['to']}"
+        # Reading the inbox prunes it too, but a recipient who never reads would
+        # otherwise keep a row for every message ever sent to them.
+        self.store.ldrop_expired(inbox_key, int(self._now()))
+        self._push_once(inbox_key, message["msg_id"], token)
         self._push_once(f"bridge:linkmsgs:{link_id}", message["msg_id"], message["msg_id"])
         thread_key = f"bridge:threadmsgs:{link_id}:{thread}"
         self._push_once(thread_key, message["msg_id"], message["msg_id"])

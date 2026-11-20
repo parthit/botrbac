@@ -37,3 +37,9 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+      # Vercel installs from requirements.txt, not uv.lock. Fail if they drifted.
+      - name: requirements.txt matches uv.lock
+        run: |
+          uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
+          git diff --exit-code requirements.txt

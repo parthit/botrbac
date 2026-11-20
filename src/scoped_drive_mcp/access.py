@@ -192,6 +192,9 @@ class AccessRequests:
         self.store.lpush(INDEX_KEY, req.id)
         self.store.ltrim(INDEX_KEY, 0, INDEX_MAX - 1)
         self.store.lpush(PENDING_INDEX, req.id)
+        # Same cap as the history list, so the nav badge never counts (and re-reads on
+        # every page) more requests than the Requests page can show.
+        self.store.ltrim(PENDING_INDEX, 0, INDEX_MAX - 1)
         return req, True
 
     def decide(

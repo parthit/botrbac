@@ -17,6 +17,8 @@ Decision = Literal["allow", "deny", "error"]
 Sink = Callable[[dict[str, Any]], None]
 
 _sinks: list[Sink] = []
+_MAX_ID = 200
+_MAX_REASON = 300
 
 
 def set_sinks(sinks: Iterable[Sink]) -> None:
@@ -54,9 +56,11 @@ def audit(
         "role": role,
         "tool": tool,
     }
-    record.update({k: v for k, v in ids.items() if v is not None})
+    # Ids come straight from tool arguments. Cap them so a caller cannot write
+    # arbitrarily large rows into the log (a guest's calls land on the owner's log).
+    record.update({k: v[:_MAX_ID] for k, v in ids.items() if v is not None})
     record["decision"] = decision
-    record["reason"] = reason
+    record["reason"] = reason[:_MAX_REASON]
     _emit(record)
 
 
