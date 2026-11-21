@@ -5,10 +5,11 @@ import json
 
 import pytest
 
-from scoped_drive_mcp.bridge import Mailbox, MailboxError
+from scoped_drive_mcp.bridge import Mailbox, MailboxError, as_assistant
 from scoped_drive_mcp.store import MemoryStore
 from scoped_drive_mcp.wake import WakeSettings, _public
 from tests.conftest import OWNER_EMAIL
+from tests.mail import READER, SENDER, cross_pair, legacy_peer_mail, self_pair
 
 EVE = "eve@example.com"
 KEK = base64.b64encode(b"k" * 32).decode()
@@ -37,30 +38,41 @@ def _box(posts: list[dict[str, str]], status: int = 200) -> Mailbox:
     )
 
 
+# Mail goes from SENDER to READER, two assistants of OWNER_EMAIL. READER's wake-up lives
+# in its own app slot, which is the only one mail to it wakes.
+APP = READER.grant_id
+
+
 def _pair(box: Mailbox) -> str:
-    created = box.request_link(OWNER_EMAIL)
-    box.request_link(EVE, created["invite_code"])
-    box.decide(OWNER_EMAIL, created["link_id"], "approve")
-    box.decide(EVE, created["link_id"], "approve")
-    return created["link_id"]
+    return self_pair(box)
+
+
+def _check_reader(box: Mailbox) -> dict:
+    with as_assistant(READER):
+        return box.check_messages(OWNER_EMAIL)
+
+
+def _send(box: Mailbox, link_id: str, body: str, **kw):
+    with as_assistant(SENDER):
+        return box.send_message(OWNER_EMAIL, link_id, body, **kw)
 
 
 def test_ping_has_ids_and_not_the_message() -> None:
     posts: list[dict[str, str]] = []
     box = _box(posts)
     link_id = _pair(box)
-    saved = box.set_webhook(EVE, URL, sender_key=SECRET)
+    saved = box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
     assert saved["secret_hint"] == SECRET[-4:]
     assert "ciphertext" not in saved
-    sent = box.send_message(OWNER_EMAIL, link_id, "Dinner is at 7.")
+    sent = _send(box, link_id, "Dinner is at 7.")
     assert posts[0]["body"].find("Dinner is at 7.") == -1
     body = json.loads(posts[0]["body"])
     assert body["msg_id"] == sent["msg_id"]
     assert body["link_id"] == link_id
     assert posts[0]["authorization"] == f"Bearer {SECRET}"
     assert "x-automation-key" not in posts[0]
-    replay = box.send_message(OWNER_EMAIL, link_id, "Dinner is at 7.", idempotency_key="same")
-    box.send_message(OWNER_EMAIL, link_id, "Dinner is at 7.", idempotency_key="same")
+    replay = _send(box, link_id, "Dinner is at 7.", idempotency_key="same")
+    _send(box, link_id, "Dinner is at 7.", idempotency_key="same")
     assert replay["idempotent_replay"] is False
     assert len(posts) == 2
 
@@ -69,9 +81,9 @@ def test_idempotent_replay_does_not_ping_twice() -> None:
     posts: list[dict[str, str]] = []
     box = _box(posts)
     link_id = _pair(box)
-    box.set_webhook(EVE, URL, sender_key=SECRET)
-    box.send_message(OWNER_EMAIL, link_id, "once", idempotency_key="k1")
-    box.send_message(OWNER_EMAIL, link_id, "once", idempotency_key="k1")
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    _send(box, link_id, "once", idempotency_key="k1")
+    _send(box, link_id, "once", idempotency_key="k1")
     assert len(posts) == 1
 
 
@@ -100,7 +112,7 @@ def test_a_failed_ping_does_not_restore_an_old_webhook() -> None:
 
     def rotate_then_fail(request: dict[str, str]) -> int:
         posts.append(request)
-        box.set_webhook(EVE, URL, sender_key="rotated-key-1234")
+        box.set_webhook(OWNER_EMAIL, URL, sender_key="rotated-key-1234", app=APP)
         raise ValueError("http_500")
 
     box.wake = WakeSettings(
@@ -111,9 +123,9 @@ def test_a_failed_ping_does_not_restore_an_old_webhook() -> None:
         poster=rotate_then_fail,
     )
     link_id = _pair(box)
-    box.set_webhook(EVE, URL, sender_key=SECRET)
-    box.send_message(OWNER_EMAIL, link_id, "during rotate")
-    saved = box.get_webhook(EVE)
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    _send(box, link_id, "during rotate")
+    saved = box.get_webhook(OWNER_EMAIL, APP)
     assert saved["secret_hint"] == "1234"
     assert saved["last_error"] is None
 
@@ -141,23 +153,23 @@ def test_a_successful_ping_clears_the_previous_error() -> None:
         ),
     )
     link_id = _pair(box)
-    box.set_webhook(EVE, URL, sender_key=SECRET)
-    box.send_message(OWNER_EMAIL, link_id, "first")
-    assert box.get_webhook(EVE)["last_error"] == "http_status"
-    box.send_message(OWNER_EMAIL, link_id, "second")
-    assert box.get_webhook(EVE)["last_error"] is None
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    _send(box, link_id, "first")
+    assert box.get_webhook(OWNER_EMAIL, APP)["last_error"] == "http_status"
+    _send(box, link_id, "second")
+    assert box.get_webhook(OWNER_EMAIL, APP)["last_error"] is None
 
 
 def test_disabled_webhook_does_not_call_out() -> None:
     store = MemoryStore(clock=lambda: 1_700_000_000.0)
     box = Mailbox(store, base_url="https://drive-test.example.com", clock=store._clock)
     link_id = _pair(box)
-    assert box.get_webhook(EVE)["available"] is False
+    assert box.get_webhook(OWNER_EMAIL, APP)["available"] is False
     with pytest.raises(MailboxError) as disabled:
-        box.set_webhook(EVE, URL, sender_key=SECRET)
+        box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
     assert disabled.value.code == "webhook_disabled"
-    box.send_message(OWNER_EMAIL, link_id, "still stored")
-    assert box.check_messages(EVE)["unread_count"] == 1
+    _send(box, link_id, "still stored")
+    assert _check_reader(box)["unread_count"] == 1
 
 
 def test_public_address_helper_rejects_mapped_loopback() -> None:
@@ -192,9 +204,11 @@ def test_claude_routine_ping_has_anthropic_headers_and_ids_in_text() -> None:
     posts: list[dict[str, str]] = []
     box = _claude_box(posts)
     link_id = _pair(box)
-    saved = box.set_webhook(EVE, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine")
+    saved = box.set_webhook(
+        OWNER_EMAIL, CLAUDE_URL, sender_key=CLAUDE_KEY, auth_scheme="claude_routine", app=APP
+    )
     assert saved["auth_scheme"] == "claude_routine"
-    sent = box.send_message(OWNER_EMAIL, link_id, "Dinner is at 7.")
+    sent = _send(box, link_id, "Dinner is at 7.")
     request = posts[0]
     assert request["hostname"] == "api.anthropic.com"
     assert request["path"] == "/v1/claude_code/routines/trig_01ABCdef/fire"
@@ -269,7 +283,26 @@ def test_any_2xx_counts_as_delivered(status: int, error: str | None) -> None:
     posts: list[dict[str, str]] = []
     box = _box(posts, status=status)
     link_id = _pair(box)
-    box.set_webhook(EVE, URL, sender_key=SECRET)
-    box.send_message(OWNER_EMAIL, link_id, "hello")
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    _send(box, link_id, "hello")
     assert len(posts) == 1
-    assert box.get_webhook(EVE).get("last_error") == error
+    assert box.get_webhook(OWNER_EMAIL, APP).get("last_error") == error
+
+
+def test_no_wake_fires_for_a_pairing_between_two_people() -> None:
+    posts: list[dict[str, str]] = []
+    box = _box(posts)
+    link_id = cross_pair(box, OWNER_EMAIL, EVE)
+    # Every slot that could be woken: the account-wide one and an app's own.
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app="")
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    box.set_webhook(EVE, URL, sender_key=SECRET)
+    with pytest.raises(MailboxError) as off:
+        box.send_message(EVE, link_id, "wake up")
+    assert off.value.code == "peer_mail_off"
+    assert posts == []
+    # Mail addressed to the whole account (the only way another person's mail was
+    # addressed) has no hook to wake, even if an old message is in the store.
+    assert box._wake_targets(OWNER_EMAIL) == []
+    legacy_peer_mail(box, link_id, EVE, OWNER_EMAIL, "old")
+    assert posts == []

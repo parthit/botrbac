@@ -1,15 +1,17 @@
-"""Mailbox pairing cards, invite reuse, declined vs turned off, delivered mail after
-turning off, the dashboard badge and summary, the consent page, and structured errors."""
+"""Mailbox pairing cards, invite reuse, declined vs turned off, delivered mail between
+your own assistants after turning off, the dashboard badge and summary, the consent page,
+and structured errors."""
 
 import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from scoped_drive_mcp.bridge import Mailbox, MailboxError
+from scoped_drive_mcp.bridge import Mailbox, MailboxError, as_assistant
 from scoped_drive_mcp.store import MemoryStore
 from tests.conftest import EVE, OWNER_EMAIL, FakeClock
 from tests.dash import client, csrf, login, mcp_call
+from tests.mail import READER, SENDER, legacy_peer_mail, self_pair
 from tests.test_mcp_oauth import CURSOR, auth_params, register
 
 CAROL = "carol@example.com"
@@ -116,10 +118,13 @@ def test_declined_and_turned_off_are_told_apart(clock: FakeClock) -> None:
         assert card["ended_at"]
     assert f"{EVE} declined" in _card(box, OWNER_EMAIL, created["link_id"])["next_step"]
     assert _card(box, EVE, created["link_id"])["next_step"].startswith("You declined")
-    # Sending is refused exactly as before.
+    # A pairing between two people never carries mail, declined or not.
     with pytest.raises(MailboxError) as refused:
         box.send_message(OWNER_EMAIL, created["link_id"], "hi")
-    assert refused.value.code == "link_revoked"
+    assert refused.value.code == "peer_mail_off"
+    assert (
+        "Nothing is shared through it" in _card(box, OWNER_EMAIL, created["link_id"])["next_step"]
+    )
     with pytest.raises(MailboxError):
         box.decide(OWNER_EMAIL, created["link_id"], "approve")
 
@@ -171,57 +176,68 @@ def test_dismiss_only_removes_dead_cards_for_that_person(clock: FakeClock) -> No
 
 def test_delivered_mail_stays_readable_after_turning_off(clock: FakeClock) -> None:
     box = _box(clock)
-    link_id = _pair(box)
-    sent = box.send_message(EVE, link_id, "reply you have not read yet")
-    box.revoke(EVE, link_id)
+    link_id = self_pair(box)
+    with as_assistant(SENDER):
+        sent = box.send_message(OWNER_EMAIL, link_id, "reply you have not read yet")
+    box.revoke(OWNER_EMAIL, link_id)
+    card = _card(box, OWNER_EMAIL, link_id)
+    assert card["mailbox"] is True
+    assert "Mail already delivered stays readable" in card["next_step"]
 
-    checked = box.check_messages(OWNER_EMAIL)
-    assert checked["unread_count"] == 1
-    assert checked["latest_preview"][0]["link_status"] == "revoked"
-    inbox = box.list_inbox(OWNER_EMAIL)
-    assert [m["msg_id"] for m in inbox["messages"]] == [sent["msg_id"]]
-    assert inbox["messages"][0]["link_status"] == "revoked"
-    assert box.list_inbox(OWNER_EMAIL, link_id=link_id)["messages"][0]["msg_id"] == sent["msg_id"]
-    assert box.mark_read(OWNER_EMAIL, [sent["msg_id"]])["marked"] == 1
-    assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
-    with pytest.raises(MailboxError) as reply:
-        box.reply(OWNER_EMAIL, "thanks", msg_id=sent["msg_id"])
-    assert reply.value.code == "link_revoked"
+    with as_assistant(READER):
+        checked = box.check_messages(OWNER_EMAIL)
+        assert checked["unread_count"] == 1
+        assert checked["latest_preview"][0]["link_status"] == "revoked"
+        inbox = box.list_inbox(OWNER_EMAIL)
+        assert [m["msg_id"] for m in inbox["messages"]] == [sent["msg_id"]]
+        assert inbox["messages"][0]["link_status"] == "revoked"
+        by_link = box.list_inbox(OWNER_EMAIL, link_id=link_id)["messages"]
+        assert by_link[0]["msg_id"] == sent["msg_id"]
+        assert box.mark_read(OWNER_EMAIL, [sent["msg_id"]])["marked"] == 1
+        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
+        with pytest.raises(MailboxError) as reply:
+            box.reply(OWNER_EMAIL, "thanks", msg_id=sent["msg_id"])
+        assert reply.value.code == "link_revoked"
     # A third person still sees nothing.
     with pytest.raises(MailboxError):
         box.list_inbox(CAROL, link_id=link_id)
 
     # Until it expires.
     clock.advance(15 * DAY)
-    assert box.list_inbox(OWNER_EMAIL)["messages"] == []
+    with as_assistant(READER):
+        assert box.list_inbox(OWNER_EMAIL)["messages"] == []
 
 
 def test_delete_messages_only_on_a_pairing_that_is_off(clock: FakeClock) -> None:
     box = _box(clock)
-    link_id = _pair(box)
-    box.send_message(EVE, link_id, "hello")
+    link_id = self_pair(box)
+    with as_assistant(SENDER):
+        box.send_message(OWNER_EMAIL, link_id, "hello")
     with pytest.raises(MailboxError) as on:
         box.delete_messages(OWNER_EMAIL, link_id)
     assert on.value.code == "invalid_state"
     box.revoke(OWNER_EMAIL, link_id)
     assert box.delete_messages(OWNER_EMAIL, link_id)["purged_messages"] == 1
-    assert box.list_inbox(OWNER_EMAIL)["messages"] == []
+    with as_assistant(READER):
+        assert box.list_inbox(OWNER_EMAIL)["messages"] == []
 
 
 def test_summary_counts(clock: FakeClock) -> None:
     box = _box(clock)
     link_id = _pair(box)
-    box.send_message(EVE, link_id, "one")
+    self_pair(box)
+    # Mail between two people from before it was turned off is not counted.
+    legacy_peer_mail(box, link_id, EVE, OWNER_EMAIL, "one")
     created = box.request_link(CAROL)
     box.request_link(OWNER_EMAIL, created["invite_code"])
     assert box.needs_approval_count(OWNER_EMAIL) == 1
     assert box.needs_approval_count(CAROL) == 1
     assert box.summary(OWNER_EMAIL) == {
         "needs_approval": 1,
-        "active": 1,
+        "active": 2,
         "people": 1,
-        "own": 0,
-        "unread": 1,
+        "own": 1,
+        "unread": 0,
     }
     box.decide(OWNER_EMAIL, created["link_id"], "approve")
     assert box.needs_approval_count(OWNER_EMAIL) == 0
@@ -265,7 +281,7 @@ def test_cards_say_who_is_waiting_on_whom(p2_app) -> None:
     assert "waiting for your approval" not in owner_page
 
 
-def test_turning_off_says_sharing_stops_and_mail_stays(p2_app) -> None:
+def test_turning_off_a_pairing_with_a_person_stops_sharing(p2_app) -> None:
     box = p2_app.state.mailbox
     owner = _signed_in(p2_app, "owner-code")
     eve = _signed_in(p2_app, "eve-code")
@@ -273,30 +289,30 @@ def test_turning_off_says_sharing_stops_and_mail_stays(p2_app) -> None:
     box.request_link(EVE, created["invite_code"])
     box.decide(OWNER_EMAIL, created["link_id"], "approve")
     box.decide(EVE, created["link_id"], "approve")
-    sent = box.send_message(EVE, created["link_id"], "unread reply")
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
 
     page = owner.get("/sharing?tab=people").text
     assert "what the other shares" in page and "Disconnect from" in page
+    assert "never message each other" in page
+    assert "mailbox is on" not in page.lower()
+    # No message options on a pairing with another person.
+    assert "Also delete stored messages" not in page
+    assert 'name="purge"' not in page
     off = eve.post(
         f"/bridge/{created['link_id']}/revoke", data={"csrf": csrf(eve, "/sharing?tab=people")}
     )
     assert off.status_code == 303
     flashed = eve.get("/sharing?tab=people").text
     assert "Sharing list" in flashed
-    assert "stay readable" in flashed
-    assert box.list_inbox(OWNER_EMAIL)["messages"][0]["msg_id"] == sent["msg_id"]
+    assert box.active_peers(OWNER_EMAIL) == []
 
     owner_page = owner.get("/sharing?tab=people").text
     assert f"Disconnected by {EVE} on " in owner_page
+    assert "Neither of you can read what the other shares through it." in owner_page
     assert "To pair again, ask your assistant for a new invite code" in owner_page
     assert "Remove from list" in owner_page
-
-    purge = owner.post(
-        f"/bridge/{created['link_id']}/purge", data={"csrf": csrf(owner, "/sharing?tab=people")}
-    )
-    assert purge.status_code == 303
-    assert "Deleted 1 stored message" in owner.get("/sharing?tab=people").text
-    assert box.list_inbox(OWNER_EMAIL)["messages"] == []
+    assert "Delete stored messages" not in owner_page
+    assert f"/bridge/{created['link_id']}/purge" not in owner_page
 
     dismiss = owner.post(
         f"/bridge/{created['link_id']}/dismiss", data={"csrf": csrf(owner, "/sharing?tab=people")}
@@ -403,11 +419,12 @@ def test_mailbox_dates_are_local_time_elements() -> None:
 
 def test_stale_decline_on_an_active_pairing_reads_as_turned_off(clock: FakeClock) -> None:
     """Decline from a page opened before the pairing turned on must not claim it never
-    turned on: mail may already have moved."""
+    turned on: shared files may already have been read."""
     box = _box(clock)
     link_id = _pair(box, OWNER_EMAIL, CAROL)
-    box.send_message(OWNER_EMAIL, link_id, "hello")
+    assert box.active_peers(OWNER_EMAIL) == [CAROL]
     box.decide(CAROL, link_id, "deny")
+    assert box.active_peers(OWNER_EMAIL) == []
     card = _card(box, OWNER_EMAIL, link_id)
     assert card["status"] == "revoked"
     assert card["ended_reason"] == "turned_off"

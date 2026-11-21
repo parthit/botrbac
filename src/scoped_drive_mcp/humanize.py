@@ -102,8 +102,8 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "trash_file": ("moved {item} to the trash", "move {item} to the trash"),
     "request_access": ("asked for access to {item}", "ask for access to {item}"),
     "check_access_request": ("checked on an access request", "check on an access request"),
-    "request_link": ("started a mailbox pairing", "start a mailbox pairing"),
-    "list_links": ("checked its mailbox pairings", "check its mailbox pairings"),
+    "request_link": ("started a pairing", "start a pairing"),
+    "list_links": ("checked its pairings", "check its pairings"),
     "send_message": ("sent a mailbox message", "send a mailbox message"),
     "reply": ("replied to a mailbox message", "reply to a mailbox message"),
     "list_inbox": ("read its mailbox", "read its mailbox"),
@@ -215,6 +215,7 @@ def _deny_why(reason: str, guest: bool) -> str:
 _REFUSALS = {
     "link_revoked": "that pairing is off",
     "link_pending": "that pairing isn’t on yet",
+    "peer_mail_off": "assistants of different people can’t message each other",
     "link_expired": "that invite has expired",
     "not_linked": "you aren’t paired with that person",
     "not_paired": "you aren’t paired with that person",

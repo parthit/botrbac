@@ -2137,15 +2137,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if links is None:
             links = box.list_links(email)["links"] if box is not None else []
         # Who each assistant talks to: your own assistants it is paired with (a grant
-        # can be in several pairings), and the people whose mail it answers.
+        # can be in several pairings). Other people's assistants never reach yours.
         names = {g.id: f"{g.client_name} …{g.id[-5:]}" for g in grants}
         mates: dict[str, list[dict[str, Any]]] = {}
-        people: list[str] = []
         for link in links:
             status = link["status"]
             if not link.get("same_account"):
-                if status == "active" and link.get("peer_email"):
-                    people.append(str(link["peer_email"]))
                 continue
             if status not in ("active", "pending_approval"):
                 continue
@@ -2157,7 +2154,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                         "pending": status == "pending_approval",
                     }
                 )
-        people = sorted(set(people))
         wake_on = box is not None and bool(box.get_webhook(email, "").get("available"))
         # One row per (pairing, assistant): an assistant in two pairings has two senders.
         missing_rows = box.missing_wakeups(email) if wake_on else []
@@ -2175,14 +2171,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
                 }
             )
-        primary = box.get_primary(email) if box is not None else None
         return {
             "assistants": rows,
             "wake_on": wake_on,
+            # Left from when mail from other people existed. It is never woken now; the
+            # page only offers to move it to an assistant or remove it.
             "account_hook": box.get_webhook(email, "") if wake_on else None,
-            "primary": primary if primary in {g.id for g in grants} else None,
             "missing_wakeups": missing_rows,
-            "people": people,
         }
 
     async def bridge_page(request: Request) -> Response:
@@ -2275,19 +2270,27 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ),
                 None,
             )
+            same = next(
+                (
+                    link.get("same_account", False)
+                    for link in ctx.mailbox.list_links(email)["links"]
+                    if link["link_id"] == link_id
+                ),
+                False,
+            )
             ctx.mailbox.revoke(email, link_id, purge)
-            message = (
-                "Mailbox turned off. Neither assistant can send on it, and neither of you can "
-                "read the other's Sharing list through it any more."
-            )
-            if peer and ctx.mailbox.is_linked(email, peer):
-                message += f" You still have another active pairing with {peer}."
+            if not same:
+                message = (
+                    "Pairing turned off. Neither of you can read the other's Sharing list "
+                    "through it any more."
+                )
+                if peer and ctx.mailbox.is_linked(email, peer):
+                    message += f" You still have another active pairing with {peer}."
+                return message
+            message = "Pairing turned off. Your two assistants can no longer message each other."
             if purge:
-                return message + " Stored messages were deleted for both of you."
-            return message + (
-                " Messages already delivered stay readable by the person they were sent to "
-                "until they expire."
-            )
+                return message + " Stored messages were deleted."
+            return message + " Messages already delivered stay readable until they expire."
         result = ctx.mailbox.decide(email, link_id, action)
         same = next(
             (
@@ -2300,10 +2303,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if same and result["status"] == "active":
             return "Approved. Your two assistants can message each other now."
         if action == "deny" or result["status"] == "revoked":
-            return "Pairing declined. Nothing is shared and no mail can be sent on it."
+            return "Pairing declined. Nothing is shared through it."
         if result["status"] == "active":
-            return "You approved. The mailbox is on."
-        return "You approved. The mailbox stays off until the other person approves."
+            return "You approved. You can now share documents with each other."
+        return "You approved. Nothing is shared until the other person approves."
 
     async def bridge_decide(request: Request, form: dict[str, str]) -> Response:
         if ctx.mailbox is None:
@@ -2326,8 +2329,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         email = str(request.session.get("owner") or "")
         back = safe_next(form.get("next") or WAKE_HOME)
-        # "account" (or "" from older pages) is the account-wide slot, a fallback for mail
-        # from other people only; otherwise one of this person's connected apps.
+        # "account" (or "" from older pages) is the account-wide slot, left from when mail
+        # from other people existed; otherwise one of this person's connected apps.
         raw_app = (form.get("app") or "").strip()
         app = "" if raw_app == "account" else raw_app
         from_app = (form.get("from_app") or "").strip()
@@ -2337,11 +2340,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ids = {g.id for g in grants}
         if (app and app not in ids) or (from_app and from_app not in ids):
             return action_done(request, "error", "That app is not connected.", back)
-        if action in (None, "", "save") and ids and not raw_app:
-            # The old form defaulted to the account slot, which never fires for mail
-            # between your own assistants. Make the person say which assistant it starts.
+        if action in (None, "", "save") and not app:
+            # The account slot never fires: mail only goes between your own assistants,
+            # each to its own wake-up. Make the person say which assistant it starts.
             return action_done(
                 request, "error", "Choose which assistant this wake-up starts.", back
+            )
+        if action == "primary":
+            return action_done(
+                request,
+                "error",
+                "Mail from other people is turned off, so there is nothing to answer.",
+                back,
             )
         # A failed test wake still changes what the page shows (the last wake), so the
         # settings page refreshes those sections even when the test reports an error.
@@ -2366,14 +2376,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                         f"Test wake failed{code}: {result.get('error')}. Check the URL and "
                         "key in the assistant that gave them to you, then save them again.",
                     )
-            elif action == "primary":
-                await blocking(ctx.mailbox.set_primary, email, app)
-                kind, message = (
-                    "ok",
-                    "Saved. Mail from other people now wakes only that app."
-                    if app
-                    else "Saved. Mail from other people wakes every app with a wake-up.",
-                )
             elif action == "move":
                 await blocking(ctx.mailbox.move_webhook, email, app, from_app)
                 kind, message = "ok", "Wake-up moved to that assistant. Its key moved with it."

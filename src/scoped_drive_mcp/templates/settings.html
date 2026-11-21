@@ -58,7 +58,7 @@
 <nav class="tabs" aria-label="Settings sections">
   <a href="#services">Services</a>
   <a href="#assistants">Assistants</a>
-  {% if wake_on %}<a href="#other-people">Mail from other people</a>{% endif %}
+  {% if wake_on and account_hook and account_hook.configured %}<a href="#other-people">Old wake-up</a>{% endif %}
   {% if is_admin %}<a href="#server">Server</a>{% endif %}
 </nav>
 
@@ -107,7 +107,7 @@
 
 <section id="assistants">
 <h2>Assistants</h2>
-<p class="muted lead">Apps that signed in here. “Talks to” on each card shows the assistants it is paired with and whose mail it answers. Each one can have its own wake-up, so it starts when mail arrives for it.</p>
+<p class="muted lead">Apps that signed in here. “Talks to” on each card shows your other assistants it is paired with. Other people’s assistants never message yours. Each one can have its own wake-up, so it starts when mail arrives for it.</p>
 <div class="copy-row">
   <label class="sr-only" for="mcp-url">Server address</label>
   <input id="mcp-url" type="text" readonly value="{{ mcp_url }}">
@@ -128,22 +128,17 @@
 <article class="card" id="app-{{ a.id }}">
   <div class="card-head">
     <h3>{{ assistant_name(a) }}</h3>
-    {% if primary == a.id %}<span class="pill">Answers other people</span>{% endif %}
   </div>
   <p class="muted">added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
   {% if wake_on %}
-  {% set answers_people = people and (primary == a.id or (not primary and a.hook and a.hook.configured and a.hook.enabled)) %}
   <dl class="talks-to">
     <dt>Talks to</dt>
     <dd>
       {% if a.mates %}
       {% for m in a.mates %}<span class="pill{{ ' pending' if m.pending }}">{{ m.name }}{% if m.pending %} · waiting for approval{% endif %}</span> {% endfor %}
       {% endif %}
-      {% if answers_people %}
-      <span class="muted">{{ "Answers" if primary == a.id else "Woken by" }} mail from {{ people | join(", ") }}.</span>
-      {% endif %}
-      {% if not a.mates and not answers_people %}
-      <span class="muted">No one yet. <a href="/sharing?tab=people">Pair it with another assistant</a>{% if people %}, or choose it under <a href="#other-people">Mail from other people</a>{% endif %}.</span>
+      {% if not a.mates %}
+      <span class="muted">No one yet. <a href="/sharing?tab=people">Pair it with another of your assistants</a>.</span>
       {% endif %}
     </dd>
   </dl>
@@ -201,52 +196,29 @@
 {% endfor %}
 </section>
 
-{% if wake_on %}
+{% if wake_on and account_hook and account_hook.configured %}
 <section id="other-people">
-<h2>Mail from other people</h2>
-<p class="muted lead">Which assistant answers when someone you are paired with writes to you. Mail between your own assistants always goes to the one it is for.</p>
-{% if assistants %}
-<form class="stack card" id="answered-by" method="post" action="/bridge/webhook" data-async data-refresh>
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <input type="hidden" name="action" value="primary">
-  <input type="hidden" name="next" value="/settings#other-people">
-  <label>Answered by
-    <select name="app">
-      <option value="">Every assistant with a wake-up</option>
-      {% for a in assistants %}<option value="{{ a.id }}"{% if primary == a.id %} selected{% endif %}>{{ a.name }} …{{ a.short_id }}</option>{% endfor %}
-    </select>
-  </label>
-  <div class="actions"><button type="submit">Save</button></div>
-</form>
-{% endif %}
-{% if account_hook and account_hook.configured %}
+<h2>Old account-wide wake-up</h2>
 <article class="card" id="account-hook">
-  <h3>Fallback wake-up</h3>
-  <p class="muted">Used only for mail from other people, when the assistant chosen above has no wake-up. It never fires for mail between your own assistants.</p>
+  <p class="muted">This wake-up was for mail from other people. That mail is turned off: other people’s assistants never message yours, so it never fires. Give it to one of your assistants, or remove it.</p>
   <p>{{ wake_status(account_hook) }}</p>
   {% set fallback_targets = assistants | rejectattr("hook.configured") | list %}
   <div class="actions">
-    <form class="inline" method="post" action="/bridge/webhook" data-async data-refresh data-confirm="Remove the fallback wake-up? Its saved key is deleted and can’t be shown again." data-confirm-action="Remove wake-up">
+    <form class="inline" method="post" action="/bridge/webhook" data-async data-refresh data-confirm="Remove the old account-wide wake-up? Its saved key is deleted and can’t be shown again." data-confirm-action="Remove wake-up">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="remove">
       <input type="hidden" name="app" value="account">
-      <input type="hidden" name="next" value="/settings#other-people">
+      <input type="hidden" name="next" value="/settings#assistants">
       <button class="danger" type="submit">Remove wake-up</button>
     </form>
   </div>
   {% if fallback_targets %}
   <details class="disclosure-form" id="move-account"><summary>Give this wake-up to an assistant</summary>
-    <p class="muted">The assistant you choose then starts for its own mail too, not only for mail from other people. The URL and key go with it.</p>
+    <p class="muted">The assistant you choose then starts when your other assistants write to it. The URL and key go with it.</p>
     {{ move_form("account", fallback_targets, "Give wake-up") }}
   </details>
   {% endif %}
 </article>
-{% elif not assistants %}
-<details class="disclosure-form card"><summary>Add a fallback wake-up</summary>
-  <p class="muted">For assistants that use an API token instead of signing in. It fires only for mail from other people.</p>
-  {{ wake_form(None, account_hook) }}
-</details>
-{% endif %}
 </section>
 {% endif %}
 

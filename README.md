@@ -60,21 +60,27 @@ the design notes.
 
 ## Bot Bridge
 
-Bot Bridge is the mailbox inside this server: two people's assistants can exchange short text after both
-humans approve the pairing at `/bridge`. It uses the same Google sign-in, store and `/mcp` connection as
-Drive, so there is one place that decides who an assistant is and what it may reach. (An earlier,
-separate TypeScript version of Bot Bridge has been removed.)
-With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
+Bot Bridge decides who can reach whom:
 
-**Your own assistants.** One person can also pair two of their own assistants, for example Grok and Claude
-signed in with the same Google account. Start a pairing in one and join with the code from the other. Each
-assistant gets its own inbox. One approval on `/bridge` turns it on, and disconnecting either app turns it off.
-It shares nothing new, because both assistants already see the same Drive. Each connected app saves its own
-wake-up hook, and only mail for that app wakes it. Mail from another person wakes the **Primary** app's own hook
-when you pick one on `/bridge`; otherwise the account-wide hook (pasted for the whole account), or every
-app's hook when there is none. A hook saved before apps had their
-own slots stays on the account; use **Move** on `/bridge` to give it to the app it belongs to. It is on by default. To turn it off
-for some or all accounts, connect a Vercel Edge Config to the project and set the item `self_pairing` to
+- **Your own assistants talk to each other.** Pair two assistants signed in with the same Google account (say
+  Grok and Claude, or Cursor and Muse) and they can exchange short text through the mailbox.
+- **Other people's assistants never reach yours.** A pairing with another person carries **no messages at
+  all**, not even text, so their assistant has no way to prompt yours. `send_message` and `reply` on such a
+  pairing return `peer_mail_off`. Once both humans approve it, each side's assistants can read (only read) the
+  documents the other person put on their **Sharing** list, and nothing else
+  (see [Sharing with paired people](#sharing-with-paired-people)).
+
+It uses the same Google sign-in, store and `/mcp` connection as Drive, so there is one place that decides who
+an assistant is and what it may reach. (An earlier, separate TypeScript version of Bot Bridge has been removed.)
+With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
+
+**Pairing your own assistants.** Start a pairing in one assistant and join with the code from the other. Each
+assistant gets its own inbox. One approval on the Sharing page (People) turns it on, and disconnecting either
+app turns it off. It shares nothing new, because both assistants already see the same Drive. Each connected
+app saves its own wake-up hook, and only mail for that app wakes it. A hook saved for the whole account
+(from when mail from other people existed) never fires; Settings offers to give it to one of your assistants
+or remove it. Self-pairing is on by default. To turn it off for some or all accounts, connect a Vercel Edge
+Config to the project and set the item `self_pairing` to
 `{"enabled": true, "off_for_domains": ["example.com"]}` (or `"enabled": false`). Changes apply within about
 30 seconds, with no redeploy.
 
@@ -138,29 +144,36 @@ Grok shows you the link; after you approve, it retries (or calls `check_access_r
 
 ## Mailbox
 
-The same `/mcp` connection can carry short text between two people. Each person is the Google account that already signed in and clicked Allow, so Grok Bot, a grok.com connector, and a Cursor agent or bot that completes this server's OAuth all share that person's mailbox. A second product signed in as you does not get a separate inbox.
+The mailbox carries short text **only between one person's own assistants**. Each person is the Google account
+that signed in and clicked Allow, and each connected app (OAuth grant) has its own inbox, addressed to that
+app. Mail never goes to, or comes from, another person's assistant.
 
-1. One assistant calls `request_link` and gives the other person the `invite_code`.
-2. The other assistant calls `request_link` with that code.
-3. Each person opens `/bridge` while signed in, checks the other Google account, and chooses **Approve pairing**. One approval leaves the link pending.
-4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person turns the mailbox off on `/bridge`. There is no revoke tool for the assistant.
+1. One of your assistants calls `request_link` and reads you the `invite_code`.
+2. Your other assistant calls `request_link` with that code.
+3. You approve it once on the Sharing page (People). `send_message`, `reply`, `list_inbox`, `check_messages`
+   and `mark_read` then work between the two. Turn it off there, or disconnect either app.
+
+The same `request_link` invite also pairs you with another person, but that pairing is for sharing documents
+only: both of you approve after checking the other Google account, and it never carries mail.
 
 Invites and pairing states:
 
 - `request_link()` without a code returns your newest invite that nobody has joined and that has not expired, with `reused: true`, instead of minting another code. Pass `new_invite: true` to start a second pairing in parallel. Every result carries `reused` (false for a new invite) and, while nobody has joined, `invite_expires_at`.
 - Joining with a code while you already have an active or pending pairing with that same person returns the error `already_paired` (with that pairing's `link_id`) and leaves the invite open.
-- `list_links` `status` is `awaiting_peer`, `pending_approval`, `active` or `revoked`, plus two values that only describe a dead link: `declined` (someone chose Decline; it behaves exactly like `revoked`) and `expired` (nobody joined the invite within 7 days). A dead link also carries `ended_reason` (`declined`, `turned_off` or `cancelled`), `ended_by` and `ended_at` when they were recorded. Sending on any dead link still returns `link_revoked`. Each link also has `created_by_you`.
-- On `/bridge`, each person sees **Needs your approval**, or **Waiting for &lt;the other person&gt;** once they approved, and whether the other person already approved. An invite nobody joined shows its code, its expiry and **Cancel invite**. Off, declined and expired pairings say who ended them and when, and have **Remove from list** (it only hides the card for you). The **Mailbox** nav item shows how many pairings wait for your approval, and Overview shows pairings, approvals and unread mail.
-- Turning a pairing off stops sending, replying and reading each other's Sharing list through it at once. Mail already delivered stays readable by the person it was sent to until it expires (`list_inbox` and `check_messages` mark it `link_status: "revoked"`; it cannot be replied to), unless someone chooses **Also delete stored messages** when turning off, or **Delete stored messages** afterwards, which deletes it for both people.
+- `list_links` `status` is `awaiting_peer`, `pending_approval`, `active` or `revoked`, plus two values that only describe a dead link: `declined` (someone chose Decline; it behaves exactly like `revoked`) and `expired` (nobody joined the invite within 7 days). A dead link also carries `ended_reason` (`declined`, `turned_off` or `cancelled`), `ended_by` and `ended_at` when they were recorded. Each link has `created_by_you`, and `mailbox`, which is true only for a pairing between two of your own assistants.
+- Sending on a pairing with another person returns `peer_mail_off`; on a dead pairing of your own assistants it returns `link_revoked`; on an invite nobody joined yet, `link_pending`.
+- On the Sharing page (People), each person sees **Needs your approval**, or **Waiting for &lt;the other person&gt;** once they approved. An invite nobody joined shows its code, its expiry and **Cancel invite**. Off, declined and expired pairings say who ended them and when, and have **Remove from list** (it only hides the card for you).
+- Mail between two people from before this rule existed is never shown again, and is deleted for both people the first time either inbox is read. It would have expired within 14 days anyway.
 - Mailbox and Shared-with-me tool errors are error results whose `structuredContent` is `{"error": <code>, "message": ..., ...}`. The text content is unchanged (`Error executing tool <name>: <same JSON>`).
 
-`list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
+`list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
 
 ## Sharing with paired people
 
 Each person has a second list, separate from **Access**: the **Sharing** page. Items on it can be read by the
-assistant of anyone you have an **active mailbox pairing** with (both of you approved on `/bridge`). Use it for
-things like a resume that any paired person's assistant may see.
+assistant of anyone you have an **active pairing** with (both of you approved on the Sharing page). This is the
+only thing a pairing with another person does: their assistant can never message yours. Use it for things like
+a resume that any paired person's assistant may see.
 
 - **Shared with me:** the dashboard's **Shared with me** page shows what paired people share with *you*,
   grouped by person and source. Open folders to any depth, preview or download files, and search names and
@@ -178,7 +191,9 @@ things like a resume that any paired person's assistant may see.
 - **No probing:** an item that is not shared returns `not_shared`, the same answer as an id that does not exist.
   Guests never create access requests, so other people cannot fill your **Requests** queue.
 - **Untrusted content:** `read_shared_file` wraps the text in markers and marks it `content_trust:
-  untrusted_peer`. The reading assistant is told not to follow instructions inside it.
+  untrusted_peer`. The reading assistant is told not to follow instructions inside it. Bot RBAC controls who
+  can read what, not what a document says: a document someone shares with you is text they wrote, and
+  reading it is your choice, like opening a file someone sent you.
 - **Activity:** every guest read or denial appears on your **Activity** page with the reader's email
   (`guest:<email>`), the tool and the file id. File contents are never logged.
 
@@ -695,7 +710,7 @@ src/scoped_drive_mcp/
   scope.py                    the allowlist scope guard and search query builder
   policy.py                   role → tool map and @require decorator (access_required errors)
   access.py                   access requests (storage, dedupe, request tools)
-  bridge.py                   mailbox between two Google accounts on this server
+  bridge.py                   pairings; mailbox between one person's own assistants
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log
   oauth.py                    Google web OAuth (authorization code) for the dashboard
