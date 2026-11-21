@@ -96,6 +96,38 @@
   var pageFlash = document.querySelector("#main > .flash:not([id])");
   if (pageFlash) announce(pageFlash.classList.contains("error") ? "error" : "ok", pageFlash.textContent.trim());
 
+  // Every notice can be closed. The button is added here, so a page without JavaScript
+  // shows the message with nothing that does not work.
+  function addDismiss(note) {
+    if (!note || note.querySelector(":scope > button.dismiss")) return;
+    var text = document.createElement("span");
+    text.className = "note-text";
+    while (note.firstChild) text.appendChild(note.firstChild);
+    note.appendChild(text);
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "dismiss";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "\u00d7";
+    note.appendChild(close);
+    note.classList.add("dismissable");
+  }
+  function setNote(note, message) {
+    var text = note.querySelector(":scope > .note-text");
+    if (text) text.textContent = message;
+    else { note.textContent = message; addDismiss(note); }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("#main > .flash"), addDismiss);
+  document.addEventListener("click", function (event) {
+    var close = event.target.closest("button.dismiss");
+    if (!close) return;
+    var note = close.parentNode;
+    var back = note.__returnFocus;
+    if (note === toast) { note.hidden = true; window.clearTimeout(toastTimer); }
+    else note.remove();
+    if (back && document.contains(back)) back.focus();
+  });
+
   var toast = null;
   var toastTimer = null;
   function inView(el) {
@@ -113,20 +145,22 @@
     var old = main.querySelectorAll(":scope > .flash:not([id])");
     for (var i = 1; i < old.length; i++) old[i].remove();
     if (old.length) {
-      old[0].className = "flash " + cls;
+      old[0].className = "flash dismissable " + cls;
       old[0].removeAttribute("role");
-      old[0].textContent = message;
+      setNote(old[0], message);
       if (inView(old[0])) { if (toast) toast.hidden = true; return; }
     }
     // Otherwise show a fixed toast by the bottom edge: no layout shift, and visible on a
     // long phone list where the top of the page is far away.
     if (!toast) {
+      // Announced through the live region above, so the toast itself is not a live region.
       toast = document.createElement("div");
-      toast.setAttribute("aria-hidden", "true");
+      toast.textContent = message;
+      addDismiss(toast);
       document.body.appendChild(toast);
     }
-    toast.className = "toast " + cls;
-    toast.textContent = message;
+    toast.className = "toast dismissable " + cls;
+    setNote(toast, message);
     toast.hidden = false;
     window.clearTimeout(toastTimer);
     toastTimer = window.setTimeout(function () { toast.hidden = true; }, cls === "ok" ? 4000 : 8000);
@@ -277,8 +311,125 @@
     if (!window.fetch || !window.URLSearchParams || !window.FormData) return;
     event.preventDefault();
     if (form.getAttribute("aria-busy") === "true") return;
-    askConfirm(form).then(function (yes) { if (yes) sendInPlace(form); });
+    askConfirm(form).then(function (yes) {
+      if (!yes) return;
+      if (form.hasAttribute("data-refresh")) sendAndRefresh(form);
+      else sendInPlace(form);
+    });
   });
+
+  // ---- Settings: update the changed sections only --------------------------------------
+  // A wake-up change can touch more than its own card (a move empties one card and fills
+  // another; "Answers other people" sits on a card but is set below). So after the change
+  // the page is fetched again in the background and only those sections are swapped in.
+  // Scroll position, other open panels and anything typed elsewhere on the page stay.
+  var REFRESH = ["assistants", "other-people"];
+
+  function postForm(form) {
+    return fetch(form.getAttribute("action"), {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(new FormData(form)).toString(),
+      credentials: "same-origin"
+    }).then(function (response) {
+      var type = response.headers.get("content-type") || "";
+      if (type.indexOf("application/json") === -1) throw new Error("not json");
+      return response.json();
+    });
+  }
+
+  function refreshSections(keepClosed) {
+    return fetch(window.location.pathname, {
+      headers: { Accept: "text/html" },
+      credentials: "same-origin",
+      cache: "no-store"
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error("reload");
+        return response.text();
+      })
+      .then(function (html) {
+        var fresh = new DOMParser().parseFromString(html, "text/html");
+        REFRESH.forEach(function (id) {
+          var now = document.getElementById(id);
+          var next = fresh.getElementById(id);
+          if (!now || !next) return;
+          // Panels the person had open stay open, except the one they just used.
+          var open = {};
+          Array.prototype.forEach.call(now.querySelectorAll("details[open][id]"), function (d) {
+            if (d.id !== keepClosed) open[d.id] = true;
+          });
+          now.innerHTML = next.innerHTML;
+          Array.prototype.forEach.call(now.querySelectorAll("details[id]"), function (d) {
+            if (open[d.id]) d.open = true;
+          });
+        });
+        localTimes();
+      });
+  }
+
+  // A message shown inside the card the person is working in, where they are looking.
+  function cardNote(cardId, kind, message) {
+    var card = cardId && document.getElementById(cardId);
+    if (!card) { showFlash(kind, message); return; }
+    // An older success toast must not sit over this message.
+    if (toast) { toast.hidden = true; window.clearTimeout(toastTimer); }
+    var old = card.querySelectorAll(":scope > .flash.in-card");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    var note = document.createElement("div");
+    note.className = "flash in-card " + (kind === "ok" ? "ok" : "error");
+    note.textContent = message;
+    addDismiss(note);
+    var head = card.querySelector(":scope > .card-head, :scope > h3");
+    if (head) head.insertAdjacentElement("afterend", note);
+    else card.insertBefore(note, card.firstChild);
+    announce(kind === "ok" ? "ok" : "error", message);
+    var r = note.getBoundingClientRect();
+    if (r.top < 72 || r.bottom > window.innerHeight) note.scrollIntoView({ block: "center", behavior: "smooth" });
+    return note;
+  }
+
+  function sendAndRefresh(form) {
+    var button = form.querySelector("button[type=submit], button:not([type])");
+    var card = form.closest(".card[id]");
+    var cardId = card ? card.id : "";
+    var panel = form.closest("details[id]");
+    var hadFocus = form.contains(document.activeElement);
+    form.setAttribute("aria-busy", "true");
+    if (button) button.disabled = true;
+    var done = function () {
+      form.removeAttribute("aria-busy");
+      if (button) button.disabled = false;
+    };
+    postForm(form)
+      .then(function (data) {
+        var changed = typeof data.changed === "boolean" ? data.changed : data.ok;
+        var after = changed ? refreshSections(data.ok && panel ? panel.id : "") : Promise.resolve();
+        return after.then(function () {
+          done();
+          if (data.ok) {
+            showFlash("ok", data.message);
+            // Keep keyboard focus nearby when the button that had it was replaced.
+            if (hadFocus && !document.contains(form)) {
+              var target = cardId && document.getElementById(cardId);
+              var heading = target ? target.querySelector("h3") : document.getElementById("assistants");
+              if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+            }
+          } else {
+            var note = cardNote(cardId, "error", data.message);
+            var back = cardId && document.getElementById(cardId);
+            if (note && back) {
+              var same = document.contains(form) ? button : back.querySelector("button[type=submit]");
+              note.__returnFocus = same;
+            }
+          }
+        });
+      })
+      .catch(function () {
+        done();
+        cardNote(cardId, "error", "That did not save. Check your connection, reload the page and try again.");
+      });
+  }
 
   function sendInPlace(form) {
     var button = form.querySelector("button[type=submit], button:not([type])");

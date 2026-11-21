@@ -791,8 +791,8 @@ class Mailbox:
         if self._hook(owner) is not None:
             raise MailboxError(
                 "invalid_state",
-                "That app already has its own wake-up. Remove it first, or remove the "
-                "account-wide one instead.",
+                "That assistant already has its own wake-up. Remove that one first, then "
+                "give it this one.",
             )
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")

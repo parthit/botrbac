@@ -4,7 +4,7 @@
 {{ a.name }} <span class="muted id-chip" title="Connection id">…{{ a.short_id }}</span>
 {%- endmacro %}
 {% macro wake_form(a, hook) -%}
-<form class="stack" method="post" action="/bridge/webhook">
+<form class="stack" method="post" action="/bridge/webhook" data-async data-refresh>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="action" value="save">
   <input type="hidden" name="app" value="{{ a.id if a else 'account' }}">
@@ -29,6 +29,19 @@
     </select>
   </label>
   <div class="actions"><button class="primary" type="submit">Save wake-up</button></div>
+</form>
+{%- endmacro %}
+{% macro move_form(from_id, targets, label) -%}
+<form class="move" method="post" action="/bridge/webhook" data-async data-refresh>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="action" value="move">
+  <input type="hidden" name="from_app" value="{{ from_id }}">
+  <input type="hidden" name="next" value="/settings#assistants">
+  <label for="move-to-{{ from_id }}">Give it to</label>
+  <select id="move-to-{{ from_id }}" name="app">
+    {% for b in targets %}<option value="{{ b.id }}">{{ b.name }} …{{ b.short_id }}</option>{% endfor %}
+  </select>
+  <button type="submit">{{ label }}</button>
 </form>
 {%- endmacro %}
 {% macro wake_status(hook) -%}
@@ -94,7 +107,7 @@
 
 <section id="assistants">
 <h2>Assistants</h2>
-<p class="muted lead">Apps that signed in here. Each one can have its own wake-up, so it starts when mail arrives for it.</p>
+<p class="muted lead">Apps that signed in here. “Talks to” on each card shows the assistants it is paired with and whose mail it answers. Each one can have its own wake-up, so it starts when mail arrives for it.</p>
 <div class="copy-row">
   <label class="sr-only" for="mcp-url">Server address</label>
   <input id="mcp-url" type="text" readonly value="{{ mcp_url }}">
@@ -117,34 +130,39 @@
     <h3>{{ assistant_name(a) }}</h3>
     {% if primary == a.id %}<span class="pill">Answers other people</span>{% endif %}
   </div>
-  <p class="muted">{% if a.paired_with %}Paired with {{ a.paired_with }} · {% endif %}added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
+  <p class="muted">added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
+  {% if wake_on %}
+  {% set answers_people = people and (primary == a.id or (not primary and a.hook and a.hook.configured and a.hook.enabled)) %}
+  <dl class="talks-to">
+    <dt>Talks to</dt>
+    <dd>
+      {% if a.mates %}
+      {% for m in a.mates %}<span class="pill{{ ' pending' if m.pending }}">{{ m.name }}{% if m.pending %} · waiting for approval{% endif %}</span> {% endfor %}
+      {% endif %}
+      {% if answers_people %}
+      <span class="muted">{{ "Answers" if primary == a.id else "Woken by" }} mail from {{ people | join(", ") }}.</span>
+      {% endif %}
+      {% if not a.mates and not answers_people %}
+      <span class="muted">No one yet. <a href="/sharing?tab=people">Pair it with another assistant</a>{% if people %}, or choose it under <a href="#other-people">Mail from other people</a>{% endif %}.</span>
+      {% endif %}
+    </dd>
+  </dl>
+  {% endif %}
   {% if wake_on %}
   {% set hook = a.hook %}
   <h4>Wake-up</h4>
   {% if hook and hook.configured %}
+  {% set move_targets = assistants | rejectattr("id", "equalto", a.id) | rejectattr("hook.configured") | list %}
   <p>{{ wake_status(hook) }}</p>
   <div class="actions">
-    <form class="inline" method="post" action="/bridge/webhook">
+    <form class="inline" method="post" action="/bridge/webhook" data-async data-refresh>
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="test">
       <input type="hidden" name="app" value="{{ a.id }}">
       <input type="hidden" name="next" value="/settings#app-{{ a.id }}">
       <button type="submit">Send test wake<span class="sr-only"> to {{ a.name }}</span></button>
     </form>
-    {% if assistants | length > 1 %}
-    <form class="inline move" method="post" action="/bridge/webhook">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="action" value="move">
-      <input type="hidden" name="from_app" value="{{ a.id }}">
-      <input type="hidden" name="next" value="/settings#assistants">
-      <label class="sr-only" for="move-{{ a.id }}">Move this wake-up to</label>
-      <select id="move-{{ a.id }}" name="app">
-        {% for b in assistants if b.id != a.id %}<option value="{{ b.id }}">{{ b.name }} …{{ b.short_id }}</option>{% endfor %}
-      </select>
-      <button type="submit">Move</button>
-    </form>
-    {% endif %}
-    <form class="inline" method="post" action="/bridge/webhook" data-confirm="Remove {{ a.name }}’s wake-up? Its saved key is deleted and can’t be shown again; you would have to get it from {{ a.name }} again.{% if assistants | length > 1 %} To give it to another assistant instead, use Move.{% endif %}" data-confirm-action="Remove wake-up">
+    <form class="inline" method="post" action="/bridge/webhook" data-async data-refresh data-confirm="Remove {{ a.name }}’s wake-up? Its saved key is deleted and can’t be shown again; you would have to get it from {{ a.name }} again.{% if move_targets %} To give it to another assistant instead, use “Give this wake-up to another assistant”.{% endif %}" data-confirm-action="Remove wake-up">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="remove">
       <input type="hidden" name="app" value="{{ a.id }}">
@@ -152,17 +170,23 @@
       <button class="danger" type="submit">Remove wake-up</button>
     </form>
   </div>
-  <details class="disclosure-form"><summary>Change URL or key</summary>{{ wake_form(a, hook) }}</details>
+  {% if move_targets %}
+  <details class="disclosure-form" id="move-{{ a.id }}"><summary>Give this wake-up to another assistant</summary>
+    <p class="muted">The webhook URL and key go to the assistant you choose, so mail for it starts it instead. {{ a.name }} stops being woken. Nothing has to be entered again.</p>
+    {{ move_form(a.id, move_targets, "Give wake-up") }}
+  </details>
+  {% endif %}
+  <details class="disclosure-form" id="edit-{{ a.id }}"><summary>Change URL or key</summary>{{ wake_form(a, hook) }}</details>
   {% else %}
   <p><span class="pill">None</span> <span class="muted">{{ a.name }} starts only when you open it or it checks on a schedule.</span></p>
-  <details class="disclosure-form"><summary>Add a wake-up for {{ a.name }}</summary>
+  <details class="disclosure-form" id="add-{{ a.id }}"><summary>Add a wake-up for {{ a.name }}</summary>
     <p class="muted">Usually you don’t need this: ask {{ a.name }} to watch for mail and it sets one up. Use this only if {{ a.name }} gave you a webhook URL and key.</p>
     {{ wake_form(a, None) }}
   </details>
   {% endif %}
   {% endif %}
   <div class="actions">
-    <form class="inline" method="post" action="/oauth/grants/revoke" data-confirm="Disconnect {{ a.name }} (…{{ a.short_id }})? It loses access immediately{% if a.paired_with %}, its pairing with {{ a.paired_with }} ends{% endif %}{% if a.hook and a.hook.configured %}, and its wake-up is deleted{% endif %}." data-confirm-action="Disconnect">
+    <form class="inline" method="post" action="/oauth/grants/revoke" data-async data-refresh data-confirm="Disconnect {{ a.name }} (…{{ a.short_id }})? It loses access immediately{% if a.paired_with %}, its pairing with {{ a.paired_with }} ends{% endif %}{% if a.hook and a.hook.configured %}, and its wake-up is deleted{% endif %}." data-confirm-action="Disconnect">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="grant_id" value="{{ a.id }}">
       <button class="danger" type="submit">Disconnect<span class="sr-only"> {{ a.name }}</span></button>
@@ -182,7 +206,7 @@
 <h2>Mail from other people</h2>
 <p class="muted lead">Which assistant answers when someone you are paired with writes to you. Mail between your own assistants always goes to the one it is for.</p>
 {% if assistants %}
-<form class="stack card" method="post" action="/bridge/webhook">
+<form class="stack card" id="answered-by" method="post" action="/bridge/webhook" data-async data-refresh>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="action" value="primary">
   <input type="hidden" name="next" value="/settings#other-people">
@@ -200,21 +224,9 @@
   <h3>Fallback wake-up</h3>
   <p class="muted">Used only for mail from other people, when the assistant chosen above has no wake-up. It never fires for mail between your own assistants.</p>
   <p>{{ wake_status(account_hook) }}</p>
+  {% set fallback_targets = assistants | rejectattr("hook.configured") | list %}
   <div class="actions">
-    {% if assistants %}
-    <form class="inline move" method="post" action="/bridge/webhook">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="action" value="move">
-      <input type="hidden" name="from_app" value="account">
-      <input type="hidden" name="next" value="/settings#assistants">
-      <label class="sr-only" for="move-account">Give this wake-up to</label>
-      <select id="move-account" name="app">
-        {% for b in assistants %}<option value="{{ b.id }}">{{ b.name }} …{{ b.short_id }}</option>{% endfor %}
-      </select>
-      <button type="submit">Give to assistant</button>
-    </form>
-    {% endif %}
-    <form class="inline" method="post" action="/bridge/webhook" data-confirm="Remove the fallback wake-up? Its saved key is deleted and can’t be shown again." data-confirm-action="Remove wake-up">
+    <form class="inline" method="post" action="/bridge/webhook" data-async data-refresh data-confirm="Remove the fallback wake-up? Its saved key is deleted and can’t be shown again." data-confirm-action="Remove wake-up">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="remove">
       <input type="hidden" name="app" value="account">
@@ -222,6 +234,12 @@
       <button class="danger" type="submit">Remove wake-up</button>
     </form>
   </div>
+  {% if fallback_targets %}
+  <details class="disclosure-form" id="move-account"><summary>Give this wake-up to an assistant</summary>
+    <p class="muted">The assistant you choose then starts for its own mail too, not only for mail from other people. The URL and key go with it.</p>
+    {{ move_form("account", fallback_targets, "Give wake-up") }}
+  </details>
+  {% endif %}
 </article>
 {% elif not assistants %}
 <details class="disclosure-form card"><summary>Add a fallback wake-up</summary>
