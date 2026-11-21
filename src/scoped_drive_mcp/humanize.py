@@ -203,6 +203,12 @@ def _deny_why(reason: str, guest: bool) -> str:
         return "it isn’t on your list"
     if reason == "not_shared":
         return "it isn’t on your Sharing list"
+    if reason == "not_linked":
+        return "they aren’t paired with you"
+    if reason == "own_drive":
+        return "that is this account’s own Drive (use the normal tools)"
+    if reason == "invalid_input":
+        return "the request was not valid"
     if reason.startswith("role ") or "may not call" in reason:
         return "that connection isn’t allowed to do that"
     if guest:
@@ -269,6 +275,9 @@ def _tool_row(
         item = f"{item} from your Sharing list"
     if via_dashboard and guest:
         done = done.replace("its ", "their ")
+    if guest and tool == "list_shared_with_me":
+        # On the owner's log: the reader listed what this owner shares with them.
+        done, attempt = "listed what you share with them", "list what you share with them"
     polling = tool in POLLING_TOOLS and decision == "allow"
     missing = names.get(_item_id(record) or "") == MISSING
     if tool == "request_access" and decision == "allow":

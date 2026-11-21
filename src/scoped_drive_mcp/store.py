@@ -123,6 +123,7 @@ class KeyValueStore(Protocol):
     def lreplace(self, key: str, old: str, new: str) -> int: ...
     def ldrop_expired(self, key: str, now: int) -> int: ...
     def incr(self, key: str, ex: int) -> int: ...
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool: ...
 
 
 class MemoryStore:
@@ -439,7 +440,7 @@ class ActorStore:
         return int(self.inner.incr(self._key(key), ex))
 
     def set_if_absent(self, key: str, value: str, ex: int) -> bool:
-        return bool(self.inner.set_if_absent(self._key(key), value, ex))  # type: ignore[attr-defined]
+        return bool(self.inner.set_if_absent(self._key(key), value, ex))
 
 
 class PostgresStore:
@@ -971,6 +972,8 @@ class ActivityLog:
 
 FIRST_READS_KEY = "first_reads"
 FIRST_READS_MAX = 20
+# How long a person's first read stays "first": after this, the next read is news again.
+FIRST_READ_EVERY = 365 * 24 * 3600
 
 
 class FirstReads:
@@ -981,10 +984,21 @@ class FirstReads:
         self.store = store
         self.max_items = max_items
 
-    def add(self, guest: str, tool: str, file_id: str | None) -> None:
-        row = {"at": utc_now(), "guest": guest, "tool": tool, "file_id": file_id}
-        self.store.lpush(FIRST_READS_KEY, json.dumps(row, separators=(",", ":")))
-        self.store.ltrim(FIRST_READS_KEY, 0, self.max_items - 1)
+    def add(self, guest: str, tool: str, file_id: str | None) -> bool:
+        """Record `guest`'s first read. Returns False if they were already seen. The seen
+        mark is claimed first so two reads at once give one notice; if writing the notice
+        then fails, the mark is released so the next read tries again."""
+        seen = f"first_read_seen:{guest}"
+        if not self.store.set_if_absent(seen, "1", ex=FIRST_READ_EVERY):
+            return False
+        try:
+            row = {"at": utc_now(), "guest": guest, "tool": tool, "file_id": file_id}
+            self.store.lpush(FIRST_READS_KEY, json.dumps(row, separators=(",", ":")))
+            self.store.ltrim(FIRST_READS_KEY, 0, self.max_items - 1)
+        except Exception:
+            self.store.delete(seen)
+            raise
+        return True
 
     def recent(self, limit: int = 5) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

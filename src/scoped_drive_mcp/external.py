@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from typing import Any, TypeVar
 
 from .audit import audit
-from .auth import current_actor, current_guest
+from .auth import current_actor, current_guest, current_principal
 from .drive_client import FOLDER_MIME, BotNotConnectedError
 from .errors import report_exception
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
@@ -99,8 +99,15 @@ def normalize_email(value: Any) -> str:
 
 # A refusal to someone who is not paired is logged at most this often per person and tool.
 NOT_LINKED_LOG_EVERY = 3600
-# How long a person's first read stays "first": after this, the next read is news again.
-FIRST_READ_EVERY = 365 * 24 * 3600
+
+
+def _caller_who() -> dict[str, str | None]:
+    """How a refusal is recorded on the caller's own log: as their own app, not a guest."""
+    principal = current_principal.get()
+    return {
+        "token_name": principal.token_name if principal else None,
+        "role": principal.role.value if principal else None,
+    }
 
 
 def _guest_who(you: str, via: str | None) -> dict[str, str | None]:
@@ -183,8 +190,10 @@ class ExternalShares:
         self.is_known_user = is_known_user or (lambda _email: False)
         # once(key, seconds): True the first time `key` is seen in that window, for the
         # current actor. Caps how often a refusal is logged, so nobody can flood a log.
-        self.once = once or (lambda _key, _ttl: True)
-        # first_read(guest, tool, file_id), as the owner: the first allowed read by a person.
+        # Without one, refusals are not logged at all: a flood limiter fails closed.
+        self.once = once or (lambda _key, _ttl: False)
+        # first_read(guest, tool, file_id), as the owner: called on every allowed read by an
+        # assistant; it records the notice only the first time it sees that person.
         self.first_read = first_read
 
     # ---- owner side ------------------------------------------------------
@@ -202,21 +211,20 @@ class ExternalShares:
         for peer in self.active_peers(you):
             with guest_of(peer, you):
                 entries = self.allowlist.entries_for(you)
-            if not entries:
-                continue
-            items = [
-                {"id": e.id, "name": e.name, "mime_type": e.mime_type}
-                for e in sorted(entries.values(), key=lambda e: e.name.lower())
-            ]
-            people.append({"owner": peer, "items": items})
-            # The owner sees that this person's assistant looked at what they share.
-            with guest_of(peer, you):
+                if not entries:
+                    continue
+                # The owner sees that this person's assistant looked at what they share.
                 audit(
                     tool="list_shared_with_me",
                     decision="allow",
                     reason="ok",
                     **_guest_who(you, None),
                 )
+            items = [
+                {"id": e.id, "name": e.name, "mime_type": e.mime_type}
+                for e in sorted(entries.values(), key=lambda e: e.name.lower())
+            ]
+            people.append({"owner": peer, "items": items})
         return {
             "you": you,
             "people": people,
@@ -409,8 +417,7 @@ class ExternalShares:
                     tool=tool,
                     decision="deny",
                     reason="invalid_input",
-                    token_name=None,
-                    role=GUEST_ROLE,
+                    **_caller_who(),
                     file_id=file_id,
                 )
             raise
@@ -420,8 +427,7 @@ class ExternalShares:
                     tool=tool,
                     decision="deny",
                     reason="own_drive",
-                    token_name=None,
-                    role=GUEST_ROLE,
+                    **_caller_who(),
                     file_id=file_id,
                 )
             raise SharedAccessError(
@@ -489,7 +495,8 @@ class ExternalShares:
                     owner=them,
                 ) from None
             audit(tool=tool, decision="allow", reason="ok", file_id=file_id, **who)
-            if self.first_read is not None and self.once(f"guestseen:{you}", FIRST_READ_EVERY):
+            # Only an assistant's read is news; the person browsing Shared with me is not.
+            if self.first_read is not None and not via:
                 try:
                     self.first_read(you, tool, file_id)
                 except Exception:
