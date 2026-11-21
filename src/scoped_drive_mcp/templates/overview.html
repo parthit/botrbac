@@ -18,6 +18,21 @@
   <p><a href="/settings#assistants">Fix in Settings</a></p>
 </div>
 {% endif %}
+{% if first_reads %}
+<div class="card" id="first-reads" role="status">
+  <h2>New readers of what you share</h2>
+  <ul>
+    {% for r in first_reads %}<li><b>{{ r.guest }}</b>’s assistant read something you share for the first time <span class="muted">{{ r.at | when }}</span></li>{% endfor %}
+  </ul>
+  <div class="actions">
+    <a href="/activity">See it in Activity</a>
+    <form class="inline" method="post" action="/first-reads/clear">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit">Dismiss</button>
+    </form>
+  </div>
+</div>
+{% endif %}
 <div class="grid stats">
   <div class="card stat">
     <span class="muted">Allowed files</span>

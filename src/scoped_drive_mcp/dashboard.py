@@ -167,6 +167,8 @@ class DashboardContext:
     # (caller email, file id) -> the paired person whose Sharing list covers that id,
     # including files inside a shared folder (ExternalShares.sharer_of).
     sharer_of: Callable[[str, str], str | None] | None = None
+    # The first read by each paired person's assistant, shown on Overview.
+    first_reads: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -1089,6 +1091,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     else []
                 ),
                 **people_summary(str(current_actor.get() or "")),
+                "first_reads": ctx.first_reads.recent() if ctx.first_reads else [],
             }
 
         data = await blocking(gather)
@@ -1514,7 +1517,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         inside a more widely shared folder does not hide it; the page says so."""
         covers: dict[str, Any] = {}
         grants = ctx.ext_grants()
-        narrowed = [e for e in entries.values() if not e.for_everyone or e.expires_at]
+        # Newest first, the order the page shows, so the rows on top are the ones checked.
+        narrowed = sorted(
+            (e for e in entries.values() if not e.for_everyone or e.expires_at),
+            key=lambda e: e.granted_at,
+            reverse=True,
+        )
         # Bounded, like the Access page: each check walks Drive parents.
         for entry in narrowed[:COVER_CHECK_LIMIT]:
             try:
@@ -1540,6 +1548,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             f"Shared \u201c{entry.name}\u201d with the assistants of people you are paired with.",
             next_url,
         )
+
+    async def first_reads_clear(request: Request, form: dict[str, str]) -> Response:
+        if ctx.first_reads is not None:
+            await blocking(ctx.first_reads.clear)
+        return action_done(request, "ok", "Cleared. Activity still lists every read.", "/")
 
     async def share_audience(request: Request, form: dict[str, str]) -> Response:
         """Who may read one item on the Sharing list, and until when."""
@@ -2530,6 +2543,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
         Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
         Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
+        Route("/first-reads/clear", csrf_protected(first_reads_clear), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),

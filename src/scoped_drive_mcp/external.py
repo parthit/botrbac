@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from typing import Any, TypeVar
 
 from .audit import audit
-from .auth import current_actor, current_guest
+from .auth import current_actor, current_guest, current_principal
 from .drive_client import FOLDER_MIME, BotNotConnectedError
 from .errors import report_exception
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
@@ -97,6 +97,31 @@ def normalize_email(value: Any) -> str:
     return email
 
 
+# A refusal to someone who is not paired is logged at most this often per person and tool.
+NOT_LINKED_LOG_EVERY = 3600
+
+
+def _caller_who() -> dict[str, str | None]:
+    """How a refusal is recorded on the caller's own log: as their own app, not a guest."""
+    principal = current_principal.get()
+    return {
+        "token_name": principal.token_name if principal else None,
+        "role": principal.role.value if principal else None,
+    }
+
+
+def _guest_who(you: str, via: str | None) -> dict[str, str | None]:
+    """How a guest call is recorded on the owner's activity log."""
+    who: dict[str, str | None] = {
+        "token_name": f"guest:{you}" + (f" ({via})" if via else ""),
+        "role": GUEST_ROLE,
+        "guest": you,
+    }
+    if via:
+        who["via"] = via
+    return who
+
+
 MAX_SEARCH_QUERY = 200
 # When searching everyone, these errors skip that owner instead of failing the search.
 SKIPPABLE_IN_SEARCH = frozenset({"owner_unavailable", "not_linked"})
@@ -150,6 +175,10 @@ class ExternalShares:
         service: DriveService,
         is_linked: Callable[[str, str], bool],
         active_peers: Callable[[str], list[str]],
+        *,
+        is_known_user: Callable[[str], bool] | None = None,
+        once: Callable[[str, int], bool] | None = None,
+        first_read: Callable[[str, str, str | None], None] | None = None,
     ):
         # `allowlist` and `service` resolve the current actor on each call, so they read
         # whichever person's external list and Drive `acting_as` selects.
@@ -157,6 +186,15 @@ class ExternalShares:
         self.service = service
         self.is_linked = is_linked
         self.active_peers = active_peers
+        # Whether an email has an account here; refusals are only logged on real accounts.
+        self.is_known_user = is_known_user or (lambda _email: False)
+        # once(key, seconds): True the first time `key` is seen in that window, for the
+        # current actor. Caps how often a refusal is logged, so nobody can flood a log.
+        # Without one, refusals are not logged at all: a flood limiter fails closed.
+        self.once = once or (lambda _key, _ttl: False)
+        # first_read(guest, tool, file_id), as the owner: called on every allowed read by an
+        # assistant; it records the notice only the first time it sees that person.
+        self.first_read = first_read
 
     # ---- owner side ------------------------------------------------------
 
@@ -173,8 +211,15 @@ class ExternalShares:
         for peer in self.active_peers(you):
             with guest_of(peer, you):
                 entries = self.allowlist.entries_for(you)
-            if not entries:
-                continue
+                if not entries:
+                    continue
+                # The owner sees that this person's assistant looked at what they share.
+                audit(
+                    tool="list_shared_with_me",
+                    decision="allow",
+                    reason="ok",
+                    **_guest_who(you, None),
+                )
             items = [
                 {"id": e.id, "name": e.name, "mime_type": e.mime_type}
                 for e in sorted(entries.values(), key=lambda e: e.name.lower())
@@ -363,13 +408,45 @@ class ExternalShares:
         via: str | None = None,
     ) -> T:
         you = normalize_email(caller)
-        them = normalize_email(owner)
+        try:
+            them = normalize_email(owner)
+        except SharedAccessError:
+            # No account to log this on; the caller's own log shows the mistake.
+            with acting_as(you):
+                audit(
+                    tool=tool,
+                    decision="deny",
+                    reason="invalid_input",
+                    **_caller_who(),
+                    file_id=file_id,
+                )
+            raise
         if you == them:
+            with acting_as(you):
+                audit(
+                    tool=tool,
+                    decision="deny",
+                    reason="own_drive",
+                    **_caller_who(),
+                    file_id=file_id,
+                )
             raise SharedAccessError(
                 "own_drive",
                 "That is your own account. Use list_folder and read_file for your own Drive.",
             )
         if not self.is_linked(you, them):
+            # Someone not paired with this person tried to read their share. Log it on the
+            # owner's activity (at most once an hour per person and tool), so probing shows.
+            if self.is_known_user(them):
+                with acting_as(them):
+                    if self.once(f"guestdeny:{you}:{tool}", NOT_LINKED_LOG_EVERY):
+                        audit(
+                            tool=tool,
+                            decision="deny",
+                            reason="not_linked",
+                            file_id=file_id,
+                            **_guest_who(you, via),
+                        )
             raise SharedAccessError(
                 "not_linked",
                 "You do not have an active pairing with that person. Both people "
@@ -378,13 +455,7 @@ class ExternalShares:
                 owner=them,
             )
         # Recorded on the owner's activity log, so they can see who read what.
-        who: dict[str, str | None] = {
-            "token_name": f"guest:{you}" + (f" ({via})" if via else ""),
-            "role": GUEST_ROLE,
-            "guest": you,
-        }
-        if via:
-            who["via"] = via
+        who = _guest_who(you, via)
         with guest_of(them, you):
             try:
                 result = fn()
@@ -424,4 +495,10 @@ class ExternalShares:
                     owner=them,
                 ) from None
             audit(tool=tool, decision="allow", reason="ok", file_id=file_id, **who)
+            # Only an assistant's read is news; the person browsing Shared with me is not.
+            if self.first_read is not None and not via:
+                try:
+                    self.first_read(you, tool, file_id)
+                except Exception:
+                    logger.info("first-read notice not saved", exc_info=True)
             return _guest_notes(result)
