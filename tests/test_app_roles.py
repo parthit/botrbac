@@ -154,8 +154,21 @@ def test_settings_flags_apps_that_are_full_only_because_they_are_old(owner_c, me
     _connect(owner_c)
     grant = _grant_id(memstore)
     assert "connected before you could choose" not in owner_c.get("/settings").text
+
+
+def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memstore) -> None:  # noqa: F811
+    token = _connect(owner_c)
+    grant = _grant_id(memstore)
     raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
     raw.pop("roles", None)
     memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
     memstore.delete(f"sdm:oauth:role:{grant}")
     assert "connected before you could choose" in owner_c.get("/settings").text
+    assert "trash_file" in tool_names(owner_c, token)  # old app: full
+    owner_c.post(
+        "/oauth/grants/role",
+        data={"csrf": csrf(owner_c, "/settings"), "grant_id": grant, "role": "viewer"},
+    )
+    memstore.delete(f"sdm:oauth:role:{grant}")
+    names = tool_names(owner_c, token)
+    assert "trash_file" not in names and not names & WRITE_TOOLS

@@ -979,6 +979,11 @@ class McpOAuth:
         if grant is None or grant.email != email:
             return False
         self.store.set(_role_key(grant.id), role)
+        if not grant.roles:
+            # The owner has now chosen for an app from before roles: from here on a lost
+            # role key fails closed to read, never back to the old full access.
+            grant.roles = True
+            self._save_grant(grant)
         return True
 
     def _note_use(self, grant_id: str) -> None:
