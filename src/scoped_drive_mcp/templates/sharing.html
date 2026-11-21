@@ -29,6 +29,8 @@
     <td data-label="Who can see it">
       {% if e.for_everyone %}Everyone you are paired with{% elif e.audience %}{{ e.audience | join(", ") }}{% else %}<b>No one</b> <span class="muted">(the people it named are no longer paired with you)</span>{% endif %}
       {% if e.expires_at %}<br><span class="muted">{{ "Ended" if e.expired() else "Until" }} {{ e.expires_at[:10] }}</span>{% endif %}
+      {% set cover = covers.get(e.id) %}
+      {% if cover %}<br><span class="muted">Also visible through “{{ cover.name or cover.id }}” to {% if cover.for_everyone %}everyone you are paired with{% elif cover.audience %}{{ cover.audience | join(", ") }}{% else %}no one{% endif %}{% if cover.expires_at %} until {{ cover.expires_at[:10] }}{% endif %}.</span>{% endif %}
       {% if peers %}
       <details class="disclosure-form" id="who-{{ e.id }}"><summary>Change<span class="sr-only"> who can see {{ e.name or e.id }}</span></summary>
         <form class="stack" method="post" action="/sharing/audience">

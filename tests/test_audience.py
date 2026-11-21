@@ -306,3 +306,31 @@ def test_a_failed_prune_on_one_side_still_prunes_the_other(three, memstore, monk
     # Eve's side was still pruned even though the owner's side failed.
     eve_raw = memstore.hget(f"{KEY_PREFIX}u:{EVE}:{EXTERNAL_ALLOWLIST_KEY}", EVE_DOC)
     assert json.loads(eve_raw)["audience"] == []
+
+
+def test_a_wider_folder_above_still_shares_a_narrowed_item_and_the_page_says_so(
+    three, memstore
+) -> None:
+    _app_, owner, eve, carol = three
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303  # everyone
+    assert post(owner, "/sharing/add", file_id="proj-notes").status_code == 303
+    done = _audience(owner, "proj-notes", "people", [EVE])
+    assert done.status_code == 303
+    # Union, as in Drive: Carol still reads it through the folder.
+    assert "project notes alpha" in json.dumps(_read(carol, "proj-notes"))
+    # The success message warns (the first page load shows it), and so does the page.
+    page = owner.get(done.headers["location"]).text
+    assert "which is also on your Sharing list" in page
+    assert "Also visible through “Projects” to everyone you are paired with" in page
+
+
+def test_a_new_item_shared_with_nobody_is_refused(world) -> None:
+    grants = GrantService(
+        lambda: world.as_user(OWNER_EMAIL),
+        Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY),
+        AccessRequests(MemoryStore()),
+        None,
+        audience=AUDIENCE_LINKED,
+    )
+    with pytest.raises(GrantError):
+        grants.grant("loose-doc", audience=())

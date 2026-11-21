@@ -115,6 +115,9 @@ class GrantService:
             return existing
         if item_id == self.my_drive_root_id():
             raise GrantError("Your whole My Drive cannot be shared; pick folders or files in it.")
+        chosen = self._audience_for(audience)
+        if isinstance(chosen, tuple) and not chosen:
+            raise GrantError("Choose at least one person, or share the item with everyone.")
         permission_id = self._share(item_id) if self.bot_email else None
         entry = AllowEntry(
             id=item_id,
@@ -123,7 +126,7 @@ class GrantService:
             permission_id=permission_id,
             request_id=request_id,
             shared_with=self.bot_email if permission_id else None,
-            audience=self._audience_for(audience),
+            audience=chosen,
             expires_at=expires_at if self.audience is not None else None,
         )
         self.allowlist.add(entry)

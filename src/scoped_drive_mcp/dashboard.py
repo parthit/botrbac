@@ -1508,6 +1508,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return ""
         return found[1] if found else None
 
+    def share_covers(entries: dict[str, Any]) -> dict[str, Any]:
+        """For items narrowed to some people or a date: the shared folder above that still
+        includes them. A folder on the list covers what is inside it, so narrowing an item
+        inside a more widely shared folder does not hide it; the page says so."""
+        covers: dict[str, Any] = {}
+        grants = ctx.ext_grants()
+        for entry in entries.values():
+            if entry.for_everyone and not entry.expires_at:
+                continue
+            try:
+                found = grants.covering_entry(entry.id)
+            except Exception as exc:
+                report_exception(exc, where="share_covers")
+                continue
+            if found and found[0] in entries:
+                covers[entry.id] = entries[found[0]]
+        return covers
+
     async def share_add(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
         next_url = safe_next(form.get("next") or "/sharing")
@@ -1549,9 +1567,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "everyone you are paired with" if entry.for_everyone else ", ".join(entry.audience)  # type: ignore[arg-type]
         )
         until = f" until {entry.expires_at[:10]}" if entry.expires_at else ""
-        return action_done(
-            request, "ok", f"“{entry.name}” is now shared with {who}{until}.", next_url
-        )
+        message = f"“{entry.name}” is now shared with {who}{until}."
+        cover = await still_covered(ctx.ext_grants(), file_id)
+        if cover:
+            message += (
+                f" It is inside “{cover}”, which is also on your Sharing list, so whoever can "
+                "see that folder can still read it."
+            )
+        return action_done(request, "ok", message, next_url)
 
     async def share_remove(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
@@ -1591,8 +1614,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         def gather() -> dict[str, Any]:
             peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
+            entries = ctx.ext_allowlist.entries()
             return {
-                "entries": ctx.ext_allowlist.entries(),
+                "entries": entries,
+                "covers": share_covers(entries),
                 "peers": peers,
                 "drive_connected": ctx.drive_connected(),
             }
@@ -1603,6 +1628,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "sharing.html",
             rows=rows,
+            covers=data["covers"],
             peers=data["peers"],
             describe_mime=describe_mime,
             drive_connected=data["drive_connected"],
