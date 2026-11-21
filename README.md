@@ -120,7 +120,9 @@ Config to the project and set the item `self_pairing` to
 | `trash_file(file_id)` (recoverable from Drive's trash for 30 days) |  |  | ✓ |
 
 `read_file` returns text for files inside the owner's share, including files nested in a shared folder.
-Google Docs and Slides are exported as plain text and Google Sheets as CSV (first sheet only). PDF, Word
+Google Docs and Slides are exported as plain text. Google Sheets are exported as `.xlsx` (same Drive
+permission) so every tab is returned, each headed `# <tab name>`; a workbook over Drive's 10 MB export
+limit or the byte cap falls back to CSV of the first tab, with a note saying so. PDF, Word
 (`.docx` and legacy `.doc`), PowerPoint (`.pptx`), Excel (`.xlsx`), RTF, CSV, Markdown, JSON, and other
 text files are extracted to plain text in the server process. Scanned PDFs and other files with no text
 layer come back empty of content, with a note to call `download_file`. Images, archives, and anything else

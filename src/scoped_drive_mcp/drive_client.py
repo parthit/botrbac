@@ -41,6 +41,10 @@ class DriveAccessError(Exception):
     """Drive refused a list because this sign-in cannot run it."""
 
 
+class DriveExportTooLargeError(Exception):
+    """Drive will not export this file in the asked format (its export limit is 10 MB)."""
+
+
 def drive_field_mask(fields: str) -> str:
     """Request shortcut targets explicitly.
 
@@ -265,8 +269,15 @@ class GoogleDriveClient:
                 raise
 
     def export(self, file_id: str, mime_type: str) -> bytes:
+        from googleapiclient.errors import HttpError
+
         files = self._service().files()
-        return self._execute(files.export(fileId=file_id, mimeType=mime_type))
+        try:
+            return self._execute(files.export(fileId=file_id, mimeType=mime_type))
+        except HttpError as exc:
+            if _http_status(exc) == 403 and b"exportSizeLimitExceeded" in (exc.content or b""):
+                raise DriveExportTooLargeError(mime_type) from None
+            raise
 
     def download(self, file_id: str, max_bytes: int) -> bytes:
         files = self._service().files()

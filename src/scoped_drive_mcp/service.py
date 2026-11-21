@@ -20,6 +20,7 @@ from .drive_client import (
     GOOGLE_APPS_PREFIX,
     SHORTCUT_MIME,
     DriveClient,
+    DriveExportTooLargeError,
     DriveNotFoundError,
 )
 from .extract import ExtractError, document_kind, extract_text
@@ -52,6 +53,11 @@ DOC_MIME = "application/vnd.google-apps.document"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SLIDES_MIME = "application/vnd.google-apps.presentation"
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# What read_file asks Drive for. A Sheet's CSV export holds only its first tab, so read_file
+# exports the workbook (every tab) and falls back to this CSV only when that cannot be read.
+# Dashboard downloads still use these formats.
 EXPORT_FORMATS = {
     DOC_MIME: "text/plain",
     SHEET_MIME: "text/csv",
@@ -336,6 +342,10 @@ class DriveService:
 
         name = str(meta.get("name", ""))
         kind = document_kind(mime, name)
+        if mime == SHEET_MIME:
+            tabs = self._read_sheet_tabs(file_id, result)
+            if tabs is not None:
+                return tabs
         if mime in EXPORT_FORMATS:
             export_mime = EXPORT_FORMATS[mime]
             data = self.drive.export(file_id, export_mime)
@@ -364,6 +374,38 @@ class DriveService:
         if len(text) > self.max_chars:
             text = text[: self.max_chars]
             result["truncated"] = True
+        result["content"] = text
+        return result
+
+    def _read_sheet_tabs(self, file_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        """Every tab of a Google Sheet, via its .xlsx export. None means use the CSV export."""
+        try:
+            data = self.drive.export(file_id, XLSX_MIME)
+        except DriveExportTooLargeError:
+            logger.info("sheet %s is over Drive's export limit; reading its first tab", file_id)
+            result["note"] = "workbook is too large to export whole; only the first tab is shown"
+            return None
+        if len(data) > self.max_bytes:
+            logger.info("sheet %s export is %d bytes; reading its first tab", file_id, len(data))
+            result["note"] = "workbook is too large to read whole; only the first tab is shown"
+            return None
+        try:
+            text = extract_text(data, "xlsx", char_limit=self.max_chars)
+        except Exception as exc:  # never log cell contents, only the failure's type
+            logger.info(
+                "sheet %s workbook read failed (%s); reading its first tab",
+                file_id,
+                type(exc).__name__,
+            )
+            result["note"] = "workbook could not be read whole; only the first tab is shown"
+            return None
+        result["exported_as"] = XLSX_MIME
+        if len(text) > self.max_chars:
+            text = text[: self.max_chars]
+            result["truncated"] = True
+            last = re.findall(r"^# (.+)$", text, flags=re.MULTILINE)
+            if last:
+                result["note"] = f"text cut off in tab {last[-1]!r}; later tabs are not shown"
         result["content"] = text
         return result
 

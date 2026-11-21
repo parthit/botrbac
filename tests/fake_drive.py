@@ -36,6 +36,8 @@ class FakeFile:
     shortcut_target: str | None = None
     description: str | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # Bytes Drive returns for files.export in a given format; others get `content`.
+    exports: dict[str, bytes | Exception] = field(default_factory=dict)
 
     def as_api(self, fields: str) -> dict[str, Any]:
         full = {
@@ -265,7 +267,10 @@ class FakeDrive:
     def export(self, file_id: str, mime_type: str) -> bytes:
         self.content_calls.append(file_id)
         f = self._get(file_id)
-        return f.content
+        export = f.exports.get(mime_type, f.content)
+        if isinstance(export, Exception):
+            raise export
+        return export
 
     def download(self, file_id: str, max_bytes: int) -> bytes:
         self.content_calls.append(file_id)

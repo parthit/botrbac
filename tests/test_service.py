@@ -2,9 +2,16 @@ import base64
 
 import pytest
 
-from scoped_drive_mcp.drive_client import FOLDER_MIME
+from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveExportTooLargeError
 from scoped_drive_mcp.scope import ForbiddenError, InvalidInputError
-from scoped_drive_mcp.service import DOC_MIME, DOWNLOAD_BYTE_CAP, DriveService, is_text_like
+from scoped_drive_mcp.service import (
+    DOC_MIME,
+    DOWNLOAD_BYTE_CAP,
+    SHEET_MIME,
+    XLSX_MIME,
+    DriveService,
+    is_text_like,
+)
 from tests.conftest import ROOT, make_settings
 from tests.office_files import (
     minimal_doc,
@@ -24,9 +31,62 @@ def test_read_google_doc_exports_text(service: DriveService) -> None:
 
 
 def test_read_sheet_exports_csv(service: DriveService) -> None:
+    # This fake Sheet has no workbook export, so read_file falls back to the first tab.
     result = service.read_file("sheet-1")
     assert result["exported_as"] == "text/csv"
     assert result["content"].startswith("a,b")
+    assert "first tab" in result["note"]
+
+
+def _booking_sheet(drive, **exports) -> None:
+    sheet = drive.add("sheet-tabs", "Maui-Oahu-Booking", SHEET_MIME, [ROOT], b"Day,Place\n1,Maui\n")
+    sheet.exports.update(exports)
+
+
+def test_read_sheet_returns_every_tab(drive, guard) -> None:
+    service = DriveService(drive, guard, make_settings(max_bytes=100_000))
+    workbook = minimal_xlsx(
+        [["Day", "Place"], [1, "Maui"]],
+        sheet="Itinerary",
+        more=[("Reservations Confirmed", [["Hotel", "Conf #"], ["Andaz", "A123"]])],
+    )
+    _booking_sheet(drive, **{XLSX_MIME: workbook})
+    result = service.read_file("sheet-tabs")
+    assert result["exported_as"] == XLSX_MIME
+    assert "# Itinerary" in result["content"]
+    assert "# Reservations Confirmed" in result["content"]
+    assert "Andaz\tA123" in result["content"]
+    assert result["truncated"] is False
+    assert "note" not in result
+
+
+def test_read_sheet_over_export_limit_falls_back_to_first_tab(drive, service) -> None:
+    _booking_sheet(drive, **{XLSX_MIME: DriveExportTooLargeError(XLSX_MIME)})
+    result = service.read_file("sheet-tabs")
+    assert result["exported_as"] == "text/csv"
+    assert result["content"].startswith("Day,Place")
+    assert "too large" in result["note"]
+
+
+def test_read_sheet_over_byte_cap_falls_back_to_first_tab(drive, service) -> None:
+    workbook = minimal_xlsx([["Day"]], more=[("Reservations Confirmed", [["Andaz"]])])
+    assert len(workbook) > 4096  # the test byte cap
+    _booking_sheet(drive, **{XLSX_MIME: workbook})
+    result = service.read_file("sheet-tabs")
+    assert result["exported_as"] == "text/csv"
+    assert "too large" in result["note"]
+
+
+def test_read_sheet_truncation_names_the_cut_tab(drive, guard) -> None:
+    workbook = minimal_xlsx(
+        [["short"]], sheet="First", more=[("Second", [["x" * 50] for _ in range(40)])]
+    )
+    _booking_sheet(drive, **{XLSX_MIME: workbook})
+    small = DriveService(drive, guard, make_settings(max_bytes=100_000, max_chars=1000))
+    result = small.read_file("sheet-tabs")
+    assert result["truncated"] is True
+    assert len(result["content"]) == 1000
+    assert "'Second'" in result["note"]
 
 
 def test_read_text_file(service: DriveService) -> None:
