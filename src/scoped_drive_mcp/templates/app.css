@@ -1111,8 +1111,6 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
 .stack label.check input { width: 18px; height: 18px; flex: 0 0 auto; margin: 2px 0 0; }
 .stack label.check.indent { margin-left: 28px; }
 .stack label.check .hint { display: block; font-weight: 400; font-size: 13px; margin-top: 4px; }
-@media (max-width: 720px) {
-}
 .act-line button { min-width: 8.5rem; }
 @media (min-width: 721px) { .file-actions:has(.act-line) { align-items: flex-end; } }
 /* Sharing table: Change opens a full-width panel in the row below the item. */

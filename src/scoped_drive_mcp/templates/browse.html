@@ -129,7 +129,7 @@
           <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}<span class="sr-only"> {{ r.name }}</span></button>
         </form>
         {% endif %}
-        {% if r.covered_by and not r.granted %}<span class="muted">Allowed via folder</span>{% endif %}
+        {% if r.covered_by %}<span class="muted" data-access-when="off"{% if r.granted %} hidden{% endif %}>Allowed via folder</span>{% endif %}
         </div>
         {% if has_pairing or r.ext_shared or r.shared_by %}
         <div class="act-line"><span class="act-who">Paired people</span>

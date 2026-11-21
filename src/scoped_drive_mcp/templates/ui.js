@@ -644,10 +644,11 @@
     event.preventDefault();
     var opening = panel.hidden;
     panel.hidden = !opening;
-    var opener = document.querySelector('[aria-controls="' + panel.id + '"]');
+    var opener = document.querySelector('[aria-controls="' + CSS.escape(panel.id) + '"]');
     if (opener) opener.setAttribute("aria-expanded", opening ? "true" : "false");
     if (opening) {
-      var first = panel.querySelector("input:checked, input");
+      // Two lookups: a selector list matches in document order, so it would pick the hidden csrf field.
+      var first = panel.querySelector("input:checked") || panel.querySelector("input:not([type=hidden])");
       if (first) first.focus();
     } else if (opener) {
       opener.focus();
