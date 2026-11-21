@@ -755,9 +755,10 @@ class Mailbox:
         self._index_hook(you, owner, present=False)
         return self.get_webhook(you, app)
 
-    def move_webhook(self, email: str, app: str) -> dict[str, Any]:
-        """Dashboard only: give the account-wide hook to one app (its own slot). The key
-        moves with it; nothing is re-entered."""
+    def move_webhook(self, email: str, app: str, from_app: str = "") -> dict[str, Any]:
+        """Dashboard only: give a saved hook to another app's slot. `from_app` is "" for
+        the account-wide hook, or the app it sits on now. The key moves with it; nothing
+        is re-entered."""
         you = _email(email)
         if not self.wake.ready:
             raise MailboxError(
@@ -765,10 +766,13 @@ class Mailbox:
             )
         if not app:
             raise MailboxError("invalid_input", "Choose an app.")
-        record = self._hook(you)
+        source = self._hook_owner(you, from_app)
+        record = self._hook(source)
         if record is None:
-            raise MailboxError("not_found", "There is no account-wide wake-up to move.")
+            raise MailboxError("not_found", "There is no wake-up there to move.")
         owner = self._hook_owner(you, app)
+        if owner == source:
+            raise MailboxError("invalid_input", "It already belongs to that app.")
         if self._hook(owner) is not None:
             raise MailboxError(
                 "invalid_state",
@@ -778,8 +782,9 @@ class Mailbox:
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
         self._index_hook(you, owner, present=True)
-        self.store.delete(f"bridge:hook:{you}")
-        self.store.delete(f"bridge:hookerr:{you}")
+        self.store.delete(f"bridge:hook:{source}")
+        self.store.delete(f"bridge:hookerr:{source}")
+        self._index_hook(you, source, present=False)
         return self.get_webhook(you, app)
 
     def get_primary(self, email: str) -> str | None:
@@ -843,7 +848,11 @@ class Mailbox:
     def _maybe_wake(self, message: dict[str, Any]) -> None:
         if not self.wake.ready:
             return
-        for slot, record in self._wake_targets(str(message["to"])):
+        targets = self._wake_targets(str(message["to"]))
+        if not targets:
+            kind = "app" if "#" in str(message["to"]) else "account"
+            logging.getLogger(__name__).warning("mailbox_wake_none %s", kind)
+        for slot, record in targets:
             if not record.get("enabled") or not record.get("url"):
                 continue
             # One mark per message and hook, so a retry does not ping a hook twice.
@@ -851,14 +860,17 @@ class Mailbox:
             mark = f"bridge:woke:{message['msg_id']}{suffix}"
             if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
                 continue
+            # Which slot, never the address or URL: "app" for one app's own, else "account".
+            kind = "app" if "#" in slot else "account"
             try:
                 deliver(self.wake, record, message)
             except Exception as exc:
                 self.store.delete(mark)
                 logged = _wake_error(exc)
-                logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
+                logging.getLogger(__name__).warning("mailbox_wake_failed %s %s", kind, logged)
                 self._note_wake(slot, record, logged)
             else:
+                logging.getLogger(__name__).warning("mailbox_wake_sent %s", kind)
                 self._note_wake(slot, record, None)
 
     def _wake_targets(self, recipient: str) -> list[tuple[str, dict[str, Any]]]:

@@ -195,6 +195,19 @@
     <input type="hidden" name="app" value="{{ hook.app.id }}">
     <div class="actions"><button type="submit">Remove</button></div>
   </form>
+  {% if apps | length > 1 %}
+  <form class="stack" method="post" action="/bridge/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="move">
+    <input type="hidden" name="from_app" value="{{ hook.app.id }}">
+    <label>Give this wake-up to
+      <select name="app">
+        {% for app in apps if app.id != hook.app.id %}<option value="{{ app.id }}">{{ app_label(app) }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="actions"><button type="submit">Move</button></div>
+  </form>
+  {% endif %}
   {% endfor %}
   {% if webhook.configured %}
   <p>
