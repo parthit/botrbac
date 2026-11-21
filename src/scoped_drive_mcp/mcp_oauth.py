@@ -332,6 +332,11 @@ def _role_key(grant_id: str) -> str:
     return f"oauth:role:{grant_id}"
 
 
+def _chosen_key(grant_id: str) -> str:
+    """Set once the owner picked a role for an app from before roles existed."""
+    return f"oauth:rolechosen:{grant_id}"
+
+
 def _seen_key(grant_id: str) -> str:
     return f"oauth:seen:{grant_id}"
 
@@ -950,6 +955,7 @@ class McpOAuth:
             self.store.delete(_code_key(grant.code_hash))
         self.store.delete(_seen_key(grant.id))
         self.store.delete(_role_key(grant.id))
+        self.store.delete(_chosen_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
         if self.on_revoke is not None:
             try:
@@ -966,7 +972,9 @@ class McpOAuth:
         stored = self.store.get(_role_key(grant.id))
         if stored in APP_ROLES:
             return str(stored)
-        return Role.VIEWER.value if grant.roles else Role.ADMIN.value
+        if grant.roles or self.store.get(_chosen_key(grant.id)) is not None:
+            return Role.VIEWER.value
+        return Role.ADMIN.value
 
     def set_role(self, grant_id: str, email: str, role: str) -> bool:
         """The owner changes what one of their apps may do. Applies on its next call."""
@@ -975,12 +983,10 @@ class McpOAuth:
         grant = self._grant(grant_id)
         if grant is None or grant.email != email:
             return False
+        # The owner has now chosen. A side key (not the grant record, which a token refresh
+        # rewrites) marks that, so a lost role key fails closed to read from here on.
+        self.store.set(_chosen_key(grant.id), "1")
         self.store.set(_role_key(grant.id), role)
-        if not grant.roles:
-            # The owner has now chosen for an app from before roles: from here on a lost
-            # role key fails closed to read, never back to the old full access.
-            grant.roles = True
-            self._save_grant(grant)
         return True
 
     def _note_use(self, grant_id: str) -> None:
