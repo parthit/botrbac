@@ -885,10 +885,11 @@ class Mailbox:
             # One mark per message and hook, so a retry does not ping a hook twice.
             suffix = "" if slot == message["to"] else f":{slot}"
             mark = f"bridge:woke:{message['msg_id']}{suffix}"
-            if not self.store.set_if_absent(mark, "pending", ex=MESSAGE_TTL):
-                # Another call holds this ping. Say "sent" only once it succeeded; while
-                # it is still in flight the outcome is not known yet.
-                outcomes.append("sent" if self.store.get(mark) != "pending" else "pending")
+            held = self._claim_wake(mark)
+            if held is not None:
+                # Another call holds this ping: "sent" only once it succeeded ("1"); while
+                # it is in flight the outcome is not known yet.
+                outcomes.append("sent" if held == "1" else "pending")
                 continue
             # Which slot, never the address or URL: "app" for one app's own, else "account".
             kind = "app" if "#" in slot else "account"
@@ -913,6 +914,18 @@ class Mailbox:
         if "pending" in outcomes:
             return {"status": "pending"}
         return {"status": "paused"}
+
+    def _claim_wake(self, mark: str) -> str | None:
+        """Take the right to send this ping. None means this call holds it now; otherwise
+        the other holder's mark ("pending" or "1"). A failed holder deletes its mark, so a
+        missing mark is claimed again rather than read as success."""
+        for _ in range(2):
+            if self.store.set_if_absent(mark, "pending", ex=MESSAGE_TTL):
+                return None
+            held = self.store.get(mark)
+            if held is not None:
+                return held
+        return "pending"
 
     def test_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
         """Dashboard only: send one ping to a saved hook now, so a person can see it work.

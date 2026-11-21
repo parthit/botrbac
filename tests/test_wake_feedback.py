@@ -253,3 +253,31 @@ def test_overview_counts_each_unwakeable_assistant_once() -> None:
     assert "1 can’t be woken" in html
     assert "Messages from Grok won’t start Claude" in html
     assert "Messages from Cursor won’t start Claude" in html
+
+
+def test_a_retry_after_a_failed_holder_pings_again_instead_of_claiming_success() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    with as_assistant(GROK):
+        box.set_webhook(OWNER_EMAIL, HOOK + "grok", sender_key="grok-key-1234")
+    message = {
+        "to": f"{OWNER_EMAIL}#{GROK.grant_id}",
+        "msg_id": "msg_race",
+        "link_id": "l",
+        "thread_id": "t",
+        "created_at": "2026-11-21T00:00:00Z",
+    }
+    mark = "bridge:woke:msg_race"
+    real_set = box.store.set_if_absent
+    calls = {"n": 0}
+
+    def lose_once(key, value, ex=None):
+        # First try: another call holds the mark, then fails and deletes it before we read.
+        if key == mark and calls["n"] == 0:
+            calls["n"] += 1
+            return False
+        return real_set(key, value, ex=ex)
+
+    box.store.set_if_absent = lose_once
+    assert box._maybe_wake(message) == {"status": "sent"}
+    assert len(posts) == 1  # this call sent the ping itself
