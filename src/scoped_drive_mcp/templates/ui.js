@@ -208,6 +208,9 @@
     while (next && !next.hasAttribute("data-row")) next = next.nextElementSibling;
     var prev = row.previousElementSibling;
     while (prev && !prev.hasAttribute("data-row")) prev = prev.previousElementSibling;
+    // A row's Change panel (Sharing) lives in the next table row; it goes with it.
+    var panel = row.nextElementSibling;
+    if (panel && panel.classList.contains("edit-row")) panel.remove();
     row.remove();
     var target = rowTarget(next) || rowTarget(prev);
     if (body && !body.querySelector("tr, li")) {
@@ -627,5 +630,28 @@
       .then(openPicker)
       .catch(function () { if (note) note.hidden = false; })
       .then(function () { pick.disabled = false; });
+  });
+})();
+
+// Sharing: Change opens the item's panel in the row below, without a page load.
+// Without JS the same link loads ?edit=<id>, which renders that panel open.
+(function () {
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest("[data-edit-toggle]");
+    if (!link) return;
+    var panel = document.getElementById(link.getAttribute("data-edit-toggle"));
+    if (!panel) return;
+    event.preventDefault();
+    var opening = panel.hidden;
+    panel.hidden = !opening;
+    var opener = document.querySelector('[aria-controls="' + CSS.escape(panel.id) + '"]');
+    if (opener) opener.setAttribute("aria-expanded", opening ? "true" : "false");
+    if (opening) {
+      // Two lookups: a selector list matches in document order, so it would pick the hidden csrf field.
+      var first = panel.querySelector("input:checked") || panel.querySelector("input:not([type=hidden])");
+      if (first) first.focus();
+    } else if (opener) {
+      opener.focus();
+    }
   });
 })();

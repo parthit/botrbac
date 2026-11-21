@@ -1101,3 +1101,37 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
   .grid.stats .stat a::after { content: "\00a0→"; }
   .copy-row input { font-size: 12px; }
 }
+
+/* Files rows: each toggle says whose access it changes. */
+.act-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.act-who { font: 500 11px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); min-width: 9.5em; }
+.file-actions:has(.act-line) { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+/* Radio and checkbox rows: the control sits beside its text, not above it. */
+.stack label.check { flex-direction: row; align-items: flex-start; gap: 10px; font-weight: 500; font-size: 15px; margin: 0 0 10px; }
+.stack label.check input { width: 18px; height: 18px; flex: 0 0 auto; margin: 2px 0 0; }
+.stack label.check.indent { margin-left: 28px; }
+.stack label.check .hint { display: block; font-weight: 400; font-size: 13px; margin-top: 4px; }
+.act-line button { min-width: 8.5rem; }
+@media (min-width: 721px) { .file-actions:has(.act-line) { align-items: flex-end; } }
+/* Sharing table: Change opens a full-width panel in the row below the item. */
+.sharing-table td[data-label="Who can see it"] > * + * { margin-left: 6px; }
+.sharing-table .cover-note { display: block; margin: 4px 0 0 !important; }
+.row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row-actions .btn, .row-actions button { min-width: 0; }
+.sharing-table tr[data-row]:has(+ tr.edit-row:not([hidden])) td { border-bottom: 0; }
+.sharing-table tr.edit-row > td { padding: 0 0 16px; }
+.edit-panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px 4px; }
+.edit-panel h3 { margin: 0 0 12px; font-size: 16px; }
+.edit-panel .stack input[type="date"] { width: min(100%, 16rem); }
+@media (max-width: 720px) {
+  .sharing-table tr.edit-row { background: transparent; border: 0; padding: 0; margin: -8px 0 12px; }
+  .sharing-table tr.edit-row > td { display: block; padding: 0; text-align: left; }
+  .sharing-table tr.edit-row > td::before { display: none; }
+  .sharing-table td[data-label="Who can see it"] { display: block; text-align: right; }
+  .sharing-table td[data-label="Who can see it"]::before { float: left; }
+}
+@media (max-width: 720px) {
+  /* Phones: the who-label on the left, its button on the right edge. */
+  .file-actions:has(.act-line) { align-items: stretch; }
+  .act-line { justify-content: space-between; }
+}

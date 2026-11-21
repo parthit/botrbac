@@ -10,7 +10,7 @@
   <ul>
     {% for p in peers %}<li><b>{{ p }}</b></li>{% endfor %}
   </ul>
-  <p class="muted">Each item says who can see it: everyone you are paired with, or only the people you pick. Their assistants can read, list and download it, never change it. Disconnecting a pairing on the People tab stops that at once.</p>
+  <p class="muted">Each item says who can see it: everyone you are paired with, or only the people you pick. Their assistants can read, list and download it. They can change it only if you tick “can add and edit”. Disconnecting a pairing on the People tab stops that at once.</p>
   {% elif rows %}
   <p>No one right now. You have no active pairing, so no other assistant can read these items. Anyone you pair with later on <a href="/sharing?tab=people">People</a> will be able to.</p>
   {% else %}
@@ -19,54 +19,68 @@
 </div>
 
 {% if rows %}
-<table class="cards" data-list>
+{#- One row per item; Change opens a full-width panel in the row below. The panel is a
+    link target so it also opens without JS (?edit=<id>); ui.js toggles it in place. -#}
+{% set editing = request.query_params.get("edit") if request else None %}
+<table class="cards sharing-table" data-list>
   <thead><tr><th>Name</th><th>Type</th><th>Who can see it</th><th>Shared</th><th>Action</th></tr></thead>
   <tbody>
   {% for e in rows %}
+  {% set open = peers and editing == e.id %}
   <tr data-row>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Who can see it">
-      {% if e.for_everyone %}Everyone you are paired with{% elif e.audience %}{{ e.audience | join(", ") }}{% else %}<b>No one</b> <span class="muted">(the people it named are no longer paired with you)</span>{% endif %}
-      {% if e.access == "edit" %}<br><span class="pill">Can edit</span>{% endif %}
-      {% if e.expires_at %}<br><span class="muted">{{ "Ended" if e.expired() else "Until" }} {{ e.expires_at[:10] }}</span>{% endif %}
+      <span>{% if e.for_everyone %}Everyone you are paired with{% elif e.audience %}{{ e.audience | join(", ") }}{% else %}<b>No one</b> <span class="muted">(the people it named are no longer paired with you)</span>{% endif %}</span>
+      {% if e.access == "edit" %}<span class="pill">Can edit</span>{% endif %}
+      {% if e.expires_at %}<span class="muted">{{ "Ended" if e.expired() else "Until" }} {{ e.expires_at[:10] }}</span>{% endif %}
       {% set cover = covers.get(e.id) %}
-      {% if cover %}<br><span class="muted">Also visible through “{{ cover.name or cover.id }}” to {% if cover.for_everyone %}everyone you are paired with{% elif cover.audience %}{{ cover.audience | join(", ") }}{% else %}no one{% endif %}{% if cover.expires_at %} until {{ cover.expires_at[:10] }}{% endif %}.</span>{% endif %}
-      {% if peers %}
-      <details class="disclosure-form" id="who-{{ e.id }}"><summary>Change<span class="sr-only"> who can see {{ e.name or e.id }}</span></summary>
-        <form class="stack" method="post" action="/sharing/audience">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="file_id" value="{{ e.id }}">
-          <input type="hidden" name="next" value="/sharing?tab=by-me">
-          <fieldset>
-            <legend class="sr-only">Who can see it</legend>
-            <label><input type="radio" name="who" value="everyone"{% if e.for_everyone %} checked{% endif %}> Everyone you are paired with, now and later</label>
-            <label><input type="radio" name="who" value="people"{% if not e.for_everyone %} checked{% endif %}> Only these people:</label>
-            {% for p in peers %}
-            <label class="indent"><input type="checkbox" name="person" value="{{ p }}"{% if not e.for_everyone and p in e.audience %} checked{% endif %}> {{ p }}</label>
-            {% endfor %}
-          </fieldset>
-          {# Tells the server this form shows the edit box: without it, editing is left as it is. #}
-          <input type="hidden" name="access_shown" value="1">
-          <label><input type="checkbox" name="access" value="edit"{% if e.access == "edit" %} checked{% endif %}> Their assistants can add and edit {{ "inside it" if e.mime_type == "application/vnd.google-apps.folder" else "it" }} <span class="muted">({{ "create, overwrite and rename inside it" if e.mime_type == "application/vnd.google-apps.folder" else "overwrite its content" }}; never trash, move or reshare. What they write is marked as theirs.)</span></label>
-          <label>Stop sharing after (optional)
-            <input type="date" name="expires_on" value="{{ e.expires_at[:10] if e.expires_at else '' }}">
-          </label>
-          <div class="actions"><button type="submit">Save</button></div>
-        </form>
-      </details>
-      {% endif %}
+      {% if cover %}<span class="muted cover-note">Also visible through “{{ cover.name or cover.id }}” to {% if cover.for_everyone %}everyone you are paired with{% elif cover.audience %}{{ cover.audience | join(", ") }}{% else %}no one{% endif %}{% if cover.expires_at %} until {{ cover.expires_at[:10] }}{% endif %}.</span>{% endif %}
     </td>
     <td data-label="Shared" class="muted">{{ e.granted_at | when }}</td>
     <td data-label="Action">
-      <form class="inline" method="post" action="/sharing/remove" data-async data-on-success="remove-row" data-confirm="Stop sharing this with other people’s assistants?">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="file_id" value="{{ e.id }}">
-        <input type="hidden" name="next" value="/sharing?tab=by-me">
-        <button class="danger" type="submit">Stop sharing<span class="sr-only"> {{ e.name or e.id }}</span></button>
-      </form>
+      <div class="row-actions">
+        {% if peers %}
+        <a class="btn" href="/sharing?tab=by-me&amp;edit={{ e.id | urlencode }}#edit-{{ e.id }}" data-edit-toggle="edit-{{ e.id }}" aria-controls="edit-{{ e.id }}" aria-expanded="{{ 'true' if open else 'false' }}">Change<span class="sr-only"> who can see {{ e.name or e.id }}</span></a>
+        {% endif %}
+        <form class="inline" method="post" action="/sharing/remove" data-async data-on-success="remove-row" data-confirm="Stop sharing this with other people’s assistants?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="file_id" value="{{ e.id }}">
+          <input type="hidden" name="next" value="/sharing?tab=by-me">
+          <button class="danger" type="submit">Stop sharing<span class="sr-only"> {{ e.name or e.id }}</span></button>
+        </form>
+      </div>
     </td>
   </tr>
+  {% if peers %}
+  <tr class="edit-row" id="edit-{{ e.id }}"{% if not open %} hidden{% endif %}>
+    <td colspan="5">
+      <div class="edit-panel">
+        <h3>Who can see “{{ e.name or e.id }}”</h3>
+          <form class="stack" method="post" action="/sharing/audience">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="file_id" value="{{ e.id }}">
+            <input type="hidden" name="next" value="/sharing?tab=by-me">
+            <fieldset>
+              <legend class="sr-only">Who can see it</legend>
+              <label class="check"><input type="radio" name="who" value="everyone"{% if e.for_everyone %} checked{% endif %}> <span>Everyone you are paired with, now and later</span></label>
+              <label class="check"><input type="radio" name="who" value="people"{% if not e.for_everyone %} checked{% endif %}> <span>Only these people:</span></label>
+              {% for p in peers %}
+              <label class="check indent"><input type="checkbox" name="person" value="{{ p }}"{% if not e.for_everyone and p in e.audience %} checked{% endif %}> <span>{{ p }}</span></label>
+              {% endfor %}
+            </fieldset>
+            {# Tells the server this form shows the edit box: without it, editing is left as it is. #}
+            <input type="hidden" name="access_shown" value="1">
+            <label class="check"><input type="checkbox" name="access" value="edit"{% if e.access == "edit" %} checked{% endif %}> <span>Their assistants can add and edit {{ "inside it" if e.mime_type == "application/vnd.google-apps.folder" else "it" }} <span class="muted hint">{{ "Create, overwrite and rename inside it" if e.mime_type == "application/vnd.google-apps.folder" else "Overwrite its content" }}. Never trash, move or reshare. What they write is marked as theirs.</span></span></label>
+            <label>Stop sharing after (optional)
+              <input type="date" name="expires_on" value="{{ e.expires_at[:10] if e.expires_at else '' }}">
+            </label>
+            <div class="actions"><button class="primary" type="submit">Save</button> <a class="btn" href="/sharing?tab=by-me" data-edit-toggle="edit-{{ e.id }}">Cancel</a></div>
+          </form>
+      </div>
+    </td>
+  </tr>
+  {% endif %}
   {% endfor %}
   </tbody>
 </table>

@@ -348,3 +348,14 @@ def test_a_dead_folder_above_does_not_count_but_a_live_one_further_up_does(three
     assert "Also visible through “Sub”" not in page
     # And the guard agrees: Carol reads it through Projects.
     assert "roadmap secret" in json.dumps(_read(carol, "proj-deep-doc"))
+
+
+def test_change_opens_one_items_panel_without_js(three) -> None:
+    _app_, owner, _eve, _carol = three
+    closed = owner.get("/sharing?tab=by-me").text
+    assert 'id="edit-loose-doc" hidden' in closed
+    assert 'href="/sharing?tab=by-me&amp;edit=loose-doc#edit-loose-doc"' in closed
+
+    opened = owner.get("/sharing?tab=by-me&edit=loose-doc").text
+    assert 'id="edit-loose-doc">' in opened
+    assert 'id="edit-loose-two" hidden' in opened
