@@ -67,7 +67,14 @@ from .humanize import (
     parse_ts,
     when,
 )
-from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
+from .mcp_oauth import (
+    APP_ROLES,
+    DEFAULT_APP_ROLE,
+    SCOPE,
+    AuthorizeError,
+    McpOAuth,
+    QueryMapping,
+)
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
@@ -291,6 +298,12 @@ async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 WAKE_HOME = "/settings#assistants"
 LIST_FIELDS = OWNER_FIELDS + ",modifiedTime"
 COVER_CHECK_LIMIT = 25
+# How each app role is named on the consent page and in Settings.
+ROLE_LABELS = {
+    "viewer": "Read only",
+    "editor": "Read and edit",
+    "admin": "Full (read, edit and trash)",
+}
 
 
 def _end_of_day(day: str) -> str | None:
@@ -2193,8 +2206,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 audit_owner("oauth_deny", client=pending.client_name)
                 target = ctx.mcp_oauth.deny(pending)
             else:
-                audit_owner("oauth_approve", client=pending.client_name)
-                target = ctx.mcp_oauth.approve(str(request.session.get("owner")), pending)
+                role = form.get("role") or DEFAULT_APP_ROLE
+                audit_owner("oauth_approve", client=pending.client_name, role=role)
+                target = ctx.mcp_oauth.approve(str(request.session.get("owner")), pending, role)
         except AuthorizeError as exc:
             return _oauth_error(request, exc, from_form=True)
         return _parked_redirect(request, target)
@@ -2255,6 +2269,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,
                     "mates": mates.get(g.id, []),
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
+                    "role": g.role,
                 }
             )
         return {
@@ -2488,6 +2503,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             kind, message, changed = "error", exc.message, False
         return action_done(request, kind, message, back, changed=changed)
 
+    async def oauth_grant_role(request: Request, form: dict[str, str]) -> Response:
+        """The owner changes what one of their connected apps may do."""
+        email = str(request.session.get("owner") or "")
+        grant_id = form.get("grant_id") or ""
+        role = form.get("role") or ""
+        back = "/settings#assistants"
+        if ctx.mcp_oauth is None or role not in APP_ROLES:
+            return action_done(request, "error", "Choose what this app may do.", back)
+        if not await blocking(ctx.mcp_oauth.set_role, grant_id, email, role):
+            return action_done(request, "error", "That app is not connected.", back)
+        audit_owner("oauth_role", grant=grant_id[-5:], role=role)
+        return action_done(
+            request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
+        )
+
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
@@ -2544,6 +2574,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
         Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
         Route("/first-reads/clear", csrf_protected(first_reads_clear), methods=["POST"]),
+        Route("/oauth/grants/role", csrf_protected(oauth_grant_role), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
@@ -2790,3 +2821,4 @@ _env.globals["human_size"] = human_size
 _env.globals["assistant_label"] = assistant_label
 _env.filters["when"] = when
 _env.globals["icon_kind"] = icon_kind
+_env.globals["role_labels"] = ROLE_LABELS

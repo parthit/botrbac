@@ -130,6 +130,16 @@
     <h3>{{ assistant_name(a) }}</h3>
   </div>
   <p class="muted">added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
+  <form class="inline" method="post" action="/oauth/grants/role" id="role-{{ a.id }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="grant_id" value="{{ a.id }}">
+    <label>Can
+      <select name="role">
+        {% for key, label in role_labels.items() %}<option value="{{ key }}"{% if a.role == key %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit">Save<span class="sr-only"> what {{ a.name }} can do</span></button>
+  </form>
   {% if wake_on %}
   <dl class="talks-to">
     <dt>Talks to</dt>
