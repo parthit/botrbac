@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import html
 import logging
+import os
 import re
 import secrets
 from collections.abc import Awaitable, Callable
@@ -107,6 +108,19 @@ _env = Environment(
     trim_blocks=True,
     lstrip_blocks=True,
 )
+
+
+def observability_on() -> bool:
+    """Vercel Speed Insights and Web Analytics: on when running on Vercel, unless
+    VERCEL_OBSERVABILITY is set to off. Their scripts are served by Vercel itself from
+    /_vercel/..., on this site's own origin, so the CSP needs no new host."""
+    if not os.environ.get("VERCEL", "").strip():
+        return False
+    flag = os.environ.get("VERCEL_OBSERVABILITY", "on").strip().lower()
+    return flag not in {"0", "off", "false", "no"}
+
+
+_env.globals["observability_on"] = observability_on
 
 SECURITY_HEADERS = [
     (b"x-frame-options", b"DENY"),
@@ -427,14 +441,21 @@ def wants_json(request: Request) -> bool:
 
 
 def action_done(
-    request: Request, kind: str, message: str, next_url: str, *, changed: bool | None = None
+    request: Request,
+    kind: str,
+    message: str,
+    next_url: str,
+    *,
+    changed: bool | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Response:
     """Finish a dashboard action that changes one row.
 
     ui.js sends these in the background and updates only the affected row, so it gets
     JSON back. A plain form POST (no JavaScript) still gets a flash and a redirect.
     `changed` says whether the row's state changed. It defaults to success, but a revoke
-    can remove the item from the list and still report a Drive error.
+    can remove the item from the list and still report a Drive error. `extra` adds fields
+    to the JSON answer only, such as a new count for a tab label on the page.
     """
     if wants_json(request):
         return JSONResponse(
@@ -443,6 +464,7 @@ def action_done(
                 "kind": kind,
                 "message": message,
                 "changed": (kind == "ok") if changed is None else changed,
+                **(extra or {}),
             },
             status_code=200 if kind == "ok" else 400,
         )
@@ -550,6 +572,10 @@ def ui_script(request: Request) -> Response:
     return _file_response(request, "ui.js", "text/javascript; charset=utf-8")
 
 
+def observability_script(request: Request) -> Response:
+    return _file_response(request, "observability.js", "text/javascript; charset=utf-8")
+
+
 def legal_routes() -> list[Route]:
     """Public pages and assets. Google's OAuth screen links to /terms and /privacy."""
     return [
@@ -560,6 +586,7 @@ def legal_routes() -> list[Route]:
         Route("/robots.txt", robots, methods=["GET"]),
         Route("/app.css", stylesheet, methods=["GET"]),
         Route("/ui.js", ui_script, methods=["GET"]),
+        Route("/observability.js", observability_script, methods=["GET"]),
         Route("/fonts/{name}", font_asset, methods=["GET"]),
     ]
 
@@ -1480,7 +1507,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         what = f"\u201c{entry.name}\u201d"
         if entry.id != file_id:
             what += ", the shortcut\u2019s target,"
-        return action_done(request, "ok", f"Allowed {what} for the assistant.", next_url)
+        return action_done(
+            request,
+            "ok",
+            f"Allowed {what} for the assistant.",
+            next_url,
+            extra=await allow_count_extra(request),
+        )
 
     async def revoke(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
@@ -1508,7 +1541,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 f"Removed “{name}”. If a folder above it is allowed, "
                 "the assistant can still use it through that folder."
             )
-        return action_done(request, "ok", message, next_url)
+        return action_done(request, "ok", message, next_url, extra=await allow_count_extra(request))
+
+    async def allow_count_extra(request: Request) -> dict[str, int] | None:
+        """The new number for the Allowed tab, so ui.js can update it without a reload."""
+        if not wants_json(request):
+            return None
+        return {"allow_count": len(await blocking(ctx.allowlist.entries))}
 
     async def still_covered(
         grants: GrantService, file_id: str, extra: dict[str, str] | None = None
