@@ -31,7 +31,7 @@ from starlette.types import Receive, Scope, Send
 
 from . import audit as audit_module
 from .access import AccessRequests, AccessService
-from .auth import BearerAuthMiddleware, current_principal
+from .auth import BearerAuthMiddleware, current_actor, current_guest, current_principal
 from .bridge import Assistant, Mailbox, MailboxError, as_assistant
 from .config import Settings
 from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
@@ -724,9 +724,12 @@ def build_app(
         routed,
         None,
         ttl=settings.scope_cache_ttl,
-        allowlist=ext_allowlist.mime_map,
+        # Only what this guest may read: shared with everyone paired, or with them by
+        # name, and not expired. Cached per (owner, guest).
+        allowlist=lambda: ext_allowlist.mime_map_for(current_guest.get()),
         allowlist_ttl=settings.allowlist_cache_ttl,
         admin_email=settings.owner_email,
+        partition=lambda: f"{current_actor.get() or ''}|{current_guest.get() or ''}",
     )
     shares = ExternalShares(
         ext_allowlist,

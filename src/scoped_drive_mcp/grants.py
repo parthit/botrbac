@@ -65,7 +65,17 @@ class GrantService:
         except DriveNotFoundError:
             return None
 
-    def grant(self, file_id: str, *, request_id: str | None = None) -> AllowEntry:
+    def grant(
+        self,
+        file_id: str,
+        *,
+        request_id: str | None = None,
+        audience: str | tuple[str, ...] | None = None,
+        expires_at: str | None = None,
+    ) -> AllowEntry:
+        """Add an item. On the Sharing list, `audience` (default: everyone paired) and
+        `expires_at` say who may read it and until when. An item already on the list keeps
+        its audience; change that with set_audience."""
         meta = self.owner_meta(file_id)
         if meta is None:
             raise GrantError("That item was not found in your Drive.")
@@ -96,13 +106,45 @@ class GrantService:
             permission_id=permission_id,
             request_id=request_id,
             shared_with=self.bot_email if permission_id else None,
-            audience=self.audience,
+            audience=self._audience_for(audience),
+            expires_at=expires_at if self.audience is not None else None,
         )
         self.allowlist.add(entry)
         self._on_change()
         self._access_changed(item_id)
         audit_owner(self._grant_action, file_id=item_id, request_id=request_id)
         return entry
+
+    def _audience_for(self, audience: str | tuple[str, ...] | None) -> str | tuple[str, ...] | None:
+        if self.audience is None:
+            return None
+        if isinstance(audience, tuple):
+            return tuple(sorted({a.strip().lower() for a in audience if a.strip()}))
+        return self.audience
+
+    def set_audience(
+        self,
+        file_id: str,
+        audience: str | tuple[str, ...],
+        expires_at: str | None = None,
+    ) -> AllowEntry:
+        """Sharing list only: change who may read an item, and until when. An empty tuple
+        is refused; use revoke to stop sharing with everyone."""
+        if self.audience is None:
+            raise GrantError("Only items on your Sharing list have an audience.")
+        validate_drive_id(file_id)
+        entry = self.allowlist.get(file_id)
+        if entry is None:
+            raise GrantError("That item is not on your Sharing list.")
+        chosen = self._audience_for(audience)
+        if isinstance(chosen, tuple) and not chosen:
+            raise GrantError("Choose at least one person, or stop sharing the item.")
+        updated = replace(entry, audience=chosen, expires_at=expires_at or None)
+        self.allowlist.add(updated)
+        self._on_change()
+        who = "everyone" if not isinstance(chosen, tuple) else str(len(chosen))
+        audit_owner("share_audience", file_id=file_id, audience=who)
+        return updated
 
     def _access_changed(self, item_id: str) -> None:
         """The owner changed what the assistant may use, so an earlier denial for this

@@ -42,6 +42,9 @@ current_principal: ContextVar[Principal | None] = ContextVar("current_principal"
 # Which tenant's allowlist, vault and Drive client the current call uses.
 # Unset means the admin's legacy keys (single-tenant tests and /health).
 current_actor: ContextVar[str | None] = ContextVar("current_actor", default=None)
+# While another person's assistant (or that person on the dashboard) reads the actor's
+# Sharing list: that reader's email. It decides which shared items they may see.
+current_guest: ContextVar[str | None] = ContextVar("current_guest", default=None)
 
 OAuthResolver = Callable[[str], Principal | None]
 

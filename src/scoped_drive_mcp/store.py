@@ -28,8 +28,8 @@ ALLOWLIST_KEY = "allowlist"
 # ALLOWLIST_KEY so an item can be shared with paired people without the owner's own bot
 # seeing it, and the reverse.
 EXTERNAL_ALLOWLIST_KEY = "ext_allowlist"
-# Who may read an external entry. v1 has one audience: anyone with an active mailbox
-# pairing with the owner. Per-person lists can be added later as another value.
+# Who may read an external entry: AUDIENCE_LINKED is anyone with an active pairing with
+# the owner; otherwise the entry names the people (a tuple of emails) who may read it.
 AUDIENCE_LINKED = "linked"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
@@ -782,11 +782,31 @@ class AllowEntry:
     request_id: str | None = None
     # The bot address `permission_id` belongs to; None when no Drive share was made.
     shared_with: str | None = None
-    # Only set on external entries: who may read it (AUDIENCE_LINKED in v1).
-    audience: str | None = None
+    # Only set on external entries: who may read it. AUDIENCE_LINKED (or None, from rows
+    # written before audiences existed) is every paired person; a tuple names the people.
+    audience: str | tuple[str, ...] | None = None
+    # Only on external entries: when this share stops working (ISO UTC), or None.
+    expires_at: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), separators=(",", ":"))
+        data = asdict(self)
+        if isinstance(self.audience, tuple):
+            data["audience"] = list(self.audience)
+        return json.dumps(data, separators=(",", ":"))
+
+    @property
+    def for_everyone(self) -> bool:
+        return not isinstance(self.audience, tuple)
+
+    def expired(self, now: str | None = None) -> bool:
+        return bool(self.expires_at) and str(self.expires_at) <= (now or utc_now())
+
+    def readable_by(self, guest: str | None, now: str | None = None) -> bool:
+        """Whether `guest` (a paired person) may read this external entry right now. No
+        guest means nobody: a caller that forgot to say who is reading gets nothing."""
+        if not guest or self.expired(now):
+            return False
+        return self.for_everyone or guest.strip().lower() in self.audience  # type: ignore[operator]
 
     @classmethod
     def from_json(cls, raw: str) -> "AllowEntry":
@@ -799,8 +819,15 @@ class AllowEntry:
             granted_at=str(data.get("granted_at", "")),
             request_id=data.get("request_id"),
             shared_with=data.get("shared_with"),
-            audience=data.get("audience"),
+            audience=_audience(data.get("audience")),
+            expires_at=data.get("expires_at") or None,
         )
+
+
+def _audience(value: Any) -> str | tuple[str, ...] | None:
+    if isinstance(value, list | tuple):
+        return tuple(sorted({str(v).strip().lower() for v in value if str(v).strip()}))
+    return value if value is None else str(value)
 
 
 class Allowlist:
@@ -832,6 +859,15 @@ class Allowlist:
 
     def mime_map(self) -> dict[str, str]:
         return {fid: e.mime_type for fid, e in self.entries().items()}
+
+    def entries_for(self, guest: str | None) -> dict[str, AllowEntry]:
+        """External entries `guest` may read now: shared with everyone paired, or with
+        them by name, and not expired."""
+        now = utc_now()
+        return {fid: e for fid, e in self.entries().items() if e.readable_by(guest, now)}
+
+    def mime_map_for(self, guest: str | None) -> dict[str, str]:
+        return {fid: e.mime_type for fid, e in self.entries_for(guest).items()}
 
 
 # ---- encrypted refresh tokens ---------------------------------------------

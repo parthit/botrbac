@@ -181,6 +181,13 @@ a resume that any paired person's assistant may see.
   Activity page shows these reads as `guest:<you> (dashboard)`.
 - **Add or remove:** on **Browse**, choose **Share with paired people** (or **Stop sharing**) next to a file or
   folder. **Sharing** lists what you share and who can currently read it. A folder includes what is inside it.
+- **Who can see each item:** a new item is shared with everyone you are paired with. On **Sharing**, choose
+  **Change** next to an item to share it only with the people you pick (from your active pairings), and
+  optionally until a date (the last second of that day, UTC). Everyone else gets `not_shared` for it, in the
+  tools and on their *Shared with me* page, exactly as if it did not exist. Each pairing card on **People**
+  lists what that person's assistant can read. A new pairing's approval card counts only the items shared
+  with everyone, since a new person is never named on an item yet. Changes apply on the next call (within
+  `ALLOWLIST_CACHE_TTL` on other instances). Rows saved before this existed are shared with everyone.
 - **Read-only, always:** another person's assistant gets `list_shared_with_me`, `search_shared_files`,
   `list_shared_folder`, `read_shared_file` and `download_shared_file`, and nothing else on your Drive, whatever role its own
   connection has. These calls run as a *guest* with your Google sign-in, behind a scope guard whose only
@@ -200,8 +207,7 @@ a resume that any paired person's assistant may see.
 Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
 your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.
 
-Later: per-person audiences on each item (`audience` is already stored on each entry, `linked` today), asking
-the owner for an item that is not shared, and expiry dates.
+Later: asking the owner for an item that is not shared.
 
 ## Phase 2 setup and test walkthrough
 

@@ -1518,7 +1518,12 @@ class Mailbox:
         # Mail between two people from before it was turned off: never shown, and deleted
         # for both people the first time either inbox is read.
         for stale in sorted(peer_links):
-            self._purge(stale)
+            try:
+                self._purge(stale)
+            except Exception:
+                # Clean-up only: the mail is already hidden, so a failed delete must never
+                # turn a read into an error. The next read tries again.
+                logging.getLogger(__name__).warning("peer_mail_purge_failed", exc_info=True)
         rows.sort(key=lambda row: row["created"], reverse=True)
         return rows
 
