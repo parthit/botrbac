@@ -436,11 +436,15 @@ class DriveService:
 
     def export_sheet_workbook(self, file_id: str) -> bytes | None:
         """A Google Sheet in scope as .xlsx bytes for a person to download, every tab.
-        None when the file is not a Sheet or the workbook is over the size caps."""
+        None when the file is not a Sheet or the workbook is over the size caps, including
+        DOWNLOAD_BYTE_CAP, which keeps the response under the host's body limit."""
         meta = self._get_in_scope(file_id)
         if meta.get("mimeType") != SHEET_MIME:
             return None
-        return self._sheet_workbook(file_id, {})
+        data = self._sheet_workbook(file_id, {})
+        if data is None or len(data) > DOWNLOAD_BYTE_CAP:
+            return None
+        return data
 
     def _read_extracted(self, file_id: str, result: dict[str, Any], kind: str) -> dict[str, Any]:
         data = self.drive.download(file_id, self.max_bytes + 1)

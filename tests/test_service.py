@@ -77,6 +77,15 @@ def test_read_sheet_over_byte_cap_falls_back_to_first_tab(drive, service) -> Non
     assert "too large" in result["note"]
 
 
+def test_sheet_workbook_download_respects_download_byte_cap(drive, guard) -> None:
+    # Readable (under max_bytes) but too big to send back as a response body.
+    wide = DriveService(drive, guard, make_settings(max_bytes=5 * 1024 * 1024))
+    _booking_sheet(drive, **{XLSX_MIME: b"PK" + b"x" * DOWNLOAD_BYTE_CAP})
+    assert wide.export_sheet_workbook("sheet-tabs") is None
+    drive.files["sheet-tabs"].exports[XLSX_MIME] = b"PK small"
+    assert wide.export_sheet_workbook("sheet-tabs") == b"PK small"
+
+
 def test_read_doc_over_export_limit_returns_a_note(drive, service) -> None:
     doc = drive.add("doc-huge", "Huge", DOC_MIME, [ROOT], b"never read")
     doc.exports["text/plain"] = DriveExportTooLargeError("text/plain")
