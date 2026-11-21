@@ -179,7 +179,7 @@ a resume that any paired person's assistant may see.
 
 - **Shared with me:** the dashboard's **Shared with me** page shows what paired people share with *you*,
   grouped by person and source. Open folders to any depth, preview or download files, and search names and
-  text across everything shared with you. Google Docs and Slides download as `.txt` and Sheets as `.csv`, the same export `read_shared_file` returns. It uses the same guest checks as the tools below, and the owner's
+  text across everything shared with you. Google Docs and Slides download as `.txt`, the same export `read_shared_file` returns. Sheets download as `.xlsx` with every tab; one too large for that comes down as a `.csv` of its first tab. It uses the same guest checks as the tools below, and the owner's
   Activity page shows these reads as `guest:<you> (dashboard)`.
 - **Add or remove:** on **Browse**, choose **Share with paired people** (or **Stop sharing**) next to a file or
   folder. **Sharing** lists what you share and who can currently read it. A folder includes what is inside it.

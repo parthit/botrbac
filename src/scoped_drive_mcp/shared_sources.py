@@ -42,7 +42,7 @@ from .external import (
     normalize_email,
 )
 from .scope import ForbiddenError, OutOfScopeError
-from .service import EXPORT_FORMATS
+from .service import EXPORT_FORMATS, SHEET_MIME
 
 # Google Docs, Sheets and Slides have no file bytes. "Download" on the dashboard gives the
 # same export read_shared_file returns (text for Docs and Slides, CSV for Sheets).
@@ -250,9 +250,19 @@ def _downloadable(mime: str) -> bool:
 
 
 def _export_extension(mime: str) -> str | None:
-    """`.txt` or `.csv` for a Google file the dashboard downloads as an export."""
+    """`.txt` or `.xlsx` for a Google file the dashboard downloads as an export.
+
+    A Sheet downloads as its whole workbook. Only one too large for that comes down as
+    `.csv` of its first tab (see SharedDriveSource._export)."""
+    if mime == SHEET_MIME:
+        return ".xlsx"
     export = EXPORT_FORMATS.get(mime)
     return EXPORT_EXTENSIONS.get(export) if export else None
+
+
+def _with_extension(meta: dict[str, Any], extension: str) -> str:
+    name = str(meta.get("name") or "download")
+    return name if name.lower().endswith(extension) else name + extension
 
 
 def _can_download(mime: str) -> bool:
@@ -416,15 +426,21 @@ class DriveSharedSource:
     def _export(self, item_id: str, meta: dict[str, Any], extension: str) -> SharedDownload:
         """A Google Doc, Sheet or Slides file, exported exactly as read_shared_file reads it
         (same size caps). Runs inside the caller's guest call."""
-        result = self.shares.service.read_file(item_id)
+        service = self.shares.service
+        if extension == ".xlsx":
+            workbook = service.export_sheet_workbook(item_id)
+            if workbook is not None:
+                return SharedDownload(_with_extension(meta, ".xlsx"), workbook, False)
+            extension = ".csv"
+        result = service.read_file(item_id)
         content = result.get("content")
+        if extension == ".csv" and result.get("exported_as") != "text/csv":
+            content = None  # only a true CSV may be saved under a .csv name
         if not isinstance(content, str):
             raise SharedAccessError(
                 "no_bytes", "This file could not be exported. Open it to read it instead."
             )
-        name = str(meta.get("name") or "download")
-        if not name.lower().endswith(extension):
-            name += extension
+        name = _with_extension(meta, extension)
         return SharedDownload(name, content.encode("utf-8"), bool(result.get("truncated")))
 
     def search(self, caller: str, owner: str, query: str, limit: int) -> builtins.list[SharedHit]:

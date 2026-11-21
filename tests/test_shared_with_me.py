@@ -6,6 +6,7 @@ from urllib.parse import quote
 import pytest
 
 from scoped_drive_mcp.dashboard import attachment_disposition, shared_href
+from scoped_drive_mcp.service import SHEET_MIME, XLSX_MIME
 from scoped_drive_mcp.store import KEY_PREFIX
 from tests.conftest import EVE, OWNER_EMAIL
 from tests.dash import client, login, post
@@ -118,6 +119,30 @@ def test_nested_folders_breadcrumbs_open_and_download(pair) -> None:
     # Opening a folder goes to the folder view.
     r = open_item(eve, "proj-sub")
     assert r.status_code == 303 and "/shared/browse?" in r.headers["location"]
+
+
+def test_sheet_downloads_as_its_workbook_or_true_csv(pair, world) -> None:
+    app, owner, eve = pair
+    _pair(app, OWNER_EMAIL, EVE)
+    workbook = b"PK\x03\x04 every tab"
+    small = world.add("proj-sheet", "Trip", SHEET_MIME, ["proj"], b"Day,Place\n", owner=OWNER_EMAIL)
+    small.exports[XLSX_MIME] = workbook
+    # Over the byte cap as a workbook: only its first tab, as a real CSV, can come down.
+    big = world.add("proj-big", "Ledger", SHEET_MIME, ["proj"], b"a,b\n1,2\n", owner=OWNER_EMAIL)
+    big.exports[XLSX_MIME] = b"PK" + b"x" * 10_000
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+
+    assert "Download as .xlsx" in open_item(eve, "proj-sheet").text
+    got = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-sheet"))
+    assert got.status_code == 200
+    assert got.content == workbook
+    assert "Trip.xlsx" in got.headers["content-disposition"]
+    assert got.headers["content-type"] == "application/octet-stream"
+
+    got = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-big"))
+    assert got.status_code == 200
+    assert got.content == b"a,b\n1,2\n"
+    assert "Ledger.csv" in got.headers["content-disposition"]
 
 
 def test_shortcuts_and_outside_items_are_refused_without_leaking(pair, world) -> None:

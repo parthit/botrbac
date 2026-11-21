@@ -77,9 +77,36 @@ def test_read_sheet_over_byte_cap_falls_back_to_first_tab(drive, service) -> Non
     assert "too large" in result["note"]
 
 
-def test_read_sheet_truncation_names_the_cut_tab(drive, guard) -> None:
+def test_read_doc_over_export_limit_returns_a_note(drive, service) -> None:
+    doc = drive.add("doc-huge", "Huge", DOC_MIME, [ROOT], b"never read")
+    doc.exports["text/plain"] = DriveExportTooLargeError("text/plain")
+    result = service.read_file("doc-huge")
+    assert result["content"] is None
+    assert "10 MB" in result["note"]
+
+
+def test_read_sheet_csv_fallback_over_export_limit_returns_a_note(drive, service) -> None:
+    _booking_sheet(
+        drive,
+        **{
+            XLSX_MIME: DriveExportTooLargeError(XLSX_MIME),
+            "text/csv": DriveExportTooLargeError("text/csv"),
+        },
+    )
+    result = service.read_file("sheet-tabs")
+    assert result["content"] is None
+    assert "10 MB" in result["note"]
+
+
+def test_read_sheet_truncation_ignores_cells_that_look_like_tab_headers(drive, guard) -> None:
+    # The cut lands in the middle tab, after a cell that reads like a tab header.
     workbook = minimal_xlsx(
-        [["short"]], sheet="First", more=[("Second", [["x" * 50] for _ in range(40)])]
+        [["short"]],
+        sheet="First",
+        more=[
+            ("Second", [["# of guests"]] + [["x" * 50] for _ in range(40)]),
+            ("Third", [["never shown"]]),
+        ],
     )
     _booking_sheet(drive, **{XLSX_MIME: workbook})
     small = DriveService(drive, guard, make_settings(max_bytes=100_000, max_chars=1000))
@@ -87,6 +114,17 @@ def test_read_sheet_truncation_names_the_cut_tab(drive, guard) -> None:
     assert result["truncated"] is True
     assert len(result["content"]) == 1000
     assert "'Second'" in result["note"]
+    assert "never shown" not in result["content"]
+
+
+def test_read_single_tab_sheet_truncation_names_the_tab(drive, guard) -> None:
+    workbook = minimal_xlsx([["x" * 50] for _ in range(40)], sheet="Only")
+    _booking_sheet(drive, **{XLSX_MIME: workbook})
+    small = DriveService(drive, guard, make_settings(max_bytes=100_000, max_chars=1000))
+    result = small.read_file("sheet-tabs")
+    assert result["truncated"] is True
+    assert "# Only" not in result["content"]  # one tab: no header line
+    assert "'Only'" in result["note"]
 
 
 def test_read_text_file(service: DriveService) -> None:
