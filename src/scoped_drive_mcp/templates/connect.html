@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Connections{% endblock %}
 {% block content %}
-<section class="hero narrow">
+<section class="hero narrow app-hero">
   {% if drive_connected %}
-  <h1>Connections.</h1>
+  <h1>Services</h1>
   <p class="sub">You are signed in as <b>{{ owner }}</b>. An assistant can only use the items you allow from a connected service.</p>
   {% else %}
   <p class="eye">One more step</p>
-  <h1>Connect your services.</h1>
+  <h1>Connect your services</h1>
   <p class="sub">You are signed in as <b>{{ owner }}</b>. Connect a service so you can choose what an assistant may use from it. Nothing is reachable until you connect it and allow specific items.</p>
   {% endif %}
 </section>
@@ -49,7 +49,7 @@
     {% endif %}
   </article>
   {% endfor %}
-  <article class="card">
+  <article class="card placeholder">
     <h2>More services</h2>
     <p class="muted">Other services will appear here as they are added. Each one is its own permission, asked for only when you connect it.</p>
   </article>

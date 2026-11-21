@@ -36,18 +36,18 @@ def open_item(c, item: str, owner: str = OWNER_EMAIL):
 
 def test_empty_states_and_nav(pair) -> None:
     app, owner, eve = pair
-    page = eve.get("/shared")
+    page = eve.get("/sharing?tab=with-me")
     assert page.status_code == 200
     assert "No one is sharing with you" in page.text
-    assert 'href="/shared"' in page.text  # nav link
+    assert 'href="/sharing?tab=with-me"' in page.text  # tab link
 
     _pair(app, OWNER_EMAIL, EVE)
-    page = eve.get("/shared").text
+    page = eve.get("/sharing?tab=with-me").text
     assert "Nothing shared with you yet" in page and OWNER_EMAIL in page
 
     # Signed out: sent to sign in, nothing listed.
     anon = client(app)
-    r = anon.get("/shared")
+    r = anon.get("/sharing?tab=with-me")
     assert r.status_code == 303 and r.headers["location"].startswith("/login")
 
 
@@ -59,15 +59,15 @@ def test_overview_lists_people_sources_and_top_items(pair) -> None:
     # On the owner's own-bot list only: never shown to Eve.
     assert post(owner, "/grant", file_id="loose-two").status_code == 303
 
-    page = eve.get("/shared").text
+    page = eve.get("/sharing?tab=with-me").text
     assert OWNER_EMAIL in page and "Google Drive" in page
     assert "Projects" in page and "Loose memo" in page
     assert "Second memo" not in page and "payroll" not in page
     assert shared_href("browse", DRIVE, OWNER_EMAIL, "proj").replace("&", "&amp;") in page
     assert shared_href("open", DRIVE, OWNER_EMAIL, "loose-doc").replace("&", "&amp;") in page
     # The owner sees nothing in their own "Shared with me".
-    assert "No one is sharing with you" not in owner.get("/shared").text
-    assert "Projects" not in owner.get("/shared").text
+    assert "No one is sharing with you" not in owner.get("/sharing?tab=with-me").text
+    assert "Projects" not in owner.get("/sharing?tab=with-me").text
 
 
 def test_nested_folders_breadcrumbs_open_and_download(pair) -> None:
@@ -152,12 +152,12 @@ def test_pairing_and_sharing_changes_apply_at_once(pair) -> None:
 
     assert post(owner, "/sharing/remove", file_id="loose-doc").status_code == 303
     assert open_item(eve, "loose-doc").status_code == 403
-    assert "Loose memo" not in eve.get("/shared").text
+    assert "Loose memo" not in eve.get("/sharing?tab=with-me").text
 
     assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
     app.state.mailbox.revoke(EVE, link_id)
     assert open_item(eve, "loose-doc").status_code == 403
-    assert "Loose memo" not in eve.get("/shared").text
+    assert "Loose memo" not in eve.get("/sharing?tab=with-me").text
 
 
 def test_bad_parameters(pair, oauth) -> None:
@@ -257,11 +257,11 @@ def test_search_across_everything_shared_with_me(pair, world, oauth) -> None:
 
     # Empty search goes back; too long is refused.
     r = eve.get("/shared/search?q=")
-    assert r.status_code == 303 and r.headers["location"] == "/shared"
+    assert r.status_code == 303 and r.headers["location"] == "/sharing?tab=with-me"
     assert eve.get("/shared/search?q=" + "x" * 201).status_code == 400
 
     # Search box shows once something is shared; unpairing empties results.
-    assert 'action="/shared/search"' in eve.get("/shared").text
+    assert 'action="/shared/search"' in eve.get("/sharing?tab=with-me").text
     app.state.mailbox.revoke(EVE, link_id)
     assert "No matches" in eve.get("/shared/search?q=roadmap").text
 

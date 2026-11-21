@@ -510,11 +510,11 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     names = tool_names(owner_c, access)
     assert len(names) == 28
     assert "trash_file" in names
-    dashboard = owner_c.get("/", headers={"Authorization": f"Bearer {access}"})
+    dashboard = owner_c.get("/settings", headers={"Authorization": f"Bearer {access}"})
     assert dashboard.status_code == 200
     assert "Local test" in dashboard.text
     logged_out = client(owner_c.app)
-    opened = logged_out.get("/browse", headers={"Authorization": f"Bearer {access}"})
+    opened = logged_out.get("/files", headers={"Authorization": f"Bearer {access}"})
     assert opened.status_code == 303
     assert opened.headers["location"].startswith("/login")
 
@@ -568,7 +568,7 @@ def test_revoked_grant_cannot_call_mcp(owner_c) -> None:
     access = token.json()["access_token"]
     refresh = token.json()["refresh_token"]
     assert "list_folder" in tool_names(owner_c, access)
-    page = owner_c.get("/")
+    page = owner_c.get("/settings")
     assert "Grok Bot" in page.text
     grant_id = _GRANT_ID.search(page.text)
     assert grant_id
@@ -579,8 +579,8 @@ def test_revoked_grant_cannot_call_mcp(owner_c) -> None:
     assert "list_folder" in tool_names(owner_c, access)
     revoked = post(owner_c, "/oauth/grants/revoke", grant_id=grant_id.group(1))
     assert revoked.status_code == 303
-    page = owner_c.get("/").text
-    assert "No apps connected" in page
+    page = owner_c.get("/settings").text
+    assert "No assistants connected" in page
     assert grant_id.group(1) not in page
     denied = owner_c.post(
         "/mcp", json=LIST, headers={**MCP_HEADERS, "Authorization": f"Bearer {access}"}
@@ -658,7 +658,7 @@ def test_access_check_does_not_clobber_rotated_grant(owner_c) -> None:
     assert json.loads(after)["access_hashes"] == json.loads(before)["access_hashes"]
     assert json.loads(after)["refresh_hash"] == json.loads(before)["refresh_hash"]
     store.set(f"oauth:seen:{grant_id}", "2099-01-01T00:00:00+00:00", ex=3600)
-    assert 'datetime="2099-01-01T00:00:00Z"' in owner_c.get("/").text
+    assert 'datetime="2099-01-01T00:00:00Z"' in owner_c.get("/settings").text
 
     original = oauth._grant
     issued: dict[str, str] = {}
@@ -720,7 +720,7 @@ def test_allow_only_approves_the_request_the_page_showed(owner_c) -> None:
     stale = post(owner_c, "/oauth/authorize", decision="allow", consent_id=shown_id)
     assert stale.status_code == 400
     assert "nothing was approved" in stale.text
-    assert "No apps connected" in owner_c.get("/").text
+    assert "No assistants connected" in owner_c.get("/settings").text
     # The page that is still current keeps working after the stale one was refused.
     live = post(owner_c, "/oauth/authorize", decision="allow")
     assert parse_qs(urlparse(posted_redirect(owner_c, live)).query)["state"] == ["other"]
@@ -738,9 +738,9 @@ def test_replaying_a_code_ends_the_tokens_it_issued(owner_c) -> None:
 def test_a_failed_exchange_leaves_no_connected_app(owner_c) -> None:
     client_id = register(owner_c, GROK, name="Half Done").json()["client_id"]
     code, _ = _approved(owner_c, client_id)
-    assert "Half Done" not in owner_c.get("/").text  # approved, but no tokens yet
+    assert "Half Done" not in owner_c.get("/settings").text  # approved, but no tokens yet
     assert exchange(owner_c, client_id, code, secrets.token_urlsafe(32), GROK).status_code == 400
-    assert "Half Done" not in owner_c.get("/").text
+    assert "Half Done" not in owner_c.get("/settings").text
 
 
 def test_refresh_with_the_wrong_client_does_not_strand_the_grant(owner_c) -> None:

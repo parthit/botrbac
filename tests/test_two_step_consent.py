@@ -8,7 +8,7 @@ from tests.conftest import OWNER_EMAIL
 from tests.dash import client, connect_drive, csrf, sign_in, start_oauth
 from tests.test_mcp_oauth import DONE, auth_params, register
 
-DRIVE_PAGES = ["/browse", "/browse?folder=proj"]
+DRIVE_PAGES = ["/files", "/files?folder=proj"]
 
 
 @pytest.fixture
@@ -71,8 +71,8 @@ def test_connect_asks_for_drive_offline_for_the_signed_in_account(
     raw = memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY)
     assert raw and "rt-owner" not in raw
     assert p2_app.state.dashboard.vault.owner()["t"] == f"rt-{OWNER_EMAIL}"
-    assert signed_in.get("/browse").status_code == 200
-    page = signed_in.get("/connect").text
+    assert signed_in.get("/files").status_code == 200
+    page = signed_in.get("/settings").text
     assert "Allow Bot RBAC to access Google Drive" not in page
     assert "Disconnect" in page
 
@@ -83,7 +83,7 @@ def test_connect_with_a_different_google_account_is_refused(signed_in, oauth, me
     assert "different account" in r.text
     assert memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY) is None
     assert oauth.revoked
-    assert signed_in.get("/browse").headers["location"].startswith("/connect")
+    assert signed_in.get("/files").headers["location"].startswith("/connect")
 
 
 def test_connect_without_drive_scope_is_refused(signed_in, oauth, memstore) -> None:
@@ -101,7 +101,7 @@ def test_connect_needs_csrf_and_a_session(c, signed_in) -> None:
 
 
 def test_unknown_connection_is_404(signed_in) -> None:
-    token = csrf(signed_in, "/connect")
+    token = csrf(signed_in, "/settings")
     assert signed_in.post("/connect/dropbox", data={"csrf": token}).status_code == 404
 
 
@@ -117,18 +117,18 @@ def test_connect_state_cannot_be_replayed_as_sign_in(c) -> None:
     forged = serializer.dumps({"flow": "connect", "connection": "google_drive", "nonce": nonce})
     r = c.get("/auth/callback", params={"code": "owner-code", "state": forged})
     assert r.status_code == 400
-    assert c.get("/browse").headers["location"].startswith("/login")
+    assert c.get("/files").headers["location"].startswith("/login")
 
 
 def test_disconnect_drops_the_token_and_keeps_the_session(signed_in, oauth, p2_app) -> None:
     connect_drive(signed_in)
-    token = csrf(signed_in, "/connect")
+    token = csrf(signed_in, "/settings")
     r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
     assert r.status_code == 303 and r.headers["location"] == "/connect"
     assert p2_app.state.dashboard.vault.owner() is None
     assert f"rt-{OWNER_EMAIL}" in oauth.revoked
     assert signed_in.get("/connect").status_code == 200
-    assert signed_in.get("/browse").headers["location"].startswith("/connect")
+    assert signed_in.get("/files").headers["location"].startswith("/connect")
 
 
 def test_narrow_token_can_be_upgraded_from_connect(signed_in, oauth, p2_app) -> None:
@@ -137,7 +137,7 @@ def test_narrow_token_can_be_upgraded_from_connect(signed_in, oauth, p2_app) -> 
     record = vault.owner()
     narrow = "openid email https://www.googleapis.com/auth/drive.file"
     vault.set_owner(record["t"], record["email"], narrow)
-    page = signed_in.get("/connect").text
+    page = signed_in.get("/settings").text
     assert "Reconnect Google Drive" in page
     assert 'action="/connect/google_drive"' in page
     assert "Disconnect" in page
@@ -145,7 +145,7 @@ def test_narrow_token_can_be_upgraded_from_connect(signed_in, oauth, p2_app) -> 
     r = connect_drive(signed_in)
     assert r.status_code == 303
     assert DRIVE_SCOPE in vault.owner()["scopes"].split()
-    page = signed_in.get("/connect").text
+    page = signed_in.get("/settings").text
     assert "Reconnect Google Drive" not in page
     assert 'action="/connect/google_drive"' not in page
 

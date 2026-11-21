@@ -209,9 +209,9 @@ def test_root_folder_id_is_only_the_admins(world, memstore, oauth) -> None:
     eve_page = client(app)
     assert login(admin_page).status_code == 303
     assert login(eve_page, "eve-code").status_code == 303
-    assert "admin-root" in admin_page.get("/access").text
-    assert "admin-root" in admin_page.get("/").text
-    assert "admin-root" not in eve_page.get("/access").text
+    assert "admin-root" in admin_page.get("/files?tab=allowed").text
+    assert "admin-root" in admin_page.get("/settings").text
+    assert "admin-root" not in eve_page.get("/files?tab=allowed").text
     assert "admin-root" not in eve_page.get("/").text
 
 

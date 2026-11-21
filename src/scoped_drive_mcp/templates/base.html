@@ -21,20 +21,17 @@
     <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav id="site-nav" aria-label="Dashboard">
       <a href="/" {{ current(nav == '/') }}>Overview</a>
-      <a href="/connect" {{ current(nav.startswith('/connect')) }}>Connections</a>
-      <a href="/browse" {{ current(nav == '/browse') }}>Browse</a>
-      <a href="/access" {{ current(nav == '/access') }}>Access</a>
-      <a href="/sharing" {{ current(nav == '/sharing') }}>Sharing</a>
-      <a href="/shared" {{ current(nav.startswith('/shared')) }}>Shared with me</a>
+      <a href="/files" {{ current(nav.startswith('/files')) }}>Files</a>
       <a href="/requests" {{ current(nav.startswith('/requests')) }}>Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
+      <a href="/sharing" {{ current(nav.startswith('/shar')) }}>Sharing{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
       <a href="/activity" {{ current(nav == '/activity') }}>Activity</a>
-      <a href="/bridge" {{ current(nav.startswith('/bridge')) }}>Mailbox{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
       <details class="account">
         <summary aria-label="Account menu for {{ owner }}"><span class="avatar" aria-hidden="true">{{ owner[:1] | upper }}</span><span class="summary-email">{{ owner }}</span></summary>
         <div class="account-menu">
           <span class="nav-user">{{ owner }}</span>
+          <a href="/settings" {{ current(nav.startswith('/settings') or nav.startswith('/connect')) }}>Settings</a>
           {% if is_admin %}
-          <a href="/admin" {{ current(nav == '/admin') }}>People</a>
+          <a href="/admin" {{ current(nav == '/admin') }}>People <span class="muted">(admin)</span></a>
           {% endif %}
           <form class="inline" method="post" action="/logout">
             <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -43,7 +40,7 @@
         </div>
       </details>
     </nav>
-    {% else %}
+    {% elif nav != '/login' %}
     <a class="btn ghost nav-signin" href="/login">Sign in</a>
     {% endif %}
   </div>

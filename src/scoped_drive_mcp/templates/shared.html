@@ -1,14 +1,14 @@
 {% extends "base.html" %}
+{% from "_tabs.html" import sharing_tabs %}
+{% from "_icons.html" import file_icon %}
 {% block title %}Shared with me{% endblock %}
 {% macro item_link(source, person, n) -%}
   {%- if n.is_container -%}<a href="{{ shared_href('browse', source.key, person, n.id) }}">{{ n.name or n.id }}</a>
   {%- else -%}<a href="{{ shared_href('open', source.key, person, n.id) }}">{{ n.name or n.id }}</a>{%- endif -%}
 {%- endmacro %}
 {% block content %}
-<h1>Shared with me</h1>
-<p class="muted">What people you are paired with on <a href="/bridge">Mailbox</a> share with you. You and your
-  assistant can open, read and download these. Nothing here can be changed. Names and contents come from the
-  other person. What you share is on <a href="/sharing">Sharing</a>.</p>
+<h1>Sharing</h1>
+{{ sharing_tabs('with-me') }}
 {% if people %}{% include "_shared_search.html" %}{% endif %}
 
 {% if people %}
@@ -22,7 +22,7 @@
       {% for n in g.roots %}
       <li class="file">
         <div class="file-name">
-          <span class="file-icon" aria-hidden="true">{% if n.is_container %}📁{% else %}📄{% endif %}</span>
+          {{ file_icon("folder" if n.is_container else icon_kind(n.mime_type or "")) }}
           {{ item_link(g.source, p.owner, n) }}
         </div>
         <div class="file-meta"><span>{{ n.kind or describe_mime(n.mime_type) }}</span></div>
@@ -43,14 +43,13 @@
 <div class="card empty">
   <h2>Nothing shared with you yet</h2>
   <p>You are paired with {{ peers | join(", ") }}, but they have not shared anything. Items appear here as soon as
-    they choose <b>Share with paired people</b> on their side.</p>
+    they choose <b>Share</b> on their side.</p>
 </div>
 {% else %}
 <div class="card empty">
   <h2>No one is sharing with you</h2>
-  <p>People can share with you after you are paired on Mailbox. Both of you approve the pairing, then they pick
-    what to share.</p>
-  <p><a class="btn primary" href="/bridge">Open Mailbox</a></p>
+  <p>People can share with you once you are paired. Both of you approve the pairing, then they pick what to share.</p>
+  <p><a class="btn primary" href="/sharing?tab=people">Pair with someone</a></p>
 </div>
 {% endif %}
 {% endblock %}

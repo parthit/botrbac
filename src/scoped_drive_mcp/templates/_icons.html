@@ -1,0 +1,19 @@
+{#- Small file-type icons, drawn in currentColor so they follow the theme. -#}
+{% macro file_icon(kind) -%}
+<svg class="file-icon icon-{{ kind }}" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false">
+{%- if kind == "folder" -%}
+<path fill="currentColor" d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l1.6 1.8h7.4A1.5 1.5 0 0 1 18 7.3v7.2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 2 14.5z"/>
+{%- elif kind == "shortcut" -%}
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M8 5H5.5A1.5 1.5 0 0 0 4 6.5v8A1.5 1.5 0 0 0 5.5 16h8a1.5 1.5 0 0 0 1.5-1.5V12M11 4h5v5M16 4l-7 7"/>
+{%- else -%}
+<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" d="M5.5 2.75h6l3.75 3.75v10.75H5.5z"/><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" d="M11.5 2.75V6.5h3.75"/>
+{%- if kind == "doc" -%}<path stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M8 10h5M8 12.5h5M8 15h3"/>
+{%- elif kind == "sheet" -%}<path fill="none" stroke="currentColor" stroke-width="1.3" d="M7.75 9.5h5.5v5.5h-5.5zM7.75 12.25h5.5M10.5 9.5V15"/>
+{%- elif kind == "slides" -%}<rect x="7.5" y="9.5" width="6" height="4.5" rx=".6" fill="none" stroke="currentColor" stroke-width="1.3"/>
+{%- elif kind == "pdf" -%}<text x="10.4" y="14.6" text-anchor="middle" font-size="5" font-weight="700" fill="currentColor" font-family="system-ui,sans-serif">PDF</text>
+{%- elif kind == "image" -%}<path fill="currentColor" d="M7.5 15l2.2-3 1.6 2 1.2-1.4 1.5 2.4z"/><circle cx="9" cy="10" r="1" fill="currentColor"/>
+{%- elif kind == "video" -%}<path fill="currentColor" d="M9 10v4.5l3.8-2.25z"/>
+{%- endif -%}
+{%- endif -%}
+</svg>
+{%- endmacro %}

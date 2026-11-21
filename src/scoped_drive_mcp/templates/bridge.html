@@ -1,28 +1,21 @@
 {% extends "base.html" %}
-{% block title %}Mailbox{% endblock %}
-{% macro app_label(app) -%}
-{{ app.name }}{% if primary == app.id %} · Primary{% endif %}{% if app.paired_with %} · paired with {{ app.paired_with }}{% endif %} · added {{ app.created_at | when(date_only=True) }} · used {{ app.last_used | when("never") }}
+{% from "_tabs.html" import sharing_tabs %}
+{% block title %}People{% endblock %}
+{% macro head(kind, mark, label, title) -%}
+<div class="card-head"><h2>{{ title }}</h2><span class="pill {{ kind }}"><span aria-hidden="true">{{ mark }}</span> {{ label }}</span></div>
 {%- endmacro %}
 {% block content %}
-<h1>Mailbox</h1>
-<p class="muted">This pairs your assistant with one other person’s assistant. Both of you have to approve.
-  Messages are short text. They stay with your assistant, which should summarize them for you and wait.
-  The other person’s Google account is the name you are confirming.</p>
-<p class="muted">While a pairing is on, that person’s assistant can also read the items on your
-  <a href="/sharing">Sharing</a> list (read-only), and yours can read theirs. Nothing else in your Drive is reachable.</p>
-{% if self_pairing %}
-<p class="muted">You can also pair two of your own assistants, say ChatGPT and Claude. Start a pairing in one and join from the other.</p>
-{% endif %}
-{% if not links %}
-<div class="card empty">
-  <h2>No pairings yet</h2>
+<h1>Sharing</h1>
+{{ sharing_tabs('people') }}
+<details class="card how" {% if not links %}open{% endif %}>
+  <summary><h2>How to pair</h2></summary>
   <ol>
-    <li>Ask your assistant to start a pairing and read you the code.</li>
-    <li>Give that code to the other person. Their assistant joins with it.</li>
+    <li>Ask your assistant to start a pairing. It reads you a short code.</li>
+    <li>Give that code to the other person. Their assistant joins with it.{% if self_pairing %} To pair two of your own assistants, say Claude and Cursor, join from your other assistant.{% endif %}</li>
     <li>Both of you approve here, after you see the other Google account.</li>
   </ol>
-</div>
-{% endif %}
+  <p class="muted">A pairing lets the two assistants send each other short messages, and lets each read (only read) what the other person shares. Nothing else in your Drive is reachable.</p>
+</details>
 {% for link in links %}
 {% set peer = link.peer_email %}
 {% set ender = "you" if link.ended_by == you else link.ended_by %}
@@ -30,15 +23,16 @@
   {% if link.same_account %}
   {% set pair = link.assistants | join(" ↔ ") %}
   {% if link.disabled_by_org and link.status != "revoked" %}
-  <p><span class="pill bad"><span aria-hidden="true">!</span> Off</span></p>
-  <p><b>{{ pair }}</b> · your account</p>
-  <p class="muted">Turned off by your organisation.</p>
+  {{ head("bad", "!", "Off", pair) }}
+  <p class="muted">Two of your own assistants. Turned off by your organisation.</p>
   {% elif link.status == "active" %}
-  <p><span class="pill ok"><span aria-hidden="true">✓</span> On</span></p>
-  <p><b>{{ pair }}</b> · your account</p>
+  {{ head("ok", "✓", "On", pair) }}
+  <p class="muted">Two of your own assistants can message each other. Nothing new is shared.</p>
+  {% for m in missing_wakeups if m.link_id == link.link_id %}
+  <p class="warn">Messages from {{ m.sender }} won’t start {{ m.assistant }}: {{ m.assistant }} {{ "has its wake-up paused" if m.paused else "has no wake-up" }}. It only sees them when it next checks. <a href="/settings#assistants">Fix in Settings</a></p>
+  {% endfor %}
   {% elif link.status == "pending_approval" %}
-  <p><span class="pill pending"><span aria-hidden="true">●</span> Needs your approval</span></p>
-  <p><b>{{ pair }}</b> · your account</p>
+  {{ head("pending", "●", "Needs your approval", pair) }}
   <p class="muted">Two of your own assistants want to message each other. Nothing new is shared.</p>
   <div class="actions">
     <form class="inline" method="post" action="/bridge/{{ link.link_id }}/approve">
@@ -51,13 +45,13 @@
     </form>
   </div>
   {% else %}
-  <p><span class="pill bad"><span aria-hidden="true">!</span> Off</span></p>
-  <p><b>{{ pair }}</b> · your account</p>
+  {{ head("bad", "!", "Off", pair) }}
+  <p class="muted">Two of your own assistants. This pairing is off.</p>
   {% endif %}
   {% if link.status == "active" or (link.disabled_by_org and link.status != "revoked") %}
-  <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this off? Your two assistants will not be able to message each other.">
+  <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Disconnect this pairing? Your two assistants will not be able to message each other.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <div class="actions"><button class="danger" type="submit">Turn off</button></div>
+    <div class="actions"><button class="danger" type="submit">Disconnect</button></div>
   </form>
   {% elif link.status == "revoked" %}
   <form class="inline" method="post" action="/bridge/{{ link.link_id }}/dismiss">
@@ -67,18 +61,16 @@
   {% endif %}
 
   {% elif link.status == "active" %}
-  <p><span class="pill ok"><span aria-hidden="true">✓</span> On</span></p>
-  <p>Paired with <b>{{ peer }}</b>.</p>
+  {{ head("ok", "✓", "On", peer) }}
   <p class="muted">{{ link.next_step }}</p>
-  <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this mailbox off? Neither assistant will be able to send to the other, and you will each stop being able to read the other's Sharing list. Messages already delivered stay readable by the person they were sent to until they expire, unless you also delete stored messages.">
+  <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Disconnect from {{ peer }}? Neither assistant will be able to send to the other, and you will each stop being able to read what the other shares. Messages already delivered stay readable until they expire, unless you also delete them." data-confirm-check="purge" data-confirm-check-label="Also delete stored messages for both of us">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <p><label><input type="checkbox" name="purge" value="on"> Also delete stored messages for both of us</label></p>
-    <div class="actions"><button class="danger" type="submit">Turn off</button></div>
+    <noscript><p><label><input type="checkbox" name="purge" value="on"> Also delete stored messages for both of us</label></p></noscript>
+    <div class="actions"><button class="danger" type="submit">Disconnect</button></div>
   </form>
 
   {% elif link.status == "pending_approval" and not link.you_approved %}
-  <p><span class="pill pending"><span aria-hidden="true">●</span> Needs your approval</span></p>
-  <p>Pairing with <b>{{ peer }}</b>.</p>
+  {{ head("pending", "●", "Needs your approval", peer) }}
   <p>{% if link.peer_approved %}<b>{{ peer }}</b> already approved. It turns on when you approve.
      {% else %}{{ peer }} has not approved yet. It turns on once you both approve.{% endif %}</p>
   {% if sharing_on %}
@@ -86,14 +78,14 @@
   {%- set n = shared_items | length %}
   <div class="warn" data-exposure>
     {% if n %}
-    <p>Approving lets <b>{{ who }}</b>’s assistant read {{ n }} {{ "item" if n == 1 else "items" }} on your Sharing list:
+    <p>Approving lets <b>{{ who }}</b>’s assistant read {{ n }} {{ "item" if n == 1 else "items" }} you share:
       {% for e in shared_items[:5] %}“{{ e.name or e.id }}”{% if not loop.last %}, {% endif %}{% endfor %}{% if n > 5 %}, and {{ n - 5 }} more{% endif %}.
       A folder includes what is inside it.</p>
     {% else %}
-    <p>Nothing is on your Sharing list yet, so approving lets <b>{{ who }}</b>’s assistant read nothing of yours.
-      Anything you add to that list later becomes readable by their assistant.</p>
+    <p>You share nothing yet, so approving lets <b>{{ who }}</b>’s assistant read nothing of yours.
+      Anything you share later becomes readable by their assistant.</p>
     {% endif %}
-    <p><a href="/sharing">Review your Sharing list</a> before you approve.</p>
+    <p><a href="/sharing?tab=by-me">Review what you share</a> before you approve.</p>
   </div>
   {% endif %}
   <p class="muted">Approve only if you recognise this Google account.</p>
@@ -109,41 +101,39 @@
   </div>
 
   {% elif link.status == "pending_approval" %}
-  <p><span class="pill pending"><span aria-hidden="true">●</span> Waiting for {{ peer.split("@")[0] }}</span></p>
-  <p>Pairing with <b>{{ peer }}</b>.</p>
+  {{ head("pending", "●", "Waiting for them", peer) }}
   <p>Waiting for <b>{{ peer }}</b> to approve. You already approved.</p>
-  {# A line listing what approving exposes from the Sharing list goes here. #}
   <p class="muted">It turns on as soon as {{ peer }} approves too.</p>
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Cancel this pairing with {{ peer }}? It will not turn on, even if they approve.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit">Cancel pairing</button>
+    <button class="danger" type="submit">Cancel pairing</button>
   </form>
 
   {% elif link.status == "awaiting_peer" %}
-  <p><span class="pill pending"><span aria-hidden="true">●</span> Invite sent</span></p>
+  {{ head("pending", "●", "Invite sent", "Waiting for someone to join") }}
   <p>Waiting for someone to join with code <code>{{ link.invite_code }}</code>.</p>
   {% if link.invite_expires_at %}<p class="muted">Expires {{ link.invite_expires_at | when(date_only=True) }}.</p>{% endif %}
   <p class="muted">{{ link.next_step }}</p>
   <form method="post" action="/bridge/{{ link.link_id }}/cancel" data-confirm="Cancel this invite? The code stops working.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit">Cancel invite</button>
+    <button class="danger" type="submit">Cancel invite</button>
   </form>
 
   {% else %}
   {% if link.status == "declined" %}
-  <p><span class="pill bad"><span aria-hidden="true">!</span> Declined</span></p>
-  <p>{% if peer %}Pairing with <b>{{ peer }}</b>. {% endif %}Declined{% if ender %} by {{ ender }}{% endif %}{% if link.ended_at %} on {{ link.ended_at | when(date_only=True) }}{% endif %}.</p>
+  {{ head("bad", "!", "Declined", peer or "Pairing") }}
+  <p>Declined{% if ender %} by {{ ender }}{% endif %}{% if link.ended_at %} on {{ link.ended_at | when(date_only=True) }}{% endif %}.</p>
   <p class="muted">It never turned on. Nothing was shared and no mail was sent.</p>
   {% elif link.status == "expired" %}
-  <p><span class="pill bad"><span aria-hidden="true">!</span> Expired</span></p>
+  {{ head("bad", "!", "Expired", "Invite") }}
   <p>Nobody joined with this invite code before it expired.</p>
   {% else %}
-  <p><span class="pill bad"><span aria-hidden="true">!</span> Off</span></p>
-  <p>{% if peer %}Pairing with <b>{{ peer }}</b>. {% endif %}
+  {{ head("bad", "!", "Off", peer or "Pairing") }}
+  <p>
     {% if link.ended_reason == "cancelled" %}Cancelled{% if ender %} by {{ ender }}{% endif %}{% if link.ended_at %} on {{ link.ended_at | when(date_only=True) }}{% endif %} before it turned on.
-    {% elif ender %}Turned off by {{ ender }}{% if link.ended_at %} on {{ link.ended_at | when(date_only=True) }}{% endif %}.
+    {% elif ender %}Disconnected by {{ ender }}{% if link.ended_at %} on {{ link.ended_at | when(date_only=True) }}{% endif %}.
     {% else %}This pairing is off.{% endif %}</p>
-  <p class="muted">Neither assistant can send on it, and neither of you can read the other's Sharing list through it.
+  <p class="muted">Neither assistant can send on it, and neither of you can read what the other shares through it.
     Messages already delivered stay readable by the person they were sent to until they expire.</p>
   {% endif %}
   <p class="muted">To pair again, ask your assistant for a new invite code.</p>
@@ -151,7 +141,7 @@
     {% if link.status == "revoked" and link.ended_reason != "cancelled" %}
     <form class="inline" method="post" action="/bridge/{{ link.link_id }}/purge" data-confirm="Delete every stored message on this pairing, for both of you? This cannot be undone.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button type="submit">Delete stored messages</button>
+      <button class="danger" type="submit">Delete stored messages</button>
     </form>
     {% endif %}
     <form class="inline" method="post" action="/bridge/{{ link.link_id }}/dismiss">
@@ -162,120 +152,4 @@
   {% endif %}
 </div>
 {% endfor %}
-{% if webhook is defined and webhook.available %}
-<div class="card">
-  <h2>Wake your assistant</h2>
-  <p>Ask your assistant to watch this mailbox. It creates the check on its own. You confirm the routine it shows. You do not paste a webhook URL or a key for that.</p>
-  {% if apps %}
-  <form class="stack" method="post" action="/bridge/webhook">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="action" value="primary">
-    <label>Primary: handles mail from other people
-      <select name="app">
-        <option value="">None (wake every app with a wake-up)</option>
-        {% for app in apps %}<option value="{{ app.id }}"{% if primary == app.id %} selected{% endif %}>{{ app_label(app) }}</option>{% endfor %}
-      </select>
-    </label>
-    <p class="muted">Only the Primary is woken when someone else's assistant writes to you. Mail between your own assistants always wakes the one it is for.</p>
-    <div class="actions"><button type="submit">Save</button></div>
-  </form>
-  {% endif %}
-  {% for hook in app_hooks %}
-  <p>
-    <span class="pill {{ 'ok' if hook.enabled else 'pending' }}">
-      <span aria-hidden="true">{{ '✓' if hook.enabled else '●' }}</span>
-      {{ 'Enabled' if hook.enabled else 'Paused' }}
-    </span>
-    <b>{{ app_label(hook.app) }}</b>. Key hint <code>{{ hook.secret_hint }}</code>.
-    {% if hook.last_error %} Last error: {{ hook.last_error }}.{% endif %}
-  </p>
-  <form method="post" action="/bridge/webhook" data-confirm="Remove {{ hook.app.name }}'s wake-up? Its saved key is deleted.">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="action" value="remove">
-    <input type="hidden" name="app" value="{{ hook.app.id }}">
-    <div class="actions"><button type="submit">Remove</button></div>
-  </form>
-  {% if apps | length > 1 %}
-  <form class="stack" method="post" action="/bridge/webhook">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="action" value="move">
-    <input type="hidden" name="from_app" value="{{ hook.app.id }}">
-    <label>Give this wake-up to
-      <select name="app">
-        {% for app in apps if app.id != hook.app.id %}<option value="{{ app.id }}">{{ app_label(app) }}</option>{% endfor %}
-      </select>
-    </label>
-    <div class="actions"><button type="submit">Move</button></div>
-  </form>
-  {% endif %}
-  {% endfor %}
-  {% if webhook.configured %}
-  <p>
-    <span class="pill {{ 'ok' if webhook.enabled else 'pending' }}">
-      <span aria-hidden="true">{{ '✓' if webhook.enabled else '●' }}</span>
-      {{ 'Enabled' if webhook.enabled else 'Paused' }}
-    </span>
-    <b>Whole account</b>, for mail from other people{% if primary %} when the Primary has no wake-up of its own{% endif %}. Key hint <code>{{ webhook.secret_hint }}</code>.
-    {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}
-  </p>
-  {% if apps %}
-  <form class="stack" method="post" action="/bridge/webhook">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="action" value="move">
-    <label>This belongs to
-      <select name="app">
-        {% for app in apps %}<option value="{{ app.id }}">{{ app_label(app) }}</option>{% endfor %}
-      </select>
-    </label>
-    <div class="actions"><button type="submit">Move</button></div>
-  </form>
-  {% endif %}
-  {% endif %}
-  <details>
-    <summary>Advanced: paste a webhook yourself</summary>
-    <p class="muted">Use this only if you already have a wake-up URL and key. The usual path is the routine your assistant creates.</p>
-    <form class="stack" method="post" action="/bridge/webhook">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="action" value="save">
-      {% if apps %}
-      <label>Wakes
-        <select name="app">
-          <option value="">Whole account (mail from other people)</option>
-          {% for app in apps %}<option value="{{ app.id }}">{{ app_label(app) }}</option>{% endfor %}
-        </select>
-      </label>
-      {% endif %}
-      <label>Webhook URL
-        <input name="url" type="url" required value="{{ webhook.url or '' }}" autocomplete="off" spellcheck="false" placeholder="https://">
-      </label>
-      <label>Sender key
-        <input name="sender_key" type="password" autocomplete="off" placeholder="{% if webhook.secret_hint %}Leave blank to keep the saved key{% else %}Required the first time{% endif %}">
-      </label>
-      <label>How the key is sent
-        <select name="auth_scheme">
-          <option value="bearer" {% if webhook.auth_scheme not in ('bearer_and_x_automation_key', 'claude_routine') %}selected{% endif %}>Bearer token</option>
-          <option value="bearer_and_x_automation_key" {% if webhook.auth_scheme == 'bearer_and_x_automation_key' %}selected{% endif %}>Bearer token and X-Automation-Key</option>
-          <option value="claude_routine" {% if webhook.auth_scheme == 'claude_routine' %}selected{% endif %}>Claude routine (API trigger)</option>
-        </select>
-      </label>
-      <label>Wake-ups
-        <select name="enabled">
-          <option value="true" {% if not webhook.configured or webhook.enabled %}selected{% endif %}>Enabled</option>
-          <option value="false" {% if webhook.configured and not webhook.enabled %}selected{% endif %}>Paused</option>
-        </select>
-      </label>
-      <div class="actions"><button class="primary" type="submit">Save webhook</button></div>
-    </form>
-    {% if webhook.configured %}
-    <form method="post" action="/bridge/webhook" data-confirm="Remove this webhook? The saved key is deleted and the assistant is no longer pinged when mail arrives.">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="action" value="remove">
-      <div class="actions"><button type="submit">Remove webhook</button></div>
-    </form>
-    {% endif %}
-  </details>
-</div>
-{% elif webhook is defined %}
-<p class="muted">Wake-ups are off on this server. Mail still arrives when your assistant calls check_messages.</p>
-{% endif %}
 {% endblock %}

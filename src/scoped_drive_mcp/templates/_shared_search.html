@@ -2,5 +2,5 @@
   <label class="sr-only" for="shared-q">Search everything shared with you</label>
   <input id="shared-q" type="search" name="q" value="{{ q or '' }}" maxlength="200" placeholder="Search everything shared with you">
   <button type="submit">Search</button>
-  {% if q %}<a href="/shared">Clear search</a>{% endif %}
+  {% if q %}<a href="/sharing?tab=with-me">Clear search</a>{% endif %}
 </form>

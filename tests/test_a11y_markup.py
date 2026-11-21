@@ -18,15 +18,15 @@ def owner_c(p2_app):
 
 
 def test_active_nav_item_has_aria_current(owner_c) -> None:
-    page = owner_c.get("/access").text
+    page = owner_c.get("/files?tab=allowed").text
     current = re.findall(r'<a href="([^"]+)" class="on" aria-current="page">', page)
-    assert current == ["/access"]
+    assert current == ["/files"]
     assert page.count('aria-current="page"') == 1
 
 
 def test_one_persistent_live_region_and_no_role_on_flash(owner_c) -> None:
     post(owner_c, "/grant", file_id="proj")
-    page = owner_c.get("/access").text
+    page = owner_c.get("/files?tab=allowed").text
     assert page.count('id="live"') == 1
     assert 'aria-live="polite"' in page
     assert re.search(r'<div class="flash ok">[^<]*Projects', page)
@@ -35,9 +35,9 @@ def test_one_persistent_live_region_and_no_role_on_flash(owner_c) -> None:
 
 def test_repeated_row_buttons_name_their_row(owner_c) -> None:
     post(owner_c, "/grant", file_id="proj")
-    browse = owner_c.get("/browse").text
+    browse = owner_c.get("/files").text
     assert re.search(r'Remove<span class="sr-only"> Projects</span></button>', browse)
-    access = owner_c.get("/access").text
+    access = owner_c.get("/files?tab=allowed").text
     assert 'Remove<span class="sr-only"> Projects</span>' in access
     # The search label uses the real class, no inline clipping styles.
     assert '<label class="sr-only" for="q">' in browse
@@ -47,7 +47,7 @@ def test_requests_last_column_has_a_header(owner_c) -> None:
     mcp_call(owner_c, "request_access", description="the Q3 memo", reason="summary")
     page = owner_c.get("/requests").text
     assert "<th></th>" not in page
-    assert '<th><span class="sr-only">Decision</span></th>' in page
+    assert "<th>Open</th>" in page
     assert 'Approve or deny<span class="sr-only"> the Q3 memo</span>' in page
 
 

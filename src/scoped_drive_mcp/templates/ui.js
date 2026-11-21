@@ -199,14 +199,88 @@
 
   if (window.fetch && window.URLSearchParams && window.FormData) window.__asyncForms = true;
 
+  // ---- Confirm -------------------------------------------------------------------
+  // An in-page dialog instead of the browser's confirm(). data-confirm is the question,
+  // data-confirm-action the button label, and data-confirm-check (a field name) with
+  // data-confirm-check-label adds one optional checkbox that posts <name>=on.
+  function askConfirm(form) {
+    var ask = form.getAttribute("data-confirm");
+    if (!ask) return Promise.resolve(true);
+    if (typeof HTMLDialogElement !== "function") return Promise.resolve(window.confirm(ask));
+    return new Promise(function (resolve) {
+      var dlg = document.createElement("dialog");
+      dlg.className = "confirm";
+      var text = document.createElement("p");
+      text.id = "confirm-text";
+      text.textContent = ask;
+      dlg.setAttribute("aria-labelledby", "confirm-text");
+      dlg.appendChild(text);
+      var checkName = form.getAttribute("data-confirm-check");
+      var box = null;
+      if (checkName) {
+        var label = document.createElement("label");
+        box = document.createElement("input");
+        box.type = "checkbox";
+        label.appendChild(box);
+        label.appendChild(document.createTextNode(" " + (form.getAttribute("data-confirm-check-label") || checkName)));
+        dlg.appendChild(label);
+      }
+      var row = document.createElement("div");
+      row.className = "actions";
+      var cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      var ok = document.createElement("button");
+      ok.type = "button";
+      var submit = form.querySelector("button[type=submit], button:not([type])");
+      ok.className = submit && submit.classList.contains("danger") ? "danger" : "primary";
+      ok.textContent = form.getAttribute("data-confirm-action") ||
+        (submit ? (submit.childNodes[0] && submit.childNodes[0].textContent || "").trim() : "") || "Confirm";
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      dlg.appendChild(row);
+      var settled = false;
+      function done(value) {
+        if (settled) return;
+        settled = true;
+        if (checkName) {
+          var old = form.querySelector('input[data-from-confirm]');
+          if (old) old.remove();
+          if (value && box && box.checked) {
+            var hidden = document.createElement("input");
+            hidden.type = "hidden";
+            hidden.name = checkName;
+            hidden.value = "on";
+            hidden.setAttribute("data-from-confirm", "");
+            form.appendChild(hidden);
+          }
+        }
+        if (dlg.open) dlg.close();
+        dlg.remove();
+        if (submit && !value) submit.focus();
+        resolve(value);
+      }
+      cancel.addEventListener("click", function () { done(false); });
+      ok.addEventListener("click", function () { done(true); });
+      dlg.addEventListener("cancel", function (event) { event.preventDefault(); done(false); });
+      dlg.addEventListener("click", function (event) { if (event.target === dlg) done(false); });
+      document.body.appendChild(dlg);
+      dlg.showModal();
+      cancel.focus();
+    });
+  }
+  window.__askConfirm = askConfirm;
+
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!form || !form.hasAttribute || !form.hasAttribute("data-async")) return;
     if (!window.fetch || !window.URLSearchParams || !window.FormData) return;
     event.preventDefault();
     if (form.getAttribute("aria-busy") === "true") return;
-    var ask = form.getAttribute("data-confirm");
-    if (ask && !window.confirm(ask)) return;
+    askConfirm(form).then(function (yes) { if (yes) sendInPlace(form); });
+  });
+
+  function sendInPlace(form) {
     var button = form.querySelector("button[type=submit], button:not([type])");
     form.setAttribute("aria-busy", "true");
     if (button) button.disabled = true;
@@ -241,35 +315,37 @@
         form.removeAttribute("aria-busy");
         if (button) button.disabled = false;
       });
-  });
+  }
 
   // ---- Times ---------------------------------------------------------------------
-  // The server writes <time datetime="…" data-time>Nov 19, 2026, 23:58 UTC</time>. Show it
-  // in the reader's own time zone, as "5 minutes ago" or "Yesterday, 3:04 PM" when recent.
-  // The full local date and time stays in the tooltip.
+  // The server writes <time datetime="…" data-time>Nov 19, 2026, 23:58 UTC</time>. One rule
+  // for every page, in the reader's own time zone: "5 minutes ago" / "3 hours ago" within a
+  // day, otherwise "18 Nov, 21:29" (with the year only when it is not this year). The full
+  // local date and time stays in the tooltip.
   function localTimes() {
     var nodes = document.querySelectorAll("time[data-time]");
     if (!nodes.length || !window.Intl || !Intl.DateTimeFormat) return;
     var full = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-    var clock = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
-    var dateOnly = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+    var opts = { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" };
+    var thisYear = new Intl.DateTimeFormat(undefined, opts);
+    var otherYear = new Intl.DateTimeFormat(undefined, Object.assign({ year: "numeric" }, opts));
+    var dayOpts = { day: "numeric", month: "short" };
+    var dateThisYear = new Intl.DateTimeFormat(undefined, dayOpts);
+    var dateOtherYear = new Intl.DateTimeFormat(undefined, Object.assign({ year: "numeric" }, dayOpts));
     var rel = Intl.RelativeTimeFormat ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }) : null;
     var now = new Date();
-    var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    var day = 24 * 3600 * 1000;
     Array.prototype.forEach.call(nodes, function (el) {
       var t = Date.parse(el.getAttribute("datetime") || "");
       if (isNaN(t)) return;
       var d = new Date(t);
       var secs = (now.getTime() - t) / 1000;
+      var sameYear = d.getFullYear() === now.getFullYear();
       var text;
-      if (el.getAttribute("data-time") === "date") text = dateOnly.format(d);
+      if (el.getAttribute("data-time") === "date") text = (sameYear ? dateThisYear : dateOtherYear).format(d);
       else if (rel && secs >= -60 && secs < 60) text = "just now";
       else if (rel && secs >= 0 && secs < 3570) text = rel.format(-Math.round(secs / 60), "minute");
-      else if (rel && secs >= 3570 && secs < 6 * 3600) text = rel.format(-Math.round(secs / 3600), "hour");
-      else if (t >= startOfToday && t < startOfToday + day) text = "Today, " + clock.format(d);
-      else if (t >= startOfToday - day && t < startOfToday) text = "Yesterday, " + clock.format(d);
-      else text = full.format(d);
+      else if (rel && secs >= 3570 && secs < 24 * 3600) text = rel.format(-Math.round(secs / 3600), "hour");
+      else text = (sameYear ? thisYear : otherYear).format(d);
       el.textContent = text;
       el.title = full.format(d);
     });
@@ -297,7 +373,7 @@
     // Same rule as the server's safe_next: a same-site path with no control characters.
     if (!value || value.charAt(0) !== "/" || value.indexOf("//") === 0 || value.indexOf("\\") !== -1 ||
         /[\u0000-\u0020\u007f]/.test(value)) {
-      return "/browse";
+      return "/files";
     }
     return value;
   }

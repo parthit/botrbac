@@ -220,13 +220,16 @@ def test_each_owner_shares_separately(people, world, oauth) -> None:
 
 def test_sharing_page_and_browse_buttons(people) -> None:
     app, owner, eve, _token = people
-    page = owner.get("/sharing")
+    page = owner.get("/sharing?tab=by-me")
     assert page.status_code == 200
     assert "Nothing is shared yet" in page.text
     assert "No one yet" in page.text
 
-    browse = owner.get("/browse")
-    assert "Share with paired people" in browse.text
+    # Share appears on Files once there is someone to share with.
+    browse = owner.get("/files")
+    assert 'action="/sharing/add"' not in browse.text
+    _pair(app, OWNER_EMAIL, EVE)
+    browse = owner.get("/files")
     assert 'action="/sharing/add"' in browse.text
 
     assert owner.post("/sharing/add", data={"file_id": "loose-doc"}).status_code == 403
@@ -237,14 +240,13 @@ def test_sharing_page_and_browse_buttons(people) -> None:
     assert set(entries) == {"loose-doc"}
     assert entries["loose-doc"].audience == "linked"
 
-    _pair(app, OWNER_EMAIL, EVE)
-    page = owner.get("/sharing")
+    page = owner.get("/sharing?tab=by-me")
     assert "Loose memo" in page.text and EVE in page.text
-    assert 'href="/sharing"' in page.text
-    assert "Shared with paired people" in owner.get("/browse").text
+    assert 'href="/sharing?tab=people"' in page.text
+    assert "</span> Shared</span>" in owner.get("/files").text
     # Eve's list is her own.
-    assert "Loose memo" not in eve.get("/sharing").text
-    assert "/sharing" in owner.get("/bridge").text
+    assert "Loose memo" not in eve.get("/sharing?tab=by-me").text
+    assert "/sharing" in owner.get("/sharing?tab=people").text
 
 
 def test_active_peers_counts_only_approved_links() -> None:
@@ -304,9 +306,10 @@ def test_guest_hints_name_the_shared_tools(people) -> None:
 
 
 def test_browse_marks_items_inside_a_shared_folder(people) -> None:
-    _app_, owner, _eve, _token = people
+    app, owner, _eve, _token = people
+    _pair(app, OWNER_EMAIL, EVE)
     assert post(owner, "/sharing/add", file_id="proj").status_code == 303
-    inside = owner.get("/browse?folder=proj").text
+    inside = owner.get("/files?folder=proj").text
     assert "Shared with paired people through Projects" in inside
     assert inside.count("Shared via folder") >= 2  # proj-sub, proj-notes
     # Items already covered by the folder do not offer a separate share button. The
@@ -316,9 +319,9 @@ def test_browse_marks_items_inside_a_shared_folder(people) -> None:
         r'action="/sharing/add".*?name="file_id" value="([^"]+)"', inside, re.S
     )
     assert share_forms == ["proj-shortcut"]
-    assert "Share the target with paired people" in inside
+    assert "Share the target" in inside
     # Outside the shared folder nothing changes.
-    other = owner.get("/browse?folder=priv").text
+    other = owner.get("/files?folder=priv").text
     assert "Shared via folder" not in other
     assert 'action="/sharing/add"' in other
 

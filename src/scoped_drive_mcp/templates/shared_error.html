@@ -5,7 +5,7 @@
   <h1>{% if code == "not_linked" %}You are not paired with that person{% elif code == "not_shared" %}That item is not shared with you{% else %}This item can’t be opened{% endif %}</h1>
   <p>{{ message }}</p>
   <div class="actions">
-    <a class="btn primary" href="/shared">Back to Shared with me</a>
+    <a class="btn primary" href="/sharing?tab=with-me">Back to Shared with me</a>
   </div>
 </div>
 {% endblock %}

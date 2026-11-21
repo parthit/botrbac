@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Activity{% endblock %}
 {% block content %}
-<h1>Recent activity</h1>
+<h1>Activity</h1>
 <p class="muted">What your assistants, the people you share with, and you have done, newest first. File contents and search text are never recorded.</p>
 <nav class="actions activity-filters" aria-label="Filter activity">
   {% for key, label, href, count in filters %}
@@ -16,10 +16,10 @@
 {% endif %}
 {% if rows %}
 <ol class="activity">
-  {% for r in rows %}
+  {% for r, times in rows %}
   <li class="activity-row">
     <span class="activity-when muted">{{ r.ts | when }}</span>
-    <span class="activity-text"{% if r.detail %} title="{{ r.detail }}"{% endif %}>{{ r.text }}</span>
+    <span class="activity-text"{% if r.detail %} title="{{ r.detail }}"{% endif %}>{{ r.text }}{% if times > 1 %} <span class="muted">({{ times }} times, newest shown)</span>{% endif %}</span>
     <span class="pill{{ ' ' ~ r.badge.tone if r.badge.tone }}"><span aria-hidden="true">{{ r.badge.mark }}</span> {{ r.badge.label }}</span>
   </li>
   {% endfor %}

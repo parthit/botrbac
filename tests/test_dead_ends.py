@@ -40,11 +40,11 @@ def owner_c(p2_app):
 def test_access_and_sharing_point_at_connections_without_drive(p2_app) -> None:
     c = client(p2_app)
     sign_in(c)  # step 1 only
-    access = c.get("/access").text
+    access = c.get("/files?tab=allowed").text
     assert "Google Drive is not connected yet" in access
     assert 'href="/connect"' in access
     assert "Sign out and sign in again" not in access and "not stored yet" not in access
-    sharing = c.get("/sharing").text
+    sharing = c.get("/sharing?tab=by-me").text
     assert "Connect Google Drive first" in sharing
     assert "Open Browse" not in sharing
 
@@ -177,12 +177,12 @@ def test_pick_mode_does_not_offer_already_allowed_items(owner_c) -> None:
     post(owner_c, "/grant", file_id="loose-doc")
     asked = mcp_call(owner_c, "request_access", description="a memo", reason="r")
     rid = asked["structuredContent"]["request_id"]
-    page = owner_c.get(f"/browse?request={rid}").text
+    page = owner_c.get(f"/files?request={rid}").text
     page = page[page.index('<ul class="files">') :]
     loose = page[page.index("Loose memo") :].split("</li>", 1)[0]
-    assert "Already allowed" in loose and "Share for this request" not in loose
+    assert "Already allowed" in loose and "Allow for this request" not in loose
     two = page[page.index("Second memo") :].split("</li>", 1)[0]
-    assert "Share for this request" in two
+    assert "Allow for this request" in two
 
 
 def test_approved_request_names_the_item_for_the_assistant(owner_c) -> None:
@@ -200,7 +200,7 @@ def test_approved_request_names_the_item_for_the_assistant(owner_c) -> None:
 def test_cancelling_the_drive_connect_offers_try_again(p2_app) -> None:
     c = client(p2_app)
     sign_in(c)
-    token = csrf(c, "/connect")
+    token = csrf(c, "/settings")
     state = start_oauth(c, "/connect/google_drive", csrf=token, next="/browse")
     page = c.get("/auth/callback", params={"error": "access_denied", "state": state})
     assert page.status_code == 400
@@ -254,16 +254,19 @@ def test_connect_page_names_the_waiting_assistant(p2_app) -> None:
 
 
 def test_connect_page_heading_after_drive_is_connected(owner_c) -> None:
-    page = owner_c.get("/connect").text
+    r = owner_c.get("/connect")
+    assert r.status_code == 303 and r.headers["location"] == "/settings#services"
+    page = owner_c.get("/settings").text
     assert "Step 2 of 2" not in page and "One more step" not in page
-    assert "<h1>Connections.</h1>" in page
+    assert "<h1>Settings</h1>" in page and 'id="services"' in page
 
 
 def test_overview_says_what_to_do_next(owner_c) -> None:
     page = owner_c.get("/").text
     assert "Next: choose files your assistant can use" in page
-    assert 'href="/browse">Choose files</a>' in page
-    assert "setup cards above" not in page and "Copy the MCP URL above" in page
+    assert 'href="/files">Choose files</a>' in page
+    assert "setup cards above" not in page
+    assert "Copy the MCP URL above" in owner_c.get("/settings").text
     post(owner_c, "/grant", file_id="loose-doc")
     assert "Next: choose files" not in owner_c.get("/").text
 
@@ -287,7 +290,7 @@ def test_when_renders_a_time_element() -> None:
 def test_dashboard_pages_render_times_not_iso_strings(owner_c) -> None:
     post(owner_c, "/grant", file_id="loose-doc")
     mcp_call(owner_c, "read_file", file_id="priv-secret")
-    for path in ("/access", "/requests", "/activity"):
+    for path in ("/files?tab=allowed", "/requests", "/activity"):
         page = owner_c.get(path).text
         assert "data-time" in page, path
         visible = re.sub(r"<[^>]+>", " ", page)
@@ -370,7 +373,7 @@ def test_not_linked_message_names_the_mailbox_page(world, memstore, oauth) -> No
     login(eve, "eve-code")
     token = _grok(eve, "Grok Eve")
     refused = _error(_mcp(eve, token, "read_shared_file", owner=OWNER_EMAIL, file_id="x"))
-    assert "Mailbox page" in refused["message"] and "/bridge" not in refused["message"]
+    assert "Sharing page" in refused["message"] and "/bridge" not in refused["message"]
 
 
 def test_list_folder_note_and_consent_deny_wording(owner_c) -> None:
@@ -386,10 +389,10 @@ def test_list_folder_note_and_consent_deny_wording(owner_c) -> None:
 
 
 def test_browse_and_mode_note_wording(owner_c) -> None:
-    browse = owner_c.get("/browse").text
-    assert "<h1>Your Google Drive</h1>" in browse
+    browse = owner_c.get("/files").text
+    assert "<h1>Files</h1>" in browse
     assert "Files this app can see" not in browse and "Google Picker" not in browse
-    assert "may still hide files" not in owner_c.get("/browse?folder=proj").text
+    assert "may still hide files" not in owner_c.get("/files?folder=proj").text
     overview = owner_c.get("/").text
     assert '<div class="card" id="mode-note">' in overview
 
@@ -455,3 +458,14 @@ def test_mailbox_refusals_are_not_blamed_on_drive() -> None:
     assert "pairing is off" in text and "Google Drive" not in text
     record["reason"] = "some_new_code"
     assert "Google Drive" not in describe(record, {}, {}, {}).text
+
+
+def test_repeated_refused_connections_fold_into_one_row(owner_c, p2_app) -> None:
+    log = p2_app.state.dashboard.activity
+    for _ in range(12):
+        log({"ts": "2026-11-19T23:58:10.123+00:00", "event": "auth", "reason": "bad"})
+    page = owner_c.get("/activity").text
+    assert page.count("tried to connect with a missing") == 1
+    assert "(12 times, newest shown)" in page
+    # Nothing to act on, so they do not count as needing attention.
+    assert "tried to connect" not in owner_c.get("/activity?view=attention").text

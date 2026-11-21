@@ -216,7 +216,13 @@ def test_summary_counts(clock: FakeClock) -> None:
     box.request_link(OWNER_EMAIL, created["invite_code"])
     assert box.needs_approval_count(OWNER_EMAIL) == 1
     assert box.needs_approval_count(CAROL) == 1
-    assert box.summary(OWNER_EMAIL) == {"needs_approval": 1, "active": 1, "unread": 1}
+    assert box.summary(OWNER_EMAIL) == {
+        "needs_approval": 1,
+        "active": 1,
+        "people": 1,
+        "own": 0,
+        "unread": 1,
+    }
     box.decide(OWNER_EMAIL, created["link_id"], "approve")
     assert box.needs_approval_count(OWNER_EMAIL) == 0
     assert box.needs_approval_count(CAROL) == 1
@@ -237,21 +243,21 @@ def test_cards_say_who_is_waiting_on_whom(p2_app) -> None:
     eve = _signed_in(p2_app, "eve-code")
 
     created = box.request_link(OWNER_EMAIL)
-    page = owner.get("/bridge").text
+    page = owner.get("/sharing?tab=people").text
     assert f"Waiting for someone to join with code <code>{created['invite_code']}</code>" in page
     assert "Expires " in page
     assert "Cancel invite" in page
     assert "Turn off" not in page and "Delete stored messages" not in page
 
     box.request_link(EVE, created["invite_code"])
-    assert "Needs your approval" in owner.get("/bridge").text
+    assert "Needs your approval" in owner.get("/sharing?tab=people").text
     approve = owner.post(
-        f"/bridge/{created['link_id']}/approve", data={"csrf": csrf(owner, "/bridge")}
+        f"/bridge/{created['link_id']}/approve", data={"csrf": csrf(owner, "/sharing?tab=people")}
     )
     assert approve.status_code == 303
-    owner_page = owner.get("/bridge").text
+    owner_page = owner.get("/sharing?tab=people").text
     assert f"Waiting for <b>{EVE}</b> to approve" in owner_page
-    eve_page = eve.get("/bridge").text
+    eve_page = eve.get("/sharing?tab=people").text
     assert "Needs your approval" in eve_page
     assert f"<b>{OWNER_EMAIL}</b> already approved" in eve_page
     # The nav badge counts what waits on Eve.
@@ -269,27 +275,31 @@ def test_turning_off_says_sharing_stops_and_mail_stays(p2_app) -> None:
     box.decide(EVE, created["link_id"], "approve")
     sent = box.send_message(EVE, created["link_id"], "unread reply")
 
-    page = owner.get("/bridge").text
-    assert "Sharing list" in page and "Turn this mailbox off?" in page
-    off = eve.post(f"/bridge/{created['link_id']}/revoke", data={"csrf": csrf(eve, "/bridge")})
+    page = owner.get("/sharing?tab=people").text
+    assert "what the other shares" in page and "Disconnect from" in page
+    off = eve.post(
+        f"/bridge/{created['link_id']}/revoke", data={"csrf": csrf(eve, "/sharing?tab=people")}
+    )
     assert off.status_code == 303
-    flashed = eve.get("/bridge").text
+    flashed = eve.get("/sharing?tab=people").text
     assert "Sharing list" in flashed
     assert "stay readable" in flashed
     assert box.list_inbox(OWNER_EMAIL)["messages"][0]["msg_id"] == sent["msg_id"]
 
-    owner_page = owner.get("/bridge").text
-    assert f"Turned off by {EVE} on " in owner_page
+    owner_page = owner.get("/sharing?tab=people").text
+    assert f"Disconnected by {EVE} on " in owner_page
     assert "To pair again, ask your assistant for a new invite code" in owner_page
     assert "Remove from list" in owner_page
 
-    purge = owner.post(f"/bridge/{created['link_id']}/purge", data={"csrf": csrf(owner, "/bridge")})
+    purge = owner.post(
+        f"/bridge/{created['link_id']}/purge", data={"csrf": csrf(owner, "/sharing?tab=people")}
+    )
     assert purge.status_code == 303
-    assert "Deleted 1 stored message" in owner.get("/bridge").text
+    assert "Deleted 1 stored message" in owner.get("/sharing?tab=people").text
     assert box.list_inbox(OWNER_EMAIL)["messages"] == []
 
     dismiss = owner.post(
-        f"/bridge/{created['link_id']}/dismiss", data={"csrf": csrf(owner, "/bridge")}
+        f"/bridge/{created['link_id']}/dismiss", data={"csrf": csrf(owner, "/sharing?tab=people")}
     )
     assert dismiss.status_code == 303
     assert box.list_links(OWNER_EMAIL)["links"] == []
@@ -301,18 +311,18 @@ def test_declined_card_and_cancel_from_the_dashboard(p2_app) -> None:
     eve = _signed_in(p2_app, "eve-code")
     created = box.request_link(OWNER_EMAIL)
     box.request_link(EVE, created["invite_code"])
-    eve.post(f"/bridge/{created['link_id']}/deny", data={"csrf": csrf(eve, "/bridge")})
-    page = owner.get("/bridge").text
+    eve.post(f"/bridge/{created['link_id']}/deny", data={"csrf": csrf(eve, "/sharing?tab=people")})
+    page = owner.get("/sharing?tab=people").text
     assert f"Declined by {EVE} on " in page
     assert "Turned off" not in page
-    assert "Declined by you" in eve.get("/bridge").text
+    assert "Declined by you" in eve.get("/sharing?tab=people").text
 
     invite = box.request_link(OWNER_EMAIL)
     cancelled = owner.post(
-        f"/bridge/{invite['link_id']}/cancel", data={"csrf": csrf(owner, "/bridge")}
+        f"/bridge/{invite['link_id']}/cancel", data={"csrf": csrf(owner, "/sharing?tab=people")}
     )
     assert cancelled.status_code == 303
-    assert invite["invite_code"] not in owner.get("/bridge").text
+    assert invite["invite_code"] not in owner.get("/sharing?tab=people").text
     with pytest.raises(MailboxError):
         box.request_link(EVE, invite["invite_code"])
 
@@ -325,8 +335,7 @@ def test_overview_summarises_mailbox_and_shared_with_me(p2_app) -> None:
     page = owner.get("/").text
     assert 'id="mailbox-summary"' in page
     assert "1 needs your approval" in page
-    assert 'id="shared-summary"' in page
-    assert "Nothing shared with you yet" in page
+    assert "View sharing" in page
 
 
 # ---- consent page ------------------------------------------------------------------

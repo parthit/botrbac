@@ -1,0 +1,15 @@
+{#- Tabs for the two merged pages. Links, not ARIA tabs: each tab is its own address. -#}
+{% macro files_tabs(active, allow_count=None) -%}
+<nav class="tabs" aria-label="Files">
+  <a href="/files" {% if active == 'all' %}aria-current="true"{% endif %}>All files</a>
+  <a href="/files?tab=allowed" {% if active == 'allowed' %}aria-current="true"{% endif %}>Allowed{% if allow_count is not none %} <span class="count">{{ allow_count }}</span>{% endif %}</a>
+</nav>
+{%- endmacro %}
+{% macro sharing_tabs(active) -%}
+<nav class="tabs" aria-label="Sharing">
+  <a href="/sharing?tab=people" {% if active == 'people' %}aria-current="true"{% endif %}>People{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
+  <a href="/sharing?tab=by-me" {% if active == 'by-me' %}aria-current="true"{% endif %}>Shared by me</a>
+  <a href="/sharing?tab=with-me" {% if active == 'with-me' %}aria-current="true"{% endif %}>Shared with me</a>
+</nav>
+<p class="muted lead">Pair with someone, then choose files to share with their assistant. Shared files are read-only.</p>
+{%- endmacro %}

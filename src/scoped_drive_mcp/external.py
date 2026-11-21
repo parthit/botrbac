@@ -361,7 +361,7 @@ class ExternalShares:
             raise SharedAccessError(
                 "not_linked",
                 "You do not have an active mailbox pairing with that person. Both people "
-                "approve the pairing on the dashboard's Mailbox page before either assistant "
+                "approve the pairing on the dashboard's Sharing page before either assistant "
                 "can read shared items.",
                 owner=them,
             )

@@ -184,7 +184,7 @@ def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(
     path = f"/requests/{req.id}"
     page = c.get(path).text
     assert "This file doesn\u2019t exist or you can\u2019t open it" in page
-    assert "pick it from Browse" in page and "Share just this item" not in page
+    assert "pick it from Files" in page and "Share just this item" not in page
     assert "Deny" in page
     # No advice that does not apply: there is no banner, and no picker on this server.
     assert "Sign in again" not in page and "picker" not in page.lower()
@@ -260,8 +260,8 @@ def test_request_access_tool_without_file_id(c, p2_app, world) -> None:
     path = out["approval_url"].removeprefix(BASE_URL)
     page = c.get(path).text
     assert "the Q3 memo" in page and "Pick an item" in page
-    picker = c.get(f"/browse?request={out['request_id']}").text
-    assert "Share for this request" in picker
+    picker = c.get(f"/files?request={out['request_id']}").text
+    assert "Allow for this request" in picker
     post(c, f"{path}/approve", target_id="loose-two")
     assert [p["emailAddress"] for p in world.files["loose-two"].permissions] == []
     status = mcp_call(c, "check_access_request", request_id=out["request_id"])

@@ -9,61 +9,51 @@
 <div class="card" id="next-step">
   <h2>Next: choose files your assistant can use</h2>
   <p>Google Drive is connected, but nothing is allowed yet. Your assistant can’t open anything until you allow a file or folder.</p>
-  <p><a class="btn primary" href="/browse">Choose files</a></p>
+  <p><a class="btn primary" href="/files">Choose files</a></p>
 </div>
 {% endif %}
-<div class="grid">
+{% if missing_wakeups %}
+<div class="warn" role="status" id="missing-wakeups">
+  {% for m in missing_wakeups %}<p>Messages from {{ m.sender }} won’t start {{ m.assistant }}: it {{ "has its wake-up paused" if m.paused else "has no wake-up" }}.</p>{% endfor %}
+  <p><a href="/settings#assistants">Fix in Settings</a></p>
+</div>
+{% endif %}
+<div class="grid stats">
   <div class="card stat">
-    <span class="muted">Allowed items</span>
+    <span class="muted">Allowed files</span>
     <b>{{ allow_count }}</b>
-    <a href="/access">Manage<span class="sr-only"> allowed items</span></a>
+    <span class="muted">{{ "file or folder" if allow_count == 1 else "files and folders" }} your assistants can use</span>
+    <a href="/files?tab=allowed">View allowed files</a>
   </div>
   <div class="card stat">
-    <span class="muted">Pending requests</span>
+    <span class="muted">Requests</span>
     <b>{{ pending_count }}</b>
-    {% if pending_count %}<span class="pill pending"><span aria-hidden="true">●</span> Waiting</span>{% else %}<span class="pill"><span aria-hidden="true">✓</span> None waiting</span>{% endif %}
-    <a href="/requests">Review</a>
+    <span class="muted">{% if pending_count %}waiting for you{% else %}nothing waiting{% endif %}</span>
+    <a href="/requests">View requests</a>
   </div>
-  <div class="card stat">
-    <span class="muted">Connections</span>
-    {% for row in connections %}
-    <p>{{ row.connection.name }}
-      {% if row.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
-      {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
-    </p>
-    {% endfor %}
-    <span class="muted">Signed in as {{ owner }}</span>
-    <a href="/connect">Manage<span class="sr-only"> connections</span></a>
-  </div>
-  {% if mailbox_summary %}
+  {% if mailbox_summary or shared_summary %}
   <div class="card stat" id="mailbox-summary">
-    <span class="muted">Mailbox</span>
-    <b>{{ mailbox_summary.active }}</b>
-    <span class="muted">active pairing{{ "" if mailbox_summary.active == 1 else "s" }}</span>
-    {% if mailbox_summary.needs_approval %}<span class="pill pending"><span aria-hidden="true">●</span> {{ mailbox_summary.needs_approval }} need{{ "s" if mailbox_summary.needs_approval == 1 }} your approval</span>{% endif %}
-    {% if mailbox_summary.unread %}<span class="muted">{{ mailbox_summary.unread }} unread message{{ "" if mailbox_summary.unread == 1 else "s" }} waiting for your assistant</span>{% endif %}
-    <a href="/bridge">{{ "Review" if mailbox_summary.needs_approval else "Manage" }}</a>
+    <span class="muted">Sharing</span>
+    <b>{{ mailbox_summary.people if mailbox_summary else 0 }}</b>
+    <span class="muted">{{ "person" if mailbox_summary and mailbox_summary.people == 1 else "people" }} paired{% if mailbox_summary and mailbox_summary.own %}, plus {{ mailbox_summary.own }} pairing of your own assistants{% endif %}{% if shared_summary and shared_summary.item_count %} · {{ shared_summary.item_count }} item{{ "" if shared_summary.item_count == 1 else "s" }} shared with you{% endif %}</span>
+    {% if mailbox_summary and mailbox_summary.needs_approval %}<span class="pill pending"><span aria-hidden="true">●</span> {{ mailbox_summary.needs_approval }} need{{ "s" if mailbox_summary.needs_approval == 1 }} your approval</span>{% endif %}
+    <a href="/sharing">View sharing</a>
   </div>
   {% endif %}
-  {% if shared_summary %}
-  <div class="card stat" id="shared-summary">
-    <span class="muted">Shared with me</span>
-    <b>{{ shared_summary.item_count }}</b>
-    {% if shared_summary.item_count %}
-    <span class="muted">item{{ "" if shared_summary.item_count == 1 else "s" }} from {{ shared_summary.people }} {{ "person" if shared_summary.people == 1 else "people" }}</span>
-    {% else %}
-    <span class="muted">Nothing shared with you yet</span>
-    {% endif %}
-    <a href="/shared">Open</a>
+  <div class="card stat">
+    <span class="muted">Assistants</span>
+    <b>{{ grants | length }}</b>
+    <span class="muted">connected{% set unwoken = missing_wakeups | map(attribute="grant_id") | unique | list %}{% if unwoken %} · {{ unwoken | length }} can’t be woken{% endif %}</span>
+    <a href="/settings#assistants">View assistants</a>
   </div>
-  {% endif %}
 </div>
 
 <h2>Connect an assistant</h2>
 <div class="card" id="mcp-address">
   <p>Every assistant uses the same server address. Add it as a custom connector or MCP server, sign in when the browser opens, and choose Allow. Leave any client id and secret empty.</p>
   <div class="copy-row">
-    <code>{{ mcp_url }}</code>
+    <label class="sr-only" for="mcp-url">Server address</label>
+    <input id="mcp-url" type="text" readonly value="{{ mcp_url }}">
     <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
   </div>
   <h3>Works with</h3>
@@ -75,54 +65,6 @@
     <li><b>Muse</b> <span class="muted">Add a custom connector with this address.</span></li>
     <li><b>Cursor</b> <span class="muted">Add an MCP server with this address.</span></li>
   </ul>
-  <p class="muted">You can disconnect any app below.</p>
+  <p class="muted">Connected assistants, their wake-ups and Disconnect are in <a href="/settings#assistants">Settings</a>.</p>
 </div>
-
-<h2>Connected apps</h2>
-<p class="muted">Apps that signed in here. Disconnecting stops that app immediately.</p>
-{% if grants %}
-<table class="cards" data-list>
-  <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th>Action</th></tr></thead>
-  <tbody>
-  {% for grant in grants %}
-  <tr data-row>
-    <td data-label="App">{{ grant.client_name }}</td>
-    <td data-label="Connected" class="muted">{{ grant.created_at | when }}</td>
-    <td data-label="Last used" class="muted">{{ grant.last_used | when("Never") }}</td>
-    <td data-label="Action">
-      <form class="inline" method="post" action="/oauth/grants/revoke" data-async data-on-success="remove-row" data-confirm="Disconnect this app? It loses access immediately.">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="grant_id" value="{{ grant.id }}">
-        <button class="danger" type="submit">Disconnect<span class="sr-only"> {{ grant.client_name }}</span></button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-<div class="card empty" data-empty{% if grants %} hidden{% endif %}>
-  <h2>No apps connected</h2>
-  <p>Copy the MCP URL above into your assistant, sign in when the browser opens, and choose Allow. The app then shows up here.</p>
-</div>
-
-{% if is_admin %}
-<div class="card">
-  <h2>For the person running this server</h2>
-  {% if missing %}
-  <div class="warn">Missing settings: {% for m in missing %}<code>{{ m }}</code>{{ ", " if not loop.last }}{% endfor %}.
-    {% if store_kind == "memory" %}Without Redis or Postgres, grants and requests are kept in memory and are lost when the server restarts.{% endif %}
-  </div>
-  {% endif %}
-  {% if not picker_ready %}
-  <p>The Google Picker is optional. It needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before the picker button appears. Browse and approval work from the signed-in Drive without it.</p>
-  {% endif %}
-  {% if env_token_set %}
-  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with only per-file access, replace it with <code>scripts/bootstrap_oauth.py</code> so this server can see that Drive. The allowlist still limits assistants.</p>
-  {% endif %}
-  <p>Server address: <code>{{ mcp_url }}</code></p>
-  {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}
-  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with connected apps. The public site address is <code>APP_BASE_URL</code>.</p>
-</div>
-{% endif %}
 {% endblock %}

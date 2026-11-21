@@ -395,7 +395,9 @@ def describe(
             text="An app tried to connect with a missing, wrong or expired key.",
             badge=_BLOCKED,
             group="security",
-            attention=True,
+            # Refused already and nothing for the person to do, so it does not count
+            # toward "Needs attention" (these come in bursts and drowned out real items).
+            attention=False,
             polling=False,
             detail=str(record.get("reason") or ""),
         )
@@ -429,6 +431,21 @@ def matches(row: ActivityRow, view: str, show_polling: bool) -> bool:
     if view == "you":
         return row.group == "you"
     return True
+
+
+def group_repeats(rows: list[ActivityRow]) -> list[tuple[ActivityRow, int]]:
+    """Fold back-to-back refused connection attempts ("An app tried to connect…" twelve
+    times) into one row, with how many there were. The newest one's time is kept. Other
+    rows stay one per event."""
+    grouped: list[tuple[ActivityRow, int]] = []
+    for row in rows:
+        if grouped and row.group == "security":
+            last, count = grouped[-1]
+            if (last.text, last.badge, last.who) == (row.text, row.badge, row.who):
+                grouped[-1] = (last, count + 1)
+                continue
+        grouped.append((row, 1))
+    return grouped
 
 
 def item_ids(records: list[Mapping[str, Any]]) -> list[str]:

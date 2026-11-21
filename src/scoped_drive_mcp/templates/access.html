@@ -1,37 +1,38 @@
 {% extends "base.html" %}
-{% block title %}Access{% endblock %}
+{% from "_tabs.html" import files_tabs %}
+{% block title %}Allowed files{% endblock %}
 {% block content %}
-<h1>What the assistant can use</h1>
-{% include "_mode.html" %}
-<p class="muted">Each item below is on your list. A folder includes what this server can see inside it.
-  Remove takes the item off that list.</p>
+<h1>Files</h1>
+{{ files_tabs('allowed', allow_count) }}
+<p class="muted lead">Your assistants can use these files and folders. An allowed folder includes everything inside it. Remove takes an item off the list.</p>
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so the assistant cannot reach your files. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 {% if rows or root_folder_id %}
 <table class="cards" data-list>
-  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>From</th><th>Action</th></tr></thead>
+  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>How</th><th>Action</th></tr></thead>
   <tbody>
   {% if root_folder_id %}
   <tr>
     <td data-label="Name"><code>{{ root_folder_id }}</code></td>
     <td data-label="Type">Folder</td>
     <td data-label="Added" class="muted">—</td>
-    <td data-label="From" class="muted">Set on the server</td>
+    <td data-label="How" class="muted">Set on the server</td>
     <td data-label="Action" class="muted">Server setting</td>
   </tr>
   {% endif %}
   {% for e in rows %}
   <tr data-row>
-    <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
+    <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}<a href="https://drive.google.com/open?id={{ e.id | urlencode }}" target="_blank" rel="noopener noreferrer">{{ e.name or e.id }}</a>{% endif %}
+      {% if covered.get(e.id) %}<div class="muted small">Also covered by “{{ covered[e.id] }}”. Removing only this entry changes nothing.</div>{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
-    <td data-label="From">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">From a request</a>{% else %}Added here{% endif %}</td>
+    <td data-label="How">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">Approved request</a>{% else %}You allowed{% endif %}</td>
     <td data-label="Action">
       <form class="inline" method="post" action="/revoke" data-async data-on-success="remove-row" data-confirm="Remove this from the assistant?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
-        <input type="hidden" name="next" value="/access">
+        <input type="hidden" name="next" value="/files?tab=allowed">
         <button class="danger" type="submit">Remove<span class="sr-only"> {{ e.name or e.id }}</span></button>
       </form>
     </td>
@@ -43,6 +44,6 @@
 <div class="card empty" data-empty{% if rows or root_folder_id %} hidden{% endif %}>
   <h2>Nothing is allowed yet</h2>
   <p>Pick a file or folder, then choose Allow. The assistant cannot use your Drive until you do.</p>
-  <p><a class="btn primary" href="/browse">Browse files</a></p>
+  <p><a class="btn primary" href="/files">Choose files</a></p>
 </div>
 {% endblock %}

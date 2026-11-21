@@ -2,27 +2,27 @@
 {% block title %}People{% endblock %}
 {% block content %}
 <h1>People</h1>
-<p class="muted">Everyone who has signed in. This page lists accounts only: not their files, requests, or activity.</p>
+<p class="muted"><span class="pill">Admin</span> Only the person running this server sees this page. Everyone who has signed in. This page lists accounts only: not their files, requests, or activity.</p>
 {% if people %}
 <table class="cards">
   <thead>
     <tr>
       <th>Email</th>
-      <th>First signed in</th>
-      <th>Connected app</th>
+      <th>First seen</th>
+      <th>Assistants</th>
     </tr>
   </thead>
   <tbody>
   {% for person in people %}
   <tr>
     <td data-label="Email">{{ person.email }}</td>
-    <td data-label="First signed in" class="muted">{{ person.created_at | when("Unknown") }}</td>
-    <td data-label="Connected app">
+    <td data-label="First seen" class="muted">{{ person.created_at | when("Unknown") }}</td>
+    <td data-label="Assistants">
       {% if person.grants %}
       {% for grant in person.grants %}
       <div>
-        <span class="pill ok"><span aria-hidden="true">✓</span> connected</span> {{ grant.client_name }}
-        <span class="muted">since {{ grant.created_at | when }}, last used {{ grant.last_used | when("never") }}</span>
+        <b>{{ grant.client_name }}</b> <span class="muted id-chip">…{{ grant.id[-5:] }}</span>
+        <span class="muted">connected {{ grant.created_at | when }}, last used {{ grant.last_used | when("never") }}</span>
       </div>
       {% endfor %}
       {% else %}

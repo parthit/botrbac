@@ -30,7 +30,7 @@ def _json(c, path: str, **data):
     )
 
 
-def _flash(c, page: str = "/access") -> str:
+def _flash(c, page: str = "/files?tab=allowed") -> str:
     text = c.get(page).text
     found = re.findall(r'class="flash (?:ok|error)"[^>]*>([^<]*)<', text)
     return " ".join(found)
@@ -78,19 +78,19 @@ def test_pending_pairing_lists_what_approving_exposes(people) -> None:
     post(owner, "/sharing/add", file_id="loose-doc")
     post(owner, "/sharing/add", file_id="proj")
     _pending_pairing(app)
-    page = owner.get("/bridge").text
+    page = owner.get("/sharing?tab=people").text
     assert "Approve pairing" in page
     card = page.split("data-exposure")[1].split("</div>")[0]
-    assert f"Approving lets <b>{EVE}</b>’s assistant read 2 items on your Sharing list" in card
+    assert f"Approving lets <b>{EVE}</b>’s assistant read 2 items you share:" in card
     assert "“Projects”" in card and "“Loose memo”" in card
-    assert 'href="/sharing"' in card
+    assert 'href="/sharing?tab=by-me"' in card
 
 
 def test_pending_pairing_with_empty_sharing_list_says_nothing_is_exposed(people) -> None:
     app, owner, _eve = people
     _pending_pairing(app)
-    card = owner.get("/bridge").text.split("data-exposure")[1].split("</div>")[0]
-    assert "Nothing is on your Sharing list yet" in card
+    card = owner.get("/sharing?tab=people").text.split("data-exposure")[1].split("</div>")[0]
+    assert "You share nothing yet" in card
     assert "read 0 items" not in card
 
 
@@ -99,7 +99,7 @@ def test_pending_pairing_summarises_a_long_sharing_list(people) -> None:
     for file_id in ("loose-doc", "loose-two", "proj", "priv", "proj-notes", "priv-other"):
         post(owner, "/sharing/add", file_id=file_id)
     _pending_pairing(app)
-    card = owner.get("/bridge").text.split("data-exposure")[1].split("</div>")[0]
+    card = owner.get("/sharing?tab=people").text.split("data-exposure")[1].split("</div>")[0]
     assert "read 6 items" in card and "and 1 more" in card
 
 
@@ -107,7 +107,7 @@ def test_no_exposure_note_once_approved(people) -> None:
     app, owner, _eve = people
     link_id = _pending_pairing(app)
     app.state.mailbox.decide(OWNER_EMAIL, link_id, "approve")
-    assert "data-exposure" not in owner.get("/bridge").text
+    assert "data-exposure" not in owner.get("/sharing?tab=people").text
 
 
 def test_sharing_page_after_unpairing_says_items_stay_listed(people) -> None:
@@ -117,12 +117,12 @@ def test_sharing_page_after_unpairing_says_items_stay_listed(people) -> None:
     box = app.state.mailbox
     box.decide(OWNER_EMAIL, link_id, "approve")
     box.decide(EVE, link_id, "approve")
-    assert EVE in owner.get("/sharing").text
+    assert EVE in owner.get("/sharing?tab=by-me").text
     box.revoke(OWNER_EMAIL, link_id, False)
-    page = owner.get("/sharing").text
+    page = owner.get("/sharing?tab=by-me").text
     assert "No one yet" not in page
     assert "No one right now" in page
-    assert "anyone you pair with later" in page
+    assert "Anyone you pair with later" in page
     assert "Loose memo" in page
 
 
@@ -174,7 +174,7 @@ def test_remove_does_not_claim_unreachable_when_drive_lookup_fails(c, monkeypatc
 
 def test_browse_inside_allowed_folder_shows_state_not_allow_buttons(c) -> None:
     post(c, "/grant", file_id="proj")
-    page = c.get("/browse?folder=proj").text
+    page = c.get("/files?folder=proj").text
     notes = _row(page, "notes.txt")
     assert "Allowed via folder “Projects”" in notes
     assert 'action="/grant"' not in notes
@@ -184,7 +184,7 @@ def test_browse_inside_allowed_folder_shows_state_not_allow_buttons(c) -> None:
     crumb_form = page.split("Everything in this folder is available")[1].split("</form>")[0]
     assert 'value="proj"' in crumb_form and 'action="/revoke"' in crumb_form
 
-    deeper = c.get("/browse?folder=proj-sub").text
+    deeper = c.get("/files?folder=proj-sub").text
     assert "Allowed through Projects" in deeper
     assert "Remove “Projects”" in deeper
     assert 'action="/grant"' not in _row(deeper, "Deep roadmap")
@@ -193,13 +193,13 @@ def test_browse_inside_allowed_folder_shows_state_not_allow_buttons(c) -> None:
 def test_browse_row_granted_twice_explains_remove(c) -> None:
     post(c, "/grant", file_id="proj")
     post(c, "/grant", file_id="proj-notes")
-    notes = _row(c.get("/browse?folder=proj").text, "notes.txt")
-    assert "Also included through “Projects”" in notes
+    notes = _row(c.get("/files?folder=proj").text, "notes.txt")
+    assert "Allowed via folder “Projects”" in notes
     assert "It stays available through “Projects”" in notes
 
 
 def test_browse_outside_allowed_folders_is_unchanged(c) -> None:
-    page = c.get("/browse?folder=priv").text
+    page = c.get("/files?folder=priv").text
     other = _row(page, "other.txt")
     assert "Not allowed" in other and 'action="/grant"' in other
     assert "Remove “" not in page
@@ -300,30 +300,30 @@ def test_denial_never_grants_access(c) -> None:
 
 def test_search_result_inside_allowed_folder_shows_inherited_state(c) -> None:
     post(c, "/grant", file_id="proj")
-    page = c.get("/browse?q=notes").text
+    page = c.get("/files?q=notes").text
     row = _row(page, "notes.txt")
     assert "Allowed via folder “Projects”" in row
     assert "Not allowed" not in row and 'action="/grant"' not in row
-    assert "My Drive / Projects" in row and 'href="/browse?folder=proj"' in row
+    assert "My Drive / Projects" in row and 'href="/files?folder=proj"' in row
 
-    deep = _row(c.get("/browse?q=Deep").text, "Deep roadmap")
+    deep = _row(c.get("/files?q=Deep").text, "Deep roadmap")
     assert "Allowed via folder “Projects”" in deep
     assert "My Drive / Projects / Sub" in deep
 
 
 def test_search_result_outside_allowed_folders_is_not_allowed(c) -> None:
     post(c, "/grant", file_id="proj")
-    row = _row(c.get("/browse?q=other").text, "other.txt")
+    row = _row(c.get("/files?q=other").text, "other.txt")
     assert "Not allowed" in row and 'action="/grant"' in row
     assert "My Drive / Private" in row
 
 
 def test_search_result_for_a_shortcut_shows_its_targets_state(c) -> None:
     post(c, "/grant", file_id="priv-secret")
-    row = _row(c.get("/browse?q=link").text, "link to payroll")
+    row = _row(c.get("/files?q=link").text, "link to payroll")
     assert "Target allowed: payroll.txt (in Private, a different folder)" in _shown(row)
     assert 'data-access="on"' in row
-    page = c.get("/browse?q=link").text
+    page = c.get("/files?q=link").text
     assert '<li class="file" data-row data-access="on"' in page
 
 
@@ -333,7 +333,7 @@ def test_search_result_for_a_shortcut_shows_its_targets_state(c) -> None:
 def test_allowing_a_shortcut_updates_its_row_without_js(c, p2_app) -> None:
     r = post(c, "/grant", file_id="proj-shortcut", next="/browse?folder=proj")
     assert r.status_code == 303
-    page = c.get("/browse?folder=proj").text
+    page = c.get("/files?folder=proj").text
     assert "Allowed “payroll.txt”, the shortcut’s target, for the assistant." in page
     row = _row(page, "link to payroll")
     assert "Target allowed: payroll.txt (in Private, a different folder)" in _shown(row)
@@ -348,15 +348,15 @@ def test_allowing_a_shortcut_updates_its_row_without_js(c, p2_app) -> None:
     assert set(p2_app.state.dashboard.allowlist.entries()) == {"priv-secret"}
 
     post(c, "/revoke", file_id="priv-secret", next="/browse?folder=proj")
-    row = _row(c.get("/browse?folder=proj").text, "link to payroll")
-    assert 'data-access="off"' in c.get("/browse?folder=proj").text
+    row = _row(c.get("/files?folder=proj").text, "link to payroll")
+    assert 'data-access="off"' in c.get("/files?folder=proj").text
     assert "Target not allowed: payroll.txt (in Private, a different folder)" in _shown(row)
     assert "Target allowed:" not in _shown(row)
 
 
 def test_shortcut_row_renders_both_states_for_the_in_place_update(c) -> None:
     """ui.js flips data-access after the JSON post, so both states are in the row."""
-    row = _row(c.get("/browse?folder=proj").text, "link to payroll")
+    row = _row(c.get("/files?folder=proj").text, "link to payroll")
     assert 'data-access-when="on" hidden><span aria-hidden="true">✓</span> Target allowed:' in row
     assert "Target not allowed:" in _shown(row) and "Target allowed:" not in _shown(row)
     assert 'action="/grant" data-async data-flip="access"' in row
@@ -370,7 +370,7 @@ def test_shortcut_row_renders_both_states_for_the_in_place_update(c) -> None:
 
 def test_shortcut_target_in_allowed_folder_shows_via_folder(c) -> None:
     post(c, "/grant", file_id="priv")
-    row = _row(c.get("/browse?folder=proj").text, "link to payroll")
+    row = _row(c.get("/files?folder=proj").text, "link to payroll")
     assert "Target allowed via folder “Private”: payroll.txt (in Private" in _shown(row)
     assert 'action="/grant"' not in row
 
@@ -414,7 +414,7 @@ def test_search_stops_guessing_when_the_lookup_budget_runs_out(c, monkeypatch) -
 
     assert post(c, "/grant", file_id="proj").status_code == 303
     monkeypatch.setattr(dashboard_module, "SEARCH_LOOKUPS", 0)
-    row = _row(c.get("/browse?q=notes").text, "notes.txt")
+    row = _row(c.get("/files?q=notes").text, "notes.txt")
     assert "Open its folder to check" in row
     assert "Not allowed" not in row
 
@@ -424,12 +424,13 @@ def test_shortcut_row_still_acts_on_its_target_when_lookups_run_out(c, monkeypat
 
     assert post(c, "/grant", file_id="proj").status_code == 303
     monkeypatch.setattr(dashboard_module, "SEARCH_LOOKUPS", 0)
-    row = _row(c.get("/browse?q=link").text, "link to payroll")
+    row = _row(c.get("/files?q=link").text, "link to payroll")
     # Not "Allowed via folder Projects" (the shortcut's own folder). Remove / Stop sharing
     # post the target's id (Allow / Share post the shortcut, which the server resolves).
     assert "Allowed via folder" not in row
     assert "Open its folder to check" in row
     assert 'data-acts-on="priv-secret"' in row
-    for action in ("/revoke", "/sharing/remove"):
+    # Share / Stop sharing only appear once there is a pairing; Remove is always there.
+    for action in ("/revoke",):
         form = row[row.index(f'action="{action}"') :].split("</form>", 1)[0]
         assert 'name="file_id" value="priv-secret"' in form

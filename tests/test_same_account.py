@@ -92,7 +92,7 @@ def test_env_refresh_token_still_wins(world, memstore, oauth) -> None:
     post(c, "/grant", file_id="loose-doc")
     assert mcp_call(c, "read_file", file_id="loose-doc")["isError"] is False
     assert app.state.tool_tokens == ["env-rt"]
-    assert "overrides this account" in c.get("/").text
+    assert "overrides this account" in c.get("/settings").text
     assert c.get("/health").json() == {"status": "ok"}
 
 
@@ -161,7 +161,8 @@ def test_my_drive_root_cannot_be_granted(c, same_app) -> None:
 
 
 def test_pages_describe_the_allowlist(c) -> None:
-    for page in ("/", "/access"):
+    # The explainer lives on Overview only; Files no longer repeats it.
+    for page in ("/",):
         html = c.get(page).text
         assert 'id="mode-note"' in html and "your Google account" in html, page
         assert "files and folders you allow" in html and "allowlist" not in html
