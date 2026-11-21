@@ -1061,10 +1061,14 @@ dialog.confirm .actions { justify-content: flex-end; }
   .sticker .ask { font-size: 14px; }
 }
 
-/* "Can [Read only] Save": the dropdown and its button on one row, with room between. */
-form.role-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 10px; margin: 4px 0 12px; }
-form.role-form label { display: flex; flex-direction: column; gap: 6px; flex: 1 1 10rem; max-width: 22rem; min-width: 0; }
-form.role-form select { width: 100%; max-width: none; }
+/* "Can [Read only] Save" on one line. Wide screens keep the plain inline form; narrow
+   ones shrink the dropdown so Save stays beside it instead of wrapping underneath. */
+form.role-form { display: inline; margin: 0; }
+@media (max-width: 640px) {
+  form.role-form { display: flex; align-items: center; gap: 8px 10px; margin: 0 0 12px; }
+  form.role-form label { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+  form.role-form select { flex: 1 1 auto; width: auto; min-width: 0; max-width: 360px; }
+}
 
 /* Search: the box takes the row, the button sits beside it. */
 form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-width: 360px; }
