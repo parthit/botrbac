@@ -364,8 +364,11 @@ The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
 4. Do not paste the make_token.py secret into the Grok Bot chat. That token is only for the xAI API and the Grok Build CLI.
 5. Ask the bot to list allowed files. An unticked file should still return an approval link.
 
-Allow grants the same tools as an admin API token, still limited to ticked items. The overview page lists the
-connection under **Connected apps**; **Disconnect** stops it immediately. The dashboard sign-in cookie is not
+On the Allow page you choose what the app may do with your ticked items: **Read only** (the default: the
+`viewer` tools), **Read and edit** (`editor`) or **Full** (`admin`, which adds `trash_file`). Settings lists the
+connection under **Assistants**, where you can change that choice (it applies on the app's next call) or
+**Disconnect** it, which stops it immediately. Apps connected before this choice existed keep Full until you
+change them. The dashboard sign-in cookie is not
 a token for `/mcp`.
 
 ### Connect Muse

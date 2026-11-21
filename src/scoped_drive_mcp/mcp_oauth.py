@@ -162,6 +162,9 @@ class OAuthGrant:
     refresh_hash: str | None = None
     code_hash: str | None = None
     refresh_until: int = 0
+    # Set on every approval since apps have roles. A grant without it predates roles and
+    # keeps full access; a grant with it whose role key is missing fails closed to read.
+    roles: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -183,6 +186,7 @@ class OAuthGrant:
             refresh_hash=data.get("refresh_hash"),
             code_hash=data.get("code_hash"),
             refresh_until=int(data.get("refresh_until") or 0),
+            roles=bool(data.get("roles", False)),
         )
 
 
@@ -192,6 +196,13 @@ class GrantView:
     client_name: str
     created_at: str
     last_used: str | None
+    role: str = Role.ADMIN.value
+
+
+# What a connected app may do, chosen by the owner on the consent page and changeable
+# later. A connection approved before roles existed has no stored role: it stays admin.
+APP_ROLES: tuple[str, ...] = (Role.VIEWER.value, Role.EDITOR.value, Role.ADMIN.value)
+DEFAULT_APP_ROLE = Role.VIEWER.value
 
 
 @dataclass(frozen=True)
@@ -315,6 +326,15 @@ def _code_key(digest: str) -> str:
 
 def _retired_key(digest: str) -> str:
     return f"oauth:rtused:{digest}"
+
+
+def _role_key(grant_id: str) -> str:
+    return f"oauth:role:{grant_id}"
+
+
+def _chosen_key(grant_id: str) -> str:
+    """Set once the owner picked a role for an app from before roles existed."""
+    return f"oauth:rolechosen:{grant_id}"
 
 
 def _seen_key(grant_id: str) -> str:
@@ -668,9 +688,11 @@ class McpOAuth:
             params["state"] = exc.state
         return _with_query(exc.redirect_uri, params)
 
-    def approve(self, email: str, pending: AuthorizeRequest) -> str:
+    def approve(self, email: str, pending: AuthorizeRequest, role: str = DEFAULT_APP_ROLE) -> str:
         if not self._may_act(email):
             raise AuthorizeError("access_denied", "This account cannot approve connections.")
+        if role not in APP_ROLES:
+            raise AuthorizeError("invalid_request", "Choose what this app may do.")
         # Re-check the client and redirect before sending the browser anywhere.
         self.parse_authorize(QueryMapping(pending.to_dict()))
         grant = OAuthGrant(
@@ -679,6 +701,7 @@ class McpOAuth:
             client_name=pending.client_name,
             email=email,
             created_at=utc_now(),
+            roles=True,
         )
         code = secrets.token_urlsafe(32)
         digest = hash_token(code)
@@ -693,6 +716,8 @@ class McpOAuth:
             separators=(",", ":"),
         )
         grant.code_hash = digest
+        # The role first, so the grant is never visible without it.
+        self.store.set(_role_key(grant.id), role)
         self._save_grant(grant)
         self.store.set(_code_key(digest), payload, ex=CODE_TTL)
         return _with_query(
@@ -883,7 +908,7 @@ class McpOAuth:
         self._note_use(grant.id)
         return Principal(
             token_name=_principal_name(grant.client_name),
-            role=Role.ADMIN,
+            role=Role(self.role_of(grant)),
             email=grant.email,
             grant_id=grant.id,
             client_name=grant.client_name,
@@ -906,6 +931,7 @@ class McpOAuth:
                         client_name=grant.client_name,
                         created_at=grant.created_at,
                         last_used=self._displayed_last_used(grant),
+                        role=self.role_of(grant),
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -928,12 +954,39 @@ class McpOAuth:
         if grant.code_hash:
             self.store.delete(_code_key(grant.code_hash))
         self.store.delete(_seen_key(grant.id))
+        self.store.delete(_role_key(grant.id))
+        self.store.delete(_chosen_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
         if self.on_revoke is not None:
             try:
                 self.on_revoke(grant.email, grant.id)
             except Exception:  # noqa: BLE001 - the grant is gone either way
                 logging.getLogger(__name__).exception("oauth_on_revoke_failed")
+        return True
+
+    def role_of(self, grant: "OAuthGrant") -> str:
+        """The role this app's calls run with. A side key, like last-use, so changing it
+        never races a token refresh rewriting the grant record. Only a grant approved
+        before roles existed falls back to admin; any other missing or unknown value is
+        read only, so a lost key never widens what an app can do."""
+        stored = self.store.get(_role_key(grant.id))
+        if stored in APP_ROLES:
+            return str(stored)
+        if grant.roles or self.store.get(_chosen_key(grant.id)) is not None:
+            return Role.VIEWER.value
+        return Role.ADMIN.value
+
+    def set_role(self, grant_id: str, email: str, role: str) -> bool:
+        """The owner changes what one of their apps may do. Applies on its next call."""
+        if role not in APP_ROLES or _GRANT_ID.fullmatch(grant_id) is None:
+            return False
+        grant = self._grant(grant_id)
+        if grant is None or grant.email != email:
+            return False
+        # The owner has now chosen. A side key (not the grant record, which a token refresh
+        # rewrites) marks that, so a lost role key fails closed to read from here on.
+        self.store.set(_chosen_key(grant.id), "1")
+        self.store.set(_role_key(grant.id), role)
         return True
 
     def _note_use(self, grant_id: str) -> None:

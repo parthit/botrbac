@@ -11,12 +11,13 @@
   </form>
   <p><b>{{ client_name }}</b> wants to act as {{ owner }} on this server. If you allow it, it can:</p>
   <ul>
-    <li><b>Use the items on your Access list.</b> On those items it can search, read, create, edit and rename,
-      and move them to Drive trash (recoverable for 30 days). Anything not on that list is refused by this server,
-      even though your connected Drive is visible to it. It cannot change who a file is shared with, or permanently delete a file.</li>
+    <li><b>Use the items on your Access list,</b> as far as you choose below. Anything not on that list is
+      refused by this server, even though your connected Drive is visible to it. It can never change who a
+      file is shared with, or permanently delete a file.</li>
     {% if mailbox_on %}
-    <li><b>Use your Mailbox.</b> It can start or join a pairing with another person (nothing turns on
-      until you both approve on the Sharing page), and send and read short messages with people you are paired with.</li>
+    <li><b>Use your Mailbox</b> with your other assistants: send and read short messages between your own
+      apps. Another person’s assistant can never message it. It can also start or join a pairing; nothing
+      turns on until it is approved on the Sharing page.</li>
     {% endif %}
     {% if shared_on %}
     <li><b>Read what paired people share with you</b> (Shared with me), read-only. Your own
@@ -24,7 +25,7 @@
     {% endif %}
   </ul>
   <p>After you choose, you go back to <b>{{ return_host }}</b>.</p>
-  <p class="muted">You can disconnect {{ client_name }} later from the Overview page.</p>
+  <p class="muted">You can change what it may do, or disconnect it, later in Settings.</p>
   {% if requested_scope and requested_scope != scope %}
   <details>
     <summary>Technical details</summary>
@@ -34,6 +35,13 @@
   <form method="post" action="/oauth/authorize">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
+    <fieldset class="stack" id="consent-role">
+      <legend><b>What may {{ client_name }} do with your Access list?</b></legend>
+      <label><input type="radio" name="role" value="viewer" checked> <b>Read only</b> <span class="muted">— search, list, read and download. Recommended.</span></label>
+      <label><input type="radio" name="role" value="editor"> <b>Read and edit</b> <span class="muted">— also create, edit and rename.</span></label>
+      <label><input type="radio" name="role" value="admin"> <b>Full</b> <span class="muted">— also move items to Drive trash (recoverable for 30 days).</span></label>
+      <p class="muted small">You can change this later in Settings.</p>
+    </fieldset>
     <div class="actions">
       <button class="primary" type="submit" name="decision" value="allow">Allow</button>
       <button class="danger" type="submit" name="decision" value="deny">Deny</button>

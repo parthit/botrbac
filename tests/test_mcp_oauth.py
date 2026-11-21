@@ -490,7 +490,8 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
 
     verifier, params = auth_params(client_id, DONE)
     assert owner_c.get("/oauth/authorize", params=params).status_code == 200
-    code = code_from(posted_redirect(owner_c, post(owner_c, "/oauth/authorize", decision="allow")))
+    full = post(owner_c, "/oauth/authorize", decision="allow", role="admin")
+    code = code_from(posted_redirect(owner_c, full))
     token = exchange(owner_c, client_id, code, verifier, DONE)
     assert token.status_code == 200, token.text
     body = token.json()
