@@ -110,7 +110,31 @@ def test_apps_connected_before_roles_keep_full_access(owner_c, memstore) -> None
     token = _connect(owner_c)
     grant = _grant_id(memstore)
     memstore.delete(f"sdm:oauth:role:{grant}")
+    # A grant approved since roles exist fails closed when its role key is gone.
+    assert "trash_file" not in tool_names(owner_c, token)
+    assert not tool_names(owner_c, token) & WRITE_TOOLS
+    # A grant from before roles (no marker on the record) keeps full access.
+    raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    raw.pop("roles", None)
+    memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
     assert "trash_file" in tool_names(owner_c, token)
+
+
+def test_an_unknown_stored_role_is_read_only(owner_c, memstore) -> None:  # noqa: F811
+    token = _connect(owner_c, role="admin")
+    grant = _grant_id(memstore)
+    memstore.set(f"sdm:oauth:role:{grant}", "root")
+    names = tool_names(owner_c, token)
+    assert "trash_file" not in names and not names & WRITE_TOOLS
+
+
+def test_only_the_owner_can_change_an_apps_role(owner_c, memstore) -> None:  # noqa: F811
+    _connect(owner_c)
+    grant = _grant_id(memstore)
+    oauth = owner_c.app.state.dashboard.mcp_oauth
+    assert oauth.set_role(grant, "eve@example.com", "admin") is False
+    assert oauth.set_role("no-such-grant-id", OWNER_EMAIL, "admin") is False
+    assert memstore.get(f"sdm:oauth:role:{grant}") == "viewer"
 
 
 def test_disconnecting_an_app_drops_its_role(owner_c, memstore) -> None:  # noqa: F811

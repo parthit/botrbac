@@ -2207,6 +2207,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 target = ctx.mcp_oauth.deny(pending)
             else:
                 role = form.get("role") or DEFAULT_APP_ROLE
+                if role not in APP_ROLES:
+                    raise AuthorizeError("invalid_request", "Choose what this app may do.")
                 audit_owner("oauth_approve", client=pending.client_name, role=role)
                 target = ctx.mcp_oauth.approve(str(request.session.get("owner")), pending, role)
         except AuthorizeError as exc:

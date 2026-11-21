@@ -162,6 +162,9 @@ class OAuthGrant:
     refresh_hash: str | None = None
     code_hash: str | None = None
     refresh_until: int = 0
+    # Set on every approval since apps have roles. A grant without it predates roles and
+    # keeps full access; a grant with it whose role key is missing fails closed to read.
+    roles: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -183,6 +186,7 @@ class OAuthGrant:
             refresh_hash=data.get("refresh_hash"),
             code_hash=data.get("code_hash"),
             refresh_until=int(data.get("refresh_until") or 0),
+            roles=bool(data.get("roles", False)),
         )
 
 
@@ -692,6 +696,7 @@ class McpOAuth:
             client_name=pending.client_name,
             email=email,
             created_at=utc_now(),
+            roles=True,
         )
         code = secrets.token_urlsafe(32)
         digest = hash_token(code)
@@ -706,8 +711,9 @@ class McpOAuth:
             separators=(",", ":"),
         )
         grant.code_hash = digest
-        self._save_grant(grant)
+        # The role first, so the grant is never visible without it.
         self.store.set(_role_key(grant.id), role)
+        self._save_grant(grant)
         self.store.set(_code_key(digest), payload, ex=CODE_TTL)
         return _with_query(
             pending.redirect_uri,
@@ -897,7 +903,7 @@ class McpOAuth:
         self._note_use(grant.id)
         return Principal(
             token_name=_principal_name(grant.client_name),
-            role=Role(self.role_of(grant.id)),
+            role=Role(self.role_of(grant)),
             email=grant.email,
             grant_id=grant.id,
             client_name=grant.client_name,
@@ -920,7 +926,7 @@ class McpOAuth:
                         client_name=grant.client_name,
                         created_at=grant.created_at,
                         last_used=self._displayed_last_used(grant),
-                        role=self.role_of(grant.id),
+                        role=self.role_of(grant),
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -952,11 +958,15 @@ class McpOAuth:
                 logging.getLogger(__name__).exception("oauth_on_revoke_failed")
         return True
 
-    def role_of(self, grant_id: str) -> str:
+    def role_of(self, grant: "OAuthGrant") -> str:
         """The role this app's calls run with. A side key, like last-use, so changing it
-        never races a token refresh rewriting the grant record."""
-        stored = self.store.get(_role_key(grant_id))
-        return stored if stored in APP_ROLES else Role.ADMIN.value
+        never races a token refresh rewriting the grant record. Only a grant approved
+        before roles existed falls back to admin; any other missing or unknown value is
+        read only, so a lost key never widens what an app can do."""
+        stored = self.store.get(_role_key(grant.id))
+        if stored in APP_ROLES:
+            return str(stored)
+        return Role.VIEWER.value if grant.roles else Role.ADMIN.value
 
     def set_role(self, grant_id: str, email: str, role: str) -> bool:
         """The owner changes what one of their apps may do. Applies on its next call."""
