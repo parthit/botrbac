@@ -31,6 +31,9 @@ EXTERNAL_ALLOWLIST_KEY = "ext_allowlist"
 # Who may read an external entry: AUDIENCE_LINKED is anyone with an active pairing with
 # the owner; otherwise the entry names the people (a tuple of emails) who may read it.
 AUDIENCE_LINKED = "linked"
+# What the people who can see an external entry may do with it.
+ACCESS_READ = "read"
+ACCESS_EDIT = "edit"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
 OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
@@ -791,6 +794,9 @@ class AllowEntry:
     audience: str | tuple[str, ...] | None = None
     # Only on external entries: when this share stops working (ISO UTC), or None.
     expires_at: str | None = None
+    # Only on external entries: "read" (default), or "edit" to let the people who can see it
+    # have their assistants create, edit and rename inside it (never trash or move).
+    access: str = "read"
 
     def to_json(self) -> str:
         data = asdict(self)
@@ -804,6 +810,9 @@ class AllowEntry:
 
     def expired(self, now: str | None = None) -> bool:
         return bool(self.expires_at) and str(self.expires_at) <= (now or utc_now())
+
+    def editable_by(self, guest: str | None, now: str | None = None) -> bool:
+        return self.access == ACCESS_EDIT and self.readable_by(guest, now)
 
     def readable_by(self, guest: str | None, now: str | None = None) -> bool:
         """Whether `guest` (a paired person) may read this external entry right now. No
@@ -825,6 +834,7 @@ class AllowEntry:
             shared_with=data.get("shared_with"),
             audience=_audience(data.get("audience")),
             expires_at=data.get("expires_at") or None,
+            access=ACCESS_EDIT if data.get("access") == ACCESS_EDIT else ACCESS_READ,
         )
 
 
@@ -872,6 +882,11 @@ class Allowlist:
 
     def mime_map_for(self, guest: str | None) -> dict[str, str]:
         return {fid: e.mime_type for fid, e in self.entries_for(guest).items()}
+
+    def edit_map_for(self, guest: str | None) -> dict[str, str]:
+        """The entries `guest`'s assistant may write into: shared with them and editable."""
+        now = utc_now()
+        return {fid: e.mime_type for fid, e in self.entries().items() if e.editable_by(guest, now)}
 
     def forget_person(self, person: str) -> list[str]:
         """Take `person` off every item that names them. Items shared with everyone are

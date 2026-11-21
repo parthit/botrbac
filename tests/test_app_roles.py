@@ -98,7 +98,7 @@ def test_changing_the_role_applies_on_the_next_call(owner_c, memstore) -> None: 
     )
     assert saved.status_code == 303
     assert WRITE_TOOLS <= tool_names(owner_c, token)
-    # A made-up role or someone else's app id changes nothing.
+    # A made-up role changes nothing (someone else's app: see the ownership test below).
     owner_c.post(
         "/oauth/grants/role",
         data={"csrf": csrf(owner_c, "/settings"), "grant_id": grant, "role": "root"},
@@ -148,3 +148,14 @@ def test_disconnecting_an_app_drops_its_role(owner_c, memstore) -> None:  # noqa
     assert gone.status_code in (200, 303)
     assert memstore.get(f"sdm:oauth:role:{grant}") is None
     assert OWNER_EMAIL  # the owner made every change above
+
+
+def test_settings_flags_apps_that_are_full_only_because_they_are_old(owner_c, memstore) -> None:  # noqa: F811
+    _connect(owner_c)
+    grant = _grant_id(memstore)
+    assert "connected before you could choose" not in owner_c.get("/settings").text
+    raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    raw.pop("roles", None)
+    memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
+    memstore.delete(f"sdm:oauth:role:{grant}")
+    assert "connected before you could choose" in owner_c.get("/settings").text

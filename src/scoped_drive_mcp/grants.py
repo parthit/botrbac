@@ -13,7 +13,7 @@ from .access import APPROVED, DENIED, AccessRequest, AccessRequests
 from .audit import audit_owner
 from .drive_client import FOLDER_MIME, SHORTCUT_MIME, DriveNotFoundError, OwnerDriveClient
 from .scope import validate_drive_id
-from .store import AllowEntry, Allowlist
+from .store import ACCESS_EDIT, ACCESS_READ, AllowEntry, Allowlist
 
 OWNER_FIELDS = "id,name,mimeType,parents,trashed,webViewLink,shortcutDetails"
 # Bounds for covering_entry's walk up the folder tree (levels, and folders looked at).
@@ -154,6 +154,7 @@ class GrantService:
         file_id: str,
         audience: str | tuple[str, ...],
         expires_at: "str | None | _Keep" = None,
+        access: "str | _Keep" = None,  # type: ignore[assignment]
     ) -> AllowEntry:
         """Sharing list only: change who may read an item, and until when. `expires_at`
         None clears the end date; KEEP leaves it as it is. An empty tuple is refused; use
@@ -168,11 +169,19 @@ class GrantService:
         if isinstance(chosen, tuple) and not chosen:
             raise GrantError("Choose at least one person, or stop sharing the item.")
         until = entry.expires_at if isinstance(expires_at, _Keep) else (expires_at or None)
-        updated = replace(entry, audience=chosen, expires_at=until)
+        if access is None or isinstance(access, _Keep):
+            mode = entry.access
+        elif access in (ACCESS_READ, ACCESS_EDIT):
+            mode = access
+        else:
+            raise GrantError("Choose read or edit.")
+        updated = replace(entry, audience=chosen, expires_at=until, access=mode)
         self.allowlist.add(updated)
         self._on_change()
         who = ",".join(chosen) if isinstance(chosen, tuple) else "everyone"
-        audit_owner("share_audience", file_id=file_id, audience=who, expires_at=until or "")
+        audit_owner(
+            "share_audience", file_id=file_id, audience=who, expires_at=until or "", access=mode
+        )
         return updated
 
     def _access_changed(self, item_id: str) -> None:

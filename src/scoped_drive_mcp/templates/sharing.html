@@ -28,6 +28,7 @@
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Who can see it">
       {% if e.for_everyone %}Everyone you are paired with{% elif e.audience %}{{ e.audience | join(", ") }}{% else %}<b>No one</b> <span class="muted">(the people it named are no longer paired with you)</span>{% endif %}
+      {% if e.access == "edit" %}<br><span class="pill">Can edit</span>{% endif %}
       {% if e.expires_at %}<br><span class="muted">{{ "Ended" if e.expired() else "Until" }} {{ e.expires_at[:10] }}</span>{% endif %}
       {% set cover = covers.get(e.id) %}
       {% if cover %}<br><span class="muted">Also visible through “{{ cover.name or cover.id }}” to {% if cover.for_everyone %}everyone you are paired with{% elif cover.audience %}{{ cover.audience | join(", ") }}{% else %}no one{% endif %}{% if cover.expires_at %} until {{ cover.expires_at[:10] }}{% endif %}.</span>{% endif %}
@@ -45,6 +46,7 @@
             <label class="indent"><input type="checkbox" name="person" value="{{ p }}"{% if not e.for_everyone and p in e.audience %} checked{% endif %}> {{ p }}</label>
             {% endfor %}
           </fieldset>
+          <label><input type="checkbox" name="access" value="edit"{% if e.access == "edit" %} checked{% endif %}> Their assistants can add and edit {{ "inside it" if e.mime_type == "application/vnd.google-apps.folder" else "it" }} <span class="muted">(create, edit and rename; never trash, move or reshare. Changes are marked as theirs.)</span></label>
           <label>Stop sharing after (optional)
             <input type="date" name="expires_on" value="{{ e.expires_at[:10] if e.expires_at else '' }}">
           </label>

@@ -34,6 +34,8 @@ class FakeFile:
     owner: str | None = None
     permissions: list[dict[str, str]] = field(default_factory=list)
     shortcut_target: str | None = None
+    description: str | None = None
+    properties: dict[str, str] = field(default_factory=dict)
 
     def as_api(self, fields: str) -> dict[str, Any]:
         full = {
@@ -51,6 +53,10 @@ class FakeFile:
             full.pop("size")
         if self.shortcut_target is not None:
             full["shortcutDetails"] = {"targetId": self.shortcut_target}
+        if self.description is not None:
+            full["description"] = self.description
+        if self.properties:
+            full["properties"] = dict(self.properties)
         wanted = {f.strip() for f in fields.split(",")}
         return {k: v for k, v in full.items() if k in wanted}
 
@@ -280,6 +286,8 @@ class FakeDrive:
             content or b"",
             owner=self.viewer,
         )
+        f.description = metadata.get("description")
+        f.properties = dict(metadata.get("properties") or {})
         return f.as_api(fields)
 
     def create_permission(self, file_id: str, email: str, role: str) -> str:
@@ -312,6 +320,8 @@ class FakeDrive:
             f.name = metadata["name"]
         if metadata.get("trashed"):
             f.trashed = True
+        if "properties" in metadata:
+            f.properties.update(metadata["properties"] or {})
         if content is not None:
             f.content = content
         return f.as_api(fields)

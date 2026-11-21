@@ -51,13 +51,30 @@ VIEWER_TOOLS: frozenset[str] = GUEST_TOOLS | frozenset(
         "clear_webhook",
     }
 )
-EDITOR_TOOLS: frozenset[str] = VIEWER_TOOLS | {
-    "create_folder",
-    "create_doc",
-    "upload_file",
-    "update_file_content",
-    "rename_file",
-}
+# Writing into an item another person shared with this person's assistant and marked
+# editable. The owner's "edit" setting is checked on the server for every call; the
+# assistant's own connection must also be allowed to edit.
+GUEST_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "create_shared_doc",
+        "create_shared_folder",
+        "upload_shared_file",
+        "update_shared_file",
+        "rename_shared_file",
+    }
+)
+
+EDITOR_TOOLS: frozenset[str] = (
+    VIEWER_TOOLS
+    | GUEST_WRITE_TOOLS
+    | {
+        "create_folder",
+        "create_doc",
+        "upload_file",
+        "update_file_content",
+        "rename_file",
+    }
+)
 ADMIN_TOOLS: frozenset[str] = EDITOR_TOOLS | {"trash_file"}
 
 ROLE_TOOLS: dict[Role, frozenset[str]] = {

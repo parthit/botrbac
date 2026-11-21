@@ -10,6 +10,7 @@ from scoped_drive_mcp.policy import (
     ADMIN_TOOLS,
     EDITOR_TOOLS,
     GUEST_TOOLS,
+    GUEST_WRITE_TOOLS,
     ROLE_TOOLS,
     VIEWER_TOOLS,
     is_allowed,
@@ -52,6 +53,13 @@ SHARED_TOOLS = {
     "read_shared_file",
     "download_shared_file",
 }
+SHARED_WRITE_TOOLS = {
+    "create_shared_doc",
+    "create_shared_folder",
+    "upload_shared_file",
+    "update_shared_file",
+    "rename_shared_file",
+}
 VIEWER_EXPECTED = (
     {
         "search_files",
@@ -74,8 +82,9 @@ EXPECTED = {
         "upload_file",
         "update_file_content",
         "rename_file",
-    },
-    Role.ADMIN: set(VALID_ARGS) | MAILBOX_TOOLS | SHARED_TOOLS,
+    }
+    | SHARED_WRITE_TOOLS,
+    Role.ADMIN: set(VALID_ARGS) | MAILBOX_TOOLS | SHARED_TOOLS | SHARED_WRITE_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")
@@ -103,13 +112,18 @@ async def test_registered_tools_are_exactly_the_role_map(service) -> None:
     names = set(tools)
     assert names == set(ADMIN_TOOLS)
     assert GUEST_TOOLS == SHARED_TOOLS
-    for name in names - GUEST_TOOLS:
+    assert GUEST_WRITE_TOOLS == SHARED_WRITE_TOOLS
+    for name in names - GUEST_TOOLS - GUEST_WRITE_TOOLS:
         assert not any(word in name for word in FORBIDDEN_TOOL_WORDS)
     # "shared" in these names means reading what someone else shared. They can never
     # change sharing or permissions: each is read-only and has no write path.
     for name in GUEST_TOOLS:
         assert tools[name].annotations.model_dump(by_alias=True)["readOnlyHint"] is True, name
         assert not any(w in name for w in ("move", "permission", "delete", "parent")), name
+    # Writing into another person's share: content only, never sharing, moving or deleting.
+    for name in GUEST_WRITE_TOOLS:
+        assert not any(w in name for w in ("move", "permission", "delete", "parent", "trash"))
+        assert "trash" not in name
 
 
 @pytest.mark.anyio

@@ -79,6 +79,8 @@ from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import (
+    ACCESS_EDIT,
+    ACCESS_READ,
     AUDIENCE_LINKED,
     EXTERNAL_ALLOWLIST_KEY,
     ActivityLog,
@@ -1586,15 +1588,19 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             audience: str | tuple[str, ...] = people
         else:
             audience = AUDIENCE_LINKED
+        access = ACCESS_EDIT if form.get("access") == ACCESS_EDIT else ACCESS_READ
         try:
-            entry = await blocking(ctx.ext_grants().set_audience, file_id, audience, expires_at)
+            entry = await blocking(
+                ctx.ext_grants().set_audience, file_id, audience, expires_at, access
+            )
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
         who = (
             "everyone you are paired with" if entry.for_everyone else ", ".join(entry.audience)  # type: ignore[arg-type]
         )
         until = f" until {entry.expires_at[:10]}" if entry.expires_at else ""
-        message = f"“{entry.name}” is now shared with {who}{until}."
+        can = " Their assistants can add and edit inside it." if entry.access == ACCESS_EDIT else ""
+        message = f"“{entry.name}” is now shared with {who}{until}.{can}"
         cover = await still_covered(ctx.ext_grants(), file_id)
         if cover:
             message += (
@@ -2272,6 +2278,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "mates": mates.get(g.id, []),
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
                     "role": g.role,
+                    "legacy_full": g.legacy_full,
                 }
             )
         return {
