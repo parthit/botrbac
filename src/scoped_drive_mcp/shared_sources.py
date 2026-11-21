@@ -432,7 +432,8 @@ class DriveSharedSource:
             if workbook is not None:
                 return SharedDownload(_with_extension(meta, ".xlsx"), workbook, False)
             extension = ".csv"
-        result = service.read_file(item_id)
+        # A Sheet too large to send whole comes down as Drive's CSV of its first tab.
+        result = service.read_file(item_id, all_tabs=extension != ".csv")
         content = result.get("content")
         if extension == ".csv" and result.get("exported_as") != "text/csv":
             content = None  # only a true CSV may be saved under a .csv name

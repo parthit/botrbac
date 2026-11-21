@@ -315,15 +315,16 @@ class DriveService:
     def get_metadata(self, file_id: str) -> dict[str, Any]:
         return self._public(self._get_in_scope(file_id))
 
-    def read_file(self, file_id: str) -> dict[str, Any]:
-        result = self._read_file(file_id)
+    def read_file(self, file_id: str, *, all_tabs: bool = True) -> dict[str, Any]:
+        """`all_tabs=False` reads a Google Sheet as Drive's CSV of its first tab."""
+        result = self._read_file(file_id, all_tabs=all_tabs)
         if result.get("written_by") and isinstance(result.get("content"), str):
             from .external import wrap_untrusted  # imports this module
 
             result["content"] = wrap_untrusted(result["content"])
         return result
 
-    def _read_file(self, file_id: str) -> dict[str, Any]:
+    def _read_file(self, file_id: str, *, all_tabs: bool = True) -> dict[str, Any]:
         meta = self._get_in_scope(file_id)
         mime = meta.get("mimeType", "")
         result: dict[str, Any] = {"file": self._public(meta), "content": None, "truncated": False}
@@ -342,7 +343,7 @@ class DriveService:
 
         name = str(meta.get("name", ""))
         kind = document_kind(mime, name)
-        if mime == SHEET_MIME:
+        if mime == SHEET_MIME and all_tabs:
             tabs = self._read_sheet_tabs(file_id, result)
             if tabs is not None:
                 return tabs

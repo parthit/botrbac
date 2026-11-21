@@ -10,6 +10,7 @@ from scoped_drive_mcp.service import SHEET_MIME, XLSX_MIME
 from scoped_drive_mcp.store import KEY_PREFIX
 from tests.conftest import EVE, OWNER_EMAIL
 from tests.dash import client, login, post
+from tests.office_files import compact_xlsx, minimal_xlsx
 from tests.test_external_sharing import SECRET_TEXT, _pair
 from tests.test_multi_user import CAROL, _app
 
@@ -143,6 +144,27 @@ def test_sheet_downloads_as_its_workbook_or_true_csv(pair, world) -> None:
     assert got.status_code == 200
     assert got.content == b"a,b\n1,2\n"
     assert "Ledger.csv" in got.headers["content-disposition"]
+
+
+def test_sheet_too_big_to_send_but_readable_downloads_first_tab_csv(
+    pair, world, monkeypatch
+) -> None:
+    # Readable whole (under max_bytes) but over the response cap: still a real CSV.
+    import scoped_drive_mcp.service as service_module
+
+    monkeypatch.setattr(service_module, "DOWNLOAD_BYTE_CAP", 64)
+    app, owner, eve = pair
+    _pair(app, OWNER_EMAIL, EVE)
+    sheet = world.add("proj-mid", "Trip", SHEET_MIME, ["proj"], b"Day,Place\n", owner=OWNER_EMAIL)
+    workbook = compact_xlsx(minimal_xlsx([["Day"]], more=[("Reservations", [["Andaz"]])]))
+    assert 64 < len(workbook) < 4096  # readable whole, too big to send
+    sheet.exports[XLSX_MIME] = workbook
+    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
+    assert "# Reservations" in open_item(eve, "proj-mid").text  # the preview reads every tab
+    got = eve.get(shared_href("download", DRIVE, OWNER_EMAIL, "proj-mid"))
+    assert got.status_code == 200
+    assert got.content == b"Day,Place\n"
+    assert "Trip.csv" in got.headers["content-disposition"]
 
 
 def test_shortcuts_and_outside_items_are_refused_without_leaking(pair, world) -> None:
