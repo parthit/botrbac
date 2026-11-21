@@ -4,13 +4,17 @@ import json
 
 import pytest
 
+from scoped_drive_mcp.access import AccessRequests
 from scoped_drive_mcp.auth import current_actor, current_guest
+from scoped_drive_mcp.grants import KEEP, GrantError, GrantService
 from scoped_drive_mcp.scope import ScopeGuard
 from scoped_drive_mcp.store import (
     AUDIENCE_LINKED,
     EXTERNAL_ALLOWLIST_KEY,
     KEY_PREFIX,
     AllowEntry,
+    Allowlist,
+    MemoryStore,
 )
 from tests.conftest import EVE, OWNER_EMAIL, FakeClock
 from tests.dash import client, csrf, login, post
@@ -207,3 +211,49 @@ def test_guest_caches_are_kept_apart_and_cleared_together() -> None:
         current_actor.reset(token)
     assert as_guest(EVE) == {}
     assert as_guest(CAROL) == {"b": "text/plain"}
+
+
+def test_unpairing_takes_a_person_off_items_so_re_pairing_starts_fresh(three, memstore) -> None:
+    app, owner, eve, carol = three
+    _audience(owner, "loose-doc", "people", [EVE, CAROL])
+    _audience(owner, "loose-two", "people", [EVE])
+    box = app.state.mailbox
+    eve_link = next(
+        link["link_id"]
+        for link in box.list_links(OWNER_EMAIL)["links"]
+        if link.get("peer_email") == EVE and link["status"] == "active"
+    )
+    box.revoke(EVE, eve_link)
+
+    # Eve is no longer named anywhere; Carol keeps her share.
+    assert _stored(memstore, "loose-doc")["audience"] == [CAROL]
+    assert _stored(memstore, "loose-two")["audience"] == []
+    page = owner.get("/sharing?tab=by-me").text
+    assert "the people it named are no longer paired with you" in page
+
+    # Pairing again does not bring the named items back.
+    _pair(app, OWNER_EMAIL, EVE)
+    assert _error(_read(eve))["error"] == "not_shared"
+    assert _error(_read(eve, "loose-two"))["error"] == "not_shared"
+    assert LOOSE_TEXT in json.dumps(_read(carol))
+
+
+def test_sharing_an_item_again_with_an_audience_applies_it(world) -> None:
+    grants = GrantService(
+        lambda: world.as_user(OWNER_EMAIL),
+        Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY),
+        AccessRequests(MemoryStore()),
+        None,
+        audience=AUDIENCE_LINKED,
+    )
+    first = grants.grant("loose-doc", expires_at="2099-12-31T23:59:59+00:00")
+    assert first.for_everyone and first.expires_at
+    # Again with an audience: applied, and the end date is kept.
+    again = grants.grant("loose-doc", audience=(EVE,))
+    assert again.audience == (EVE,)
+    assert again.expires_at == "2099-12-31T23:59:59+00:00"
+    # set_audience with KEEP leaves the date; None clears it.
+    assert grants.set_audience("loose-doc", (EVE,), KEEP).expires_at == first.expires_at
+    assert grants.set_audience("loose-doc", AUDIENCE_LINKED, None).expires_at is None
+    with pytest.raises(GrantError):
+        grants.set_audience("loose-doc", ())

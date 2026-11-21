@@ -14,7 +14,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -868,6 +868,20 @@ class Allowlist:
 
     def mime_map_for(self, guest: str | None) -> dict[str, str]:
         return {fid: e.mime_type for fid, e in self.entries_for(guest).items()}
+
+    def forget_person(self, person: str) -> list[str]:
+        """Take `person` off every item that names them. Items shared with everyone are
+        unchanged. Returns the ids changed; an item that named only them then names
+        nobody, and the Sharing page says so."""
+        who = person.strip().lower()
+        changed: list[str] = []
+        for file_id, entry in self.entries().items():
+            if entry.for_everyone or who not in entry.audience:  # type: ignore[operator]
+                continue
+            rest = tuple(a for a in entry.audience if a != who)  # type: ignore[union-attr]
+            self.add(replace(entry, audience=rest))
+            changed.append(file_id)
+        return changed
 
 
 # ---- encrypted refresh tokens ---------------------------------------------

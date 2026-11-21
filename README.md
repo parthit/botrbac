@@ -185,9 +185,11 @@ a resume that any paired person's assistant may see.
   **Change** next to an item to share it only with the people you pick (from your active pairings), and
   optionally until a date (the last second of that day, UTC). Everyone else gets `not_shared` for it, in the
   tools and on their *Shared with me* page, exactly as if it did not exist. Each pairing card on **People**
-  lists what that person's assistant can read. A new pairing's approval card counts only the items shared
-  with everyone, since a new person is never named on an item yet. Changes apply on the next call (within
-  `ALLOWLIST_CACHE_TTL` on other instances). Rows saved before this existed are shared with everyone.
+  lists what that person's assistant can read. When a pairing ends, that person is taken off every item that
+  named them, so pairing again later starts from what is shared with everyone; an item that named only them
+  then shows **No one**. A new pairing's approval card counts only the items shared with everyone. Changes and
+  end dates apply on the next call, up to `ALLOWLIST_CACHE_TTL` later (2 seconds by default). Rows saved before
+  this existed are shared with everyone.
 - **Read-only, always:** another person's assistant gets `list_shared_with_me`, `search_shared_files`,
   `list_shared_folder`, `read_shared_file` and `download_shared_file`, and nothing else on your Drive, whatever role its own
   connection has. These calls run as a *guest* with your Google sign-in, behind a scope guard whose only

@@ -45,6 +45,13 @@ current_actor: ContextVar[str | None] = ContextVar("current_actor", default=None
 # While another person's assistant (or that person on the dashboard) reads the actor's
 # Sharing list: that reader's email. It decides which shared items they may see.
 current_guest: ContextVar[str | None] = ContextVar("current_guest", default=None)
+GUEST_PARTITION_SEP = "|"  # never in an email address
+
+
+def guest_partition(actor: str | None, guest: str | None) -> str:
+    """The guest guard's cache key: one per (owner, reader)."""
+    return f"{actor or ''}{GUEST_PARTITION_SEP}{guest or ''}"
+
 
 OAuthResolver = Callable[[str], Principal | None]
 

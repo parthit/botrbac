@@ -35,7 +35,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .auth import current_actor
+from .auth import GUEST_PARTITION_SEP, current_actor
 from .drive_client import FOLDER_MIME, DriveClient, DriveNotFoundError
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
@@ -171,7 +171,8 @@ class ScopeGuard:
         if self._partition is None:
             return [who]
         actor = current_actor.get() or ""
-        return [key for key in cache if key == who or key.split("|", 1)[0] == actor]
+        prefix = actor + GUEST_PARTITION_SEP
+        return [key for key in cache if key == who or key.startswith(prefix)]
 
     # ---- allowlist -----------------------------------------------------
 

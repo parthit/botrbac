@@ -27,7 +27,7 @@
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Who can see it">
-      {% if e.for_everyone %}Everyone you are paired with{% else %}{{ e.audience | join(", ") }}{% endif %}
+      {% if e.for_everyone %}Everyone you are paired with{% elif e.audience %}{{ e.audience | join(", ") }}{% else %}<b>No one</b> <span class="muted">(the people it named are no longer paired with you)</span>{% endif %}
       {% if e.expires_at %}<br><span class="muted">{{ "Ended" if e.expired() else "Until" }} {{ e.expires_at[:10] }}</span>{% endif %}
       {% if peers %}
       <details class="disclosure-form" id="who-{{ e.id }}"><summary>Change<span class="sr-only"> who can see {{ e.name or e.id }}</span></summary>

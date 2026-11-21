@@ -1548,7 +1548,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         who = (
             "everyone you are paired with" if entry.for_everyone else ", ".join(entry.audience)  # type: ignore[arg-type]
         )
-        until = f" until {form.get('expires_on')}" if entry.expires_at else ""
+        until = f" until {entry.expires_at[:10]}" if entry.expires_at else ""
         return action_done(
             request, "ok", f"“{entry.name}” is now shared with {who}{until}.", next_url
         )

@@ -142,6 +142,9 @@ class Mailbox:
         self._lock = threading.Lock()
         self._fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
         self.wake = wake or WakeSettings()
+        # Called with (a, b) when two people stop being paired, so each person's Sharing
+        # list stops naming the other: re-pairing later must not bring that access back.
+        self.on_unpaired: Callable[[str, str], None] | None = None
 
     def request_link(
         self, email: str, invite_code: str | None = None, new_invite: bool = False
@@ -1474,6 +1477,18 @@ class Mailbox:
         record = json.dumps({"by": you, "at": at, "how": how})
         self.store.set_if_absent(f"bridge:ended:{link['link_id']}", record, ex=PEER_TTL)
         self.store.set(f"bridge:revoked:{link['link_id']}", at)
+        peer = self._peer(link["link_id"])
+        if self.on_unpaired is None or link.get("same_account") or not peer:
+            return
+        a = str(link["email_a"])
+        if self.is_linked(a, peer):
+            return  # another pairing between the same two people is still on
+        try:
+            self.on_unpaired(a, peer)
+        except Exception:
+            # The pairing is already off, which ends access on its own. A person named on
+            # an item stays named; they still read nothing until a pairing is approved.
+            logging.getLogger(__name__).warning("unpair_prune_failed", exc_info=True)
 
     def _ended(self, link_id: str) -> dict[str, Any] | None:
         raw = self.store.get(f"bridge:ended:{link_id}")
