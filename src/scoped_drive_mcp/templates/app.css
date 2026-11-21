@@ -1118,3 +1118,14 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
 }
 .act-line button { min-width: 8.5rem; }
 @media (min-width: 721px) { .file-actions:has(.act-line) { align-items: flex-end; } }
+/* Sharing table: an opened Change form makes one cell tall; the rest stay on the row's first line. */
+@media (min-width: 721px) {
+  table.cards.top td { vertical-align: top; }
+  /* Pull the button up so its label sits on the same line as the other cells' text. */
+  table.cards.top td form.inline { margin-top: -10px; }
+}
+@media (max-width: 720px) {
+  /* Phones: the who-label on the left, its button on the right edge. */
+  .file-actions:has(.act-line) { align-items: stretch; }
+  .act-line { justify-content: space-between; }
+}
