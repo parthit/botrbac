@@ -130,7 +130,7 @@
     <h3>{{ assistant_name(a) }}</h3>
   </div>
   <p class="muted">added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
-  <form class="inline" method="post" action="/oauth/grants/role" id="role-{{ a.id }}">
+  <form class="role-form" method="post" action="/oauth/grants/role" id="role-{{ a.id }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="grant_id" value="{{ a.id }}">
     <label>Can

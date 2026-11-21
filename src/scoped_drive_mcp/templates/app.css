@@ -1047,3 +1047,57 @@ dialog.confirm label { display: flex; gap: 8px; align-items: flex-start; margin:
 dialog.confirm .actions { justify-content: flex-end; }
 .trust { align-items: start; }
 .copy-row { margin-bottom: 16px; }
+
+/* ---- Small screens ------------------------------------------------------------
+   Rules above that set a desktop value after their own media query win over it (same
+   specificity, later in the file). These come last so the phone values hold. */
+
+/* "How a call moves": three stickers in a row only when they fit; stacked below that. */
+@media (max-width: 900px) {
+  .diagram { padding-top: 40px; }
+  .diagram-row { grid-template-columns: minmax(0, 1fr); gap: 4px; max-width: 480px; }
+  .diagram-row .arrow { transform: rotate(90deg); margin: 2px auto; }
+  .sticker { padding: 14px 16px 12px; }
+  .sticker .ask { font-size: 14px; }
+}
+
+/* "Can [Read only] Save" on one line. Wide screens keep the plain inline form; narrow
+   ones shrink the dropdown so Save stays beside it instead of wrapping underneath. */
+form.role-form { display: inline; margin: 0; }
+@media (max-width: 640px) {
+  form.role-form { display: flex; align-items: center; gap: 8px 10px; margin: 0 0 12px; }
+  form.role-form label { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+  form.role-form select { flex: 1 1 auto; width: auto; min-width: 0; max-width: 360px; }
+}
+
+/* Search: the box takes the row, the button sits beside it. */
+form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-width: 360px; }
+
+/* Folder names inside pills can be long: let them wrap rather than widen the row. */
+.file-meta .pill, .crumbs .pill { white-space: normal; overflow-wrap: anywhere; }
+
+/* Close buttons and disclosure headings are 44px targets on touch and narrow screens. */
+@media (max-width: 1100px), (pointer: coarse) {
+  button.dismiss { width: 44px; height: 44px; margin: -10px -12px -10px 0; }
+  details.how > summary { min-height: 44px; }
+}
+
+@media (max-width: 520px) {
+  main { padding-top: 76px; }
+  .card { padding: 18px 16px; }
+  .hero { padding-top: 32px; }
+  .hero .sub { font-size: 18px; margin-top: 22px; }
+  .lede, .sub { font-size: 18px; }
+  .trust { font-size: 16px; line-height: 24px; margin-top: 22px; }
+  .sq { margin-top: 7px; }
+  .products { padding-top: 32px; gap: 12px; }
+  .split { padding-top: 36px; }
+  /* Overview: four counts two-up instead of four screen-tall cards. */
+  .grid.stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .grid.stats .stat b { font-size: 40px; }
+  .grid.stats .stat { gap: 6px; }
+  .grid.stats .stat { font-size: 15px; }
+  .grid.stats .stat a { font-size: 14px; }
+  .grid.stats .stat a::after { content: "\00a0→"; }
+  .copy-row input { font-size: 12px; }
+}
