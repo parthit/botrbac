@@ -176,3 +176,5 @@ def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memsto
     memstore.delete(f"sdm:oauth:role:{grant}")
     names = tool_names(owner_c, token)
     assert "trash_file" not in names and not names & WRITE_TOOLS
+    # Choosing never rewrites the grant record (a token refresh rewrites it too).
+    assert "roles" not in json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
