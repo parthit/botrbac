@@ -2136,16 +2136,28 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         grants = ctx.mcp_oauth.list_grants(email) if ctx.mcp_oauth else []
         if links is None:
             links = box.list_links(email)["links"] if box is not None else []
-        paired: dict[str, str] = {}
+        # Who each assistant talks to: your own assistants it is paired with (a grant
+        # can be in several pairings), and the people whose mail it answers.
+        names = {g.id: f"{g.client_name} …{g.id[-5:]}" for g in grants}
+        mates: dict[str, list[dict[str, Any]]] = {}
+        people: list[str] = []
         for link in links:
-            if not link.get("same_account") or link["status"] not in (
-                "active",
-                "pending_approval",
-            ):
+            status = link["status"]
+            if not link.get("same_account"):
+                if status == "active" and link.get("peer_email"):
+                    people.append(str(link["peer_email"]))
+                continue
+            if status not in ("active", "pending_approval"):
                 continue
             (grant_a, grant_b), (label_a, label_b) = link["grant_ids"], link["assistants"]
-            paired.setdefault(str(grant_a), label_b)
-            paired.setdefault(str(grant_b), label_a)
+            for me, other, label in ((grant_a, grant_b, label_b), (grant_b, grant_a, label_a)):
+                mates.setdefault(str(me), []).append(
+                    {
+                        "name": names.get(str(other), label),
+                        "pending": status == "pending_approval",
+                    }
+                )
+        people = sorted(set(people))
         wake_on = box is not None and bool(box.get_webhook(email, "").get("available"))
         # One row per (pairing, assistant): an assistant in two pairings has two senders.
         missing_rows = box.missing_wakeups(email) if wake_on else []
@@ -2158,7 +2170,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "name": g.client_name,
                     "created_at": g.created_at,
                     "last_used": g.last_used,
-                    "paired_with": paired.get(g.id),
+                    "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,
+                    "mates": mates.get(g.id, []),
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
                 }
             )
@@ -2169,6 +2182,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "account_hook": box.get_webhook(email, "") if wake_on else None,
             "primary": primary if primary in {g.id for g in grants} else None,
             "missing_wakeups": missing_rows,
+            "people": people,
         }
 
     async def bridge_page(request: Request) -> Response:
@@ -2322,38 +2336,39 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         grants = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
         ids = {g.id for g in grants}
         if (app and app not in ids) or (from_app and from_app not in ids):
-            flash(request, "error", "That app is not connected.")
-            return RedirectResponse(back, status_code=303)
+            return action_done(request, "error", "That app is not connected.", back)
         if action in (None, "", "save") and ids and not raw_app:
             # The old form defaulted to the account slot, which never fires for mail
             # between your own assistants. Make the person say which assistant it starts.
-            flash(request, "error", "Choose which assistant this wake-up starts.")
-            return RedirectResponse(back, status_code=303)
+            return action_done(
+                request, "error", "Choose which assistant this wake-up starts.", back
+            )
+        # A failed test wake still changes what the page shows (the last wake), so the
+        # settings page refreshes those sections even when the test reports an error.
+        changed: bool | None = None
         try:
             if action == "remove":
                 await blocking(ctx.mailbox.clear_webhook, email, app)
-                flash(request, "ok", "Wake-up removed. Mail still waits for check_messages.")
+                kind, message = "ok", "Wake-up removed. Mail still waits for check_messages."
             elif action == "test":
                 result = await blocking(ctx.mailbox.test_webhook, email, app)
+                changed = True
                 if result.get("ok"):
-                    flash(
-                        request,
+                    kind, message = (
                         "ok",
                         f"Test wake sent (HTTP {result.get('http')}). The assistant should "
                         "start in a few seconds and find no new mail.",
                     )
                 else:
                     code = f" (HTTP {result['http']})" if result.get("http") else ""
-                    flash(
-                        request,
+                    kind, message = (
                         "error",
                         f"Test wake failed{code}: {result.get('error')}. Check the URL and "
                         "key in the assistant that gave them to you, then save them again.",
                     )
             elif action == "primary":
                 await blocking(ctx.mailbox.set_primary, email, app)
-                flash(
-                    request,
+                kind, message = (
                     "ok",
                     "Saved. Mail from other people now wakes only that app."
                     if app
@@ -2361,7 +2376,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 )
             elif action == "move":
                 await blocking(ctx.mailbox.move_webhook, email, app, from_app)
-                flash(request, "ok", "Wake-up moved to that app. Its key moved with it.")
+                kind, message = "ok", "Wake-up moved to that assistant. Its key moved with it."
             else:
                 enabled = form.get("enabled", "true") != "false"
                 await blocking(
@@ -2373,10 +2388,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     enabled=enabled,
                     app=app,
                 )
-                flash(request, "ok", "Wake-up saved. Use Send test wake to check it works.")
+                kind, message = "ok", "Wake-up saved. Use Send test wake to check it works."
         except MailboxError as exc:
-            flash(request, "error", exc.message)
-        return RedirectResponse(back, status_code=303)
+            kind, message, changed = "error", exc.message, False
+        return action_done(request, kind, message, back, changed=changed)
 
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
