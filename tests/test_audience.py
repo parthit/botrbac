@@ -334,3 +334,17 @@ def test_a_new_item_shared_with_nobody_is_refused(world) -> None:
     )
     with pytest.raises(GrantError):
         grants.grant("loose-doc", audience=())
+
+
+def test_a_dead_folder_above_does_not_count_but_a_live_one_further_up_does(three, memstore) -> None:
+    _app_, owner, _eve, carol = three
+    # proj-sub (inside proj) is shared with Eve and has ended; proj, above it, is live.
+    for fid in ("proj", "proj-sub", "proj-deep-doc"):
+        assert post(owner, "/sharing/add", file_id=fid).status_code == 303
+    _audience(owner, "proj-sub", "everyone", expires_on="2020-01-01")
+    _audience(owner, "proj-deep-doc", "people", [EVE])
+    page = owner.get("/sharing?tab=by-me").text
+    assert "Also visible through “Projects”" in page
+    assert "Also visible through “Sub”" not in page
+    # And the guard agrees: Carol reads it through Projects.
+    assert "roadmap secret" in json.dumps(_read(carol, "proj-deep-doc"))

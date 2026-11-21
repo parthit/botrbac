@@ -1514,14 +1514,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         inside a more widely shared folder does not hide it; the page says so."""
         covers: dict[str, Any] = {}
         grants = ctx.ext_grants()
-        for entry in entries.values():
-            if entry.for_everyone and not entry.expires_at:
-                continue
+        narrowed = [e for e in entries.values() if not e.for_everyone or e.expires_at]
+        # Bounded, like the Access page: each check walks Drive parents.
+        for entry in narrowed[:COVER_CHECK_LIMIT]:
             try:
                 found = grants.covering_entry(entry.id)
             except Exception as exc:
+                # Drive is not answering; one failure is enough to stop asking.
                 report_exception(exc, where="share_covers")
-                continue
+                break
             if found and found[0] in entries:
                 covers[entry.id] = entries[found[0]]
         return covers
@@ -1615,11 +1616,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         def gather() -> dict[str, Any]:
             peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
             entries = ctx.ext_allowlist.entries()
+            connected = ctx.drive_connected()
             return {
                 "entries": entries,
-                "covers": share_covers(entries),
+                "covers": share_covers(entries) if connected else {},
                 "peers": peers,
-                "drive_connected": ctx.drive_connected(),
+                "drive_connected": connected,
             }
 
         data = await blocking(gather)

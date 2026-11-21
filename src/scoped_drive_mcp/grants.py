@@ -33,6 +33,13 @@ class ApprovalOption:
     label: str
 
 
+def _live(entry: AllowEntry) -> bool:
+    """Whether an entry still lets someone in: not ended, and not naming nobody."""
+    if entry.expired():
+        return False
+    return entry.for_everyone or bool(entry.audience)
+
+
 class _Keep:
     """Leave this field as it is (set_audience's expires_at)."""
 
@@ -265,8 +272,10 @@ class GrantService:
         parent chain, the same way the scope guard does, so the dashboard can say so
         instead of claiming the item is gone. `extra` adds ids that count as allowed
         without being on the list (the server's root folder), mapped to a display name.
+        Only a live entry counts: one that has ended, or names nobody, gives no access, so
+        the walk goes on past it to a folder further up that still does.
         """
-        entries = self.allowlist.entries()
+        entries = {fid: e for fid, e in self.allowlist.entries().items() if _live(e)}
         drive = self.owner_drive()
         seen: set[str] = {file_id}
         frontier = [file_id]
