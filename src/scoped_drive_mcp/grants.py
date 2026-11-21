@@ -33,6 +33,20 @@ class ApprovalOption:
     label: str
 
 
+def _live(entry: AllowEntry) -> bool:
+    """Whether an entry still lets someone in: not ended, and not naming nobody."""
+    if entry.expired():
+        return False
+    return entry.for_everyone or bool(entry.audience)
+
+
+class _Keep:
+    """Leave this field as it is (set_audience's expires_at)."""
+
+
+KEEP = _Keep()
+
+
 class GrantService:
     def __init__(
         self,
@@ -65,7 +79,18 @@ class GrantService:
         except DriveNotFoundError:
             return None
 
-    def grant(self, file_id: str, *, request_id: str | None = None) -> AllowEntry:
+    def grant(
+        self,
+        file_id: str,
+        *,
+        request_id: str | None = None,
+        audience: str | tuple[str, ...] | None = None,
+        expires_at: str | None = None,
+    ) -> AllowEntry:
+        """Add an item. On the Sharing list, `audience` (default: everyone paired) and
+        `expires_at` say who may read it and until when. For an item already on the list,
+        a given audience or expiry is applied with set_audience; without them it keeps
+        what it has."""
         meta = self.owner_meta(file_id)
         if meta is None:
             raise GrantError("That item was not found in your Drive.")
@@ -81,6 +106,15 @@ class GrantService:
         item_id = str(meta["id"])
         existing = self.allowlist.get(item_id)
         if existing is not None:
+            if self.audience is not None and (audience is not None or expires_at is not None):
+                return self.set_audience(
+                    item_id,
+                    audience
+                    if audience is not None
+                    # An item that names nobody stays that way; never widen it to everyone.
+                    else (existing.audience if existing.audience is not None else self.audience),
+                    expires_at if expires_at is not None else KEEP,
+                )
             if request_id and not existing.request_id:
                 updated = replace(existing, request_id=request_id)
                 self.allowlist.add(updated)
@@ -88,6 +122,9 @@ class GrantService:
             return existing
         if item_id == self.my_drive_root_id():
             raise GrantError("Your whole My Drive cannot be shared; pick folders or files in it.")
+        chosen = self._audience_for(audience)
+        if isinstance(chosen, tuple) and not chosen:
+            raise GrantError("Choose at least one person, or share the item with everyone.")
         permission_id = self._share(item_id) if self.bot_email else None
         entry = AllowEntry(
             id=item_id,
@@ -96,13 +133,47 @@ class GrantService:
             permission_id=permission_id,
             request_id=request_id,
             shared_with=self.bot_email if permission_id else None,
-            audience=self.audience,
+            audience=chosen,
+            expires_at=expires_at if self.audience is not None else None,
         )
         self.allowlist.add(entry)
         self._on_change()
         self._access_changed(item_id)
         audit_owner(self._grant_action, file_id=item_id, request_id=request_id)
         return entry
+
+    def _audience_for(self, audience: str | tuple[str, ...] | None) -> str | tuple[str, ...] | None:
+        if self.audience is None:
+            return None
+        if isinstance(audience, tuple):
+            return tuple(sorted({a.strip().lower() for a in audience if a.strip()}))
+        return self.audience
+
+    def set_audience(
+        self,
+        file_id: str,
+        audience: str | tuple[str, ...],
+        expires_at: "str | None | _Keep" = None,
+    ) -> AllowEntry:
+        """Sharing list only: change who may read an item, and until when. `expires_at`
+        None clears the end date; KEEP leaves it as it is. An empty tuple is refused; use
+        revoke to stop sharing with everyone."""
+        if self.audience is None:
+            raise GrantError("Only items on your Sharing list have an audience.")
+        validate_drive_id(file_id)
+        entry = self.allowlist.get(file_id)
+        if entry is None:
+            raise GrantError("That item is not on your Sharing list.")
+        chosen = self._audience_for(audience)
+        if isinstance(chosen, tuple) and not chosen:
+            raise GrantError("Choose at least one person, or stop sharing the item.")
+        until = entry.expires_at if isinstance(expires_at, _Keep) else (expires_at or None)
+        updated = replace(entry, audience=chosen, expires_at=until)
+        self.allowlist.add(updated)
+        self._on_change()
+        who = ",".join(chosen) if isinstance(chosen, tuple) else "everyone"
+        audit_owner("share_audience", file_id=file_id, audience=who, expires_at=until or "")
+        return updated
 
     def _access_changed(self, item_id: str) -> None:
         """The owner changed what the assistant may use, so an earlier denial for this
@@ -201,8 +272,10 @@ class GrantService:
         parent chain, the same way the scope guard does, so the dashboard can say so
         instead of claiming the item is gone. `extra` adds ids that count as allowed
         without being on the list (the server's root folder), mapped to a display name.
+        Only a live entry counts: one that has ended, or names nobody, gives no access, so
+        the walk goes on past it to a folder further up that still does.
         """
-        entries = self.allowlist.entries()
+        entries = {fid: e for fid, e in self.allowlist.entries().items() if _live(e)}
         drive = self.owner_drive()
         seen: set[str] = {file_id}
         frontier = [file_id]
