@@ -2147,7 +2147,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             paired.setdefault(str(grant_a), label_b)
             paired.setdefault(str(grant_b), label_a)
         wake_on = box is not None and bool(box.get_webhook(email, "").get("available"))
-        missing = {row["grant_id"]: row for row in box.missing_wakeups(email)} if wake_on else {}
+        # One row per (pairing, assistant): an assistant in two pairings has two senders.
+        missing_rows = box.missing_wakeups(email) if wake_on else []
         rows = []
         for g in grants:
             rows.append(
@@ -2159,7 +2160,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "last_used": g.last_used,
                     "paired_with": paired.get(g.id),
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
-                    "missing": missing.get(g.id),
                 }
             )
         primary = box.get_primary(email) if box is not None else None
@@ -2168,7 +2168,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "wake_on": wake_on,
             "account_hook": box.get_webhook(email, "") if wake_on else None,
             "primary": primary if primary in {g.id for g in grants} else None,
-            "missing_wakeups": list(missing.values()),
+            "missing_wakeups": missing_rows,
         }
 
     async def bridge_page(request: Request) -> Response:

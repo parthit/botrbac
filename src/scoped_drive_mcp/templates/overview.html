@@ -43,7 +43,7 @@
   <div class="card stat">
     <span class="muted">Assistants</span>
     <b>{{ grants | length }}</b>
-    <span class="muted">connected{% if missing_wakeups %} · {{ missing_wakeups | length }} can’t be woken{% endif %}</span>
+    <span class="muted">connected{% set unwoken = missing_wakeups | map(attribute="grant_id") | unique | list %}{% if unwoken %} · {{ unwoken | length }} can’t be woken{% endif %}</span>
     <a href="/settings#assistants">View assistants</a>
   </div>
 </div>

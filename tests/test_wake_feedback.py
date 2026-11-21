@@ -174,3 +174,82 @@ def test_settings_page_puts_each_wakeup_on_its_assistant(world, memstore, oauth)
     page = owner.get("/settings").text
     assert "Test wake sent (HTTP 200)" in page and "delivered" in page
     assert len(posts) == 1
+
+
+def test_a_retry_while_the_ping_is_in_flight_does_not_claim_success() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    link_id = _self_pair(box)
+    with as_assistant(GROK):
+        box.set_webhook(OWNER_EMAIL, HOOK + "grok", sender_key="grok-key-1234")
+    message = {"to": f"{OWNER_EMAIL}#{GROK.grant_id}", "msg_id": "msg_inflight"}
+    box.store.set("bridge:woke:msg_inflight", "pending")
+    assert box._maybe_wake(message) == {"status": "pending"}
+    box.store.set("bridge:woke:msg_inflight", "1")
+    assert box._maybe_wake(message) == {"status": "sent"}
+    assert posts == [] and link_id
+
+
+def test_saving_a_new_url_clears_the_old_wake_result() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    with as_assistant(GROK):
+        box.set_webhook(OWNER_EMAIL, HOOK + "grok", sender_key="grok-key-1234")
+    box.test_webhook(OWNER_EMAIL, GROK.grant_id)
+    assert box.get_webhook(OWNER_EMAIL, GROK.grant_id)["last_wake"] is not None
+    # Saving the same hook again (say, to pause it) keeps the history.
+    with as_assistant(GROK):
+        box.set_webhook(OWNER_EMAIL, HOOK + "grok", enabled=False)
+    assert box.get_webhook(OWNER_EMAIL, GROK.grant_id)["last_wake"] is not None
+    with as_assistant(GROK):
+        box.set_webhook(OWNER_EMAIL, HOOK + "grok2", sender_key="grok-key-5678")
+    assert box.get_webhook(OWNER_EMAIL, GROK.grant_id)["last_wake"] is None
+
+
+def test_a_replayed_send_repeats_the_wake_result() -> None:
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    link_id = _self_pair(box)
+    with as_assistant(CLAUDE):
+        first = box.send_message(OWNER_EMAIL, link_id, "hi", idempotency_key="k2")
+        again = box.send_message(OWNER_EMAIL, link_id, "hi", idempotency_key="k2")
+    assert again["idempotent_replay"] is True
+    assert again["wake"] == first["wake"] and first["wake"]["status"] == "no_wakeup"
+
+
+def test_one_assistant_in_two_pairings_is_listed_per_sender() -> None:
+    from tests.test_self_pairing import CURSOR
+
+    posts: list[dict] = []
+    box = _wake_box(posts)
+    _self_pair(box)  # Grok and Claude
+    with as_assistant(CURSOR):
+        created = box.request_link(OWNER_EMAIL)
+    with as_assistant(CLAUDE):
+        box.request_link(OWNER_EMAIL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+    claude = [m for m in box.missing_wakeups(OWNER_EMAIL) if m["assistant"] == "Claude"]
+    assert sorted(m["sender"] for m in claude) == ["Cursor", "Grok"]
+
+
+def test_overview_counts_each_unwakeable_assistant_once() -> None:
+    from scoped_drive_mcp.dashboard import _env
+
+    rows = [
+        {"grant_id": "g-claude", "assistant": "Claude", "sender": "Grok", "paused": False},
+        {"grant_id": "g-claude", "assistant": "Claude", "sender": "Cursor", "paused": False},
+    ]
+    html = _env.get_template("overview.html").render(
+        owner="o@example.com",
+        nav="/",
+        flashes=[],
+        grants=[1, 2],
+        missing_wakeups=rows,
+        allow_count=1,
+        pending_count=0,
+        drive_connected=True,
+        mcp_url="https://x/mcp",
+    )
+    assert "1 can’t be woken" in html
+    assert "Messages from Grok won’t start Claude" in html
+    assert "Messages from Cursor won’t start Claude" in html

@@ -751,6 +751,9 @@ class Mailbox:
         }
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
+        if not _same_target(current, record):
+            # A new URL or key has not been tried yet; the old result is not about it.
+            self.store.delete(f"bridge:hooklast:{owner}")
         self._index_hook(you, owner, present=True)
         return self.get_webhook(you, app)
 
@@ -882,8 +885,10 @@ class Mailbox:
             # One mark per message and hook, so a retry does not ping a hook twice.
             suffix = "" if slot == message["to"] else f":{slot}"
             mark = f"bridge:woke:{message['msg_id']}{suffix}"
-            if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
-                outcomes.append("sent")
+            if not self.store.set_if_absent(mark, "pending", ex=MESSAGE_TTL):
+                # Another call holds this ping. Say "sent" only once it succeeded; while
+                # it is still in flight the outcome is not known yet.
+                outcomes.append("sent" if self.store.get(mark) != "pending" else "pending")
                 continue
             # Which slot, never the address or URL: "app" for one app's own, else "account".
             kind = "app" if "#" in slot else "account"
@@ -897,6 +902,7 @@ class Mailbox:
                 outcomes.append("failed")
                 reason = reason or logged
             else:
+                self.store.set(mark, "1", ex=MESSAGE_TTL)
                 log.warning("mailbox_wake_sent %s", kind)
                 self._note_wake(slot, record, None, http=status)
                 outcomes.append("sent")
@@ -904,6 +910,8 @@ class Mailbox:
             return {"status": "sent"}
         if "failed" in outcomes:
             return {"status": "failed", "reason": reason}
+        if "pending" in outcomes:
+            return {"status": "pending"}
         return {"status": "paused"}
 
     def test_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
@@ -1111,10 +1119,10 @@ class Mailbox:
         except MailboxError:
             self._release_pending(idem_key, pending, peer, message["msg_id"])
             raise
-        wake = self._publish(message)
+        wake = self._keep_wake(message["msg_id"], _wake_view(self._publish(message), link, peer))
         if idem_key:
             self.store.set(idem_key, message["msg_id"], ex=MESSAGE_TTL)
-        return _sent(message, replay=False, wake=_wake_view(wake, link, peer))
+        return _sent(message, replay=False, wake=wake)
 
     def _finish_idem(
         self,
@@ -1172,9 +1180,9 @@ class Mailbox:
             if exc.code == "rate_limited" and not already_queued:
                 self._release_pending(idem_key, token, peer, msg_id)
             raise
-        wake = self._publish(message)
+        wake = self._keep_wake(msg_id, _wake_view(self._publish(message), link, peer))
         self.store.set(idem_key, msg_id, ex=MESSAGE_TTL)
-        return _sent(message, replay=already_queued, wake=_wake_view(wake, link, peer))
+        return _sent(message, replay=already_queued, wake=wake)
 
     def _release_pending(self, idem_key: str | None, pending: str, peer: str, msg_id: str) -> None:
         if idem_key and self.store.get(idem_key) == pending and not self._queued(peer, msg_id):
@@ -1269,7 +1277,21 @@ class Mailbox:
                 "idempotency_conflict",
                 "That idempotency key was already used with a different message.",
             )
-        return _sent(message, replay=True)
+        return _sent(message, replay=True, wake=self._kept_wake(msg_id))
+
+    def _keep_wake(self, msg_id: str, view: dict[str, Any]) -> dict[str, Any]:
+        """Remember what the sender was told, so a retry with the same idempotency key
+        (the usual move after a timeout) gets the same wake result."""
+        self.store.set(f"bridge:wakeview:{msg_id}", json.dumps(view), ex=MESSAGE_TTL)
+        return view
+
+    def _kept_wake(self, msg_id: str) -> dict[str, Any] | None:
+        raw = self.store.get(f"bridge:wakeview:{msg_id}")
+        try:
+            view = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            return None
+        return view if isinstance(view, dict) else None
 
     def _charge_attempt(self, you: str) -> None:
         bucket = int(self._now()) // HOUR
@@ -1796,6 +1818,10 @@ def _wake_error(exc: Exception) -> str:
     return type(exc).__name__
 
 
+def _same_target(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    return all(old.get(k) == new.get(k) for k in ("url", "scheme", "ciphertext", "nonce"))
+
+
 def _wake_http(exc: Exception) -> int | None:
     detail = exc.args[0] if exc.args else ""
     if isinstance(detail, str) and detail.startswith("http_") and detail[5:].isdigit():
@@ -1829,6 +1855,10 @@ def _wake_view(wake: dict[str, Any], link: dict[str, Any], peer: str) -> dict[st
             )
     elif status == "paused":
         view["hint"] = f"{who}'s wake-up is paused. The message waits in its inbox."
+    elif status == "pending":
+        view["hint"] = (
+            f"A wake for {who} is still being sent. The message is in its inbox either way."
+        )
     elif status == "failed":
         view["hint"] = (
             f"Waking {who} failed. The message is still in its inbox. The owner can see the "
