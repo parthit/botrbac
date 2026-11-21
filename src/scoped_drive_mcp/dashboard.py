@@ -2527,7 +2527,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return action_done(request, "error", "Choose what this app may do.", back)
         if not await blocking(ctx.mcp_oauth.set_role, grant_id, email, role):
             return action_done(request, "error", "That app is not connected.", back)
-        audit_owner("oauth_role", grant=grant_id[-5:], role=role)
+        names = {g.id: g.client_name for g in ctx.mcp_oauth.list_grants(email)}
+        audit_owner(
+            "oauth_role", grant=grant_id[-5:], role=role, client=names.get(grant_id, "an app")
+        )
         return action_done(
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )

@@ -323,6 +323,13 @@ def _tool_row(
     )
 
 
+_ROLE_WORDS = {
+    "viewer": "read only",
+    "editor": "read and edit",
+    "admin": "full access",
+}
+
+
 def _owner_row(
     record: Mapping[str, Any],
     names: Mapping[str, str],
@@ -333,6 +340,7 @@ def _owner_row(
     reason = str(record.get("reason") or "")
     item = _item_text(record, names, request_names)
     client = str(record.get("client") or "an app")
+    role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -359,6 +367,7 @@ def _owner_row(
         "oauth_approve": (f"You connected {client}.", Badge("ok", "Connected", "✓")),
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
+        "oauth_role": (f"You changed what {client} can do: {role_words}.", _DONE),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
     }
     group = "you"

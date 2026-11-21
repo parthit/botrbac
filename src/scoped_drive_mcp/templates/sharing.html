@@ -46,6 +46,7 @@
             <label class="indent"><input type="checkbox" name="person" value="{{ p }}"{% if not e.for_everyone and p in e.audience %} checked{% endif %}> {{ p }}</label>
             {% endfor %}
           </fieldset>
+          {# Tells the server this form shows the edit box: without it, editing is left as it is. #}
           <input type="hidden" name="access_shown" value="1">
           <label><input type="checkbox" name="access" value="edit"{% if e.access == "edit" %} checked{% endif %}> Their assistants can add and edit {{ "inside it" if e.mime_type == "application/vnd.google-apps.folder" else "it" }} <span class="muted">({{ "create, overwrite and rename inside it" if e.mime_type == "application/vnd.google-apps.folder" else "overwrite its content" }}; never trash, move or reshare. What they write is marked as theirs.)</span></label>
           <label>Stop sharing after (optional)

@@ -178,3 +178,13 @@ def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memsto
     assert "trash_file" not in names and not names & WRITE_TOOLS
     # Choosing never rewrites the grant record (a token refresh rewrites it too).
     assert "roles" not in json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+
+
+def test_a_role_change_reads_clearly_on_activity(owner_c, memstore) -> None:  # noqa: F811
+    _connect(owner_c, "Grok Bot")
+    grant = _grant_id(memstore)
+    owner_c.post(
+        "/oauth/grants/role",
+        data={"csrf": csrf(owner_c, "/settings"), "grant_id": grant, "role": "editor"},
+    )
+    assert "You changed what Grok Bot can do: read and edit." in owner_c.get("/activity").text
