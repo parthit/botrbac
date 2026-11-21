@@ -8,7 +8,7 @@ Each person keeps two lists:
 An assistant acting for Eve can read an item from Ada's Drive only when all of these hold,
 checked on every call:
 
-1. Eve and Ada have an active mailbox pairing (both approved on /bridge, not revoked).
+1. Eve and Ada have an active pairing (both approved on /bridge, not revoked).
 2. The item is on Ada's external list, or inside a folder on it. Ada's own-bot list does
    not count, and Eve's role on her own connection does not matter.
 3. The operation is one of the read-only guest operations below. There is no write path:
@@ -175,7 +175,7 @@ class ExternalShares:
             "content_trust": "untrusted_peer",
             "note": (
                 "Pass owner and an item id to list_shared_folder, read_shared_file or "
-                "download_shared_file. Only people with an active mailbox pairing appear."
+                "download_shared_file. Only people with an active pairing appear."
             ),
         }
 
@@ -225,7 +225,7 @@ class ExternalShares:
             "content_trust": "untrusted_peer",
             "note": (
                 "Pass owner and a file id to read_shared_file or list_shared_folder. "
-                "Only people with an active mailbox pairing are searched."
+                "Only people with an active pairing are searched."
             ),
         }
 
@@ -360,7 +360,7 @@ class ExternalShares:
         if not self.is_linked(you, them):
             raise SharedAccessError(
                 "not_linked",
-                "You do not have an active mailbox pairing with that person. Both people "
+                "You do not have an active pairing with that person. Both people "
                 "approve the pairing on the dashboard's Sharing page before either assistant "
                 "can read shared items.",
                 owner=them,

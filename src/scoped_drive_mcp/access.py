@@ -345,7 +345,7 @@ class AccessService:
                 "owner": owner,
                 "message": (
                     f"This file is not in the user's own Drive. {owner} shares it with them "
-                    f'through a mailbox pairing. Use read_shared_file(owner="{owner}", '
+                    f'through a pairing. Use read_shared_file(owner="{owner}", '
                     f'file_id="{file_id}") or download_shared_file with the same owner. '
                     "No approval is needed, and none was requested."
                 ),
