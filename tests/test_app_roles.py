@@ -148,3 +148,20 @@ def test_disconnecting_an_app_drops_its_role(owner_c, memstore) -> None:  # noqa
     assert gone.status_code in (200, 303)
     assert memstore.get(f"sdm:oauth:role:{grant}") is None
     assert OWNER_EMAIL  # the owner made every change above
+
+
+def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memstore) -> None:  # noqa: F811
+    token = _connect(owner_c)
+    grant = _grant_id(memstore)
+    raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    raw.pop("roles", None)
+    memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
+    memstore.delete(f"sdm:oauth:role:{grant}")
+    assert "trash_file" in tool_names(owner_c, token)  # old app: full
+    owner_c.post(
+        "/oauth/grants/role",
+        data={"csrf": csrf(owner_c, "/settings"), "grant_id": grant, "role": "viewer"},
+    )
+    memstore.delete(f"sdm:oauth:role:{grant}")
+    names = tool_names(owner_c, token)
+    assert "trash_file" not in names and not names & WRITE_TOOLS
