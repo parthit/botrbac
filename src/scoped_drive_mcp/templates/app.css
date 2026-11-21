@@ -1101,3 +1101,20 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
   .grid.stats .stat a::after { content: "\00a0→"; }
   .copy-row input { font-size: 12px; }
 }
+
+/* Files rows: each toggle says whose access it changes. */
+.act-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.act-who { font: 500 11px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); min-width: 9.5em; }
+.file-actions:has(.act-line) { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+/* Radio and checkbox rows: the control sits beside its text, not above it. */
+.stack label.check { flex-direction: row; align-items: flex-start; gap: 10px; font-weight: 500; font-size: 15px; margin: 0 0 10px; }
+.stack label.check input { width: 18px; height: 18px; flex: 0 0 auto; margin: 2px 0 0; }
+.stack label.check.indent { margin-left: 28px; }
+.stack label.check .hint { display: block; font-weight: 400; font-size: 13px; margin-top: 4px; }
+@media (max-width: 720px) {
+  /* A cell holding a form reads top to bottom, left aligned, label on its own line. */
+  table.cards td.wide { display: block; text-align: left; }
+  table.cards td.wide::before { display: block; margin: 0 0 6px; }
+}
+.act-line button { min-width: 8.5rem; }
+@media (min-width: 721px) { .file-actions:has(.act-line) { align-items: flex-end; } }
