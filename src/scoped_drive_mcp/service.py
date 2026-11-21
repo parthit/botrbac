@@ -417,7 +417,7 @@ class DriveService:
             text = text[: self.max_chars]
             result["truncated"] = True
             result["note"] = f"text cut off in tab {cut_in!r}; later tabs are not shown"
-        result["content"] = text.replace("\x00", "")
+        result["content"] = text  # xlsx_tabs already strips NUL characters
         return result
 
     def _sheet_workbook(self, file_id: str, result: dict[str, Any]) -> bytes | None:
