@@ -2270,19 +2270,27 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ),
                 None,
             )
+            same = next(
+                (
+                    link.get("same_account", False)
+                    for link in ctx.mailbox.list_links(email)["links"]
+                    if link["link_id"] == link_id
+                ),
+                False,
+            )
             ctx.mailbox.revoke(email, link_id, purge)
-            message = (
-                "Mailbox turned off. Neither assistant can send on it, and neither of you can "
-                "read the other's Sharing list through it any more."
-            )
-            if peer and ctx.mailbox.is_linked(email, peer):
-                message += f" You still have another active pairing with {peer}."
+            if not same:
+                message = (
+                    "Pairing turned off. Neither of you can read the other's Sharing list "
+                    "through it any more."
+                )
+                if peer and ctx.mailbox.is_linked(email, peer):
+                    message += f" You still have another active pairing with {peer}."
+                return message
+            message = "Pairing turned off. Your two assistants can no longer message each other."
             if purge:
-                return message + " Stored messages were deleted for both of you."
-            return message + (
-                " Messages already delivered stay readable by the person they were sent to "
-                "until they expire."
-            )
+                return message + " Stored messages were deleted."
+            return message + " Messages already delivered stay readable until they expire."
         result = ctx.mailbox.decide(email, link_id, action)
         same = next(
             (

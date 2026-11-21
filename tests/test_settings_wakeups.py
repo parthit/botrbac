@@ -112,3 +112,34 @@ def test_wakeup_actions_answer_json_for_in_place_updates(world, memstore, oauth)
 
     # Nothing was flashed for the next page load: the page showed it in place already.
     assert "already has its own wake-up" not in owner.get("/settings").text
+
+
+def test_primary_action_is_gone_and_the_account_slot_cannot_be_saved(
+    world, memstore, oauth
+) -> None:
+    app, owner, ids = _setup(world, memstore, oauth)
+    box = app.state.mailbox
+    token = csrf(owner, "/settings")
+    json_headers = {"Accept": "application/json"}
+
+    def send(**form):
+        return owner.post("/bridge/webhook", data={"csrf": token, **form}, headers=json_headers)
+
+    # There is no Primary app: mail from other people does not exist.
+    for chosen in (ids["Claude"], ""):
+        r = send(action="primary", app=chosen)
+        assert r.status_code == 400
+        assert r.json()["ok"] is False
+        assert "Mail from other people is turned off" in r.json()["message"]
+    assert box.store.get(f"bridge:primary:{OWNER_EMAIL}") is None
+
+    # A wake-up has to name the assistant it starts.
+    for slot in ("", "account"):
+        r = send(action="save", app=slot, url=HOOK + "a", sender_key="k-1234")
+        assert r.json()["ok"] is False
+        assert "Choose which assistant this wake-up starts." in r.json()["message"]
+    assert box.get_webhook(OWNER_EMAIL, "")["configured"] is False
+
+    page = owner.get("/settings").text
+    assert "Mail from other people" not in page
+    assert 'name="action" value="primary"' not in page

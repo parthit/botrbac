@@ -9,6 +9,7 @@ from scoped_drive_mcp.flags import EdgeConfigFlags, self_pairing_allowed
 from scoped_drive_mcp.store import MemoryStore
 from tests.conftest import OWNER_EMAIL
 from tests.dash import client, csrf, login
+from tests.mail import legacy_peer_mail
 
 GROK = Assistant("grant-grok", "Grok")
 CLAUDE = Assistant("grant-claude", "Claude")
@@ -137,19 +138,26 @@ def test_revoking_an_assistant_ends_its_same_account_links() -> None:
     assert exc.value.code == "link_revoked"
 
 
-def test_cross_person_links_ignore_assistant_identity() -> None:
+def test_cross_person_links_share_documents_but_carry_no_mail() -> None:
     box = _box()
     with as_assistant(GROK):
         created = box.request_link(OWNER_EMAIL)
     with as_assistant(Assistant("grant-eve", "Muse")):
-        box.request_link(EVE, created["invite_code"])
+        joined = box.request_link(EVE, created["invite_code"])
+    assert "same_account" not in joined
     box.decide(OWNER_EMAIL, created["link_id"], "approve")
     box.decide(EVE, created["link_id"], "approve")
-    with as_assistant(CLAUDE):
-        # Any of the owner's assistants can use a link with another person, as before.
-        box.send_message(OWNER_EMAIL, created["link_id"], "hello eve")
-    assert box.check_messages(EVE)["unread_count"] == 1
+    # Whichever of the owner's assistants tries, another person's assistant is not reached.
+    for assistant in (GROK, CLAUDE, None):
+        with as_assistant(assistant), pytest.raises(MailboxError) as exc:
+            box.send_message(OWNER_EMAIL, created["link_id"], "hello eve")
+        assert exc.value.code == "peer_mail_off"
+    with as_assistant(Assistant("grant-eve", "Muse")), pytest.raises(MailboxError) as back:
+        box.send_message(EVE, created["link_id"], "hello owner")
+    assert back.value.code == "peer_mail_off"
+    assert box.check_messages(EVE)["unread_count"] == 0
     assert box.active_peers(OWNER_EMAIL) == [EVE]
+    assert box.active_peers(EVE) == [OWNER_EMAIL]
 
 
 def test_self_pairing_off_for_domain_blocks_join_and_send() -> None:
@@ -375,25 +383,28 @@ def test_each_app_saves_its_own_hook_and_only_its_mail_wakes_it() -> None:
     assert _urls(posts) == [HOOK + "claude", HOOK + "cursor"]
 
 
-def test_mail_from_another_person_wakes_account_hook_else_every_app() -> None:
+def test_another_person_can_wake_none_of_your_assistants() -> None:
     posts: list[dict] = []
     box = _wake_box(posts)
     with as_assistant(CURSOR):
         box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
     with as_assistant(CLAUDE):
         box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
+    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
     created = box.request_link(EVE)
     box.request_link(OWNER_EMAIL, created["invite_code"])
     box.decide(OWNER_EMAIL, created["link_id"], "approve")
     box.decide(EVE, created["link_id"], "approve")
 
-    box.send_message(EVE, created["link_id"], "hello")
-    assert sorted(_urls(posts)) == [HOOK + "claude", HOOK + "cursor"]
-
-    posts.clear()
-    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
-    box.send_message(EVE, created["link_id"], "again")
-    assert _urls(posts) == [HOOK + "account"]
+    with pytest.raises(MailboxError) as exc:
+        box.send_message(EVE, created["link_id"], "hello")
+    assert exc.value.code == "peer_mail_off"
+    assert posts == []
+    # Even an old message addressed to the account wakes nothing.
+    legacy_peer_mail(box, created["link_id"], EVE, OWNER_EMAIL, "from before")
+    assert posts == []
+    with as_assistant(CLAUDE):
+        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
 
 
 def test_account_hook_never_wakes_for_one_apps_mail_and_can_be_moved() -> None:
@@ -438,16 +449,19 @@ def test_move_refuses_to_overwrite_an_apps_hook() -> None:
     assert box.get_webhook(OWNER_EMAIL, "")["url"] == HOOK + "old"
 
 
-def test_unindexed_app_hook_of_a_paired_app_still_wakes_for_outside_mail() -> None:
+def test_only_an_apps_own_slot_is_a_wake_target() -> None:
     posts: list[dict] = []
     box = _wake_box(posts)
     _self_pair(box)
     with as_assistant(GROK):
         box.set_webhook(OWNER_EMAIL, HOOK + "grok", sender_key="grok-key-12345")
+    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
     box.store.delete(f"bridge:hookapps:{OWNER_EMAIL}")  # saved before the index existed
-    assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [
-        f"{OWNER_EMAIL}#{GROK.grant_id}"
-    ]
+    grok = f"{OWNER_EMAIL}#{GROK.grant_id}"
+    assert [slot for slot, _ in box._wake_targets(grok)] == [grok]
+    assert box._wake_targets(f"{OWNER_EMAIL}#{CLAUDE.grant_id}") == []
+    # The account-wide address served mail from other people; it wakes nobody now.
+    assert box._wake_targets(OWNER_EMAIL) == []
 
 
 def test_same_account_link_names_its_two_apps() -> None:
@@ -459,48 +473,10 @@ def test_same_account_link_names_its_two_apps() -> None:
     assert link["assistants"] == ["Grok", "Claude"]
 
 
-def _outside_mail(box: Mailbox) -> None:
-    created = box.request_link(EVE)
-    box.request_link(OWNER_EMAIL, created["invite_code"])
-    box.decide(OWNER_EMAIL, created["link_id"], "approve")
-    box.decide(EVE, created["link_id"], "approve")
-    box.send_message(EVE, created["link_id"], "hello from eve")
-
-
-def test_primary_app_alone_is_woken_for_outside_mail() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    with as_assistant(CURSOR):
-        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
-    with as_assistant(CLAUDE):
-        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
-    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
-    box.set_primary(OWNER_EMAIL, CURSOR.grant_id)
-    _outside_mail(box)
-    assert _urls(posts) == [HOOK + "cursor"]  # not Claude, not the account hook
-
-
-def test_primary_without_its_own_hook_uses_account_hook_else_nobody() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    with as_assistant(CLAUDE):
-        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
-    box.set_primary(OWNER_EMAIL, CURSOR.grant_id)
-    _outside_mail(box)
-    assert posts == []  # a Primary was chosen, so Claude is not woken
-    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
-    assert [slot for slot, _ in box._wake_targets(OWNER_EMAIL)] == [OWNER_EMAIL]
-
-
-def test_disconnecting_the_primary_clears_it() -> None:
+def test_there_is_no_primary_app_any_more() -> None:
     box = _wake_box([])
-    box.set_primary(OWNER_EMAIL, CURSOR.grant_id)
-    assert box.get_primary(OWNER_EMAIL) == CURSOR.grant_id
-    box.end_assistant_links(OWNER_EMAIL, CURSOR.grant_id)
-    assert box.get_primary(OWNER_EMAIL) is None
-    box.set_primary(OWNER_EMAIL, CLAUDE.grant_id)
-    box.set_primary(OWNER_EMAIL, "")
-    assert box.get_primary(OWNER_EMAIL) is None
+    assert not hasattr(box, "set_primary")
+    assert not hasattr(box, "get_primary")
 
 
 def test_move_a_hook_from_one_app_to_another() -> None:
