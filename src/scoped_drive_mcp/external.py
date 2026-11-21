@@ -391,15 +391,21 @@ class ExternalShares:
     # ---- guest writes ----------------------------------------------------
 
     def _write(
-        self, caller: str, owner: str, tool: str, file_id: str | None, fn: Callable[[], T]
-    ) -> T:
+        self,
+        caller: str,
+        owner: str,
+        tool: str,
+        file_id: str | None,
+        fn: Callable[[DriveService], dict[str, Any]],
+    ) -> dict[str, Any]:
         service = self.write_service
         if service is None:
             raise SharedAccessError(
                 "not_shared", "Writing into what other people share is not available here."
             )
 
-        def run() -> T:
+        def run() -> dict[str, Any]:
+            # Charged only once the guest checks passed: a refused write costs nothing.
             you = current_guest.get() or ""
             if self.charge_write is not None and self.charge_write(you) > GUEST_WRITES_PER_HOUR:
                 raise SharedAccessError(
@@ -407,10 +413,10 @@ class ExternalShares:
                     f"At most {GUEST_WRITES_PER_HOUR} changes an hour to one person's share.",
                     retry_after_seconds=3600,
                 )
-            return fn()
+            return fn(service)
 
         result = self._as_guest(caller, owner, tool, file_id, run)
-        return {"owner": normalize_email(owner), **result}  # type: ignore[return-value]
+        return {"owner": normalize_email(owner), **result}
 
     def create_doc(
         self, caller: str, owner: str, title: str, content: str = "", parent_id: str | None = None
@@ -420,7 +426,7 @@ class ExternalShares:
             owner,
             "create_shared_doc",
             parent_id,
-            lambda: self.write_service.create_doc(title, content, parent_id),  # type: ignore[union-attr]
+            lambda s: s.create_doc(title, content, parent_id),
         )
 
     def create_folder(
@@ -431,7 +437,7 @@ class ExternalShares:
             owner,
             "create_shared_folder",
             parent_id,
-            lambda: self.write_service.create_folder(name, parent_id),  # type: ignore[union-attr]
+            lambda s: s.create_folder(name, parent_id),
         )
 
     def upload_file(
@@ -449,9 +455,7 @@ class ExternalShares:
             owner,
             "upload_shared_file",
             parent_id,
-            lambda: self.write_service.upload_file(  # type: ignore[union-attr]
-                name, mime_type, content_text, content_base64, parent_id
-            ),
+            lambda s: s.upload_file(name, mime_type, content_text, content_base64, parent_id),
         )
 
     def update_file(self, caller: str, owner: str, file_id: str, content: str) -> dict[str, Any]:
@@ -460,16 +464,12 @@ class ExternalShares:
             owner,
             "update_shared_file",
             file_id,
-            lambda: self.write_service.update_file_content(file_id, content),  # type: ignore[union-attr]
+            lambda s: s.update_file_content(file_id, content),
         )
 
     def rename_file(self, caller: str, owner: str, file_id: str, new_name: str) -> dict[str, Any]:
         return self._write(
-            caller,
-            owner,
-            "rename_shared_file",
-            file_id,
-            lambda: self.write_service.rename_file(file_id, new_name),  # type: ignore[union-attr]
+            caller, owner, "rename_shared_file", file_id, lambda s: s.rename_file(file_id, new_name)
         )
 
     def guest_call(

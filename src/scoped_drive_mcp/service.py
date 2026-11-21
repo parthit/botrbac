@@ -216,8 +216,14 @@ class DriveService:
         return "found", str(meta.get("name") or "") or None
 
     def _public(self, meta: dict[str, Any], memo: dict[str, bool] | None = None) -> dict[str, Any]:
-        """public_meta with `parents` cut down to in-scope folder ids (dropped if none)."""
+        """public_meta with `parents` cut down to in-scope folder ids (dropped if none).
+        A file a paired person's assistant wrote says so, wherever it is listed: its name
+        and content are theirs, so they are untrusted data for whoever reads them."""
         out = public_meta(meta)
+        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        if writer:
+            out["written_by"] = str(writer).removeprefix("guest:")
+            out["content_trust"] = "untrusted_peer"
         if "parents" not in out:
             return out
         memo = {} if memo is None else memo
@@ -525,9 +531,9 @@ class DriveService:
     def rename_file(self, file_id: str, new_name: str) -> dict[str, Any]:
         new_name = validate_name(new_name, "new_name")
         self._get_in_scope(file_id, allow_root=False)
-        updated = self.drive.update(
-            file_id, {"name": new_name, **self._stamp()}, None, None, fields=META_FIELDS
-        )
+        # Not stamped: a rename changes no content. Only what a peer writes is marked theirs
+        # (creates and content updates), and the mark is never cleared once set.
+        updated = self.drive.update(file_id, {"name": new_name}, None, None, fields=META_FIELDS)
         return self._public(updated)
 
     # ---- admin tools -----------------------------------------------------

@@ -48,6 +48,8 @@ def _set(owner, file_id: str, who: str = "everyone", people=(), access: str = "e
         "expires_on": "",
         "next": "/sharing?tab=by-me",
     }
+    if access != "omit":
+        data["access_shown"] = "1"
     if access == "edit":
         data["access"] = "edit"
     return owner.post("/sharing/audience", data=data)
@@ -174,3 +176,54 @@ def test_the_sharing_page_offers_and_shows_editing(setup) -> None:
     # Saving without the box turns editing off again.
     _set(owner, "proj", access="read")
     assert "Can edit" not in owner.get("/sharing?tab=by-me").text
+
+
+def test_switching_back_to_read_refuses_the_next_write(setup) -> None:
+    _app_, owner, eve, _carol = setup
+    _set(owner, "proj")
+    assert _create(eve, title="first")["isError"] is False
+    _set(owner, "proj", access="read")
+    assert _error(_create(eve, title="second"))["error"] == "not_shared"
+
+
+def test_a_post_without_the_edit_field_keeps_editing_on(setup, memstore) -> None:
+    from scoped_drive_mcp.store import EXTERNAL_ALLOWLIST_KEY, KEY_PREFIX
+
+    _app_, owner, eve, _carol = setup
+    _set(owner, "proj")
+    _set(owner, "proj", who="people", people=[EVE], access="omit")  # an old page
+    row = json.loads(memstore.hget(f"{KEY_PREFIX}{EXTERNAL_ALLOWLIST_KEY}", "proj"))
+    assert row["access"] == "edit" and row["audience"] == [EVE]
+    assert _create(eve)["isError"] is False
+
+
+def test_peer_written_files_are_marked_wherever_they_are_listed(setup) -> None:
+    from tests.dash import mcp_call
+
+    _app_, owner, eve, _carol = setup
+    _set(owner, "proj")
+    new_id = _create(eve, title="From Eve")["structuredContent"]["id"]
+    post(owner, "/grant", file_id="proj")
+    listed = mcp_call(owner, "list_folder", folder_id="proj")["structuredContent"]
+    row = next(f for f in listed["files"] if f["id"] == new_id)
+    assert row["written_by"] == EVE and row["content_trust"] == "untrusted_peer"
+    meta = mcp_call(owner, "get_metadata", file_id=new_id)["structuredContent"]
+    assert meta["written_by"] == EVE
+    # A rename alone does not mark a file the owner wrote as the peer's.
+    c, token = eve
+    _mcp(c, token, "rename_shared_file", owner=OWNER_EMAIL, file_id="proj-notes", new_name="n")
+    notes = mcp_call(owner, "get_metadata", file_id="proj-notes")["structuredContent"]
+    assert "written_by" not in notes
+
+
+def test_the_memory_store_counts_in_a_fixed_window() -> None:
+    from scoped_drive_mcp.store import MemoryStore
+    from tests.conftest import FakeClock
+
+    clock = FakeClock()
+    store = MemoryStore(clock=clock)
+    assert store.incr("k", 10) == 1
+    clock.advance(6)
+    assert store.incr("k", 10) == 2
+    clock.advance(5)  # 11 seconds after the first hit: a new window
+    assert store.incr("k", 10) == 1

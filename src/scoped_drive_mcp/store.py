@@ -260,8 +260,13 @@ class MemoryStore:
         """Add one and return the new value. An expired key starts again at 1."""
         with self._lock:
             current = self._live(key)
-            count = int(current) + 1 if isinstance(current, str) and current.isdigit() else 1
-            expires = self._clock() + ex if ex else None
+            if isinstance(current, str) and current.isdigit():
+                # A fixed window, like Redis: the first hit sets the expiry, later ones keep it.
+                expires = self._values[key][0]
+                count = int(current) + 1
+            else:
+                expires = self._clock() + ex if ex else None
+                count = 1
             self._values[key] = (expires, str(count))
             return count
 

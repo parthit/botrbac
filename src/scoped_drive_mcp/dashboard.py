@@ -54,7 +54,7 @@ from .drive_client import (
 )
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
-from .grants import OWNER_FIELDS, GrantError, GrantService
+from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
 from .humanize import (
     ACTIVITY_FILTERS,
     MISSING,
@@ -1588,7 +1588,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             audience: str | tuple[str, ...] = people
         else:
             audience = AUDIENCE_LINKED
-        access = ACCESS_EDIT if form.get("access") == ACCESS_EDIT else ACCESS_READ
+        # The form always sends `access_shown`; without it (an old page, a script) the
+        # current setting is kept rather than silently turned off.
+        if form.get("access_shown"):
+            access: Any = ACCESS_EDIT if form.get("access") == ACCESS_EDIT else ACCESS_READ
+        else:
+            access = KEEP
         try:
             entry = await blocking(
                 ctx.ext_grants().set_audience, file_id, audience, expires_at, access
