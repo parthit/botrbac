@@ -193,8 +193,9 @@ def create_mcp(
     @mcp.tool(annotations=READ_ONLY)
     @guarded("read_file")
     async def read_file(file_id: str) -> dict[str, Any]:
-        """Read a file as text. Google Docs and Slides are exported as plain text and Sheets
-        as CSV (first sheet). PDF, Word (.docx and .doc), PowerPoint (.pptx), Excel (.xlsx),
+        """Read a file as text. Google Docs and Slides are exported as plain text. Google
+        Sheets return every tab as tab-separated rows, each tab headed "# <tab name>" when
+        there is more than one. PDF, Word (.docx and .doc), PowerPoint (.pptx), Excel (.xlsx),
         RTF, CSV, Markdown, JSON, and other text files are extracted to text. Images, archives,
         and other non-text files return no content; use download_file for those bytes. Only
         files the owner shared (directly or inside a shared folder) can be read. Large text

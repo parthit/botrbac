@@ -20,9 +20,10 @@ from .drive_client import (
     GOOGLE_APPS_PREFIX,
     SHORTCUT_MIME,
     DriveClient,
+    DriveExportTooLargeError,
     DriveNotFoundError,
 )
-from .extract import ExtractError, document_kind, extract_text
+from .extract import ExtractError, document_kind, extract_text, xlsx_tabs
 from .scope import (
     FileRef,
     InvalidInputError,
@@ -52,6 +53,11 @@ DOC_MIME = "application/vnd.google-apps.document"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SLIDES_MIME = "application/vnd.google-apps.presentation"
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# What read_file asks Drive for. A Sheet's CSV export holds only its first tab, so read_file
+# exports the workbook (every tab) and falls back to this CSV only when that cannot be read.
+# Dashboard downloads still use these formats.
 EXPORT_FORMATS = {
     DOC_MIME: "text/plain",
     SHEET_MIME: "text/csv",
@@ -309,15 +315,16 @@ class DriveService:
     def get_metadata(self, file_id: str) -> dict[str, Any]:
         return self._public(self._get_in_scope(file_id))
 
-    def read_file(self, file_id: str) -> dict[str, Any]:
-        result = self._read_file(file_id)
+    def read_file(self, file_id: str, *, all_tabs: bool = True) -> dict[str, Any]:
+        """`all_tabs=False` reads a Google Sheet as Drive's CSV of its first tab."""
+        result = self._read_file(file_id, all_tabs=all_tabs)
         if result.get("written_by") and isinstance(result.get("content"), str):
             from .external import wrap_untrusted  # imports this module
 
             result["content"] = wrap_untrusted(result["content"])
         return result
 
-    def _read_file(self, file_id: str) -> dict[str, Any]:
+    def _read_file(self, file_id: str, *, all_tabs: bool = True) -> dict[str, Any]:
         meta = self._get_in_scope(file_id)
         mime = meta.get("mimeType", "")
         result: dict[str, Any] = {"file": self._public(meta), "content": None, "truncated": False}
@@ -336,9 +343,20 @@ class DriveService:
 
         name = str(meta.get("name", ""))
         kind = document_kind(mime, name)
+        if mime == SHEET_MIME and all_tabs:
+            tabs = self._read_sheet_tabs(file_id, result)
+            if tabs is not None:
+                return tabs
         if mime in EXPORT_FORMATS:
             export_mime = EXPORT_FORMATS[mime]
-            data = self.drive.export(file_id, export_mime)
+            try:
+                data = self.drive.export(file_id, export_mime)
+            except DriveExportTooLargeError:
+                logger.info("%s %s is over Drive's export limit", mime, file_id)
+                result["note"] = (
+                    "file is over Google Drive's 10 MB export limit; its text cannot be read"
+                )
+                return result
             result["exported_as"] = export_mime
         elif mime.startswith(GOOGLE_APPS_PREFIX):
             result["note"] = f"{mime} cannot be exported as text"
@@ -366,6 +384,68 @@ class DriveService:
             result["truncated"] = True
         result["content"] = text
         return result
+
+    def _read_sheet_tabs(self, file_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        """Every tab of a Google Sheet, via its .xlsx export. None means use the CSV export.
+
+        A workbook too big to read here costs a second export (CSV of the first tab), so a
+        huge Sheet is fetched twice; that is the price of not guessing its size up front.
+        """
+        data = self._sheet_workbook(file_id, result)
+        if data is None:
+            return None
+        try:
+            tabs = xlsx_tabs(data, self.max_chars)
+        except Exception as exc:  # never log cell contents, only the failure's type
+            logger.info(
+                "sheet %s workbook read failed (%s); reading its first tab",
+                file_id,
+                type(exc).__name__,
+            )
+            result["note"] = "workbook could not be read whole; only the first tab is shown"
+            return None
+        result["exported_as"] = XLSX_MIME
+        text = ""
+        cut_in: str | None = None
+        for title, tab_text in tabs:
+            if text:
+                text += "\n"
+            text += tab_text
+            if len(text) > self.max_chars:
+                cut_in = title
+                break
+        if cut_in is not None:
+            text = text[: self.max_chars]
+            result["truncated"] = True
+            result["note"] = f"text cut off in tab {cut_in!r}; later tabs are not shown"
+        result["content"] = text  # xlsx_tabs already strips NUL characters
+        return result
+
+    def _sheet_workbook(self, file_id: str, result: dict[str, Any]) -> bytes | None:
+        """The Sheet as .xlsx bytes, or None (with a note) when it is too large."""
+        try:
+            data = self.drive.export(file_id, XLSX_MIME)
+        except DriveExportTooLargeError:
+            logger.info("sheet %s is over Drive's export limit; reading its first tab", file_id)
+            result["note"] = "workbook is too large to export whole; only the first tab is shown"
+            return None
+        if len(data) > self.max_bytes:
+            logger.info("sheet %s export is %d bytes; reading its first tab", file_id, len(data))
+            result["note"] = "workbook is too large to read whole; only the first tab is shown"
+            return None
+        return data
+
+    def export_sheet_workbook(self, file_id: str) -> bytes | None:
+        """A Google Sheet in scope as .xlsx bytes for a person to download, every tab.
+        None when the file is not a Sheet or the workbook is over the size caps, including
+        DOWNLOAD_BYTE_CAP, which keeps the response under the host's body limit."""
+        meta = self._get_in_scope(file_id)
+        if meta.get("mimeType") != SHEET_MIME:
+            return None
+        data = self._sheet_workbook(file_id, {})
+        if data is None or len(data) > DOWNLOAD_BYTE_CAP:
+            return None
+        return data
 
     def _read_extracted(self, file_id: str, result: dict[str, Any], kind: str) -> dict[str, Any]:
         data = self.drive.download(file_id, self.max_bytes + 1)

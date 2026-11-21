@@ -139,6 +139,19 @@ def minimal_xlsx(
     return buf.getvalue()
 
 
+def compact_xlsx(data: bytes) -> bytes:
+    """`data` without its theme and document properties: still a workbook openpyxl reads,
+    small enough to fit under the 4 KB test byte cap."""
+    src = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dest:
+        for info in src.infolist():
+            if info.filename.startswith(("xl/theme/", "docProps/")):
+                continue
+            dest.writestr(info.filename, src.read(info.filename), compresslevel=9)
+    return out.getvalue()
+
+
 def minimal_rtf(text: str) -> bytes:
     escaped = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
     return f"{{\\rtf1\\ansi {escaped}\\par}}".encode("ascii")

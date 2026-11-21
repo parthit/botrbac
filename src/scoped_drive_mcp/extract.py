@@ -268,8 +268,21 @@ def _slide_names(archive: zipfile.ZipFile) -> list[str]:
 
 
 def _xlsx(data: bytes, char_limit: int) -> str:
+    return _clip([text for _, text in xlsx_tabs(data, char_limit)], char_limit + 1)
+
+
+def xlsx_tabs(data: bytes, char_limit: int) -> list[tuple[str, str]]:
+    """(tab title, text) for each non-empty tab, in order, stopping once past `char_limit`.
+
+    Rows are tab-separated. With more than one tab, each tab's text starts with a
+    `# <title>` line. Callers that need to know which tab a cut landed in use the titles
+    here rather than searching the text, where a cell can also start with `# `.
+    """
     import openpyxl
 
+    if char_limit < 1:
+        raise ExtractError("character limit is too small")
+    _sniff_kind("xlsx", data)  # refuses a legacy binary workbook
     archive_check = _open_zip(data)
     archive_check.close()
     try:
@@ -278,7 +291,7 @@ def _xlsx(data: bytes, char_limit: int) -> str:
         raise ExtractError("could not read spreadsheet") from exc
     try:
         sheets = list(workbook.worksheets)
-        blocks: list[str] = []
+        tabs: list[tuple[str, str]] = []
         size = 0
         multi = len(sheets) > 1
         for sheet in sheets:
@@ -296,10 +309,10 @@ def _xlsx(data: bytes, char_limit: int) -> str:
                 if size > char_limit:
                     break
             if rows:
-                blocks.append("\n".join(rows))
+                tabs.append((str(sheet.title), "\n".join(rows).replace("\x00", "")))
             if size > char_limit:
                 break
-        return _clip(blocks, char_limit + 1)
+        return tabs
     finally:
         workbook.close()
 
