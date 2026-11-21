@@ -438,6 +438,9 @@ class ActorStore:
     def incr(self, key: str, ex: int) -> int:
         return int(self.inner.incr(self._key(key), ex))
 
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+        return bool(self.inner.set_if_absent(self._key(key), value, ex))  # type: ignore[attr-defined]
+
 
 class PostgresStore:
     """One short Postgres connection per call. No pool (serverless-friendly)."""
@@ -964,6 +967,38 @@ class ActivityLog:
             except ValueError:
                 continue
         return out
+
+
+FIRST_READS_KEY = "first_reads"
+FIRST_READS_MAX = 20
+
+
+class FirstReads:
+    """Newest first: the first time each paired person's assistant read something this
+    person shares. Shown on Overview so a new reader does not go unnoticed."""
+
+    def __init__(self, store: KeyValueStore, max_items: int = FIRST_READS_MAX):
+        self.store = store
+        self.max_items = max_items
+
+    def add(self, guest: str, tool: str, file_id: str | None) -> None:
+        row = {"at": utc_now(), "guest": guest, "tool": tool, "file_id": file_id}
+        self.store.lpush(FIRST_READS_KEY, json.dumps(row, separators=(",", ":")))
+        self.store.ltrim(FIRST_READS_KEY, 0, self.max_items - 1)
+
+    def recent(self, limit: int = 5) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for raw in self.store.lrange(FIRST_READS_KEY, 0, limit - 1):
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("guest"):
+                out.append(row)
+        return out
+
+    def clear(self) -> None:
+        self.store.delete(FIRST_READS_KEY)
 
 
 def _copy_string(source: KeyValueStore, dest: KeyValueStore, key: str) -> None:

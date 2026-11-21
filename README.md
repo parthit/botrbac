@@ -206,7 +206,13 @@ a resume that any paired person's assistant may see.
   can read what, not what a document says: a document someone shares with you is text they wrote, and
   reading it is your choice, like opening a file someone sent you.
 - **Activity:** every guest read or denial appears on your **Activity** page with the reader's email
-  (`guest:<email>`), the tool and the file id. File contents are never logged.
+  (`guest:<email>`), the tool and the file id. File contents are never logged. This includes someone who is
+  **not paired** with you trying to read your share (`not_linked`), logged at most once an hour per person
+  and tool so it cannot flood your log, and each `list_shared_with_me` that lists your items. An address with
+  no account here gets nothing logged. Calling a guest tool on your own account (`own_drive`) is logged on
+  your own Activity.
+- **New readers:** the first time a paired person's assistant reads something you share, Overview shows
+  "New readers of what you share" until you dismiss it.
 
 Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
 your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.

@@ -67,6 +67,7 @@ from .store import (
     EXTERNAL_ALLOWLIST_KEY,
     ActivityLog,
     Allowlist,
+    FirstReads,
     KeyValueStore,
     MemoryStore,
     PrefixedStore,
@@ -658,6 +659,7 @@ def build_app(
     vault = TokenVault(actor_kv, enc_key)
     requests = AccessRequests(actor_kv)
     activity = ActivityLog(actor_kv)
+    first_reads = FirstReads(actor_kv)
     audit_module.set_sinks([activity])
 
     def stored_owner_token() -> str | None:
@@ -762,6 +764,9 @@ def build_app(
         DriveService(routed, ext_guard, settings),
         is_linked=mailbox.is_linked,
         active_peers=mailbox.active_peers,
+        is_known_user=directory.is_known_user,
+        once=lambda key, ttl: actor_kv.set_if_absent(f"once:{key}", "1", ex=ttl),
+        first_read=first_reads.add,
     )
     # The human side of the same shares: the dashboard's "Shared with me" page. Each
     # source runs through the same guest checks as the MCP tools above.
@@ -832,6 +837,7 @@ def build_app(
         vault=vault,
         requests=requests,
         activity=activity,
+        first_reads=first_reads,
         oauth=oauth,
         owner_drive_factory=owner_drive_factory or _owner_factory(settings),
         bot_drive=drive_client,
