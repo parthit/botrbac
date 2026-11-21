@@ -39,7 +39,7 @@ def test_both_people_must_approve_before_mail_flows() -> None:
     joined = box.request_link(EVE, created["invite_code"].lower())
     assert joined["status"] == "pending_approval"
     assert joined["peer_email"] == OWNER_EMAIL
-    assert joined["approval_url"] == "https://drive-test.example.com/bridge"
+    assert joined["approval_url"] == "https://drive-test.example.com/sharing?tab=people"
 
     with pytest.raises(MailboxError) as pending:
         box.send_message(OWNER_EMAIL, created["link_id"], "hello")
@@ -150,22 +150,24 @@ def test_dashboard_requires_csrf_and_both_approvals(p2_app) -> None:
     rejected = owner.post(f"/bridge/{link_id}/approve", data={})
     assert rejected.status_code == 403
 
-    page = owner.get("/bridge")
+    page = owner.get("/sharing?tab=people")
     assert page.status_code == 200
     assert EVE in page.text
     assert "request_link" not in page.text
     assert "Needs your approval" in page.text
     assert "pending_approval" not in page.text
-    approved = owner.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/bridge")})
+    approved = owner.post(
+        f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/sharing?tab=people")}
+    )
     assert approved.status_code == 303
-    assert approved.headers["location"] == "/bridge"
+    assert approved.headers["location"] == "/sharing?tab=people"
     assert box.list_links(OWNER_EMAIL)["links"][0]["status"] == "pending_approval"
 
     eve = client(p2_app)
     login(eve, "eve-code")
-    eve_page = eve.get("/bridge")
+    eve_page = eve.get("/sharing?tab=people")
     assert OWNER_EMAIL in eve_page.text
-    done = eve.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(eve, "/bridge")})
+    done = eve.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(eve, "/sharing?tab=people")})
     assert done.status_code == 303
     assert box.list_links(EVE)["links"][0]["status"] == "active"
 

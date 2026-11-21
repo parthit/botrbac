@@ -39,7 +39,8 @@ def test_next_keeps_ordinary_paths() -> None:
 
 def test_connect_page_does_not_link_offsite(owner_c) -> None:
     page = owner_c.get("/connect", params={"next": "/\t/evil.example"})
-    assert page.status_code == 200
+    # Already connected, and the unsafe next is dropped: straight to Settings.
+    assert page.status_code == 303 and page.headers["location"] == "/settings#services"
     assert "evil.example" not in page.text
 
 
@@ -109,9 +110,9 @@ def test_fonts_are_cached(c) -> None:
 
 
 def test_a_stale_page_link_falls_back_to_the_first_page(owner_c) -> None:
-    stale = owner_c.get("/browse", params={"folder": "root", "page": "garbage"})
+    stale = owner_c.get("/files", params={"folder": "root", "page": "garbage"})
     assert stale.status_code == 303
-    assert stale.headers["location"] == "/browse?folder=root"
+    assert stale.headers["location"] == "/files?folder=root"
     assert owner_c.get(stale.headers["location"]).status_code == 200
 
 
@@ -119,8 +120,9 @@ def test_final_decisions_ask_first(owner_c) -> None:
     from scoped_drive_mcp.dashboard import TEMPLATES_DIR
 
     bridge = (TEMPLATES_DIR / "bridge.html").read_text()
+    wakeups = (TEMPLATES_DIR / "settings.html").read_text()
     request = (TEMPLATES_DIR / "request.html").read_text()
-    for template, action in ((bridge, "/deny"), (bridge, "/bridge/webhook"), (request, "/deny")):
+    for template, action in ((bridge, "/deny"), (wakeups, "/bridge/webhook"), (request, "/deny")):
         forms = [f for f in template.split("<form")[1:] if action in f.split(">")[0]]
         removing = [f for f in forms if "deny" in f.split(">")[0] or 'value="remove"' in f]
         assert removing and all("data-confirm=" in f.split(">")[0] for f in removing)

@@ -45,7 +45,7 @@ def test_two_assistants_on_one_account_can_pair_and_message() -> None:
         joined = box.request_link(OWNER_EMAIL, created["invite_code"])
     assert joined["status"] == "pending_approval"
     assert joined["peer_label"] == "Grok"
-    assert joined["approval_url"].endswith("/bridge")
+    assert joined["approval_url"].endswith("/sharing?tab=people")
 
     # One approval from the human turns it on.
     assert box.decide(OWNER_EMAIL, created["link_id"], "approve")["status"] == "active"
@@ -230,11 +230,13 @@ def test_dashboard_shows_assistant_names_and_one_approve(p2_app) -> None:
     link_id = _self_pair(box, approve=False)
     owner = client(p2_app)
     login(owner)
-    page = owner.get("/bridge")
+    page = owner.get("/sharing?tab=people")
     assert "Grok ↔ Claude" in page.text
     assert "pair two of your own assistants" in page.text
     assert page.text.count(f"/bridge/{link_id}/approve") == 1
-    done = owner.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/bridge")})
+    done = owner.post(
+        f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/sharing?tab=people")}
+    )
     assert done.status_code == 303
     assert box.list_links(OWNER_EMAIL)["links"][0]["status"] == "active"
 
@@ -313,7 +315,7 @@ def test_disabled_pending_pairing_can_still_be_ended(p2_app) -> None:
     box.self_pairing = lambda _email: False
     owner = client(p2_app)
     login(owner)
-    page = owner.get("/bridge")
+    page = owner.get("/sharing?tab=people")
     assert "Turned off by your organisation" in page.text
     assert f"/bridge/{link_id}/revoke" in page.text
 

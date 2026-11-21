@@ -60,8 +60,10 @@ from .humanize import (
     app_names,
     assistant_label,
     describe,
+    group_repeats,
     item_ids,
     matches,
+    parse_ts,
     when,
 )
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
@@ -126,7 +128,7 @@ SECURITY_HEADERS = [
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Searches per person per minute on "Shared with me". Each one reads every sharer's Drive.
 SHARED_SEARCH_LIMIT = 20
-# Folder lookups one Browse page may make to work out search-result paths and
+# Folder lookups one Files page may make to work out search-result paths and
 # folder-inherited access. Past this, the remaining rows say to open their folder.
 SEARCH_LOOKUPS = 40
 # Name matches shown for one Browse search. More than this and the page says to narrow it.
@@ -283,6 +285,48 @@ async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
 
 
+WAKE_HOME = "/settings#assistants"
+LIST_FIELDS = OWNER_FIELDS + ",modifiedTime"
+COVER_CHECK_LIMIT = 25
+
+
+def _dupes(rows: list[dict[str, Any]]) -> set[str]:
+    seen: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("name") or "").strip().casefold()
+        seen[key] = seen.get(key, 0) + 1
+    return {name for name, n in seen.items() if n > 1}
+
+
+def icon_kind(mime: str) -> str:
+    """Which small icon a row gets: folder, doc, sheet, slides, pdf, image, video, file."""
+    if mime == FOLDER_MIME:
+        return "folder"
+    if mime == SHORTCUT_MIME:
+        return "shortcut"
+    if mime.endswith(".document") or "wordprocessing" in mime or mime == "application/msword":
+        return "doc"
+    if (
+        mime.endswith(".spreadsheet")
+        or "spreadsheetml" in mime
+        or mime
+        in (
+            "application/vnd.ms-excel",
+            "text/csv",
+        )
+    ):
+        return "sheet"
+    if mime.endswith(".presentation") or "presentationml" in mime or "powerpoint" in mime:
+        return "slides"
+    if mime == "application/pdf":
+        return "pdf"
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    return "file"
+
+
 def safe_next(value: str | None) -> str:
     """A same-site path, else "/". Browsers drop tabs and newlines from a URL, so
     "/\t/evil.example" in a link would become "//evil.example"; refuse those too."""
@@ -388,6 +432,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     if reconsent is None:
         reconsent = getattr(request.state, "reconsent", False)
     ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
+    ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -946,6 +991,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if next_url.startswith("/connect"):
             next_url = "/"
         client_name = await blocking(waiting_client, next_url)
+        if any(r["connected"] for r in rows) and next_url == "/" and not client_name:
+            # Set up already: the services list lives in Settings now.
+            return RedirectResponse("/settings#services", status_code=303)
         return render(
             request,
             "connect.html",
@@ -1022,6 +1070,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "connections": ctx.connection_rows(),
                 "allow_count": len(entries),
                 "grants": (ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []),
+                "missing_wakeups": (
+                    ctx.mailbox.missing_wakeups(str(current_actor.get() or ""))
+                    if ctx.mailbox is not None
+                    else []
+                ),
                 **people_summary(str(current_actor.get() or "")),
             }
 
@@ -1087,7 +1140,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if q:
             term = clean_search_text(q)
             query = f"trashed=false and name contains '{term}'"
-            resp = drive.list_files(query, fields=OWNER_FIELDS, page_size=SEARCH_PAGE)
+            resp = drive.list_files(query, fields=LIST_FIELDS, page_size=SEARCH_PAGE)
             items = resp.get("files", [])
             more_matches = bool(resp.get("nextPageToken"))
         else:
@@ -1134,7 +1187,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             else:
                 query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
-                query, fields=OWNER_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
+                query, fields=LIST_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
             )
             items = resp.get("files", [])
             # Drive's parents filter can echo a file that merely mentions the folder.
@@ -1255,6 +1308,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "is_shortcut": is_shortcut,
                     "target": target,
                     "kind": describe_mime(mime),
+                    "icon": icon_kind(mime),
+                    "modified": item.get("modifiedTime"),
                     "link": item.get("webViewLink"),
                     "path": path,
                     "parent_id": parent_id,
@@ -1267,6 +1322,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
         return {
             "rows": rows,
+            # Same-named rows ("Untitled document" three times) show when each changed.
+            "dupes": _dupes(rows),
             "crumbs": crumbs,
             "covered_by": covered_by,
             "covered_id": covered_id,
@@ -1315,7 +1372,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     first["q"] = q
                 if picking:
                     first["request"] = picking.id
-                return RedirectResponse(f"/browse?{urlencode(first)}", status_code=303)
+                return RedirectResponse(f"/files?{urlencode(first)}", status_code=303)
             data = {
                 "rows": [],
                 "crumbs": [{"id": "root", "name": "My Drive"}],
@@ -1337,9 +1394,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             prev=prev,
             next_token=data.get("next_token"),
         )
+        email = str(current_actor.get() or "")
+        has_pairing = bool(
+            ctx.mailbox is not None
+            and ctx.ext_allowlist is not None
+            and await blocking(ctx.mailbox.active_peers, email)
+        )
         return render(
             request,
             "browse.html",
+            has_pairing=has_pairing,
             q=q,
             folder=folder,
             picking=picking,
@@ -1553,7 +1617,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         q = (request.query_params.get("q") or "").strip()
         if not q:
-            return RedirectResponse("/shared", status_code=303)
+            return RedirectResponse("/sharing?tab=with-me", status_code=303)
         allowed = await blocking(
             allow, ctx.store, "shared_search", "user:" + email, SHARED_SEARCH_LIMIT, 60
         )
@@ -1637,9 +1701,28 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
+
+        def overlaps() -> dict[str, str]:
+            # An entry inside another allowed folder: removing it alone changes nothing,
+            # so the list says so. Bounded, since each check walks up the folder tree.
+            found: dict[str, str] = {}
+            if not data["drive_connected"] or len(rows) < 2:
+                return found
+            grants = ctx.grants()
+            for entry in rows[:COVER_CHECK_LIMIT]:
+                try:
+                    cover = grants.covering_entry(entry.id)
+                except Exception:
+                    return found
+                if cover and cover[0] != entry.id:
+                    found[entry.id] = cover[1]
+            return found
+
+        covered = await blocking(overlaps)
         return render(
             request,
             "access.html",
+            covered=covered,
             rows=rows,
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
@@ -1766,7 +1849,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         target = form.get("target_id") or req.file_id
         if not target:
             flash(request, "error", "Pick an item to share first.")
-            return RedirectResponse(f"/browse?request={quote(req.id)}", status_code=303)
+            return RedirectResponse(f"/files?request={quote(req.id)}", status_code=303)
         try:
             entry = await blocking(ctx.grants().approve, req, validate_drive_id(target))
             flash(request, "ok", f"Approved: shared \u201c{entry.name}\u201d with the assistant.")
@@ -1856,7 +1939,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return render(
             request,
             "activity.html",
-            rows=page_rows,
+            rows=group_repeats(page_rows),
             total=len(records),
             more_href=href(show=limit + ACTIVITY_PAGE) if len(shown_ids) > limit else None,
             view=view,
@@ -1887,10 +1970,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         rows: list[dict[str, Any]] = []
         for person in ctx.directory.known_users():
             grants = ctx.mcp_oauth.list_grants(person) if ctx.mcp_oauth else []
+            # The sign-in index is newer than some accounts, so its date can be later
+            # than an app the person connected. Show the earliest date we know of.
+            known = [ctx.directory.created_at(person), *(g.created_at for g in grants)]
+            moments = [(parse_ts(v), v) for v in known if v]
+            earliest = min((m for m in moments if m[0] is not None), default=None)
             rows.append(
                 {
                     "email": person,
-                    "created_at": ctx.directory.created_at(person),
+                    "created_at": earliest[1] if earliest else None,
                     "grants": grants,
                 }
             )
@@ -2040,19 +2128,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
         return _completion_page(url)
 
-    async def bridge_page(request: Request) -> Response:
-        if ctx.mailbox is None:
-            return render(request, "error.html", 404, message="The mailbox is not configured.")
-        email = str(request.session.get("owner") or "")
-        data = await blocking(ctx.mailbox.list_links, email)
-        data["webhook"] = await blocking(ctx.mailbox.get_webhook, email, "")
-        # Each connected app has its own wake-up slot; the account one is for mail from
-        # other people. Names come from the app list, so a removed app shows no slot.
-        apps = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
-        # Two connections can share a name (two "Cursor"s), so each choice also says
-        # which of your assistants it is paired with, when it was added and last used.
+    def assistant_rows(email: str, links: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Connected assistants with their wake-up, for Settings. Two connections can share
+        a name (two "Cursor"s), so each row also says which of your assistants it is
+        paired with, when it was added and last used, and a short id that never changes."""
+        box = ctx.mailbox
+        grants = ctx.mcp_oauth.list_grants(email) if ctx.mcp_oauth else []
+        if links is None:
+            links = box.list_links(email)["links"] if box is not None else []
         paired: dict[str, str] = {}
-        for link in data["links"]:
+        for link in links:
             if not link.get("same_account") or link["status"] not in (
                 "active",
                 "pending_approval",
@@ -2061,23 +2146,37 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             (grant_a, grant_b), (label_a, label_b) = link["grant_ids"], link["assistants"]
             paired.setdefault(str(grant_a), label_b)
             paired.setdefault(str(grant_b), label_a)
-        data["apps"] = [
-            {
-                "id": g.id,
-                "name": g.client_name,
-                "created_at": g.created_at,
-                "last_used": g.last_used,
-                "paired_with": paired.get(g.id),
-            }
-            for g in apps
-        ]
-        primary = await blocking(ctx.mailbox.get_primary, email)
-        data["primary"] = primary if primary in {g.id for g in apps} else None
-        data["app_hooks"] = []
-        for app in data["apps"]:
-            hook = await blocking(ctx.mailbox.get_webhook, email, app["id"])
-            if hook.get("configured"):
-                data["app_hooks"].append({**hook, "app": app})
+        wake_on = box is not None and bool(box.get_webhook(email, "").get("available"))
+        missing = {row["grant_id"]: row for row in box.missing_wakeups(email)} if wake_on else {}
+        rows = []
+        for g in grants:
+            rows.append(
+                {
+                    "id": g.id,
+                    "short_id": g.id[-5:],
+                    "name": g.client_name,
+                    "created_at": g.created_at,
+                    "last_used": g.last_used,
+                    "paired_with": paired.get(g.id),
+                    "hook": box.get_webhook(email, g.id) if wake_on else None,
+                    "missing": missing.get(g.id),
+                }
+            )
+        primary = box.get_primary(email) if box is not None else None
+        return {
+            "assistants": rows,
+            "wake_on": wake_on,
+            "account_hook": box.get_webhook(email, "") if wake_on else None,
+            "primary": primary if primary in {g.id for g in grants} else None,
+            "missing_wakeups": list(missing.values()),
+        }
+
+    async def bridge_page(request: Request) -> Response:
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="Pairing is not configured.")
+        email = str(request.session.get("owner") or "")
+        data = await blocking(ctx.mailbox.list_links, email)
+        data["missing_wakeups"] = await blocking(ctx.mailbox.missing_wakeups, email)
         data["self_pairing"] = await blocking(ctx.mailbox.self_pairing, email)
         # Approving a pairing lets that person's assistant read the Sharing list, so each
         # card that asks for approval says what that list holds right now.
@@ -2089,7 +2188,58 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             data["shared_items"] = sorted(
                 entries.values(), key=lambda e: e.granted_at, reverse=True
             )
-        return render(request, "bridge.html", **data)
+        return render(request, "bridge.html", tab="people", **data)
+
+    async def settings_page(request: Request) -> Response:
+        email = str(request.session.get("owner") or "")
+
+        def gather() -> dict[str, Any]:
+            return {
+                "rows": ctx.connection_rows(),
+                **assistant_rows(email),
+            }
+
+        data = await blocking(gather)
+        return render(
+            request,
+            "settings.html",
+            mcp_url=f"{settings.app_base_url}/mcp",
+            drive_connected=any(r["connected"] for r in data["rows"]),
+            next="/settings",
+            missing=settings.missing_settings(),
+            store_kind=getattr(ctx.store, "kind", "custom"),
+            root_folder_id=ctx.visible_root_folder_id(),
+            picker_ready=settings.picker_configured,
+            env_token_set=bool(
+                settings.env_bot_refresh_token and session_user(request) == settings.owner_email
+            ),
+            **data,
+        )
+
+    async def files_page(request: Request) -> Response:
+        request.state.allow_count = len(await blocking(ctx.allowlist.entries))
+        if request.query_params.get("tab") == "allowed":
+            return await access(request)
+        return await browse(request)
+
+    async def sharing_hub(request: Request) -> Response:
+        tab = request.query_params.get("tab") or "people"
+        if tab == "by-me":
+            return await sharing(request)
+        if tab == "with-me":
+            return await shared_overview(request)
+        return await bridge_page(request)
+
+    def moved(path: str, **extra: str) -> Handler:
+        """An old address. Keep its query string so bookmarks and links still land."""
+
+        async def go(request: Request) -> Response:
+            params = [(k, v) for k, v in request.query_params.multi_items() if k not in extra]
+            params = [*extra.items(), *params]
+            target = path + (f"?{urlencode(params)}" if params else "")
+            return RedirectResponse(target, status_code=308)
+
+        return go
 
     def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
         email = str(request.session.get("owner") or "")
@@ -2155,26 +2305,51 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(request, "error", exc.message)
         else:
             flash(request, "ok", message)
-        return RedirectResponse("/bridge", status_code=303)
+        return RedirectResponse("/sharing?tab=people", status_code=303)
 
     async def bridge_webhook(request: Request, form: dict[str, str]) -> Response:
         if ctx.mailbox is None:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         email = str(request.session.get("owner") or "")
-        # "" is the account-wide slot; otherwise one of this person's connected apps.
-        app = (form.get("app") or "").strip()
+        back = safe_next(form.get("next") or WAKE_HOME)
+        # "account" (or "" from older pages) is the account-wide slot, a fallback for mail
+        # from other people only; otherwise one of this person's connected apps.
+        raw_app = (form.get("app") or "").strip()
+        app = "" if raw_app == "account" else raw_app
         from_app = (form.get("from_app") or "").strip()
-        if app or from_app:
-            grants = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
-            ids = {g.id for g in grants}
-            if (app and app not in ids) or (from_app and from_app not in ids):
-                flash(request, "error", "That app is not connected.")
-                return RedirectResponse("/bridge", status_code=303)
+        from_app = "" if from_app == "account" else from_app
+        action = form.get("action")
+        grants = await blocking(ctx.mcp_oauth.list_grants, email) if ctx.mcp_oauth else []
+        ids = {g.id for g in grants}
+        if (app and app not in ids) or (from_app and from_app not in ids):
+            flash(request, "error", "That app is not connected.")
+            return RedirectResponse(back, status_code=303)
+        if action in (None, "", "save") and ids and not raw_app:
+            # The old form defaulted to the account slot, which never fires for mail
+            # between your own assistants. Make the person say which assistant it starts.
+            flash(request, "error", "Choose which assistant this wake-up starts.")
+            return RedirectResponse(back, status_code=303)
         try:
-            action = form.get("action")
             if action == "remove":
                 await blocking(ctx.mailbox.clear_webhook, email, app)
                 flash(request, "ok", "Wake-up removed. Mail still waits for check_messages.")
+            elif action == "test":
+                result = await blocking(ctx.mailbox.test_webhook, email, app)
+                if result.get("ok"):
+                    flash(
+                        request,
+                        "ok",
+                        f"Test wake sent (HTTP {result.get('http')}). The assistant should "
+                        "start in a few seconds and find no new mail.",
+                    )
+                else:
+                    code = f" (HTTP {result['http']})" if result.get("http") else ""
+                    flash(
+                        request,
+                        "error",
+                        f"Test wake failed{code}: {result.get('error')}. Check the URL and "
+                        "key in the assistant that gave them to you, then save them again.",
+                    )
             elif action == "primary":
                 await blocking(ctx.mailbox.set_primary, email, app)
                 flash(
@@ -2198,19 +2373,26 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     enabled=enabled,
                     app=app,
                 )
-                flash(request, "ok", "Wake-up saved. The key is not shown again.")
+                flash(request, "ok", "Wake-up saved. Use Send test wake to check it works.")
         except MailboxError as exc:
             flash(request, "error", exc.message)
-        return RedirectResponse("/bridge", status_code=303)
+        return RedirectResponse(back, status_code=303)
 
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
             ctx.mcp_oauth.revoke, grant_id, email=str(request.session.get("owner") or "")
         ):
-            return action_done(request, "error", "That connection was not found.", "/")
+            return action_done(
+                request, "error", "That connection was not found.", "/settings#assistants"
+            )
         audit_owner("oauth_revoke")
-        return action_done(request, "ok", "Disconnected the app. Its tokens no longer work.", "/")
+        return action_done(
+            request,
+            "ok",
+            "Disconnected the assistant. Its tokens no longer work.",
+            "/settings#assistants",
+        )
 
     async def confirm_js(_: Request) -> Response:
         return Response(
@@ -2218,8 +2400,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             b"var f=e.target;if(!f||!f.getAttribute)return;"
             # ui.js asks for confirmation itself on background (data-async) forms.
             b"if(window.__asyncForms&&f.hasAttribute('data-async'))return;"
-            b"var m=f.getAttribute('data-confirm');"
-            b"if(m&&!window.confirm(m))e.preventDefault();});",
+            b"var m=f.getAttribute('data-confirm');if(!m)return;"
+            b"if(f.__confirmed){f.__confirmed=false;return;}"
+            b"e.preventDefault();var s=e.submitter;"
+            # ui.js's in-page dialog when it loaded, else the browser's own confirm().
+            b"var ask=window.__askConfirm||function(x){"
+            b"return Promise.resolve(window.confirm(x.getAttribute('data-confirm')));};"
+            b"ask(f).then(function(ok){if(!ok)return;f.__confirmed=true;"
+            b"if(f.requestSubmit)f.requestSubmit(s||undefined);else f.submit();});});",
             media_type="text/javascript",
             headers={"cache-control": "no-store"},
         )
@@ -2234,15 +2422,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/connect/{key}/disconnect", csrf_protected(connect_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", safely(home), methods=["GET"]),
-        Route("/browse", owner_only(browse), methods=["GET"]),
+        Route("/files", owner_only(files_page), methods=["GET"]),
+        Route("/browse", moved("/files"), methods=["GET"]),
         Route("/picker/session", owner_only(picker_session), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
-        Route("/access", owner_only(access), methods=["GET"]),
-        Route("/sharing", owner_only(sharing), methods=["GET"]),
+        Route("/access", moved("/files", tab="allowed"), methods=["GET"]),
+        Route("/sharing", owner_only(sharing_hub), methods=["GET"]),
+        Route("/settings", owner_only(settings_page), methods=["GET"]),
         Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
         Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
-        Route("/shared", owner_only(shared_overview), methods=["GET"]),
+        Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
         Route("/shared/open", owner_only(shared_open), methods=["GET"]),
@@ -2252,7 +2442,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
         Route("/requests/{rid}/deny", csrf_protected(request_deny), methods=["POST"]),
         Route("/activity", owner_only(activity), methods=["GET"]),
-        Route("/bridge", owner_only(bridge_page), methods=["GET"]),
+        Route("/bridge", moved("/sharing", tab="people"), methods=["GET"]),
         Route("/bridge/webhook", csrf_protected(bridge_webhook), methods=["POST"]),
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", safely(admin_page), methods=["GET"]),
@@ -2316,7 +2506,7 @@ def browse_href(
             pairs.append(("prev", item))
     if request_id:
         pairs.append(("request", request_id))
-    return "/browse?" + urlencode(pairs)
+    return "/files?" + urlencode(pairs)
 
 
 def browse_pager(
@@ -2487,3 +2677,4 @@ _env.globals["shared_href"] = shared_href
 _env.globals["human_size"] = human_size
 _env.globals["assistant_label"] = assistant_label
 _env.filters["when"] = when
+_env.globals["icon_kind"] = icon_kind

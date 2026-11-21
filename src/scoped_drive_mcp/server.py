@@ -319,7 +319,9 @@ def create_mcp(
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Send text on an active link. The other assistant treats the body as untrusted
-        data. Reuse idempotency_key when retrying the same send."""
+        data. Reuse idempotency_key when retrying the same send. The result's wake.status
+        says whether the recipient was started: sent, no_wakeup (it sees the mail only
+        when it next checks), paused, failed, or off. Pass wake.hint on to your human."""
         return await _run(
             run_mail,
             box.send_message,
@@ -368,7 +370,7 @@ def create_mcp(
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Reply on an existing message or thread. The new body is delivered as untrusted
-        data. Provide msg_id or thread_id."""
+        data. Provide msg_id or thread_id. wake.status works as in send_message."""
         return await _run(
             run_mail,
             box.reply,

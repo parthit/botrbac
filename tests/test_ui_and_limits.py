@@ -104,7 +104,7 @@ def test_browse_sends_opaque_page_token(owner_c, monkeypatch) -> None:
     monkeypatch.setattr(FakeDrive, "list_files", wrapped)
     monkeypatch.setattr("scoped_drive_mcp.dashboard.BROWSE_PAGE_SIZE", 1)
     token = "Cjx~!*|token"
-    page = owner_c.get("/browse", params={"folder": "root", "page": token})
+    page = owner_c.get("/files", params={"folder": "root", "page": token})
     assert page.status_code == 200
     assert token in seen
     nxt = re.search(r'href="([^"]+)">Next</a>', page.text)
@@ -130,7 +130,7 @@ def test_picker_button_keeps_folder_and_request(world, memstore, oauth) -> None:
     assert login(signed_in).status_code == 303
     denied = mcp_call(signed_in, "read_file", file_id="priv-secret")
     request_id = denied["structuredContent"]["request_id"]
-    page = signed_in.get("/browse", params={"folder": "proj", "request": request_id})
+    page = signed_in.get("/files", params={"folder": "proj", "request": request_id})
     assert page.status_code == 200
     button = re.search(r"<button[^>]*id=\"pick-drive\"[^>]*>", page.text)
     assert button, page.text
@@ -185,7 +185,7 @@ def test_request_page_picker_approves_an_unopened_file(world, memstore, oauth) -
 
 def test_browse_previous_and_next(owner_c, monkeypatch) -> None:
     monkeypatch.setattr("scoped_drive_mcp.dashboard.BROWSE_PAGE_SIZE", 1)
-    first = owner_c.get("/browse")
+    first = owner_c.get("/files")
     assert first.status_code == 200
     assert 'aria-disabled="true">Previous' in first.text
     match = re.search(r'href="([^"]+)">Next</a>', first.text)
@@ -209,7 +209,7 @@ def test_narrow_token_shows_reconsent(owner_c, p2_app) -> None:
     )
     page = owner_c.get("/").text
     assert 'id="reconsent"' in page
-    assert "Reconnect Google Drive" in page and 'href="/connect"' in page
+    assert "Reconnect Google Drive" in page and 'href="/settings#connection-google_drive"' in page
     vault.set_owner(record["t"], record["email"])
     assert 'id="reconsent"' in owner_c.get("/").text
     vault.set_owner(

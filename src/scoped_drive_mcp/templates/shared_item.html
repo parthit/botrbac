@@ -2,7 +2,7 @@
 {% block title %}{{ doc.node.name or "Item" }} · Shared with me{% endblock %}
 {% block content %}
 <p class="crumbs">
-  <a href="/shared">Shared with me</a><span class="sep">/</span>
+  <a href="/sharing?tab=with-me">Shared with me</a><span class="sep">/</span>
   <a href="{{ shared_href('browse', source.key, shared_owner) }}">{{ shared_owner }} · {{ source.name }}</a>
   {% for c in doc.path %}
     <span class="sep">/</span><a href="{{ shared_href('browse', source.key, shared_owner, c.id) }}">{{ c.name or c.id }}</a>

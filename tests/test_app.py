@@ -154,7 +154,7 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
         assert "do-not-leak-this" not in r.text
         assert "API_TOKENS" not in r.text and "problems" not in r.text
         assert (await c.post("/mcp", json=INIT)).status_code == 503
-        assert (await c.get("/browse")).status_code == 503
+        assert (await c.get("/files")).status_code == 503
         assert (await c.get("/terms")).status_code == 200
         assert (await c.get("/privacy")).status_code == 200
 

@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% from "_icons.html" import file_icon %}
 {% block title %}Search · Shared with me{% endblock %}
 {% block content %}
 {% include "_shared_search.html" %}
-<p class="crumbs"><a href="/shared">Shared with me</a><span class="sep">/</span><b>Search</b></p>
+<p class="crumbs"><a href="/sharing?tab=with-me">Shared with me</a><span class="sep">/</span><b>Search</b></p>
 <h1>Results for “{{ results.query }}”</h1>
 <p class="muted">Names and text in everything people you are paired with share with you.
   {{ results.count }} match{{ "" if results.count == 1 else "es" }}.</p>
@@ -18,7 +19,7 @@
     {% set n = h.node %}
     <li class="file">
       <div class="file-name">
-        <span class="file-icon" aria-hidden="true">{% if n.is_container %}📁{% else %}📄{% endif %}</span>
+        {{ file_icon("folder" if n.is_container else icon_kind(n.mime_type or "")) }}
         {% if n.is_container %}<a href="{{ shared_href('browse', g.source.key, g.owner, n.id) }}">{{ n.name or n.id }}</a>
         {% else %}<a href="{{ shared_href('open', g.source.key, g.owner, n.id) }}">{{ n.name or n.id }}</a>{% endif %}
       </div>

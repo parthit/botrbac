@@ -33,7 +33,7 @@ def sign_in(c: TestClient, code: str = "owner-code", path: str = "/auth/login"):
 
 def connect_drive(c: TestClient, code: str = "owner-code", next_url: str = "/"):
     """Step 2: the explicit Connect Google Drive button on /connect."""
-    token = csrf(c, "/connect")
+    token = csrf(c, "/settings")
     state = start_oauth(c, "/connect/google_drive", csrf=token, next=next_url)
     return c.get("/auth/callback", params={"code": code, "state": state})
 

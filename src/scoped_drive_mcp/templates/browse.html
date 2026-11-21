@@ -1,22 +1,25 @@
 {% extends "base.html" %}
-{% block title %}Browse{% endblock %}
+{% from "_tabs.html" import files_tabs %}
+{% from "_icons.html" import file_icon %}
+{% block title %}Files{% endblock %}
 {% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
-<h1>Your Google Drive</h1>
-<p class="muted">Allow the items your assistant may use. A folder you allow includes the files inside it. Files the assistant creates in an allowed folder are included.</p>
+<h1>Files</h1>
+{{ files_tabs('all', allow_count) }}
+<p class="muted lead">Allow the files and folders your assistant may use. An allowed folder includes everything inside it, and files the assistant creates there.</p>
 {% if picking %}
 <div class="warn">Choosing an item for this request:
   <b>{{ picking.description or picking.file_name or "a file the assistant asked for" }}</b>.
-  Choose <b>Share for this request</b> next to the right item.
+  Choose <b>Allow for this request</b> next to the right item.
   <a href="/requests/{{ picking.id }}">Back to the request</a>
 </div>
 {% endif %}
-<form method="get" action="/browse" class="actions" role="search">
+<form method="get" action="/files" class="actions" role="search">
   {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
   <label class="sr-only" for="q">Search names</label>
   <input id="q" type="search" name="q" value="{{ q or '' }}" placeholder="Search names in your Drive">
   <button type="submit">Search</button>
-  {% if q %}<a href="/browse?folder=root{{ keep('') }}">Clear search</a>{% endif %}
+  {% if q %}<a href="/files?folder=root{{ keep('') }}">Clear search</a>{% endif %}
   {% if picker_ready %}
   <button type="button" class="primary" id="pick-drive" data-next="{{ here }}"{% if picking %} data-request="{{ picking.id }}"{% endif %}>Add from Google Drive</button>
   {% endif %}
@@ -24,9 +27,10 @@
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>
 
 {% if not q %}
+{% if current and not is_root %}<h2 class="folder-title">{{ file_icon("folder") }} {{ crumbs[-1].name }}</h2>{% endif %}
 <p class="crumbs">
   {% for c in crumbs %}
-    {% if not loop.last %}<a href="/browse?folder={{ c.id | urlencode }}{{ keep('') }}">{{ c.name }}</a><span class="sep">/</span>
+    {% if not loop.last %}<a href="/files?folder={{ c.id | urlencode }}{{ keep('') }}">{{ c.name }}</a><span class="sep">/</span>
     {% else %}<b>{{ c.name }}</b>{% endif %}
   {% endfor %}
   {% if current and not is_root %}
@@ -36,7 +40,7 @@
   {% endif %}
 </p>
 {% if covered_by %}
-<div class="actions">
+<div class="actions covered">
   <p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed.</p>
   {% if covered_id and not picking %}
   <form class="inline" method="post" action="/revoke" data-confirm="Remove “{{ covered_by }}” and everything in it from the assistant?">
@@ -48,7 +52,7 @@
   {% endif %}
 </div>
 {% endif %}
-{% if shared_by %}<p class="muted">Everything in this folder can be read by the assistants of people you are paired with, because “{{ shared_by }}” is on your <a href="/sharing">Sharing</a> list.</p>{% endif %}
+{% if shared_by %}<p class="muted">Everything in this folder can be read by the assistants of people you are paired with, because “{{ shared_by }}” is on your <a href="/sharing?tab=by-me">Shared by me</a> list.</p>{% endif %}
 {% else %}
 <p class="muted">Search results for “{{ q }}”.</p>
 {% endif %}
@@ -59,7 +63,7 @@
   {% if picker_ready %}
   <p>Use <b>Add from Google Drive</b> and choose the document. A file created in Google Docs stays closed to this app until you choose it. Choosing it is what lets the assistant open it.</p>
   {% else %}
-  <p>Reload the page to try again. If this keeps happening, reconnect Google Drive on <a href="/connect">Connections</a>.</p>
+  <p>Reload the page to try again. If this keeps happening, reconnect Google Drive in <a href="/settings#services">Settings</a>.</p>
   {% endif %}
 </div>
 {% elif rows %}
@@ -72,14 +76,15 @@
   {%- set t = r.target %}
   <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}" data-acts-on="{{ r.acts_on }}">
     <div class="file-name">
-      <span class="file-icon" aria-hidden="true">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
-      {% if r.is_folder %}<a href="/browse?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}</a>
+      {{ file_icon(r.icon or ("folder" if r.is_folder else "file")) }}
+      {% if r.is_folder %}<a class="folder-link" href="/files?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}<span class="chev" aria-hidden="true">›</span></a>
       {% elif r.link %}<a href="{{ r.link }}" target="_blank" rel="noopener noreferrer">{{ r.name }}</a>
       {% else %}{{ r.name }}{% endif %}
-      {% if r.path %}<span class="muted file-path">in <a href="/browse?folder={{ r.parent_id | urlencode }}{{ keep('') }}">{{ r.path }}</a></span>{% endif %}
+      {% if r.path %}<span class="muted file-path">in <a href="/files?folder={{ r.parent_id | urlencode }}{{ keep('') }}">{{ r.path }}</a></span>{% endif %}
     </div>
     <div class="file-meta">
       <span>{{ r.kind }}</span>
+      {% if r.modified and (r.name | trim | lower) in dupes %}<span>changed {{ r.modified | when }}</span>{% endif %}
       {% if t %}
       {#- The file name stays outside the pill, which is set in capitals. -#}
       <span class="pill ok" data-access-when="on"{% if not r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Target allowed:</span>
@@ -87,13 +92,14 @@
       {% else %}<span class="pill" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">–</span> Target not allowed:</span>{% endif %}
       <span class="shortcut-target">{{ t.name }} (in {{ t.folder }}{% if t.elsewhere %}, a different folder{% endif %})</span>
       {% else %}
-      <span class="pill ok" data-access-when="on"{% if not r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed</span>
-      {% if r.covered_by %}<span class="pill ok" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed via folder “{{ r.covered_by }}”</span>
-      {% elif r.unsure %}<span class="muted" data-access-when="off"{% if r.granted %} hidden{% endif %}>Open its folder to check whether a folder already allows it.</span>
-      {% else %}<span class="pill" data-access-when="off"{% if r.granted %} hidden{% endif %}><span aria-hidden="true">–</span> Not allowed</span>{% endif %}
+      {#- "Not allowed" is the quiet default: no pill. One pattern for inherited access. -#}
+      {% if r.covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed via folder “{{ r.covered_by }}”</span>
+      {% else %}<span class="pill ok" data-access-when="on"{% if not r.granted %} hidden{% endif %}><span aria-hidden="true">✓</span> Allowed</span>
+      {% if r.unsure %}<span class="muted" data-access-when="off"{% if r.granted %} hidden{% endif %}>Open its folder to check whether a folder already allows it.</span>
+      {% else %}<span class="sr-only" data-access-when="off"{% if r.granted %} hidden{% endif %}>Not allowed</span>{% endif %}
       {% endif %}
-      {% if r.granted and r.covered_by %}<span class="muted" data-access-when="on">Also included through “{{ r.covered_by }}”.</span>{% endif %}
-      <span class="pill ok" data-share-when="on"{% if not r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared with paired people</span>
+      {% endif %}
+      <span class="pill ok" data-share-when="on"{% if not r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared</span>
       {% if r.shared_by %}<span class="pill ok" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared via folder “{{ r.shared_by }}”</span>{% endif %}
     </div>
     <div class="file-actions">
@@ -103,7 +109,7 @@
         <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="target_id" value="{{ r.id }}">
-          <button class="primary" type="submit">Share for this request<span class="sr-only"> {{ r.name }}</span></button>
+          <button class="primary" type="submit">Allow for this request<span class="sr-only"> {{ r.name }}</span></button>
         </form>
       {% else %}
         {#- Under an allowed folder the item stays available after Remove, so the confirm
@@ -122,6 +128,7 @@
           <button type="submit">{{ "Allow the target" if r.is_shortcut else "Allow" }}<span class="sr-only"> {{ r.name }}</span></button>
         </form>
         {% endif %}
+        {% if has_pairing or r.ext_shared or r.shared_by %}
         <form class="inline" method="post" action="/sharing/remove" data-async data-flip="share" data-share-when="on" data-confirm="{% if r.shared_by %}Stop sharing this item on its own? It stays shared through “{{ r.shared_by }}”.{% else %}Stop sharing this with other people’s assistants?{% endif %}"{% if not r.ext_shared %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.acts_on }}">
@@ -133,8 +140,9 @@
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">
-          <button type="submit">{{ "Share the target with paired people" if r.is_shortcut else "Share with paired people" }}<span class="sr-only"> {{ r.name }}</span></button>
+          <button type="submit">{{ "Share the target" if r.is_shortcut else "Share" }}<span class="sr-only"> {{ r.name }} with paired people</span></button>
         </form>
+        {% endif %}
         {% endif %}
       {% endif %}
     </div>
@@ -148,7 +156,7 @@
 <div class="card empty">
   <h2>No names match “{{ q }}”</h2>
   <p>Try a shorter name, or clear the search and pick a file from Google Drive.</p>
-  <p><a class="btn" href="/browse?folder=root{{ keep('') }}">Clear search</a></p>
+  <p><a class="btn" href="/files?folder=root{{ keep('') }}">Clear search</a></p>
 </div>
 {% else %}
 <div class="card empty">

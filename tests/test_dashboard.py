@@ -22,9 +22,11 @@ from tests.dash import (
 )
 
 OWNER_PAGES = [
-    "/browse",
-    "/browse?folder=proj",
-    "/access",
+    "/files",
+    "/files?folder=proj",
+    "/files?tab=allowed",
+    "/sharing",
+    "/settings",
     "/requests",
     "/activity",
     "/requests/" + "A" * 32,
@@ -59,6 +61,21 @@ def test_logged_out_pages_redirect_to_login(c, page: str) -> None:
     r = c.get(page)
     assert r.status_code == 303
     assert r.headers["location"].startswith("/login?next=")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("/browse", "/files"),
+        ("/browse?folder=proj&q=x", "/files?folder=proj&q=x"),
+        ("/access", "/files?tab=allowed"),
+        ("/shared", "/sharing?tab=with-me"),
+        ("/bridge", "/sharing?tab=people"),
+    ],
+)
+def test_old_addresses_redirect_to_the_new_pages(c, old: str, new: str) -> None:
+    r = c.get(old)
+    assert r.status_code == 308 and r.headers["location"] == new
 
 
 @pytest.mark.parametrize("path", OWNER_POSTS)
@@ -122,7 +139,7 @@ def test_owner_login(c, oauth, memstore, p2_app) -> None:
     vault = p2_app.state.dashboard.vault
     assert vault.owner()["t"] == f"rt-{OWNER_EMAIL}"
     # and used for the owner's Drive
-    assert c.get("/browse").status_code == 200
+    assert c.get("/files").status_code == 200
     assert p2_app.state.owner_tokens[-1] == f"rt-{OWNER_EMAIL}"
 
 
@@ -154,7 +171,7 @@ def test_unverified_account_cannot_sign_in(c, oauth, memstore) -> None:
     r = login(c, "unverified-owner-code")
     assert r.status_code == 403
     assert "not allowed" in r.text
-    assert c.get("/browse").status_code == 303  # still logged out
+    assert c.get("/files").status_code == 303  # still logged out
     assert memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY) is None
     assert oauth.revoked  # the unwanted token was revoked
 
@@ -162,7 +179,7 @@ def test_unverified_account_cannot_sign_in(c, oauth, memstore) -> None:
 def test_second_verified_account_can_sign_in(c, memstore, p2_app) -> None:
     r = login(c, "eve-code")
     assert r.status_code == 303
-    assert c.get("/browse").status_code == 200
+    assert c.get("/files").status_code == 200
     # The admin's legacy key stays empty; eve's token is under her prefix.
     assert memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY) is None
     raw = memstore.get(KEY_PREFIX + "u:eve@example.com:" + OWNER_TOKEN_KEY)
@@ -218,7 +235,7 @@ def test_login_hint_is_only_the_visitors(c, oauth) -> None:
 def test_logout(owner_c) -> None:
     r = post(owner_c, "/logout")
     assert r.status_code == 303
-    assert owner_c.get("/browse").status_code == 303
+    assert owner_c.get("/files").status_code == 303
 
 
 # HTML form POST is a non-cors navigation. These policies leave Origin as the
@@ -263,7 +280,7 @@ def test_logout_form_post_as_the_browser(owner_c) -> None:
     home = owner_c.get("/")
     assert home.status_code == 200 and "Privacy policy" in home.text
     assert "Sign out" not in home.text
-    assert owner_c.get("/browse").headers["location"].startswith("/login")
+    assert owner_c.get("/files").headers["location"].startswith("/login")
 
     login(owner_c)
     denied = owner_c.post("/logout", headers={"Origin": origin})
@@ -286,7 +303,7 @@ def test_session_for_other_owner_is_ignored(p2_app, world, memstore, oauth) -> N
     )
     c2 = client(other)
     c2.cookies.set(SESSION_COOKIE, cookie)
-    assert c2.get("/browse").status_code == 303
+    assert c2.get("/files").status_code == 303
 
 
 # ---- bot connection ----------------------------------------------------------------
@@ -407,18 +424,18 @@ def test_dashboard_cookie_does_not_open_mcp(owner_c) -> None:
 
 
 def test_browse_my_drive(owner_c) -> None:
-    r = owner_c.get("/browse")
+    r = owner_c.get("/files")
     assert r.status_code == 200
     for name in ("Projects", "Private", "Loose memo"):
         assert name in r.text
     assert "secret from eve" not in r.text  # not in the owner's Drive
-    r = owner_c.get("/browse?folder=proj-sub")
+    r = owner_c.get("/files?folder=proj-sub")
     assert "Deep roadmap" in r.text
-    assert 'href="/browse?folder=proj"' in r.text  # breadcrumb
-    r = owner_c.get("/browse?q=memo")
+    assert 'href="/files?folder=proj"' in r.text  # breadcrumb
+    r = owner_c.get("/files?q=memo")
     assert "Loose memo" in r.text and "Second memo" in r.text and "Projects" not in r.text
-    assert owner_c.get("/browse?folder=bad id").status_code == 400
-    assert owner_c.get("/browse?folder=proj-notes").status_code == 400
+    assert owner_c.get("/files?folder=bad id").status_code == 400
+    assert owner_c.get("/files?folder=proj-notes").status_code == 400
 
 
 def test_browse_when_my_drive_root_is_hidden(owner_c, monkeypatch) -> None:
@@ -433,7 +450,7 @@ def test_browse_when_my_drive_root_is_hidden(owner_c, monkeypatch) -> None:
         return real(self, file_id, fields)
 
     monkeypatch.setattr(FakeDrive, "get_file", get_file)
-    page = owner_c.get("/browse")
+    page = owner_c.get("/files")
     assert page.status_code == 200
     assert "Something went wrong" not in page.text
     assert "My Drive" in page.text
@@ -442,10 +459,10 @@ def test_browse_when_my_drive_root_is_hidden(owner_c, monkeypatch) -> None:
 def test_browse_does_not_invent_a_my_drive_parent(owner_c, world) -> None:
     """A folder whose parent this app cannot see is not shown under My Drive."""
     world.add("specs", "Specs", FOLDER_MIME, ["shared-drive-root"], owner=OWNER_EMAIL)
-    page = owner_c.get("/browse?folder=specs")
+    page = owner_c.get("/files?folder=specs")
     assert page.status_code == 200
     assert "Specs" in page.text
-    assert 'href="/browse?folder=root"' not in page.text
+    assert 'href="/files?folder=root"' not in page.text
 
 
 def test_browse_stays_up_when_drive_list_fails(owner_c, monkeypatch) -> None:
@@ -455,7 +472,7 @@ def test_browse_stays_up_when_drive_list_fails(owner_c, monkeypatch) -> None:
         raise RuntimeError("drive list refused")
 
     monkeypatch.setattr(FakeDrive, "list_files", boom)
-    page = owner_c.get("/browse")
+    page = owner_c.get("/files")
     assert page.status_code == 200
     assert "Google Drive did not return files" in page.text
     assert "Something went wrong" not in page.text
@@ -468,11 +485,11 @@ def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
     r = post(owner_c, "/grant", file_id="proj", next="/browse")
     assert r.status_code == 303 and r.headers["location"] == "/browse"
     assert world.files["proj"].permissions == []
-    page = owner_c.get("/browse").text
+    page = owner_c.get("/files").text
     assert "Remove" in page and 'data-confirm="Remove this from the assistant?"' in page
-    page = owner_c.get("/browse?folder=proj").text
+    page = owner_c.get("/files?folder=proj").text
     assert "via folder" in page and "Everything in this folder is available" in page
-    assert "Projects" in owner_c.get("/access").text
+    assert "Projects" in owner_c.get("/files?tab=allowed").text
 
     result = mcp_call(owner_c, "read_file", file_id="proj-notes")
     assert result["isError"] is False
@@ -486,7 +503,7 @@ def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
 
 def test_grant_errors_are_shown(owner_c) -> None:
     post(owner_c, "/grant", file_id="does-not-exist", next="/browse")
-    assert "not found" in owner_c.get("/browse").text
+    assert "not found" in owner_c.get("/files").text
     r = post(owner_c, "/grant", file_id="bad id")
     assert r.status_code == 400
 
@@ -562,12 +579,15 @@ def test_activity_is_capped(p2_app) -> None:
 
 def test_overview_and_health_report_status(owner_c) -> None:
     page = owner_c.get("/").text
-    assert "UPSTASH_REDIS_REST_URL" in page
     assert f"{BASE_URL}/mcp" in page
     assert "uses your Google account" in page
     assert "files and folders you allow" in page
     assert "Assistant acts as" not in page
-    assert "make_token.py" in page  # admin-only operator note
+    # Operator notes moved from Overview to Settings, admin only.
+    assert "make_token.py" not in page
+    settings_page = owner_c.get("/settings").text
+    assert "UPSTASH_REDIS_REST_URL" in settings_page
+    assert "make_token.py" in settings_page
 
 
 def test_non_admin_overview_hides_operator_notes(c) -> None:
@@ -580,6 +600,8 @@ def test_non_admin_overview_hides_operator_notes(c) -> None:
     assert "UPSTASH_REDIS_REST_URL" not in page
     assert "Vercel" not in page
     assert "BOT_EMAIL" not in page
+    settings_page = c.get("/settings").text
+    assert "make_token.py" not in settings_page and 'id="server"' not in settings_page
 
 
 def test_overview_shows_one_mcp_address_for_every_client(c) -> None:
@@ -607,14 +629,14 @@ def test_allowed_emails_rejects_other_accounts(world, memstore, oauth) -> None:
     assert refused.status_code == 403
     assert "not allowed" in refused.text
     assert oauth.revoked
-    assert c.get("/browse").status_code == 303
+    assert c.get("/files").status_code == 303
     assert login(c).status_code == 303
-    assert c.get("/browse").status_code == 200
+    assert c.get("/files").status_code == 200
 
 
 def test_requests_nav_counts_pending(owner_c) -> None:
     mcp_call(owner_c, "read_file", file_id="priv-secret")
-    page = owner_c.get("/browse").text
+    page = owner_c.get("/files").text
     start = page.index("Requests")
     assert "1 waiting" in page[start : start + 220]
 
@@ -627,7 +649,7 @@ def test_confirm_script_is_served(c) -> None:
 
 
 def test_mailbox_empty_state_is_plain_language(owner_c) -> None:
-    page = owner_c.get("/bridge").text
+    page = owner_c.get("/sharing?tab=people").text
     assert "request_link" not in page
     assert "Ask your assistant to start a pairing" in page
 
@@ -691,12 +713,12 @@ def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
         "changed": True,
     }
     # No flash left behind for the next full page load.
-    assert "for the assistant." not in owner_c.get("/access").text.split("<h1>")[0]
-    assert "Projects" in owner_c.get("/access").text
+    assert "for the assistant." not in owner_c.get("/files?tab=allowed").text.split("<h1>")[0]
+    assert "Projects" in owner_c.get("/files?tab=allowed").text
 
     r = _post_json(owner_c, "/revoke", file_id="proj", next="/browse")
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert "Projects" not in owner_c.get("/access").text
+    assert "Projects" not in owner_c.get("/files?tab=allowed").text
 
     r = _post_json(owner_c, "/grant", file_id="does-not-exist", next="/browse")
     assert r.status_code == 400
@@ -705,7 +727,7 @@ def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
 
 
 def test_browse_rows_render_both_toggle_states(owner_c) -> None:
-    page = owner_c.get("/browse").text
+    page = owner_c.get("/files").text
     assert 'data-async data-flip="access" data-access-when="off"' in page
     assert 'data-async data-flip="access" data-access-when="on"' in page
     assert "data-row data-access=" in page
@@ -713,7 +735,7 @@ def test_browse_rows_render_both_toggle_states(owner_c) -> None:
 
 def test_list_pages_remove_rows_in_place(owner_c) -> None:
     post(owner_c, "/grant", file_id="proj")
-    page = owner_c.get("/access").text
+    page = owner_c.get("/files?tab=allowed").text
     assert 'data-async data-on-success="remove-row"' in page
     # The empty-state block is on the page (hidden) so ui.js can show it after the last row.
     assert "Nothing is allowed yet" in page
@@ -748,7 +770,7 @@ def test_revoke_json_reports_change_when_drive_cleanup_fails(owner_c, monkeypatc
 def test_shortcut_rows_update_in_place_and_remove_acts_on_the_target(owner_c) -> None:
     """A shortcut row renders its target's state, so ui.js can flip it like any row.
     Remove posts the target's id, since that is what Allow stored."""
-    page = owner_c.get("/browse?folder=proj").text
+    page = owner_c.get("/files?folder=proj").text
     assert "Allow the target" in page
     allow_target = r"<form[^>]*>\s*(?:<input[^>]*>\s*)*<button[^>]*>Allow the target"
     forms = re.findall(allow_target, page)

@@ -3,11 +3,11 @@
 {% macro table(items, empty) %}
 {% if items %}
 <table class="cards">
-  <thead><tr><th>Asked for</th><th>Assistant</th><th>Action</th><th>Created</th><th>Status</th><th><span class="sr-only">Decision</span></th></tr></thead>
+  <thead><tr><th>Asked for</th><th>Assistant</th><th>Action</th><th>Created</th><th>Status</th><th>Open</th></tr></thead>
   <tbody>
   {% for r in items %}
   <tr>
-    <td data-label="Asked for">{{ r.file_name or r.description or "A file" }}</td>
+    <td data-label="Asked for">{{ r.file_name or r.description or "An unnamed file" }}</td>
     <td data-label="Assistant">{{ assistant_label(r.token_name, apps) }}</td>
     <td data-label="Action">{{ tool_label(r.tool) }}</td>
     <td data-label="Created" class="muted">{{ r.created_at | when }}</td>
@@ -33,10 +33,10 @@
 {% endif %}
 {% endmacro %}
 {% block content %}
-<h1>Access requests</h1>
-<p class="muted">The assistant can ask for a file before it is allowed to open it. Approving adds that file to your list. A sign-in that cannot see your whole Drive has to be renewed before those requests can be approved.</p>
+<h1>Requests</h1>
+<p class="muted">An assistant can ask for a file before it is allowed to open it. Approving adds that file to your allowed files. A sign-in that cannot see your whole Drive has to be renewed before those requests can be approved.</p>
 <h2>Waiting for you</h2>
-{{ table(pending, "No one is waiting. When an assistant asks for a file you have not shared, it shows up here.") }}
+{{ table(pending, "No one is waiting. When an assistant asks for a file you have not allowed, it shows up here.") }}
 <h2>Recent decisions</h2>
 {{ table(decided, "No decisions yet.") }}
 <p class="muted">Requests expire after 7 days.</p>

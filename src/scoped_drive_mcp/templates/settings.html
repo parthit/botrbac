@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% macro assistant_name(a) -%}
+{{ a.name }} <span class="muted id-chip" title="Connection id">…{{ a.short_id }}</span>
+{%- endmacro %}
+{% macro wake_form(a, hook) -%}
+<form class="stack" method="post" action="/bridge/webhook">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="action" value="save">
+  <input type="hidden" name="app" value="{{ a.id if a else 'account' }}">
+  <input type="hidden" name="next" value="/settings#{{ 'app-' ~ a.id if a else 'other-people' }}">
+  <label>Webhook URL
+    <input name="url" type="url" required value="{{ hook.url or '' if hook else '' }}" autocomplete="off" spellcheck="false" placeholder="https://">
+  </label>
+  <label>Key
+    <input name="sender_key" type="password" autocomplete="off" placeholder="{% if hook and hook.secret_hint %}Leave blank to keep the saved key{% else %}Required the first time{% endif %}">
+  </label>
+  <label>How the key is sent
+    <select name="auth_scheme">
+      <option value="bearer" {% if not hook or hook.auth_scheme not in ('bearer_and_x_automation_key', 'claude_routine') %}selected{% endif %}>Bearer token (Cursor automation, Grok)</option>
+      <option value="bearer_and_x_automation_key" {% if hook and hook.auth_scheme == 'bearer_and_x_automation_key' %}selected{% endif %}>Bearer token and X-Automation-Key</option>
+      <option value="claude_routine" {% if hook and hook.auth_scheme == 'claude_routine' %}selected{% endif %}>Claude routine (API trigger)</option>
+    </select>
+  </label>
+  <label>Status
+    <select name="enabled">
+      <option value="true" {% if not hook or not hook.configured or hook.enabled %}selected{% endif %}>On</option>
+      <option value="false" {% if hook and hook.configured and not hook.enabled %}selected{% endif %}>Paused</option>
+    </select>
+  </label>
+  <div class="actions"><button class="primary" type="submit">Save wake-up</button></div>
+</form>
+{%- endmacro %}
+{% macro wake_status(hook) -%}
+{% set last = hook.last_wake %}
+{% if not hook.enabled %}<span class="pill">Paused</span>
+{% elif last and not last.ok %}<span class="pill bad"><span aria-hidden="true">!</span> Failed</span>
+{% else %}<span class="pill ok"><span aria-hidden="true">✓</span> On</span>{% endif %}
+<span class="muted">Key ends in <code>{{ hook.secret_hint }}</code>.
+{% if last %}Last wake {{ last.at | when }}: {% if last.ok %}delivered{% else %}failed ({{ last.error }}){% endif %}{% if last.http %}, HTTP {{ last.http }}{% endif %}.
+{% else %}No wake sent yet.{% endif %}</span>
+{%- endmacro %}
+{% block content %}
+<h1>Settings</h1>
+<nav class="tabs" aria-label="Settings sections">
+  <a href="#services">Services</a>
+  <a href="#assistants">Assistants</a>
+  {% if wake_on %}<a href="#other-people">Mail from other people</a>{% endif %}
+  {% if is_admin %}<a href="#server">Server</a>{% endif %}
+</nav>
+
+<section id="services">
+<h2>Services</h2>
+<p class="muted lead">Where your files come from. An assistant can only use files you allow from a connected service.</p>
+<div class="grid">
+  {% for row in rows %}
+  {% set conn = row.connection %}
+  <article class="card" id="connection-{{ conn.key }}">
+    <div class="card-head"><h3>{{ conn.name }}</h3>
+      {% if row.connected %}<span class="pill ok"><span aria-hidden="true">✓</span> Connected</span>
+      {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
+    </div>
+    <p class="muted">{{ conn.summary }}</p>
+    {% if row.connected %}
+    {% if row.needs_upgrade %}
+    <p class="warn">This connection only covers some of your Drive. Reconnect to allow full Drive access. Your current access keeps working until you do.</p>
+    <p class="disclosure">{{ conn.disclosure }}</p>
+    <form method="post" action="/connect/{{ conn.key }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button class="primary" type="submit">Reconnect {{ conn.name }}</button>
+    </form>
+    {% endif %}
+    <form class="inline" method="post" action="/connect/{{ conn.key }}/disconnect" data-confirm="Disconnect {{ conn.name }}? Assistants lose access to it immediately." data-confirm-action="Disconnect">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" type="submit">Disconnect</button>
+    </form>
+    {% else %}
+    <p class="disclosure">{{ conn.disclosure }}</p>
+    <form method="post" action="/connect/{{ conn.key }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button class="primary" type="submit">Connect {{ conn.name }}</button>
+    </form>
+    {% endif %}
+  </article>
+  {% endfor %}
+  <article class="card placeholder">
+    <h3>More services</h3>
+    <p class="muted">Other services appear here as they are added. Each is its own permission, asked for only when you connect it.</p>
+  </article>
+</div>
+</section>
+
+<section id="assistants">
+<h2>Assistants</h2>
+<p class="muted lead">Apps that signed in here. Each one can have its own wake-up, so it starts when mail arrives for it.</p>
+<div class="copy-row">
+  <label class="sr-only" for="mcp-url">Server address</label>
+  <input id="mcp-url" type="text" readonly value="{{ mcp_url }}">
+  <button type="button" data-copy="{{ mcp_url }}">Copy MCP URL</button>
+</div>
+<p class="muted small">Add this address to an assistant as a custom connector or MCP server, sign in when the browser opens, and choose Allow.</p>
+
+{% if missing_wakeups %}
+<div class="warn" role="status" id="missing-wakeups">
+  {% for m in missing_wakeups %}
+  <p>Messages from {{ m.sender }} won’t start <b>{{ m.assistant }}</b>: it {{ "has its wake-up paused" if m.paused else "has no wake-up" }}. It only sees them when it next checks its inbox.</p>
+  {% endfor %}
+  <p class="muted">Ask that assistant to watch for mail and it sets a wake-up up itself, or add one below.</p>
+</div>
+{% endif %}
+
+{% for a in assistants %}
+<article class="card" id="app-{{ a.id }}">
+  <div class="card-head">
+    <h3>{{ assistant_name(a) }}</h3>
+    {% if primary == a.id %}<span class="pill">Answers other people</span>{% endif %}
+  </div>
+  <p class="muted">{% if a.paired_with %}Paired with {{ a.paired_with }} · {% endif %}added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
+  {% if wake_on %}
+  {% set hook = a.hook %}
+  <h4>Wake-up</h4>
+  {% if hook and hook.configured %}
+  <p>{{ wake_status(hook) }}</p>
+  <div class="actions">
+    <form class="inline" method="post" action="/bridge/webhook">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="test">
+      <input type="hidden" name="app" value="{{ a.id }}">
+      <input type="hidden" name="next" value="/settings#app-{{ a.id }}">
+      <button type="submit">Send test wake<span class="sr-only"> to {{ a.name }}</span></button>
+    </form>
+    {% if assistants | length > 1 %}
+    <form class="inline move" method="post" action="/bridge/webhook">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="move">
+      <input type="hidden" name="from_app" value="{{ a.id }}">
+      <input type="hidden" name="next" value="/settings#assistants">
+      <label class="sr-only" for="move-{{ a.id }}">Move this wake-up to</label>
+      <select id="move-{{ a.id }}" name="app">
+        {% for b in assistants if b.id != a.id %}<option value="{{ b.id }}">{{ b.name }} …{{ b.short_id }}</option>{% endfor %}
+      </select>
+      <button type="submit">Move</button>
+    </form>
+    {% endif %}
+    <form class="inline" method="post" action="/bridge/webhook" data-confirm="Remove {{ a.name }}’s wake-up? Its saved key is deleted and can’t be shown again; you would have to get it from {{ a.name }} again.{% if assistants | length > 1 %} To give it to another assistant instead, use Move.{% endif %}" data-confirm-action="Remove wake-up">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="remove">
+      <input type="hidden" name="app" value="{{ a.id }}">
+      <input type="hidden" name="next" value="/settings#app-{{ a.id }}">
+      <button class="danger" type="submit">Remove wake-up</button>
+    </form>
+  </div>
+  <details class="disclosure-form"><summary>Change URL or key</summary>{{ wake_form(a, hook) }}</details>
+  {% else %}
+  <p><span class="pill">None</span> <span class="muted">{{ a.name }} starts only when you open it or it checks on a schedule.</span></p>
+  <details class="disclosure-form"><summary>Add a wake-up for {{ a.name }}</summary>
+    <p class="muted">Usually you don’t need this: ask {{ a.name }} to watch for mail and it sets one up. Use this only if {{ a.name }} gave you a webhook URL and key.</p>
+    {{ wake_form(a, None) }}
+  </details>
+  {% endif %}
+  {% endif %}
+  <div class="actions">
+    <form class="inline" method="post" action="/oauth/grants/revoke" data-confirm="Disconnect {{ a.name }} (…{{ a.short_id }})? It loses access immediately{% if a.paired_with %}, its pairing with {{ a.paired_with }} ends{% endif %}{% if a.hook and a.hook.configured %}, and its wake-up is deleted{% endif %}." data-confirm-action="Disconnect">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="grant_id" value="{{ a.id }}">
+      <button class="danger" type="submit">Disconnect<span class="sr-only"> {{ a.name }}</span></button>
+    </form>
+  </div>
+</article>
+{% else %}
+<div class="card empty">
+  <h3>No assistants connected</h3>
+  <p>Copy the MCP URL above into your assistant, sign in when the browser opens, and choose Allow. It then shows up here.</p>
+</div>
+{% endfor %}
+</section>
+
+{% if wake_on %}
+<section id="other-people">
+<h2>Mail from other people</h2>
+<p class="muted lead">Which assistant answers when someone you are paired with writes to you. Mail between your own assistants always goes to the one it is for.</p>
+{% if assistants %}
+<form class="stack card" method="post" action="/bridge/webhook">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="action" value="primary">
+  <input type="hidden" name="next" value="/settings#other-people">
+  <label>Answered by
+    <select name="app">
+      <option value="">Every assistant with a wake-up</option>
+      {% for a in assistants %}<option value="{{ a.id }}"{% if primary == a.id %} selected{% endif %}>{{ a.name }} …{{ a.short_id }}</option>{% endfor %}
+    </select>
+  </label>
+  <div class="actions"><button type="submit">Save</button></div>
+</form>
+{% endif %}
+{% if account_hook and account_hook.configured %}
+<article class="card" id="account-hook">
+  <h3>Fallback wake-up</h3>
+  <p class="muted">Used only for mail from other people, when the assistant chosen above has no wake-up. It never fires for mail between your own assistants.</p>
+  <p>{{ wake_status(account_hook) }}</p>
+  <div class="actions">
+    {% if assistants %}
+    <form class="inline move" method="post" action="/bridge/webhook">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="move">
+      <input type="hidden" name="from_app" value="account">
+      <input type="hidden" name="next" value="/settings#assistants">
+      <label class="sr-only" for="move-account">Give this wake-up to</label>
+      <select id="move-account" name="app">
+        {% for b in assistants %}<option value="{{ b.id }}">{{ b.name }} …{{ b.short_id }}</option>{% endfor %}
+      </select>
+      <button type="submit">Give to assistant</button>
+    </form>
+    {% endif %}
+    <form class="inline" method="post" action="/bridge/webhook" data-confirm="Remove the fallback wake-up? Its saved key is deleted and can’t be shown again." data-confirm-action="Remove wake-up">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="remove">
+      <input type="hidden" name="app" value="account">
+      <input type="hidden" name="next" value="/settings#other-people">
+      <button class="danger" type="submit">Remove wake-up</button>
+    </form>
+  </div>
+</article>
+{% elif not assistants %}
+<details class="disclosure-form card"><summary>Add a fallback wake-up</summary>
+  <p class="muted">For assistants that use an API token instead of signing in. It fires only for mail from other people.</p>
+  {{ wake_form(None, account_hook) }}
+</details>
+{% endif %}
+</section>
+{% endif %}
+
+{% if is_admin %}
+<section id="server">
+<h2>Server</h2>
+<div class="card">
+  {% if missing %}
+  <div class="warn">Missing settings: {% for m in missing %}<code>{{ m }}</code>{{ ", " if not loop.last }}{% endfor %}.
+    {% if store_kind == "memory" %}Without Redis or Postgres, grants and requests are kept in memory and are lost when the server restarts.{% endif %}
+  </div>
+  {% endif %}
+  {% if not picker_ready %}
+  <p>The Google Picker is optional. It needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before the picker button appears. Files and approvals work from the signed-in Drive without it.</p>
+  {% endif %}
+  {% if env_token_set %}
+  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with only per-file access, replace it with <code>scripts/bootstrap_oauth.py</code> so this server can see that Drive. The allowed-files list still limits assistants.</p>
+  {% endif %}
+  {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}
+  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with assistants. The public site address is <code>APP_BASE_URL</code>.</p>
+  <p><a href="/admin">People</a></p>
+</div>
+</section>
+{% endif %}
+{% endblock %}

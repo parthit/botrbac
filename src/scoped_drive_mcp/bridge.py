@@ -158,9 +158,10 @@ class Mailbox:
 
     def summary(self, email: str) -> dict[str, int]:
         """Counts for the dashboard: pairings that need this person's approval, active
-        pairings, and unread mail (inbox rows only, no bodies)."""
+        pairings (split into other people and your own assistants), and unread mail
+        (inbox rows only, no bodies)."""
         you = _email(email)
-        needs = active = 0
+        needs = active = own = 0
         for link_id in self._user_link_ids(you):
             link = self._link(link_id)
             if link is None or you not in _parties(link, self._peer(link_id)):
@@ -168,12 +169,19 @@ class Mailbox:
             status = self._status(link)
             if status == "active":
                 active += 1
+                own += 1 if link.get("same_account") else 0
             elif status == "pending_approval":
                 side = "a" if you == link["email_a"] else "b"
                 if not self._approved(link_id, side):
                     needs += 1
         unread = len(self._inbox_index(you, None, unread_only=True))
-        return {"needs_approval": needs, "active": active, "unread": unread}
+        return {
+            "needs_approval": needs,
+            "active": active,
+            "people": active - own,
+            "own": own,
+            "unread": unread,
+        }
 
     def needs_approval_count(self, email: str) -> int:
         """Pairings waiting on this person's approval. Cheap enough for every page's nav."""
@@ -207,7 +215,7 @@ class Mailbox:
 
         This is what external sharing trusts: a peer's assistant may read the items that
         person put on their shared list. It is read fresh on every call, so turning a
-        pairing off on /bridge ends that access at once.
+        pairing off on the Sharing page ends that access at once.
         """
         you = _email(email)
         peers: set[str] = set()
@@ -534,7 +542,7 @@ class Mailbox:
             raise MailboxError(
                 "already_paired",
                 f"You already have a pairing with {link['email_a']}. Use that one, or turn it "
-                "off on the Mailbox page before joining a new one.",
+                "off on the Sharing page (People) before joining a new one.",
                 link_id=existing["link_id"],
                 status=self._status(existing),
                 manage_url=self._page(),
@@ -589,7 +597,7 @@ class Mailbox:
             raise MailboxError(
                 "already_paired",
                 "These two assistants are already paired. Use that pairing, or turn it off "
-                "on the Mailbox page before joining a new one.",
+                "on the Sharing page (People) before joining a new one.",
                 link_id=existing["link_id"],
                 status=self._status(existing),
                 manage_url=self._page(),
@@ -624,6 +632,7 @@ class Mailbox:
             self.store.delete(f"bridge:primary:{you}")
         self.store.delete(f"bridge:hook:{slot}")
         self.store.delete(f"bridge:hookerr:{slot}")
+        self.store.delete(f"bridge:hooklast:{slot}")
         self._index_hook(you, slot, present=False)
         ended = 0
         for link_id in self._user_link_ids(you):
@@ -657,6 +666,7 @@ class Mailbox:
                 "auth_scheme": None,
                 "secret_hint": None,
                 "last_error": None,
+                "last_wake": None,
             }
         return {
             "available": True,
@@ -666,6 +676,7 @@ class Mailbox:
             "auth_scheme": record.get("scheme"),
             "secret_hint": record.get("hint"),
             "last_error": self.store.get(f"bridge:hookerr:{owner}"),
+            "last_wake": self._last_wake(owner),
         }
 
     def set_webhook(
@@ -752,6 +763,7 @@ class Mailbox:
         owner = self._hook_owner(you, app)
         self.store.delete(f"bridge:hook:{owner}")
         self.store.delete(f"bridge:hookerr:{owner}")
+        self.store.delete(f"bridge:hooklast:{owner}")
         self._index_hook(you, owner, present=False)
         return self.get_webhook(you, app)
 
@@ -782,8 +794,12 @@ class Mailbox:
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
         self._index_hook(you, owner, present=True)
+        last = self.store.get(f"bridge:hooklast:{source}")
+        if last:
+            self.store.set(f"bridge:hooklast:{owner}", last, ex=MESSAGE_TTL)
         self.store.delete(f"bridge:hook:{source}")
         self.store.delete(f"bridge:hookerr:{source}")
+        self.store.delete(f"bridge:hooklast:{source}")
         self._index_hook(you, source, present=False)
         return self.get_webhook(you, app)
 
@@ -845,33 +861,108 @@ class Mailbox:
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def _maybe_wake(self, message: dict[str, Any]) -> None:
+    def _maybe_wake(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Ping the recipient's wake-up hook(s) and say what happened, so the sender
+        learns whether the other assistant is starting or will only see the mail when it
+        next checks. The result names no URL, key or address."""
         if not self.wake.ready:
-            return
+            return {"status": "off"}
+        log = logging.getLogger(__name__)
         targets = self._wake_targets(str(message["to"]))
         if not targets:
             kind = "app" if "#" in str(message["to"]) else "account"
-            logging.getLogger(__name__).warning("mailbox_wake_none %s", kind)
+            log.warning("mailbox_wake_none %s", kind)
+            return {"status": "no_wakeup"}
+        outcomes: list[str] = []
+        reason = ""
         for slot, record in targets:
             if not record.get("enabled") or not record.get("url"):
+                outcomes.append("paused")
                 continue
             # One mark per message and hook, so a retry does not ping a hook twice.
             suffix = "" if slot == message["to"] else f":{slot}"
             mark = f"bridge:woke:{message['msg_id']}{suffix}"
             if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
+                outcomes.append("sent")
                 continue
             # Which slot, never the address or URL: "app" for one app's own, else "account".
             kind = "app" if "#" in slot else "account"
             try:
-                deliver(self.wake, record, message)
+                status = deliver(self.wake, record, message)
             except Exception as exc:
                 self.store.delete(mark)
                 logged = _wake_error(exc)
-                logging.getLogger(__name__).warning("mailbox_wake_failed %s %s", kind, logged)
-                self._note_wake(slot, record, logged)
+                log.warning("mailbox_wake_failed %s %s", kind, logged)
+                self._note_wake(slot, record, logged, http=_wake_http(exc))
+                outcomes.append("failed")
+                reason = reason or logged
             else:
-                logging.getLogger(__name__).warning("mailbox_wake_sent %s", kind)
-                self._note_wake(slot, record, None)
+                log.warning("mailbox_wake_sent %s", kind)
+                self._note_wake(slot, record, None, http=status)
+                outcomes.append("sent")
+        if "sent" in outcomes:
+            return {"status": "sent"}
+        if "failed" in outcomes:
+            return {"status": "failed", "reason": reason}
+        return {"status": "paused"}
+
+    def test_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
+        """Dashboard only: send one ping to a saved hook now, so a person can see it work.
+        The ping carries made-up ids; the assistant that wakes finds no new mail."""
+        you = _email(email)
+        if not self.wake.ready:
+            raise MailboxError(
+                "webhook_disabled", "Webhook wake-ups are turned off on this server."
+            )
+        owner = self._hook_owner(you, app)
+        record = self._hook(owner)
+        if record is None:
+            raise MailboxError("not_found", "There is no wake-up there to test.")
+        message = {
+            "link_id": "test",
+            "thread_id": "test",
+            "msg_id": _id("test"),
+            "created_at": self._iso(),
+        }
+        try:
+            status = deliver(self.wake, record, message)
+        except Exception as exc:
+            logged = _wake_error(exc)
+            self._note_wake(owner, record, logged, http=_wake_http(exc))
+            return {"ok": False, "error": logged, "http": _wake_http(exc)}
+        self._note_wake(owner, record, None, http=status)
+        return {"ok": True, "http": status}
+
+    def missing_wakeups(self, email: str) -> list[dict[str, Any]]:
+        """Own-assistant pairings where one side has no working wake-up: mail sent to that
+        assistant is stored but does not start it. One row per (link, assistant)."""
+        you = _email(email)
+        rows: list[dict[str, Any]] = []
+        if not self.wake.ready:
+            return rows
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or not link.get("same_account") or self._revoked(link_id):
+                continue
+            if self._status(link) != "active":
+                continue
+            for side, other in (("a", "b"), ("b", "a")):
+                grant = link.get(f"grant_{side}")
+                if not grant:
+                    continue
+                record = self._hook(_self_addr(you, str(grant)))
+                if record is not None and record.get("enabled") and record.get("url"):
+                    continue
+                rows.append(
+                    {
+                        "link_id": link_id,
+                        "grant_id": str(grant),
+                        "assistant": link.get(f"label_{side}") or "Assistant",
+                        "sender": link.get(f"label_{other}") or "Assistant",
+                        "paused": record is not None,
+                    }
+                )
+        return rows
 
     def _wake_targets(self, recipient: str) -> list[tuple[str, dict[str, Any]]]:
         """Which saved hooks to ping for mail addressed to `recipient`.
@@ -913,7 +1004,9 @@ class Mailbox:
                 found.append((slot, record))
         return found
 
-    def _note_wake(self, email: str, used: dict[str, Any], error: str | None) -> None:
+    def _note_wake(
+        self, email: str, used: dict[str, Any], error: str | None, http: int | None = None
+    ) -> None:
         """Record the outcome only while the saved webhook is still the one we called."""
         current = self._hook(email)
         if current is None:
@@ -930,6 +1023,18 @@ class Mailbox:
             self.store.delete(key)
         else:
             self.store.set(key, error, ex=MESSAGE_TTL)
+        last = {"at": self._iso(), "ok": error is None, "error": error, "http": http}
+        self.store.set(f"bridge:hooklast:{email}", json.dumps(last), ex=MESSAGE_TTL)
+
+    def _last_wake(self, owner: str) -> dict[str, Any] | None:
+        raw = self.store.get(f"bridge:hooklast:{owner}")
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _deliver(
         self,
@@ -1006,10 +1111,10 @@ class Mailbox:
         except MailboxError:
             self._release_pending(idem_key, pending, peer, message["msg_id"])
             raise
-        self._publish(message)
+        wake = self._publish(message)
         if idem_key:
             self.store.set(idem_key, message["msg_id"], ex=MESSAGE_TTL)
-        return _sent(message, replay=False)
+        return _sent(message, replay=False, wake=_wake_view(wake, link, peer))
 
     def _finish_idem(
         self,
@@ -1067,9 +1172,9 @@ class Mailbox:
             if exc.code == "rate_limited" and not already_queued:
                 self._release_pending(idem_key, token, peer, msg_id)
             raise
-        self._publish(message)
+        wake = self._publish(message)
         self.store.set(idem_key, msg_id, ex=MESSAGE_TTL)
-        return _sent(message, replay=already_queued)
+        return _sent(message, replay=already_queued, wake=_wake_view(wake, link, peer))
 
     def _release_pending(self, idem_key: str | None, pending: str, peer: str, msg_id: str) -> None:
         if idem_key and self.store.get(idem_key) == pending and not self._queued(peer, msg_id):
@@ -1094,7 +1199,7 @@ class Mailbox:
             raise
         self.store.set(flag, "1", ex=MESSAGE_TTL)
 
-    def _publish(self, message: dict[str, Any]) -> None:
+    def _publish(self, message: dict[str, Any]) -> dict[str, Any]:
         """Save the body, then queue the id. A second call does not insert another copy."""
         self._save_message(message)
         link_id = message["link_id"]
@@ -1111,7 +1216,7 @@ class Mailbox:
         self._push_once(f"bridge:linkmsgs:{link_id}", message["msg_id"], message["msg_id"])
         thread_key = f"bridge:threadmsgs:{link_id}:{thread}"
         self._push_once(thread_key, message["msg_id"], message["msg_id"])
-        self._maybe_wake(message)
+        return self._maybe_wake(message)
 
     def _push_once(self, key: str, msg_id: str, value: str) -> None:
         """Queue `value` unless this list already has `msg_id`. The mark follows the push."""
@@ -1267,7 +1372,7 @@ class Mailbox:
         if not allowed and status != "revoked":
             step = SELF_PAIRING_OFF
         elif status == "pending_approval":
-            step = "Approve on the Mailbox page to connect your two assistants."
+            step = "Approve on the Sharing page (People) to connect your two assistants."
         elif status == "active":
             step = (
                 f"Your assistants are connected. Send to {peer_label} on this link_id."
@@ -1306,7 +1411,7 @@ class Mailbox:
         }
 
     def _page(self) -> str:
-        return f"{self.base_url}/bridge" if self.base_url else "/bridge"
+        return f"{self.base_url}/sharing?tab=people" if self.base_url else "/sharing?tab=people"
 
     def _invite_live(self, link: dict[str, Any]) -> bool:
         return self._stamp(link["invite_expires_at"]) > self._now()
@@ -1691,14 +1796,62 @@ def _wake_error(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def _sent(message: dict[str, Any], replay: bool) -> dict[str, Any]:
-    return {
+def _wake_http(exc: Exception) -> int | None:
+    detail = exc.args[0] if exc.args else ""
+    if isinstance(detail, str) and detail.startswith("http_") and detail[5:].isdigit():
+        return int(detail[5:])
+    return None
+
+
+def _wake_view(wake: dict[str, Any], link: dict[str, Any], peer: str) -> dict[str, Any]:
+    """What send_message tells the sender about waking the recipient, with a plain hint
+    when the recipient will not start on its own."""
+    status = str(wake.get("status") or "off")
+    view: dict[str, Any] = {"status": status}
+    if wake.get("reason"):
+        view["reason"] = wake["reason"]
+    who = "The other person's assistant"
+    if link.get("same_account"):
+        for side in ("a", "b"):
+            if peer.endswith(f"#{link.get(f'grant_{side}')}"):
+                who = str(link.get(f"label_{side}") or "The other assistant")
+    if status == "sent":
+        view["hint"] = f"{who} was woken. The message is in its inbox."
+    elif status == "no_wakeup":
+        view["hint"] = (
+            f"{who} has no wake-up saved, so it will not start on its own. It sees this "
+            "message the next time it checks its inbox."
+        )
+        if link.get("same_account"):
+            view["hint"] += (
+                f" To start {who} automatically, add a wake-up for it on the dashboard "
+                "(Settings, Assistants)."
+            )
+    elif status == "paused":
+        view["hint"] = f"{who}'s wake-up is paused. The message waits in its inbox."
+    elif status == "failed":
+        view["hint"] = (
+            f"Waking {who} failed. The message is still in its inbox. The owner can see the "
+            "error and send a test wake on the dashboard."
+        )
+    else:
+        view["hint"] = "Wake-ups are off on this server. The message waits in the inbox."
+    return view
+
+
+def _sent(
+    message: dict[str, Any], replay: bool, wake: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "msg_id": message["msg_id"],
         "created_at": message["created_at"],
         "thread_id": message["thread_id"],
         "expires_at": message["expires_at"],
         "idempotent_replay": replay,
     }
+    if wake is not None:
+        out["wake"] = wake
+    return out
 
 
 def _next_step(
