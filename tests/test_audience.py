@@ -19,7 +19,7 @@ from scoped_drive_mcp.store import (
 from tests.conftest import EVE, OWNER_EMAIL, FakeClock
 from tests.dash import client, csrf, login, post
 from tests.test_external_sharing import LOOSE_TEXT, _error, _pair
-from tests.test_multi_user import CAROL, _app, _grok, _mcp
+from tests.test_multi_user import CAROL, EVE_DOC, _app, _grok, _mcp
 
 OTHER_TEXT = "memo gamma"  # loose-two
 
@@ -257,3 +257,52 @@ def test_sharing_an_item_again_with_an_audience_applies_it(world) -> None:
     assert grants.set_audience("loose-doc", AUDIENCE_LINKED, None).expires_at is None
     with pytest.raises(GrantError):
         grants.set_audience("loose-doc", ())
+
+
+def test_an_item_that_names_nobody_is_never_widened_to_everyone(world) -> None:
+    store = MemoryStore()
+    ext = Allowlist(store, EXTERNAL_ALLOWLIST_KEY)
+    grants = GrantService(
+        lambda: world.as_user(OWNER_EMAIL),
+        ext,
+        AccessRequests(MemoryStore()),
+        None,
+        audience=AUDIENCE_LINKED,
+    )
+    grants.grant("loose-doc", audience=(EVE,))
+    assert ext.forget_person(EVE) == ["loose-doc"]
+    assert ext.get("loose-doc").audience == ()
+    # Setting only an end date on it is refused rather than sharing it with everyone.
+    with pytest.raises(GrantError):
+        grants.grant("loose-doc", expires_at="2099-12-31T23:59:59+00:00")
+    assert ext.get("loose-doc").audience == ()
+    assert not ext.get("loose-doc").readable_by(CAROL)
+
+
+def test_a_failed_prune_on_one_side_still_prunes_the_other(three, memstore, monkeypatch) -> None:
+    app, owner, eve, _carol = three
+    eve_client = eve[0]
+    # Each side names the other on an item.
+    _audience(owner, "loose-doc", "people", [EVE])
+    assert post(eve_client, "/sharing/add", file_id=EVE_DOC).status_code == 303
+    _audience(eve_client, EVE_DOC, "people", [OWNER_EMAIL])
+
+    real = Allowlist.forget_person
+
+    def flaky(self, person: str):
+        if current_actor.get() in (None, OWNER_EMAIL):
+            raise RuntimeError("store down")
+        return real(self, person)
+
+    monkeypatch.setattr(Allowlist, "forget_person", flaky)
+    box = app.state.mailbox
+    link = next(
+        link["link_id"]
+        for link in box.list_links(OWNER_EMAIL)["links"]
+        if link.get("peer_email") == EVE and link["status"] == "active"
+    )
+    box.revoke(EVE, link)  # the pairing still turns off
+    assert box.is_linked(OWNER_EMAIL, EVE) is False
+    # Eve's side was still pruned even though the owner's side failed.
+    eve_raw = memstore.hget(f"{KEY_PREFIX}u:{EVE}:{EXTERNAL_ALLOWLIST_KEY}", EVE_DOC)
+    assert json.loads(eve_raw)["audience"] == []

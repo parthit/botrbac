@@ -742,12 +742,19 @@ def build_app(
     def forget_each_other(a: str, b: str) -> None:
         """Two people are no longer paired: neither Sharing list names the other any more,
         so approving a new pairing later starts from what is shared with everyone."""
+        failed = None
         for owner, guest in ((a, b), (b, a)):
-            with acting_as(owner):
-                changed = ext_allowlist.forget_person(guest)
-                if changed:
-                    ext_guard.invalidate_allowlist()
-                    audit_owner("share_unpaired", count=str(len(changed)))
+            # Each side on its own: one failing must not leave the other side's names.
+            try:
+                with acting_as(owner):
+                    changed = ext_allowlist.forget_person(guest)
+                    if changed:
+                        ext_guard.invalidate_allowlist()
+                        audit_owner("share_unpaired", count=str(len(changed)))
+            except Exception as exc:  # noqa: BLE001 - re-raised below, after both sides
+                failed = exc
+        if failed is not None:
+            raise failed
 
     mailbox.on_unpaired = forget_each_other
     shares = ExternalShares(

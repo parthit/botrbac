@@ -102,7 +102,10 @@ class GrantService:
             if self.audience is not None and (audience is not None or expires_at is not None):
                 return self.set_audience(
                     item_id,
-                    audience if audience is not None else existing.audience or self.audience,
+                    audience
+                    if audience is not None
+                    # An item that names nobody stays that way; never widen it to everyone.
+                    else (existing.audience if existing.audience is not None else self.audience),
                     expires_at if expires_at is not None else KEEP,
                 )
             if request_id and not existing.request_id:
