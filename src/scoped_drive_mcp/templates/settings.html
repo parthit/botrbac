@@ -140,6 +140,7 @@
     </label>
     <button type="submit">Save<span class="sr-only"> what {{ a.name }} can do</span></button>
   </form>
+  {% if a.legacy_full %}<p class="muted small">{{ a.name }} has Full access because it was connected before you could choose. Lower it if it only needs to read.</p>{% endif %}
   {% if wake_on %}
   <dl class="talks-to">
     <dt>Talks to</dt>

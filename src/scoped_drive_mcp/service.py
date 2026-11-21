@@ -11,6 +11,7 @@ import binascii
 import logging
 import posixpath
 import re
+from collections.abc import Callable
 from typing import Any
 
 from .config import Settings
@@ -31,7 +32,11 @@ from .scope import (
     validate_drive_id,
 )
 
-META_FIELDS = "id,name,mimeType,parents,size,createdTime,modifiedTime,webViewLink,trashed"
+META_FIELDS = (
+    "id,name,mimeType,parents,size,createdTime,modifiedTime,webViewLink,trashed,properties"
+)
+# Set on files a paired person's assistant writes into a folder shared with them.
+WRITER_PROPERTY = "botrbac_writer"
 PUBLIC_META_KEYS = (
     "id",
     "name",
@@ -162,11 +167,19 @@ def validate_name(value: Any, what: str = "name") -> str:
 
 
 class DriveService:
-    def __init__(self, drive: DriveClient, guard: ScopeGuard, settings: Settings):
+    def __init__(
+        self,
+        drive: DriveClient,
+        guard: ScopeGuard,
+        settings: Settings,
+        writer: Callable[[], str | None] | None = None,
+    ):
         self.drive = drive
         self.guard = guard
         self.max_bytes = settings.max_bytes
         self.max_chars = settings.max_chars
+        # For the paired-person write service: who is writing (stamped on what they write).
+        self.writer = writer
 
     def _fetch_meta(self, file_id: str) -> dict[str, Any]:
         validate_drive_id(file_id)
@@ -203,8 +216,14 @@ class DriveService:
         return "found", str(meta.get("name") or "") or None
 
     def _public(self, meta: dict[str, Any], memo: dict[str, bool] | None = None) -> dict[str, Any]:
-        """public_meta with `parents` cut down to in-scope folder ids (dropped if none)."""
+        """public_meta with `parents` cut down to in-scope folder ids (dropped if none).
+        A file a paired person's assistant wrote says so, wherever it is listed: its name
+        and content are theirs, so they are untrusted data for whoever reads them."""
         out = public_meta(meta)
+        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        if writer:
+            out["written_by"] = str(writer).removeprefix("guest:")
+            out["content_trust"] = "untrusted_peer"
         if "parents" not in out:
             return out
         memo = {} if memo is None else memo
@@ -291,9 +310,23 @@ class DriveService:
         return self._public(self._get_in_scope(file_id))
 
     def read_file(self, file_id: str) -> dict[str, Any]:
+        result = self._read_file(file_id)
+        if result.get("written_by") and isinstance(result.get("content"), str):
+            from .external import wrap_untrusted  # imports this module
+
+            result["content"] = wrap_untrusted(result["content"])
+        return result
+
+    def _read_file(self, file_id: str) -> dict[str, Any]:
         meta = self._get_in_scope(file_id)
         mime = meta.get("mimeType", "")
         result: dict[str, Any] = {"file": self._public(meta), "content": None, "truncated": False}
+        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        if writer:
+            # A paired person's assistant wrote this into a folder you shared: its text is
+            # theirs, so it is untrusted data for whoever reads it, you included.
+            result["content_trust"] = "untrusted_peer"
+            result["written_by"] = str(writer).removeprefix("guest:")
 
         if mime == FOLDER_MIME:
             raise InvalidInputError("this is a folder; use list_folder")
@@ -413,13 +446,24 @@ class DriveService:
                     "parent_id is required; call list_folder to find a folder you may use"
                 )
         parent = self.guard.assert_parent_in_scope(parent_id)
-        metadata = {**metadata, "parents": [parent.id]}
+        metadata = {**metadata, "parents": [parent.id], **self._stamp(created=True)}
         created = self.drive.create(metadata, content, mime, fields=META_FIELDS)
         ref = FileRef.from_api(created)
         if ref.is_folder:
             self.guard.remember(ref)
             self.guard.invalidate()
         return self._public(created, {parent.id: True})
+
+    def _stamp(self, created: bool = False) -> dict[str, Any]:
+        """Metadata that records who wrote a file, when this service writes for a paired
+        person (`writer` is set). Drive itself records the owner, whose sign-in is used."""
+        who = self.writer() if self.writer is not None else None
+        if not who:
+            return {}
+        stamp: dict[str, Any] = {"properties": {WRITER_PROPERTY: f"guest:{who}"}}
+        if created:
+            stamp["description"] = f"Created by {who}'s assistant through Bot RBAC."
+        return stamp
 
     def create_folder(self, name: str, parent_id: str | None = None) -> dict[str, Any]:
         name = validate_name(name)
@@ -479,12 +523,16 @@ class DriveService:
             upload_mime = mime or "text/plain"
         else:
             raise InvalidInputError("binary files cannot be updated with text content")
-        updated = self.drive.update(file_id, None, data, upload_mime, fields=META_FIELDS)
+        updated = self.drive.update(
+            file_id, self._stamp() or None, data, upload_mime, fields=META_FIELDS
+        )
         return self._public(updated)
 
     def rename_file(self, file_id: str, new_name: str) -> dict[str, Any]:
         new_name = validate_name(new_name, "new_name")
         self._get_in_scope(file_id, allow_root=False)
+        # Not stamped: a rename changes no content. Only what a peer writes is marked theirs
+        # (creates and content updates), and the mark is never cleared once set.
         updated = self.drive.update(file_id, {"name": new_name}, None, None, fields=META_FIELDS)
         return self._public(updated)
 

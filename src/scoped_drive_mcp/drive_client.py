@@ -27,8 +27,10 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_APPS_PREFIX = "application/vnd.google-apps."
 
-CREATE_METADATA_KEYS = frozenset({"name", "mimeType", "parents"})
-UPDATE_METADATA_KEYS = frozenset({"name", "trashed"})
+# `description` and `properties` only carry who wrote a file (a paired person's assistant
+# writing into a folder shared with them); they never move a file or change who sees it.
+CREATE_METADATA_KEYS = frozenset({"name", "mimeType", "parents", "description", "properties"})
+UPDATE_METADATA_KEYS = frozenset({"name", "trashed", "properties"})
 
 
 class DriveNotFoundError(Exception):

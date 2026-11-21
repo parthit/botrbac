@@ -213,6 +213,17 @@ a resume that any paired person's assistant may see.
   your own Activity.
 - **New readers:** the first time a paired person's assistant reads something you share, Overview shows
   "New readers of what you share" until you dismiss it.
+- **Letting them edit (optional):** on **Sharing**, **Change** next to an item has "Their assistants can add and
+  edit". With it on, the people who can see the item can have their assistants use `create_shared_doc`,
+  `create_shared_folder`, `upload_shared_file`, `update_shared_file` and `rename_shared_file` inside it. They
+  can never trash, move or reshare anything, or rename the shared item itself. Their own connection must be
+  **Read and edit** or **Full**. Writes run as your Google account, so Drive shows you as the editor; Bot RBAC
+  records the real writer on the file (`properties.botrbac_writer = guest:<email>`, and a description on new
+  files) and on your Activity page; renames are logged but do not mark a file as theirs. Each person may make
+  at most 30 changes an hour to your share. Wherever your own assistant later sees such a file (`read_file`,
+  `get_metadata`, `list_folder`, `search_files`, `download_file`), it carries `written_by` and
+  `content_trust: untrusted_peer`, and `read_file` wraps its text, because its name and content came from that
+  person. Drive keeps earlier versions if you need to undo.
 
 Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
 your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.

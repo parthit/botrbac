@@ -197,6 +197,8 @@ class GrantView:
     created_at: str
     last_used: str | None
     role: str = Role.ADMIN.value
+    # Full only because it was connected before apps had roles; the owner never chose it.
+    legacy_full: bool = False
 
 
 # What a connected app may do, chosen by the owner on the consent page and changeable
@@ -932,6 +934,7 @@ class McpOAuth:
                         created_at=grant.created_at,
                         last_used=self._displayed_last_used(grant),
                         role=self.role_of(grant),
+                        legacy_full=not grant.roles and self.store.get(_role_key(grant.id)) is None,
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)

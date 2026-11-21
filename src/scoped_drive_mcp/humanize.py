@@ -121,6 +121,11 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
         "search files people share with you",
     ),
     "list_shared_folder": ("opened {item}", "open {item}"),
+    "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
+    "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
+    "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
+    "update_shared_file": ("edited {item}", "edit {item}"),
+    "rename_shared_file": ("renamed {item}", "rename {item}"),
     "read_shared_file": ("read {item}", "read {item}"),
     "download_shared_file": ("downloaded {item}", "download {item}"),
 }
@@ -130,7 +135,16 @@ POLLING_TOOLS = frozenset(
     {"check_access_request", "check_messages", "list_inbox", "list_links", "get_webhook"}
 )
 _FOLDER_TOOLS = frozenset(
-    {"list_folder", "create_folder", "create_doc", "upload_file", "list_shared_folder"}
+    {
+        "list_folder",
+        "create_folder",
+        "create_doc",
+        "upload_file",
+        "list_shared_folder",
+        "create_shared_doc",
+        "create_shared_folder",
+        "upload_shared_file",
+    }
 )
 _ID_FIELDS = ("file_id", "folder_id", "parent_id")
 # A `names` value meaning "the person's Drive has no such item" (looked up, not found).
@@ -309,6 +323,13 @@ def _tool_row(
     )
 
 
+_ROLE_WORDS = {
+    "viewer": "read only",
+    "editor": "read and edit",
+    "admin": "full access",
+}
+
+
 def _owner_row(
     record: Mapping[str, Any],
     names: Mapping[str, str],
@@ -319,6 +340,7 @@ def _owner_row(
     reason = str(record.get("reason") or "")
     item = _item_text(record, names, request_names)
     client = str(record.get("client") or "an app")
+    role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -345,6 +367,7 @@ def _owner_row(
         "oauth_approve": (f"You connected {client}.", Badge("ok", "Connected", "✓")),
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
+        "oauth_role": (f"You changed what {client} can do: {role_words}.", _DONE),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
     }
     group = "you"

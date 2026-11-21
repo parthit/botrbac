@@ -54,7 +54,7 @@ from .drive_client import (
 )
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
-from .grants import OWNER_FIELDS, GrantError, GrantService
+from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
 from .humanize import (
     ACTIVITY_FILTERS,
     MISSING,
@@ -79,6 +79,8 @@ from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .ratelimit import allow, client_ip
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import (
+    ACCESS_EDIT,
+    ACCESS_READ,
     AUDIENCE_LINKED,
     EXTERNAL_ALLOWLIST_KEY,
     ActivityLog,
@@ -1586,15 +1588,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             audience: str | tuple[str, ...] = people
         else:
             audience = AUDIENCE_LINKED
+        # The form always sends `access_shown`; without it (an old page, a script) the
+        # current setting is kept rather than silently turned off.
+        if form.get("access_shown"):
+            access: Any = ACCESS_EDIT if form.get("access") == ACCESS_EDIT else ACCESS_READ
+        else:
+            access = KEEP
         try:
-            entry = await blocking(ctx.ext_grants().set_audience, file_id, audience, expires_at)
+            entry = await blocking(
+                ctx.ext_grants().set_audience, file_id, audience, expires_at, access
+            )
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
         who = (
             "everyone you are paired with" if entry.for_everyone else ", ".join(entry.audience)  # type: ignore[arg-type]
         )
         until = f" until {entry.expires_at[:10]}" if entry.expires_at else ""
-        message = f"“{entry.name}” is now shared with {who}{until}."
+        can = " Their assistants can add and edit inside it." if entry.access == ACCESS_EDIT else ""
+        message = f"“{entry.name}” is now shared with {who}{until}.{can}"
         cover = await still_covered(ctx.ext_grants(), file_id)
         if cover:
             message += (
@@ -2272,6 +2283,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "mates": mates.get(g.id, []),
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
                     "role": g.role,
+                    "legacy_full": g.legacy_full,
                 }
             )
         return {
@@ -2515,7 +2527,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return action_done(request, "error", "Choose what this app may do.", back)
         if not await blocking(ctx.mcp_oauth.set_role, grant_id, email, role):
             return action_done(request, "error", "That app is not connected.", back)
-        audit_owner("oauth_role", grant=grant_id[-5:], role=role)
+        names = {g.id: g.client_name for g in ctx.mcp_oauth.list_grants(email)}
+        audit_owner(
+            "oauth_role", grant=grant_id[-5:], role=role, client=names.get(grant_id, "an app")
+        )
         return action_done(
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )

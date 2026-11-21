@@ -97,6 +97,8 @@ def normalize_email(value: Any) -> str:
     return email
 
 
+# Writes one person's assistant may make into another person's share, per hour.
+GUEST_WRITES_PER_HOUR = 30
 # A refusal to someone who is not paired is logged at most this often per person and tool.
 NOT_LINKED_LOG_EVERY = 3600
 
@@ -179,6 +181,8 @@ class ExternalShares:
         is_known_user: Callable[[str], bool] | None = None,
         once: Callable[[str, int], bool] | None = None,
         first_read: Callable[[str, str, str | None], None] | None = None,
+        write_service: DriveService | None = None,
+        charge_write: Callable[[str], int] | None = None,
     ):
         # `allowlist` and `service` resolve the current actor on each call, so they read
         # whichever person's external list and Drive `acting_as` selects.
@@ -195,6 +199,11 @@ class ExternalShares:
         # first_read(guest, tool, file_id), as the owner: called on every allowed read by an
         # assistant; it records the notice only the first time it sees that person.
         self.first_read = first_read
+        # Writes go through their own guard, whose only allowlist is what the owner marked
+        # editable for this guest. Without one, guests cannot write at all.
+        self.write_service = write_service
+        # charge_write(guest) -> writes so far this hour by that guest, on the owner's store.
+        self.charge_write = charge_write
 
     # ---- owner side ------------------------------------------------------
 
@@ -378,6 +387,90 @@ class ExternalShares:
         )
         result["content_trust"] = "untrusted_peer"
         return {"owner": normalize_email(owner), **result}
+
+    # ---- guest writes ----------------------------------------------------
+
+    def _write(
+        self,
+        caller: str,
+        owner: str,
+        tool: str,
+        file_id: str | None,
+        fn: Callable[[DriveService], dict[str, Any]],
+    ) -> dict[str, Any]:
+        service = self.write_service
+        if service is None:
+            raise SharedAccessError(
+                "not_shared", "Writing into what other people share is not available here."
+            )
+
+        def run() -> dict[str, Any]:
+            # Charged only once the guest checks passed: a refused write costs nothing.
+            you = current_guest.get() or ""
+            if self.charge_write is not None and self.charge_write(you) > GUEST_WRITES_PER_HOUR:
+                raise SharedAccessError(
+                    "rate_limited",
+                    f"At most {GUEST_WRITES_PER_HOUR} changes an hour to one person's share.",
+                    retry_after_seconds=3600,
+                )
+            return fn(service)
+
+        result = self._as_guest(caller, owner, tool, file_id, run)
+        return {"owner": normalize_email(owner), **result}
+
+    def create_doc(
+        self, caller: str, owner: str, title: str, content: str = "", parent_id: str | None = None
+    ) -> dict[str, Any]:
+        return self._write(
+            caller,
+            owner,
+            "create_shared_doc",
+            parent_id,
+            lambda s: s.create_doc(title, content, parent_id),
+        )
+
+    def create_folder(
+        self, caller: str, owner: str, name: str, parent_id: str | None = None
+    ) -> dict[str, Any]:
+        return self._write(
+            caller,
+            owner,
+            "create_shared_folder",
+            parent_id,
+            lambda s: s.create_folder(name, parent_id),
+        )
+
+    def upload_file(
+        self,
+        caller: str,
+        owner: str,
+        name: str,
+        mime_type: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._write(
+            caller,
+            owner,
+            "upload_shared_file",
+            parent_id,
+            lambda s: s.upload_file(name, mime_type, content_text, content_base64, parent_id),
+        )
+
+    def update_file(self, caller: str, owner: str, file_id: str, content: str) -> dict[str, Any]:
+        return self._write(
+            caller,
+            owner,
+            "update_shared_file",
+            file_id,
+            lambda s: s.update_file_content(file_id, content),
+        )
+
+    def rename_file(self, caller: str, owner: str, file_id: str, new_name: str) -> dict[str, Any]:
+        return self._write(
+            caller, owner, "rename_shared_file", file_id, lambda s: s.rename_file(file_id, new_name)
+        )
 
     def guest_call(
         self,
