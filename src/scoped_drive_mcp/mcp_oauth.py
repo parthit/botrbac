@@ -262,8 +262,14 @@ def _same(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+# set_if_absent takes a lifetime. Ten years stands in for "does not expire".
+_FOR_GOOD = 10 * 365 * 24 * 3600
+
+
 def _expired(saved: dict[str, Any]) -> bool:
-    """A token record past the time it carries. Records from before that have none."""
+    """A token record past the time it carries. Records from before that have none.
+    Checked for access tokens. A refresh token is held to `refresh_until` on its grant,
+    which is signed, so the time on its own record is only there for the reader."""
     exp = saved.get("exp")
     return isinstance(exp, (int, float)) and time.time() >= exp
 
@@ -1001,18 +1007,22 @@ class McpOAuth:
     def pin_legacy_roles(self) -> int:
         """Write down the role of every app from before apps had roles, and mark its
         grant as having one. Afterwards a role record that goes missing means read only
-        for these apps too, as it already does for newer ones. Returns how many changed.
-        Run before REQUIRE_SIGNED_RECORDS is turned on (the admin page does)."""
-        changed = 0
+        for these apps too, as it already does for newer ones. Returns (changed, could not
+        be changed): a grant a token refresh rewrote at that moment is left for the next
+        run. Run before REQUIRE_SIGNED_RECORDS is turned on (the admin page does)."""
+        changed = failed = 0
         for grant_id in list(self.store.hgetall(GRANTS_KEY)):
             grant = self._grant(grant_id)
             if grant is None or grant.roles:
                 continue
             if self.store.get(_role_key(grant.id)) not in APP_ROLES:
-                self.store.set(_role_key(grant.id), self.role_of(grant))
+                # Only if there is still none: a role the owner picks at this moment wins.
+                self.store.set_if_absent(_role_key(grant.id), self.role_of(grant), ex=_FOR_GOOD)
             if self._mark_roles(grant):
                 changed += 1
-        return changed
+            else:
+                failed += 1
+        return changed, failed
 
     def _mark_roles(self, grant: "OAuthGrant") -> bool:
         """Set `roles` on the stored grant, only if nothing else changed it meanwhile (a

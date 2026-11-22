@@ -1483,8 +1483,7 @@ class Mailbox:
         self.store.set(f"bridge:revoked:{link['link_id']}", at)
         # Also written into the signed link record, and both approvals are removed: a
         # pairing that was turned off stays off if the marker above goes missing.
-        current = self._link(link["link_id"]) or link
-        self.store.set(f"bridge:link:{link['link_id']}", json.dumps({**current, "ended_at": at}))
+        self._mark_ended(link, at)
         for side in ("a", "b"):
             self.store.hdel(f"bridge:appr:{link['link_id']}", side)
         peer = self._peer(link["link_id"])
@@ -1499,6 +1498,28 @@ class Mailbox:
             # The pairing is already off, which ends access on its own. A person named on
             # an item stays named; they still read nothing until a pairing is approved.
             logging.getLogger(__name__).warning("unpair_prune_failed", exc_info=True)
+
+    def _mark_ended(self, link: dict[str, Any], at: str) -> None:
+        """Write `ended_at` into the link record without losing a change someone else
+        makes to that record at the same moment: compare-and-swap, a few tries."""
+        key = f"bridge:link:{link['link_id']}"
+        replace = getattr(self.store, "replace", None)
+        for _ in range(4):
+            raw = self.store.get(key)
+            try:
+                current = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                current = None
+            if not isinstance(current, dict):
+                current, raw = link, None
+            ended = json.dumps({**current, "ended_at": at})
+            if raw is None or replace is None:
+                self.store.set(key, ended)
+                return
+            if replace(key, raw, ended):
+                return
+        # Lost every race, which a person clicking cannot cause. Off is the safe side.
+        self.store.set(key, json.dumps({**link, "ended_at": at}))
 
     def _ended(self, link_id: str) -> dict[str, Any] | None:
         raw = self.store.get(f"bridge:ended:{link_id}")

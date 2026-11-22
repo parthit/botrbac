@@ -575,6 +575,14 @@ class SignedStore:
                 out[name] = value
         return out
 
+    def replace(self, key: str, old: str, new: str) -> bool:
+        """Change a string from `old` to `new` only if it still says `old`. Keeps its expiry."""
+        raw = self.inner.get(key)
+        swap = getattr(self.inner, "swap", None)
+        if raw is None or swap is None or self._open(key, None, raw) != old:
+            return False
+        return bool(swap(key, raw, self._seal(key, None, new) if signs(key) else new))
+
     def hreplace(self, key: str, field: str, old: str, new: str) -> bool:
         """Change one hash field from `old` to `new` only if it still says `old`."""
         raw = self.inner.hget(key, field)

@@ -72,7 +72,8 @@
   - **Turning it on.** Records saved before signing existed are still accepted until
     `REQUIRE_SIGNED_RECORDS=1`. Open **People** (`/admin`) and choose **Sign existing records**. It signs
     each one with a compare-and-swap, so a change made at the same moment is never undone, and it tells you
-    if any are left. When it reports none, set the variable. Until it is on, an unsigned record written
+    if any are left. When it reports none, set the variable. It signs whatever is stored at that moment,
+    so do it soon after deploying, and look over Allowed, Sharing and connected apps first. Until it is on, an unsigned record written
     straight into the store is still accepted. The variable is refused without `ENCRYPTION_KEY`.
   - **Deleting a record adds nothing.** With the variable on, a missing record is never read as
     permission. A pairing approval names the person who had joined, so replacing who joined does not carry

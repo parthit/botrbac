@@ -598,6 +598,7 @@ def test_the_admin_can_sign_older_records_from_the_people_page(p2_app, memstore)
     # A page that read the allowlist on the way may have signed it already.
     after = c.get("/admin").text
     assert "Signed 1 stored record." in after or "already signed" in after
+    assert "Sign existing records" in after
 
 
 # ---- the Picker never gets a token for the whole Drive ----
@@ -746,7 +747,7 @@ def test_deleting_an_older_apps_role_records_does_not_make_it_full(strict, memst
 
     oauth_server.strict = False
     assert oauth_server.resolve_access(token).role.value == "admin"  # as it always was
-    assert oauth_server.pin_legacy_roles() == 1  # the admin action writes that down
+    assert oauth_server.pin_legacy_roles() == (1, 0)  # the admin action writes that down
     oauth_server.strict = True
     assert oauth_server.resolve_access(token).role.value == "admin"
     memstore.delete(f"{KEY_PREFIX}oauth:role:{grant_id}")

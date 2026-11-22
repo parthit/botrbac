@@ -2173,9 +2173,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # approval that does not name who joined, and an app with no written role.
             if ctx.mailbox is not None:
                 ctx.mailbox.bind_legacy_approvals([e for e in everyone if e])
+            unpinned = 0
             if ctx.mcp_oauth is not None:
-                ctx.mcp_oauth.pin_legacy_roles()
-            return sign_existing_records(ctx.store, people, settings.owner_email)
+                _pinned, unpinned = ctx.mcp_oauth.pin_legacy_roles()
+            signed, failed = sign_existing_records(ctx.store, people, settings.owner_email)
+            return signed, failed + unpinned
 
         signed, failed = await blocking(run)
         audit_owner("sign_records", count=str(signed), failed=str(failed))
@@ -2191,10 +2193,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(
                 request,
                 "ok",
-                f"Signed {signed} stored record{'' if signed == 1 else 's'}. None are left "
-                "unsigned."
+                f"Signed {signed} stored record{'' if signed == 1 else 's'}. Every record "
+                "this server knows of is now signed."
                 if signed
-                else "Every stored record was already signed.",
+                else "Every record this server knows of was already signed.",
             )
         return RedirectResponse("/admin", status_code=303)
 
