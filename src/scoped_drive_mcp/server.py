@@ -24,13 +24,14 @@ from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
 from . import audit as audit_module
-from .access import AccessRequests, AccessService
+from .access import OWNER_INDEX, REQUEST_TTL, AccessRequests, AccessService
 from .audit import audit_owner
 from .auth import (
     BearerAuthMiddleware,
@@ -41,7 +42,13 @@ from .auth import (
 )
 from .bridge import Assistant, Mailbox, MailboxError, as_assistant
 from .config import Settings
-from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
+from .dashboard import (
+    DashboardContext,
+    SecurityHeadersMiddleware,
+    build_dashboard,
+    legal_routes,
+    render_plain,
+)
 from .drive_client import (
     DRIVE_SCOPE,
     BotNotConnectedError,
@@ -71,9 +78,11 @@ from .store import (
     KeyValueStore,
     MemoryStore,
     PrefixedStore,
+    SignedStore,
     TenantDirectory,
     TokenVault,
     build_store,
+    signing_key,
 )
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
@@ -713,12 +722,23 @@ def build_app(
 
     kv = PrefixedStore(store) if store is not None else build_store(settings)
     enc_key = settings.encryption_key.get_secret_value() if settings.encryption_key else None
+    if enc_key:
+        # Everything below reads and writes through this, whichever account it is for.
+        kv = SignedStore(kv, signing_key(enc_key), require=settings.require_signed_records)
     directory = TenantDirectory(kv, settings.owner_email, enc_key)
     actor_kv = directory.actor_store()
     allowlist = Allowlist(actor_kv)
     ext_allowlist = Allowlist(actor_kv, EXTERNAL_ALLOWLIST_KEY)
-    vault = TokenVault(actor_kv, enc_key)
-    requests = AccessRequests(actor_kv)
+    vault = TokenVault(
+        actor_kv, enc_key, expected=lambda: current_actor.get() or settings.owner_email
+    )
+
+    def note_request_owner(rid: str) -> None:
+        who = current_actor.get() or settings.owner_email
+        if who:
+            kv.set(f"{OWNER_INDEX}{rid}", who, ex=REQUEST_TTL)
+
+    requests = AccessRequests(actor_kv, on_create=note_request_owner)
     activity = ActivityLog(actor_kv)
     first_reads = FirstReads(actor_kv)
     audit_module.set_sinks([activity])
@@ -778,6 +798,7 @@ def build_app(
         kv,
         base_url=settings.app_base_url or "",
         self_pairing=flags.self_pairing_enabled,
+        strict=isinstance(kv, SignedStore) and kv.require,
         encryption_key=enc_key,
         wake=WakeSettings(
             enabled=settings.webhooks_enabled,
@@ -880,6 +901,7 @@ def build_app(
             probe=service.probe,
             sharer_of=sharer_of,
             limited_sign_in=limited_sign_in,
+            max_pending=settings.max_pending_requests,
         )
         if settings.app_base_url
         else None
@@ -905,6 +927,8 @@ def build_app(
                 settings.sign_in_allowed(email) and directory.has_owner_refresh(email)
             ),
             rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
+            test_callback=settings.oauth_test_callback,
+            strict=isinstance(kv, SignedStore) and kv.require,
         )
         if base_url and not settings.dashboard_missing()
         else None
@@ -962,7 +986,12 @@ def build_app(
     if mcp_oauth is not None:
         routes.extend(mcp_oauth.routes())
     routes.append(Mount("/", app=dashboard))
-    app = Starlette(routes=routes)
+    # The dashboard sets these on its own pages. /mcp, /health, the OAuth endpoints and
+    # the discovery documents sit outside it and get the same headers here.
+    app = Starlette(
+        routes=routes,
+        middleware=[Middleware(SecurityHeadersMiddleware, hsts=settings.secure_cookies)],
+    )
     app.state.mcp = mcp
     app.state.mailbox = mailbox
     app.state.service = service

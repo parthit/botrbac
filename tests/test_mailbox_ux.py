@@ -268,7 +268,8 @@ def test_cards_say_who_is_waiting_on_whom(p2_app) -> None:
     box.request_link(EVE, created["invite_code"])
     assert "Needs your approval" in owner.get("/sharing?tab=people").text
     approve = owner.post(
-        f"/bridge/{created['link_id']}/approve", data={"csrf": csrf(owner, "/sharing?tab=people")}
+        f"/bridge/{created['link_id']}/approve",
+        data={"csrf": csrf(owner, "/sharing?tab=people"), "peer": EVE},
     )
     assert approve.status_code == 303
     owner_page = owner.get("/sharing?tab=people").text

@@ -7,7 +7,7 @@ from scoped_drive_mcp.drive_client import FOLDER_MIME
 from scoped_drive_mcp.scope import ScopeGuard
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import KEY_PREFIX
-from tests.conftest import EVE, OWNER_EMAIL, make_settings
+from tests.conftest import EVE, OWNER_EMAIL, make_settings, unsealed
 from tests.dash import MCP_HEADERS, client, login, post
 from tests.fake_drive import FakeDrive
 from tests.test_mcp_oauth import GROK, auth_params, code_from, exchange, posted_redirect, register
@@ -108,8 +108,8 @@ def test_each_grok_bot_sees_only_that_users_files(world, memstore, oauth) -> Non
     assert eve_denied["structuredContent"]["error"] == "not_found"
     assert eve_denied["structuredContent"]["file_id"] == "loose-doc"
 
-    allow = memstore.hgetall(KEY_PREFIX + "allowlist")
-    eve_allow = memstore.hgetall(KEY_PREFIX + f"u:{EVE}:allowlist")
+    allow = unsealed(memstore.hgetall(KEY_PREFIX + "allowlist"))
+    eve_allow = unsealed(memstore.hgetall(KEY_PREFIX + f"u:{EVE}:allowlist"))
     assert "loose-doc" in allow and EVE_DOC not in allow
     assert EVE_DOC in eve_allow and "loose-doc" not in eve_allow
     assert json.loads(allow["loose-doc"])["shared_with"] is None

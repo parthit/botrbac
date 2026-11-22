@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -39,7 +40,14 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .access import PENDING, AccessRequests
+from .access import (
+    OWNER_INDEX,
+    OWNER_INDEX_SINCE,
+    PENDING,
+    REQUEST_TTL,
+    AccessRequests,
+    validate_request_id,
+)
 from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
@@ -86,7 +94,9 @@ from .store import (
     EXTERNAL_ALLOWLIST_KEY,
     ActivityLog,
     Allowlist,
+    SignedStore,
     TokenVault,
+    sign_existing_records,
 )
 
 logger = logging.getLogger(__name__)
@@ -404,13 +414,11 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers") or [])
                 # Pages are never cached. A static asset sets its own policy and keeps it.
-                cacheable = any(key.lower() == b"cache-control" for key, _ in headers)
-                headers += [
-                    item
-                    for item in SECURITY_HEADERS
-                    if not (cacheable and item[0] == b"cache-control")
-                ]
-                if self.hsts:
+                # A header that is already there stays as it is, so wrapping both the
+                # dashboard and the app around it does not send anything twice.
+                present = {key.lower() for key, _ in headers}
+                headers += [item for item in SECURITY_HEADERS if item[0] not in present]
+                if self.hsts and HSTS_HEADER[0] not in present:
                     headers.append(HSTS_HEADER)
                 message["headers"] = headers
             await send(message)
@@ -644,6 +652,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if not isinstance(owner, str) or not owner or ctx.directory is None:
             return None
         if not settings.sign_in_allowed(owner):
+            return None
+        if not ctx.directory.session_alive(request.session.get("sid"), owner):
             return None
         if not ctx.directory.is_known_user(owner):
             return None
@@ -943,6 +953,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         next_url = safe_next(request.session.get("oauth_next"))
         request.session.clear()
         request.session["owner"] = email
+        if ctx.directory is not None:
+            request.session["sid"] = await blocking(
+                ctx.directory.open_session, email, SESSION_MAX_AGE
+            )
         request.session["csrf"] = secrets.token_urlsafe(32)
         audit_owner("login")
         reset = current_actor.set(email)
@@ -1091,6 +1105,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
+        if ctx.directory is not None:
+            await blocking(ctx.directory.close_session, request.session.get("sid"))
         request.session.clear()
         # "Switch account" on a request page and "Use a different account" on the consent
         # page sign out, then signs in with ?next back.
@@ -1487,7 +1503,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 record["t"],
             )
         except OAuthError as exc:
-            logger.warning("picker token refresh failed")
+            logger.warning("picker token not issued: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=502)
         return JSONResponse(
             {
@@ -1903,6 +1919,28 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         request it is."""
         if ctx.directory is None:
             return False
+        try:
+            validate_request_id(rid)
+        except InvalidInputError:
+            return False
+        owner = ctx.store.get(f"{OWNER_INDEX}{rid}")
+        if owner:
+            return owner != email
+        # Requests filed before the index existed are not in it. They expire REQUEST_TTL
+        # after they were filed, so the look through every account is only needed that long.
+        now = time.time()
+        # Ten years: the mark only has to outlive the window it starts.
+        ctx.store.set_if_absent(OWNER_INDEX_SINCE, f"{now:.0f}", ex=10 * 365 * 24 * 3600)
+        since = ctx.store.get(OWNER_INDEX_SINCE) or f"{now:.0f}"
+        try:
+            if now - float(since) >= REQUEST_TTL:
+                return False
+        except ValueError:
+            return False
+        # While the look-through is still needed, one person may cause it a few times an
+        # hour. Past that an unknown link is simply not found.
+        if not allow(ctx.store, "request-lookup", email or "anon", 20, 3600):
+            return False
         for person in ctx.directory.known_users():
             if person == email:
                 continue
@@ -2118,7 +2156,61 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             people = await blocking(_directory_rows)
         finally:
             current_actor.reset(reset)
-        return render(request, "admin.html", people=people)
+        signing = None
+        if isinstance(ctx.store, SignedStore):
+            signing = {"required": ctx.store.require}
+        return render(request, "admin.html", people=people, signing=signing)
+
+    async def admin_sign_records(request: Request, form: dict[str, str]) -> Response:
+        """Sign the allowlist, app and pairing records saved before records were signed."""
+        if session_user(request) != settings.owner_email or ctx.directory is None:
+            return render(request, "error.html", 404, message="Page not found.")
+        if isinstance(ctx.store, SignedStore) and ctx.store.require:
+            # Signing is for records from before. Once unsigned ones are ignored, signing
+            # whatever is in the store would bring back one that was planted since.
+            flash(
+                request,
+                "error",
+                "REQUIRE_SIGNED_RECORDS is on, so nothing was signed. Unsigned records are "
+                "ignored now.",
+            )
+            return RedirectResponse("/admin", status_code=303)
+
+        def run() -> tuple[int, int]:
+            people = ctx.directory.known_users()
+            everyone = list(dict.fromkeys([*people, settings.owner_email or ""]))
+            # First the two records whose older form says less than it should: an
+            # approval that does not name who joined, and an app with no written role.
+            if ctx.mailbox is not None:
+                known = [e for e in everyone if e]
+                ctx.mailbox.seal_ended_pairings(known)
+                ctx.mailbox.bind_legacy_approvals(known)
+            unpinned = 0
+            if ctx.mcp_oauth is not None:
+                _pinned, unpinned = ctx.mcp_oauth.pin_legacy_roles()
+            signed, failed = sign_existing_records(ctx.store, people, settings.owner_email)
+            return signed, failed + unpinned
+
+        signed, failed = await blocking(run)
+        audit_owner("sign_records", count=str(signed), failed=str(failed))
+        if failed:
+            flash(
+                request,
+                "error",
+                f"Signed {signed}, but {failed} could not be signed because they changed "
+                "at that moment or the store refused. Run this again, and do not turn on "
+                "REQUIRE_SIGNED_RECORDS until it reports none left.",
+            )
+        else:
+            flash(
+                request,
+                "ok",
+                f"Signed {signed} stored record{'' if signed == 1 else 's'}. Every record "
+                "this server knows of is now signed."
+                if signed
+                else "Every record this server knows of was already signed.",
+            )
+        return RedirectResponse("/admin", status_code=303)
 
     def _directory_rows() -> list[dict[str, Any]]:
         if ctx.directory is None:
@@ -2418,7 +2510,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         return go
 
-    def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
+    def _bridge_act(
+        request: Request,
+        link_id: str,
+        action: str,
+        purge: bool = False,
+        expect_peer: str | None = None,
+    ) -> str:
         email = str(request.session.get("owner") or "")
         if action == "cancel":
             ctx.mailbox.cancel_invite(email, link_id)
@@ -2459,7 +2557,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if purge:
                 return message + " Stored messages were deleted."
             return message + " Messages already delivered stay readable until they expire."
-        result = ctx.mailbox.decide(email, link_id, action)
         same = next(
             (
                 link.get("same_account", False)
@@ -2467,6 +2564,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 if link["link_id"] == link_id
             ),
             False,
+        )
+        # Approving another person is approving that account. The form names the account
+        # the page showed, and the approval is refused if someone else is joined by now.
+        if action == "approve" and not same and not expect_peer:
+            raise MailboxError(
+                "peer_changed",
+                "Reload the page and check who is asking before you approve.",
+            )
+        result = ctx.mailbox.decide(
+            email, link_id, action, expect_peer if action == "approve" else None
         )
         if same and result["status"] == "active":
             return "Approved. Your two assistants can message each other now."
@@ -2485,7 +2592,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="That page is not available.")
         purge = form.get("purge") == "on"
         try:
-            message = await blocking(_bridge_act, request, link_id, action, purge)
+            message = await blocking(
+                _bridge_act, request, link_id, action, purge, form.get("peer") or None
+            )
         except MailboxError as exc:
             flash(request, "error", exc.message)
         else:
@@ -2652,6 +2761,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/bridge/webhook", csrf_protected(bridge_webhook), methods=["POST"]),
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", safely(admin_page), methods=["GET"]),
+        Route("/admin/sign-records", csrf_protected(admin_sign_records), methods=["POST"]),
         Route("/oauth/authorize", safely(oauth_authorize), methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),

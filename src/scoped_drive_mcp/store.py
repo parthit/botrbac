@@ -8,9 +8,13 @@ All keys are prefixed with `sdm:`. The admin keeps the original key names. Every
 is stored under `u:{email}:` on that same prefixed store.
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -36,6 +40,8 @@ ACCESS_READ = "read"
 ACCESS_EDIT = "edit"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
+# A paired person's repeated call is written to the owner's Activity this often.
+GUEST_ROW_EVERY = 3600
 OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
 BOT_TOKEN_KEY = "vault:bot_refresh_token"  # noqa: S105 - a key name
 USERS_INDEX = "users:index"
@@ -73,6 +79,22 @@ for _, value in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
     end
 end
 return removed
+"""
+
+_SWAP_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+    return 1
+end
+return 0
+"""
+
+_HSWAP_SCRIPT = """
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+    redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+    return 1
+end
+return 0
 """
 
 _LREPLACE_SCRIPT = """
@@ -165,6 +187,23 @@ class MemoryStore:
         with self._lock:
             expires = self._clock() + ex if ex else None
             self._values[key] = (expires, value)
+
+    def swap(self, key: str, old: str, new: str) -> bool:
+        """Replace a string with `new` only if it still says `old`. Keeps its expiry."""
+        with self._lock:
+            if self._live(key) != old:
+                return False
+            self._values[key] = (self._values[key][0], new)
+            return True
+
+    def hswap(self, key: str, field: str, old: str, new: str) -> bool:
+        """Replace one hash field with `new` only if it still says `old`."""
+        with self._lock:
+            current = self._live(key)
+            if not isinstance(current, dict) or current.get(field) != old:
+                return False
+            current[field] = new
+            return True
 
     def delete(self, key: str) -> None:
         with self._lock:
@@ -335,6 +374,12 @@ class RedisStore:
         removed = self._redis.lrem(key, 0, value)
         return int(removed or 0)
 
+    def swap(self, key: str, old: str, new: str) -> bool:
+        return bool(self._redis.eval(_SWAP_SCRIPT, keys=[key], args=[old, new]))
+
+    def hswap(self, key: str, field: str, old: str, new: str) -> bool:
+        return bool(self._redis.eval(_HSWAP_SCRIPT, keys=[key], args=[field, old, new]))
+
     def lreplace(self, key: str, old: str, new: str) -> int:
         value = self._redis.eval(_LREPLACE_SCRIPT, keys=[key], args=[old, new])
         return int(value or 0)
@@ -374,6 +419,255 @@ class PrefixedStore:
             return method(self.prefix + key, *args, **kwargs)
 
         return call
+
+
+# ---- signed records ---------------------------------------------------------
+#
+# The records that decide who may reach what: allowlist and Sharing entries, connected
+# apps (grants, roles, access and refresh tokens, codes) and pairings. Each is stored
+# with an HMAC over its key, its hash field and its value, made with a key derived from
+# ENCRYPTION_KEY. Someone who can write to the store but does not have that key cannot
+# add one or move one to another person's keys. It does not stop them deleting a
+# record, or putting back an older value they copied from the same place, so the code
+# that reads these records must not treat a missing one as permission.
+SIGNED_MARK = "s1."
+_MAC_LENGTH = 43  # urlsafe base64 of 32 bytes, without padding
+_MAC_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+_SIGNED_HASHES = frozenset({ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY})
+_SIGNED_PREFIXES = (
+    "oauth:",
+    "bridge:link:",
+    "bridge:appr:",
+    "bridge:peer:",
+    "bridge:user:",
+    "bridge:invite:",
+    "bridge:selfclaim:",
+)
+_TENANT_PREFIX = re.compile(r"^u:[^:]+:")
+
+
+def signs(key: str) -> bool:
+    """Whether `key` (as seen below the `sdm:` prefix) holds a signed record."""
+    name = _TENANT_PREFIX.sub("", key, count=1)
+    return name in _SIGNED_HASHES or name.startswith(_SIGNED_PREFIXES)
+
+
+def signing_key(encryption_key: str) -> bytes:
+    return hmac.new(
+        encryption_key.strip().encode(), b"botrbac record signing v1", hashlib.sha256
+    ).digest()
+
+
+def _looks_signed(raw: str) -> bool:
+    """`s1.<43 characters>.<value>`. A value from before signing that merely starts with
+    `s1.` (an address such as s1.smith@example.com) is not mistaken for a signed one."""
+    head = len(SIGNED_MARK) + _MAC_LENGTH
+    return (
+        raw.startswith(SIGNED_MARK)
+        and len(raw) > head
+        and raw[head] == "."
+        and all(ch in _MAC_CHARS for ch in raw[len(SIGNED_MARK) : head])
+    )
+
+
+class SignedStore:
+    """Signs the records `signs()` names on the way in and checks them on the way out.
+
+    A record whose signature does not match is treated as missing. An unsigned record is
+    accepted until `require` is on (REQUIRE_SIGNED_RECORDS), and is treated as missing
+    after that. Reading never writes: records from before signing are signed by
+    `sign_existing_records`, one compare-and-swap each, so a change made at the same
+    moment is never undone. Every other key passes straight through."""
+
+    def __init__(self, inner: KeyValueStore, key: bytes, *, require: bool = False):
+        self.inner = inner
+        self.kind = getattr(inner, "kind", "custom")
+        self.require = require
+        self._key = key
+        self.refused = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def _mac(self, key: str, field: str | None, value: str) -> str:
+        message = "\x00".join((key, field or "", value)).encode()
+        digest = hmac.new(self._key, message, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+    def _seal(self, key: str, field: str | None, value: str) -> str:
+        return f"{SIGNED_MARK}{self._mac(key, field, value)}.{value}"
+
+    def _open(self, key: str, field: str | None, raw: Any) -> str | None:
+        """The value, or None when the record is refused."""
+        if not isinstance(raw, str):
+            return raw
+        if _looks_signed(raw):
+            mac, _, value = raw[len(SIGNED_MARK) :].partition(".")
+            if hmac.compare_digest(mac.encode(), self._mac(key, field, value).encode()):
+                return value
+            self.refused += 1
+            logger.warning("stored record failed its signature check and was ignored")
+            return None
+        if self.require:
+            self.refused += 1
+            logger.warning("unsigned stored record ignored (REQUIRE_SIGNED_RECORDS is on)")
+            return None
+        return raw
+
+    def get(self, key: str) -> str | None:
+        raw = self.inner.get(key)
+        if raw is None or not signs(key):
+            return raw
+        return self._open(key, None, raw)
+
+    def getdel(self, key: str) -> str | None:
+        if not signs(key):
+            consume = getattr(self.inner, "getdel", None)
+            if consume is not None:
+                return consume(key)
+            raw = self.inner.get(key)
+            if raw is not None:
+                self.inner.delete(key)
+            return raw
+        # Checked before it is taken, so a record that is refused is left where it is.
+        raw = self.inner.get(key)
+        if raw is None or self._open(key, None, raw) is None:
+            return None
+        consume = getattr(self.inner, "getdel", None)
+        if consume is not None:
+            taken = consume(key)
+        else:
+            taken = self.inner.get(key)
+            if taken is not None:
+                self.inner.delete(key)
+        if taken is None:
+            return None  # someone else took it first
+        return self._open(key, None, taken)
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        stored = self._seal(key, None, value) if signs(key) else value
+        if ex is None:
+            self.inner.set(key, stored)
+        else:
+            self.inner.set(key, stored, ex=ex)
+
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+        stored = self._seal(key, None, value) if signs(key) else value
+        return self.inner.set_if_absent(key, stored, ex=ex)
+
+    def hset(self, key: str, field: str, value: str) -> None:
+        self.inner.hset(key, field, self._seal(key, field, value) if signs(key) else value)
+
+    def hget(self, key: str, field: str) -> str | None:
+        raw = self.inner.hget(key, field)
+        if raw is None or not signs(key):
+            return raw
+        return self._open(key, field, raw)
+
+    def hgetall(self, key: str) -> dict[str, str]:
+        rows = self.inner.hgetall(key)
+        if not signs(key):
+            return rows
+        out: dict[str, str] = {}
+        for name, raw in rows.items():
+            value = self._open(key, name, raw)
+            if value is not None:
+                out[name] = value
+        return out
+
+    def replace(self, key: str, old: str, new: str) -> bool:
+        """Change a string from `old` to `new` only if it still says `old`. Keeps its expiry.
+        False both when it changed meanwhile and when the store below cannot swap; a
+        caller that retries ends with a plain write either way."""
+        raw = self.inner.get(key)
+        swap = getattr(self.inner, "swap", None)
+        if raw is None or swap is None or self._open(key, None, raw) != old:
+            return False
+        return bool(swap(key, raw, self._seal(key, None, new) if signs(key) else new))
+
+    def hreplace(self, key: str, field: str, old: str, new: str) -> bool:
+        """Change one hash field from `old` to `new` only if it still says `old`."""
+        raw = self.inner.hget(key, field)
+        swap = getattr(self.inner, "hswap", None)
+        if raw is None or swap is None or self._open(key, field, raw) != old:
+            return False
+        stored = self._seal(key, field, new) if signs(key) else new
+        return bool(swap(key, field, raw, stored))
+
+    def sign_in_place(self, key: str, field: str | None = None) -> str:
+        """Sign one record from before signing. "signed", "already", "missing", or
+        "failed" when it changed at that moment or this store cannot swap."""
+        raw = self.inner.get(key) if field is None else self.inner.hget(key, field)
+        if raw is None:
+            return "missing"
+        if _looks_signed(raw):
+            return "already"
+        sealed = self._seal(key, field, raw)
+        try:
+            if field is None:
+                swap = getattr(self.inner, "swap", None)
+                done = swap is not None and swap(key, raw, sealed)
+            else:
+                swap = getattr(self.inner, "hswap", None)
+                done = swap is not None and swap(key, field, raw, sealed)
+        except Exception:
+            logger.warning("could not sign a stored record in place", exc_info=True)
+            done = False
+        return "signed" if done else "failed"
+
+
+def sign_existing_records(
+    store: Any, people: list[str], admin_email: str | None
+) -> tuple[int, int]:
+    """Sign every record from before signing. Returns (signed, could not be signed).
+
+    Run from the admin page before REQUIRE_SIGNED_RECORDS is turned on, and again until
+    the second number is 0: a record that changed at the moment it was being signed is
+    left for the next run. Authorization codes and other records that live for minutes
+    are left out."""
+    if not isinstance(store, SignedStore):
+        return 0, 0
+    tally = {"signed": 0, "failed": 0}
+
+    def sign(key: str, field: str | None = None) -> None:
+        outcome = store.sign_in_place(key, field)
+        if outcome in tally:
+            tally[outcome] += 1
+
+    def sign_hash(key: str) -> list[str]:
+        fields = list(store.inner.hgetall(key))
+        for name in fields:
+            sign(key, name)
+        return fields
+
+    for email in dict.fromkeys([*people, *([admin_email] if admin_email else [])]):
+        prefix = "" if email == admin_email else f"u:{email}:"
+        sign_hash(prefix + ALLOWLIST_KEY)
+        sign_hash(prefix + EXTERNAL_ALLOWLIST_KEY)
+        for link_id in sign_hash(f"bridge:user:{email}"):
+            sign(f"bridge:link:{link_id}")
+            sign_hash(f"bridge:appr:{link_id}")
+            sign(f"bridge:peer:{link_id}")
+            sign(f"bridge:selfclaim:{link_id}")
+            try:
+                code = json.loads(store.get(f"bridge:link:{link_id}") or "{}").get("invite_code")
+            except (ValueError, AttributeError):
+                code = None
+            if isinstance(code, str) and code:
+                sign(f"bridge:invite:{code}")
+    sign_hash("oauth:clients")
+    for grant_id in sign_hash("oauth:grants"):
+        for name in ("role", "rolechosen", "seen", "revoked"):
+            sign(f"oauth:{name}:{grant_id}")
+        try:
+            grant = json.loads(store.hget("oauth:grants", grant_id) or "{}")
+        except ValueError:
+            continue
+        for digest in grant.get("access_hashes") or []:
+            sign(f"oauth:at:{digest}")
+        if grant.get("refresh_hash"):
+            sign(f"oauth:rt:{grant['refresh_hash']}")
+    return tally["signed"], tally["failed"]
 
 
 class ActorStore:
@@ -601,6 +895,34 @@ class PostgresStore:
             )
 
         self._run(write)
+
+    def swap(self, key: str, old: str, new: str) -> bool:
+        def write(conn: Any) -> bool:
+            row = conn.execute(
+                """
+                UPDATE sdm_kv SET value = %s
+                WHERE key = %s AND value = %s AND (expires_at IS NULL OR expires_at > NOW())
+                RETURNING 1
+                """,
+                (new, key, old),
+            ).fetchone()
+            return row is not None
+
+        return bool(self._run(write))
+
+    def hswap(self, key: str, field: str, old: str, new: str) -> bool:
+        def write(conn: Any) -> bool:
+            row = conn.execute(
+                """
+                UPDATE sdm_hash SET value = %s
+                WHERE key = %s AND field = %s AND value = %s
+                RETURNING 1
+                """,
+                (new, key, field, old),
+            ).fetchone()
+            return row is not None
+
+        return bool(self._run(write))
 
     def hget(self, key: str, field: str) -> str | None:
         def read(conn: Any) -> str | None:
@@ -914,8 +1236,16 @@ class Allowlist:
 class TokenVault:
     """Refresh tokens for the owner and the bot, encrypted with Fernet (ENCRYPTION_KEY)."""
 
-    def __init__(self, store: KeyValueStore, encryption_key: str | None):
+    def __init__(
+        self,
+        store: KeyValueStore,
+        encryption_key: str | None,
+        expected: Callable[[], str | None] | None = None,
+    ):
         self.store = store
+        # Whose sign-in this vault should hold. The encrypted record names its account,
+        # so one copied into another person's slot in the store is refused.
+        self.expected = expected
         self._fernet = None
         if encryption_key:
             from cryptography.fernet import Fernet
@@ -951,7 +1281,15 @@ class TokenVault:
         self._put(OWNER_TOKEN_KEY, token, email, scopes)
 
     def owner(self) -> dict[str, str] | None:
-        return self._take(OWNER_TOKEN_KEY)
+        record = self._take(OWNER_TOKEN_KEY)
+        want = self.expected() if self.expected is not None else None
+        have = record.get("email") if record else None
+        # A record saved before the account was written into it has no email and is
+        # accepted. Every record written since has one, so a copied one is caught.
+        if want and have and str(have).strip().lower() != want.strip().lower():
+            logger.warning("stored Drive sign-in belongs to a different account; ignored")
+            return None
+        return record
 
     def set_bot(self, token: str, email: str) -> None:
         self._put(BOT_TOKEN_KEY, token, email)
@@ -977,8 +1315,39 @@ class ActivityLog:
         self.max_items = max_items
 
     def __call__(self, record: dict[str, Any]) -> None:
+        if not self._worth_keeping(record):
+            return
         self.store.lpush(ACTIVITY_KEY, json.dumps(record, separators=(",", ":")))
         self.store.ltrim(ACTIVITY_KEY, 0, self.max_items - 1)
+
+    def _worth_keeping(self, record: dict[str, Any]) -> bool:
+        """The list holds ACTIVITY_MAX rows, so rows anyone can produce in bulk must not
+        be able to push the others out. Every record still goes to the server log.
+
+        A rejected bearer token is kept once an hour per reason. A paired person's call
+        is kept once an hour per tool and outcome (and per file when it was allowed), so
+        repeating a call does not bury the record of an earlier one."""
+        guest = record.get("guest")
+        if record.get("event") == "auth":
+            parts = ["auth", str(record.get("reason"))]
+        elif guest:
+            allowed = record.get("decision") == "allow"
+            parts = [
+                str(guest),
+                str(record.get("tool")),
+                str(record.get("decision")),
+                str(record.get("reason")),
+                str(record.get("file_id") or record.get("folder_id") or "") if allowed else "",
+            ]
+        else:
+            return True
+        digest = hashlib.sha256("\x00".join(parts).encode()).hexdigest()[:32]
+        try:
+            return self.store.set_if_absent(f"activity_seen:{digest}", "1", ex=GUEST_ROW_EVERY)
+        except Exception:
+            # Not knowing whether it is a repeat is no reason to lose the record.
+            logger.warning("activity repeat check failed; keeping the row", exc_info=True)
+            return True
 
     def recent(self, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1130,6 +1499,10 @@ def _scan_request_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
             return
 
 
+def _session_key(sid: str) -> str:
+    return "session:" + hashlib.sha256(sid.encode()).hexdigest()
+
+
 class TenantDirectory:
     """Opens one person's store without changing `current_actor`.
 
@@ -1148,7 +1521,25 @@ class TenantDirectory:
         return PrefixedStore(self.store, f"u:{email}:")
 
     def vault_for(self, email: str | None) -> TokenVault:
-        return TokenVault(self.store_for(email), self.encryption_key)
+        return TokenVault(
+            self.store_for(email), self.encryption_key, expected=lambda: email or self.admin_email
+        )
+
+    # Dashboard sessions. The cookie carries a random id; the id has to be here too, so
+    # signing out ends the session and it cannot outlive `ttl` by being re-signed.
+    def open_session(self, email: str, ttl: int) -> str:
+        sid = secrets.token_urlsafe(32)
+        self.store.set(_session_key(sid), email, ex=ttl)
+        return sid
+
+    def session_alive(self, sid: Any, email: str) -> bool:
+        if not isinstance(sid, str) or not sid:
+            return False
+        return self.store.get(_session_key(sid)) == email
+
+    def close_session(self, sid: Any) -> None:
+        if isinstance(sid, str) and sid:
+            self.store.delete(_session_key(sid))
 
     def actor_store(self) -> ActorStore:
         return ActorStore(self.store, self.admin_email)

@@ -21,6 +21,7 @@ as a fresh request. The hold ends early when the owner changes that file's entry
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 import time
@@ -31,12 +32,21 @@ from typing import Any
 from .scope import InvalidInputError, validate_drive_id
 from .store import KeyValueStore, utc_now
 
+logger = logging.getLogger(__name__)
+
 REQUEST_TTL = 7 * 24 * 3600
 DENIAL_WINDOW = 24 * 3600
 INDEX_KEY = "requests:index"
 PENDING_INDEX = "requests:pending"
 PENDING_READY = "requests:pending_ready"
 INDEX_MAX = 300
+# Requests one connected app may have waiting at once (MAX_PENDING_REQUESTS).
+MAX_PENDING_PER_APP = 50
+# Whole-server keys (not per person): request id -> the account it belongs to, and when
+# this index started. They let "this link is for a different account" be answered with one
+# read instead of looking through every account.
+OWNER_INDEX = "reqowner:"
+OWNER_INDEX_SINCE = "reqowner_since"
 MAX_TEXT = 500
 
 PENDING = "pending"
@@ -107,9 +117,16 @@ def _cleared_key(file_id: str) -> str:
 
 
 class AccessRequests:
-    def __init__(self, store: KeyValueStore, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        store: KeyValueStore,
+        clock: Callable[[], float] = time.time,
+        on_create: Callable[[str], None] | None = None,
+    ):
         self.store = store
         self.clock = clock
+        # Told each new request id, so the server can note whose it is (see OWNER_INDEX).
+        self.on_create = on_create
 
     def recent_denial(self, file_id: str, token_name: str | None) -> AccessRequest | None:
         """The request the owner denied for this file and assistant within DENIAL_WINDOW."""
@@ -170,13 +187,17 @@ class AccessRequests:
         file_id: str | None = None,
         file_name: str | None = None,
         description: str | None = None,
+        max_pending: int | None = None,
     ) -> tuple[AccessRequest, bool]:
         """Create a pending request, or return the existing pending one for `file_id`.
-        Returns (request, created)."""
+        Returns (request, created). Raises TooManyPending when `max_pending` requests
+        from this app are already waiting: nothing is saved then."""
         if file_id is not None:
             existing = self.pending_for(file_id)
             if existing is not None:
                 return existing, False
+        if max_pending is not None and self.pending_from(token_name) >= max_pending:
+            raise TooManyPending(max_pending)
         req = AccessRequest(
             id=new_request_id(),
             file_id=file_id,
@@ -195,6 +216,11 @@ class AccessRequests:
         # Same cap as the history list, so the nav badge never counts (and re-reads on
         # every page) more requests than the Requests page can show.
         self.store.ltrim(PENDING_INDEX, 0, INDEX_MAX - 1)
+        if self.on_create is not None:
+            try:
+                self.on_create(req.id)
+            except Exception:  # the request itself is saved; only the hint is missing
+                logger.warning("request owner index not written", exc_info=True)
         return req, True
 
     def decide(
@@ -221,6 +247,15 @@ class AccessRequests:
                 ex=DENIAL_WINDOW,
             )
         return req
+
+    def pending_from(self, token_name: str | None) -> int:
+        """How many waiting requests this app filed. Read only when it files another."""
+        count = 0
+        for rid in dict.fromkeys(self.store.lrange(PENDING_INDEX, 0, -1)):
+            req = self.get(rid)
+            if req is not None and req.status == PENDING and req.token_name == token_name:
+                count += 1
+        return count
 
     def pending_count(self) -> int:
         """How many requests are still waiting. One list read, then one read per waiting id.
@@ -267,6 +302,14 @@ class AccessRequests:
         return out
 
 
+class TooManyPending(Exception):
+    """An app already has as many requests waiting as it is allowed."""
+
+    def __init__(self, limit: int):
+        super().__init__(f"{limit} requests are already waiting")
+        self.limit = limit
+
+
 class AccessService:
     """What the MCP tools see: build `access_required` payloads and the two request tools."""
 
@@ -280,7 +323,10 @@ class AccessService:
         probe: Callable[[str], tuple[str, str | None]] | None = None,
         sharer_of: Callable[[str], str | None] | None = None,
         limited_sign_in: Callable[[], bool] | None = None,
+        max_pending: int | None = MAX_PENDING_PER_APP,
     ):
+        # One app's waiting requests are capped, so it cannot bury the Requests page.
+        self.max_pending = max_pending
         self.requests = requests
         self.app_base_url = app_base_url.rstrip("/")
         self.guard = guard
@@ -375,14 +421,31 @@ class AccessService:
         unreachable, name = self._lookup(file_id)
         if unreachable is not None:
             return unreachable
-        req, _created = self.requests.create(
-            tool=tool,
-            token_name=token_name,
-            reason=f"{tool} was refused because the item is not shared with the assistant",
-            file_id=file_id,
-            file_name=name,
-        )
+        try:
+            req, _created = self.requests.create(
+                tool=tool,
+                token_name=token_name,
+                reason=f"{tool} was refused because the item is not shared with the assistant",
+                file_id=file_id,
+                file_name=name,
+                max_pending=self.max_pending,
+            )
+        except TooManyPending as exc:
+            return self._too_many(exc.limit, file_id)
         return self._payload(req)
+
+    def _too_many(self, limit: int, file_id: str | None) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "error": "too_many_requests",
+            "message": (
+                f"This app already has {limit} access requests waiting for the user, so no "
+                "new one was created and there is no approval link. Ask the user to approve "
+                "or deny the waiting requests on the dashboard's Requests page, then try again."
+            ),
+        }
+        if file_id:
+            out["file_id"] = file_id
+        return out
 
     def request_access(
         self,
@@ -412,14 +475,19 @@ class AccessService:
             unreachable, name = self._lookup(file_id)
             if unreachable is not None:
                 return {"status": unreachable.pop("error"), **unreachable}
-        req, _created = self.requests.create(
-            tool="request_access",
-            token_name=token_name,
-            reason=reason_clean,
-            file_id=file_id,
-            file_name=name,
-            description=description_clean,
-        )
+        try:
+            req, _created = self.requests.create(
+                tool="request_access",
+                token_name=token_name,
+                reason=reason_clean,
+                file_id=file_id,
+                file_name=name,
+                description=description_clean,
+                max_pending=self.max_pending,
+            )
+        except TooManyPending as exc:
+            refused = self._too_many(exc.limit, file_id)
+            return {"status": refused.pop("error"), **refused}
         return {
             "status": req.status,
             "request_id": req.id,

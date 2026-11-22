@@ -75,6 +75,25 @@ def _guest_notes(result: Any) -> Any:
     return result
 
 
+def _hide_other_guests(result: Any, you: str) -> Any:
+    """Who else wrote into or renamed something in a share is the owner's business. A guest
+    sees their own address, and "another person" for anyone else.
+
+    `written_by` and `renamed_by` are the only fields that name a person today. A new field
+    that does has to be added here. The dicts are built for this one response, so changing
+    them in place is safe."""
+    if isinstance(result, dict):
+        for key in ("written_by", "renamed_by"):
+            if isinstance(result.get(key), str) and result[key] != you:
+                result[key] = "another person"
+        for value in result.values():
+            _hide_other_guests(value, you)
+    elif isinstance(result, list):
+        for item in result:
+            _hide_other_guests(item, you)
+    return result
+
+
 class SharedAccessError(Exception):
     """A guest call was refused. The message is safe to show the reading assistant."""
 
@@ -144,7 +163,9 @@ def clean_query(value: Any) -> str:
 def wrap_untrusted(text: str) -> str:
     """Wrap file text so the reader can tell where another person's content starts and
     ends. The markers are removed from the body first so a file cannot close them early."""
-    body = text.replace(SHARED_START, "").replace(SHARED_END, "")
+    # Replaced, not deleted: deleting lets a marker split around a copy of itself
+    # ("<<<END U" + marker + "NTRUSTED ...>>>") join back up into a real one.
+    body = text.replace(SHARED_START, "[removed-marker]").replace(SHARED_END, "[removed-marker]")
     return f"{SHARED_START}\n{body}\n{SHARED_END}"
 
 
@@ -468,9 +489,14 @@ class ExternalShares:
         )
 
     def rename_file(self, caller: str, owner: str, file_id: str, new_name: str) -> dict[str, Any]:
-        return self._write(
-            caller, owner, "rename_shared_file", file_id, lambda s: s.rename_file(file_id, new_name)
-        )
+        def rename(service: Any) -> dict[str, Any]:
+            # An item on the Sharing list keeps the name its owner gave it, also when it
+            # sits inside a folder that person may edit.
+            if file_id in self.allowlist.entries():
+                raise ForbiddenError("an item on the Sharing list cannot be renamed")
+            return service.rename_file(file_id, new_name)
+
+        return self._write(caller, owner, "rename_shared_file", file_id, rename)
 
     def guest_call(
         self,
@@ -594,4 +620,4 @@ class ExternalShares:
                     self.first_read(you, tool, file_id)
                 except Exception:
                     logger.info("first-read notice not saved", exc_info=True)
-            return _guest_notes(result)
+            return _hide_other_guests(_guest_notes(result), you)

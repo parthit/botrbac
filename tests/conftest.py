@@ -92,6 +92,7 @@ def make_settings(**overrides) -> Settings:
         "app_base_url": BASE_URL,
         "session_secret": SESSION_SECRET,
         "encryption_key": ENCRYPTION_KEY,
+        "oauth_test_callback": True,
     }
     values.update(overrides)
     return Settings(**values)
@@ -285,3 +286,13 @@ def p2_app(world: FakeDrive, p2_settings: Settings, memstore: MemoryStore, oauth
     )
     app.state.owner_tokens = owner_tokens
     return app
+
+
+def unsealed(stored):
+    """What a signed record says, for tests that look straight at the store. Records that
+    decide access are stored as `s1.<signature>.<value>` (store.SignedStore)."""
+    if isinstance(stored, dict):
+        return {key: unsealed(value) for key, value in stored.items()}
+    if isinstance(stored, str) and stored.startswith("s1."):
+        return stored.split(".", 2)[2]
+    return stored

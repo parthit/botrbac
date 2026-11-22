@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     app_base_url: str | None = None
     session_secret: SecretStr | None = None
     encryption_key: SecretStr | None = None
+    # Local testing only: also accept this server's own /oauth/done as an OAuth redirect.
+    oauth_test_callback: bool = False
     webhooks_enabled: bool = False
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"
@@ -133,6 +135,11 @@ class Settings(BaseSettings):
     login_rate_limit: int = Field(default=30, ge=1, le=10_000)
     login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
     mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)
+    # Off: an unsigned allowlist, app or pairing record is accepted and signed when read.
+    # On: it is ignored. Turn on once the records from before signing have been signed.
+    require_signed_records: bool = False
+    # Access requests one connected app may have waiting for the person at once.
+    max_pending_requests: int = Field(default=50, ge=1, le=300)
     mcp_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
 
     @field_validator(
@@ -345,6 +352,14 @@ class Settings(BaseSettings):
         if self.postgres_configured:
             missing = [name for name in missing if not name.startswith("UPSTASH_")]
         return missing
+
+    @model_validator(mode="after")
+    def _signing_needs_a_key(self) -> "Settings":
+        # Records are signed with a key made from ENCRYPTION_KEY. Without it nothing is
+        # signed or checked, so asking for signed records must not quietly do nothing.
+        if self.require_signed_records and self.encryption_key is None:
+            raise ValueError("REQUIRE_SIGNED_RECORDS needs ENCRYPTION_KEY to be set")
+        return self
 
     def dashboard_missing(self) -> list[str]:
         """Settings the web dashboard cannot run without (Redis may fall back to memory)."""

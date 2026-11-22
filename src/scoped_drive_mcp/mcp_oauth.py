@@ -243,8 +243,13 @@ def protected_resource_metadata_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/.well-known/oauth-protected-resource/mcp"
 
 
-def redirect_allowlist(base_url: str) -> frozenset[str]:
-    return ALLOWED_REDIRECT_URIS | {done_redirect(base_url)}
+def redirect_allowlist(base_url: str, test_callback: bool = False) -> frozenset[str]:
+    """Where an authorization code may be sent. This server's own `/oauth/done` page is
+    not one of them unless OAUTH_TEST_CALLBACK is on: a code sent there lands in front of
+    the person who clicked Allow, and anyone who registered the app could ask them for it."""
+    if test_callback:
+        return ALLOWED_REDIRECT_URIS | {done_redirect(base_url)}
+    return ALLOWED_REDIRECT_URIS
 
 
 def pkce_s256(verifier: str) -> str:
@@ -255,6 +260,18 @@ def pkce_s256(verifier: str) -> str:
 def _same(left: str, right: str) -> bool:
     # Bytes, not str: compare_digest raises TypeError on non-ASCII text.
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+# set_if_absent takes a lifetime. Ten years stands in for "does not expire".
+_FOR_GOOD = 10 * 365 * 24 * 3600
+
+
+def _expired(saved: dict[str, Any]) -> bool:
+    """A token record past the time it carries. Records from before that have none.
+    Checked for access tokens. A refresh token is held to `refresh_until` on its grant,
+    which is signed, so the time on its own record is only there for the reader."""
+    exp = saved.get("exp")
+    return isinstance(exp, (int, float)) and time.time() >= exp
 
 
 def _safe_state(value: str) -> bool:
@@ -339,6 +356,11 @@ def _chosen_key(grant_id: str) -> str:
     return f"oauth:rolechosen:{grant_id}"
 
 
+def _pinned_key(grant_id: str) -> str:
+    """Set when the role of an app from before roles existed was written down for it."""
+    return f"oauth:rolepinned:{grant_id}"
+
+
 def _seen_key(grant_id: str) -> str:
     return f"oauth:seen:{grant_id}"
 
@@ -364,7 +386,13 @@ class McpOAuth:
         signed_in: Callable[[str], bool] | None = None,
         *,
         rate_limit: tuple[int, int] | None = None,
+        test_callback: bool = False,
+        strict: bool = False,
     ):
+        self.test_callback = test_callback
+        # REQUIRE_SIGNED_RECORDS is on: a record that is missing is never read as
+        # permission, because someone who can write to the store can also delete from it.
+        self.strict = strict
         # (requests, window seconds) per address for the two unauthenticated endpoints.
         self.rate_limit = rate_limit
         self.store = store
@@ -390,7 +418,7 @@ class McpOAuth:
     def redirect_allowed(self, uri: str) -> bool:
         if not uri or any(ch in uri for ch in ("\r", "\n", "\t", " ", "\\")):
             return False
-        return uri in redirect_allowlist(self.base_url)
+        return uri in redirect_allowlist(self.base_url, self.test_callback)
 
     def completion_url_ok(self, url: str) -> bool:
         """True when `url` is an allowlisted redirect plus an optional query string."""
@@ -461,7 +489,7 @@ class McpOAuth:
             *[Route(path, self._asm, methods=["GET"]) for path in AS_PATHS],
             Route("/oauth/register", self._register, methods=["POST"]),
             Route("/oauth/token", self._token, methods=["POST"]),
-            Route("/oauth/done", self._done, methods=["GET"]),
+            *([Route("/oauth/done", self._done, methods=["GET"])] if self.test_callback else []),
         ]
 
     async def _prm(self, _: Request) -> JSONResponse:
@@ -524,11 +552,11 @@ class McpOAuth:
         return JSONResponse(body, headers=_NO_STORE)
 
     async def _done(self, request: Request) -> HTMLResponse:
-        code = html.escape(request.query_params.get("code", ""))
+        # Test deployments only (OAUTH_TEST_CALLBACK). The code is never shown.
         error = html.escape(request.query_params.get("error", ""))
         page = (
             "<!doctype html><meta charset=utf-8><title>OAuth</title>"
-            f"<p>error: {error}</p><p>code: {code}</p>"
+            f"<p>error: {error}</p><p>Test callback. Do not give this page's address to anyone.</p>"
         )
         return HTMLResponse(page, headers=_NO_STORE)
 
@@ -852,11 +880,12 @@ class McpOAuth:
         access_digest = hash_token(access)
         refresh_digest = hash_token(refresh)
         access_ttl = min(ACCESS_TTL, remaining)
-        payload = json.dumps(
-            {"grant_id": grant.id, "client_id": grant.client_id, "email": grant.email},
-            separators=(",", ":"),
-        )
+        claims = {"grant_id": grant.id, "client_id": grant.client_id, "email": grant.email}
+        # The record says when it ends, as well as the store dropping it then: a signed
+        # record put back in the store without an expiry is still over at that time.
+        payload = json.dumps({**claims, "exp": now + access_ttl}, separators=(",", ":"))
         self.store.set(_at_key(access_digest), payload, ex=access_ttl)
+        payload = json.dumps({**claims, "exp": now + remaining}, separators=(",", ":"))
         self.store.set(_rt_key(refresh_digest), payload, ex=remaining)
         grant.access_hashes.append(access_digest)
         while len(grant.access_hashes) > MAX_ACCESS_TOKENS:
@@ -903,6 +932,7 @@ class McpOAuth:
             or not self._may_act(grant.email)
             or digest not in grant.access_hashes
             or not _same(str(saved.get("client_id", "")), grant.client_id)
+            or _expired(saved)
         ):
             return None
         # Last-use is a side key. Rewriting the grant here races _issue_tokens and can
@@ -934,7 +964,7 @@ class McpOAuth:
                         created_at=grant.created_at,
                         last_used=self._displayed_last_used(grant),
                         role=self.role_of(grant),
-                        legacy_full=not grant.roles and self.store.get(_role_key(grant.id)) is None,
+                        legacy_full=self._legacy_full(grant),
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -975,9 +1005,61 @@ class McpOAuth:
         stored = self.store.get(_role_key(grant.id))
         if stored in APP_ROLES:
             return str(stored)
-        if grant.roles or self.store.get(_chosen_key(grant.id)) is not None:
+        if grant.roles or self.strict or self.store.get(_chosen_key(grant.id)) is not None:
             return Role.VIEWER.value
         return Role.ADMIN.value
+
+    def _legacy_full(self, grant: "OAuthGrant") -> bool:
+        """Full access only because the app was connected before roles existed, and the
+        owner has not chosen since. True both before and after that role is written down."""
+        if self.store.get(_chosen_key(grant.id)) is not None:
+            return False
+        if self.store.get(_pinned_key(grant.id)) is not None:
+            return self.store.get(_role_key(grant.id)) == Role.ADMIN.value
+        return not grant.roles and self.store.get(_role_key(grant.id)) is None
+
+    def pin_legacy_roles(self) -> tuple[int, int]:
+        """Write down the role of every app from before apps had roles, and mark its
+        grant as having one. Afterwards a role record that goes missing means read only
+        for these apps too, as it already does for newer ones. Returns (changed, could not
+        be changed): a grant a token refresh rewrote at that moment is left for the next
+        run. Run before REQUIRE_SIGNED_RECORDS is turned on (the admin page does)."""
+        changed = failed = 0
+        for grant_id in list(self.store.hgetall(GRANTS_KEY)):
+            grant = self._grant(grant_id)
+            if grant is None or grant.roles:
+                continue
+            if self.store.get(_role_key(grant.id)) not in APP_ROLES:
+                # Only if there is still none: a role the owner picks at this moment wins.
+                self.store.set_if_absent(_role_key(grant.id), self.role_of(grant), ex=_FOR_GOOD)
+                # Written down here, not chosen by the owner: Settings still says so.
+                self.store.set(_pinned_key(grant.id), "1")
+            if self._mark_roles(grant):
+                changed += 1
+            else:
+                failed += 1
+        return changed, failed
+
+    def _mark_roles(self, grant: "OAuthGrant") -> bool:
+        """Set `roles` on the stored grant, only if nothing else changed it meanwhile (a
+        token refresh rewrites the same record). False when it lost that race."""
+        replace = getattr(self.store, "hreplace", None)
+        if replace is None:
+            return False
+        try:
+            # The stored text, not this object written out again: an older record may
+            # be spelled differently and would never compare equal.
+            before = self.store.hget(GRANTS_KEY, grant.id)
+            if not before:
+                return False
+            after = json.dumps({**json.loads(before), "roles": True}, separators=(",", ":"))
+            if not replace(GRANTS_KEY, grant.id, before, after):
+                return False
+            grant.roles = True
+            return True
+        except Exception:
+            logger.warning("could not mark a grant as having a role", exc_info=True)
+            return False
 
     def set_role(self, grant_id: str, email: str, role: str) -> bool:
         """The owner changes what one of their apps may do. Applies on its next call."""
@@ -990,6 +1072,10 @@ class McpOAuth:
         # rewrites) marks that, so a lost role key fails closed to read from here on.
         self.store.set(_chosen_key(grant.id), "1")
         self.store.set(_role_key(grant.id), role)
+        if not grant.roles:
+            # Best effort: also say so on the grant itself, which is signed, so deleting
+            # the two side keys cannot bring full access back.
+            self._mark_roles(grant)
         return True
 
     def _note_use(self, grant_id: str) -> None:

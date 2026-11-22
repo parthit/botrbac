@@ -38,6 +38,7 @@ META_FIELDS = (
 )
 # Set on files a paired person's assistant writes into a folder shared with them.
 WRITER_PROPERTY = "botrbac_writer"
+RENAMER_PROPERTY = "botrbac_renamed_by"
 PUBLIC_META_KEYS = (
     "id",
     "name",
@@ -230,6 +231,10 @@ class DriveService:
         if writer:
             out["written_by"] = str(writer).removeprefix("guest:")
             out["content_trust"] = "untrusted_peer"
+        renamer = (meta.get("properties") or {}).get(RENAMER_PROPERTY)
+        if renamer:
+            out["renamed_by"] = str(renamer).removeprefix("guest:")
+            out["name_trust"] = "untrusted_peer"
         if "parents" not in out:
             return out
         memo = {} if memo is None else memo
@@ -610,10 +615,18 @@ class DriveService:
 
     def rename_file(self, file_id: str, new_name: str) -> dict[str, Any]:
         new_name = validate_name(new_name, "new_name")
-        self._get_in_scope(file_id, allow_root=False)
-        # Not stamped: a rename changes no content. Only what a peer writes is marked theirs
-        # (creates and content updates), and the mark is never cleared once set.
-        updated = self.drive.update(file_id, {"name": new_name}, None, None, fields=META_FIELDS)
+        meta = self._get_in_scope(file_id, allow_root=False)
+        # A rename changes no content, so the file is not marked as written by a peer. The
+        # name is theirs though, and is marked so whoever lists the file knows that.
+        metadata: dict[str, Any] = {"name": new_name}
+        who = self.writer() if self.writer is not None else None
+        if who:
+            metadata["properties"] = {RENAMER_PROPERTY: f"guest:{who}"}
+        elif (meta.get("properties") or {}).get(RENAMER_PROPERTY):
+            # The owner's own assistant chose this name, so it is no longer a peer's.
+            # Drive deletes a property that is set to null.
+            metadata["properties"] = {RENAMER_PROPERTY: None}
+        updated = self.drive.update(file_id, metadata, None, None, fields=META_FIELDS)
         return self._public(updated)
 
     # ---- admin tools -----------------------------------------------------

@@ -18,6 +18,12 @@ from defusedxml.ElementTree import fromstring as xml_fromstring
 _ZIP_ENTRY_CAP = 2000
 _UNCOMPRESSED_CAP = 32 * 1024 * 1024
 _PIECE_CAP = 10_000
+# Work limits for one file. The size caps above bound the bytes, not the work: nested
+# paragraphs are walked once per level, and a sheet row is as wide as its last cell
+# reference says, so a few kilobytes can ask for gigabytes or minutes without these.
+_NODE_VISIT_CAP = 3_000_000
+_TEXT_CAP = 4_000_000
+_CELL_CAP = 2_000_000
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -176,15 +182,21 @@ def _local(tag: str, ns: str) -> str:
 
 def _paragraphs(root, paragraph_tag: str, text_tag: str, break_tag: str, tab_tag: str) -> list[str]:
     lines: list[str] = []
+    visited = 0
+    size = 0
     for paragraph in root.iter(paragraph_tag):
         chunks: list[str] = []
         for node in paragraph.iter():
+            visited += 1
             if node.tag == text_tag and node.text:
                 chunks.append(node.text)
+                size += len(node.text)
             elif node.tag == tab_tag:
                 chunks.append("\t")
             elif node.tag == break_tag:
                 chunks.append("\n")
+        if visited > _NODE_VISIT_CAP or size > _TEXT_CAP:
+            raise ExtractError("document is too complex to extract; use download_file")
         lines.append("".join(chunks))
     return lines
 
@@ -293,12 +305,16 @@ def xlsx_tabs(data: bytes, char_limit: int) -> list[tuple[str, str]]:
         sheets = list(workbook.worksheets)
         tabs: list[tuple[str, str]] = []
         size = 0
+        seen_cells = 0
         multi = len(sheets) > 1
         for sheet in sheets:
             rows: list[str] = []
             if multi:
                 rows.append(f"# {sheet.title}")
             for row in sheet.iter_rows(values_only=True):
+                seen_cells += len(row)
+                if seen_cells > _CELL_CAP:
+                    raise ExtractError("spreadsheet is too large to extract; use download_file")
                 cells = ["" if cell is None else str(cell) for cell in row]
                 while cells and cells[-1] == "":
                     cells.pop()
