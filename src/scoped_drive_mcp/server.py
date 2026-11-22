@@ -929,6 +929,7 @@ def build_app(
             rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
             test_callback=settings.oauth_test_callback,
             strict=isinstance(kv, SignedStore) and kv.require,
+            encryption_key=enc_key,
         )
         if base_url and not settings.dashboard_missing()
         else None
