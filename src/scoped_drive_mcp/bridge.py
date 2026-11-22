@@ -119,7 +119,8 @@ def present_untrusted(body: str) -> str:
 
 
 def preview_untrusted(body: str, limit: int = 140) -> str:
-    flat = re.sub(r"\s+", " ", neutralize(body)).strip()
+    # Flatten first: a marker broken across lines would otherwise form after the check.
+    flat = neutralize(re.sub(r"\s+", " ", body)).strip()
     snippet = flat if len(flat) <= limit else f"{flat[: limit - 1]}…"
     return "\n".join([UNTRUSTED_START, snippet, UNTRUSTED_END])
 

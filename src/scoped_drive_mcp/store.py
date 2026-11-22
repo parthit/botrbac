@@ -8,9 +8,11 @@ All keys are prefixed with `sdm:`. The admin keeps the original key names. Every
 is stored under `u:{email}:` on that same prefixed store.
 """
 
+import hashlib
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -36,6 +38,8 @@ ACCESS_READ = "read"
 ACCESS_EDIT = "edit"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
+# A paired person's repeated call is written to the owner's Activity this often.
+GUEST_ROW_EVERY = 3600
 OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
 BOT_TOKEN_KEY = "vault:bot_refresh_token"  # noqa: S105 - a key name
 USERS_INDEX = "users:index"
@@ -914,8 +918,16 @@ class Allowlist:
 class TokenVault:
     """Refresh tokens for the owner and the bot, encrypted with Fernet (ENCRYPTION_KEY)."""
 
-    def __init__(self, store: KeyValueStore, encryption_key: str | None):
+    def __init__(
+        self,
+        store: KeyValueStore,
+        encryption_key: str | None,
+        expected: Callable[[], str | None] | None = None,
+    ):
         self.store = store
+        # Whose sign-in this vault should hold. The encrypted record names its account,
+        # so one copied into another person's slot in the store is refused.
+        self.expected = expected
         self._fernet = None
         if encryption_key:
             from cryptography.fernet import Fernet
@@ -951,7 +963,13 @@ class TokenVault:
         self._put(OWNER_TOKEN_KEY, token, email, scopes)
 
     def owner(self) -> dict[str, str] | None:
-        return self._take(OWNER_TOKEN_KEY)
+        record = self._take(OWNER_TOKEN_KEY)
+        want = self.expected() if self.expected is not None else None
+        have = record.get("email") if record else None
+        if want and have and str(have).strip().lower() != want.strip().lower():
+            logger.warning("stored Drive sign-in belongs to a different account; ignored")
+            return None
+        return record
 
     def set_bot(self, token: str, email: str) -> None:
         self._put(BOT_TOKEN_KEY, token, email)
@@ -977,8 +995,34 @@ class ActivityLog:
         self.max_items = max_items
 
     def __call__(self, record: dict[str, Any]) -> None:
+        if not self._worth_keeping(record):
+            return
         self.store.lpush(ACTIVITY_KEY, json.dumps(record, separators=(",", ":")))
         self.store.ltrim(ACTIVITY_KEY, 0, self.max_items - 1)
+
+    def _worth_keeping(self, record: dict[str, Any]) -> bool:
+        """The list holds ACTIVITY_MAX rows, so rows anyone can produce in bulk must not
+        be able to push the others out. Every record still goes to the server log.
+
+        A rejected bearer token is kept once an hour per reason. A paired person's call
+        is kept once an hour per tool and outcome (and per file when it was allowed), so
+        repeating a call does not bury the record of an earlier one."""
+        guest = record.get("guest")
+        if record.get("event") == "auth":
+            parts = ["auth", str(record.get("reason"))]
+        elif guest:
+            allowed = record.get("decision") == "allow"
+            parts = [
+                str(guest),
+                str(record.get("tool")),
+                str(record.get("decision")),
+                str(record.get("reason")),
+                str(record.get("file_id") or record.get("folder_id") or "") if allowed else "",
+            ]
+        else:
+            return True
+        digest = hashlib.sha256("\x00".join(parts).encode()).hexdigest()[:32]
+        return self.store.set_if_absent(f"activity_seen:{digest}", "1", ex=GUEST_ROW_EVERY)
 
     def recent(self, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1130,6 +1174,10 @@ def _scan_request_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
             return
 
 
+def _session_key(sid: str) -> str:
+    return "session:" + hashlib.sha256(sid.encode()).hexdigest()
+
+
 class TenantDirectory:
     """Opens one person's store without changing `current_actor`.
 
@@ -1148,7 +1196,25 @@ class TenantDirectory:
         return PrefixedStore(self.store, f"u:{email}:")
 
     def vault_for(self, email: str | None) -> TokenVault:
-        return TokenVault(self.store_for(email), self.encryption_key)
+        return TokenVault(
+            self.store_for(email), self.encryption_key, expected=lambda: email or self.admin_email
+        )
+
+    # Dashboard sessions. The cookie carries a random id; the id has to be here too, so
+    # signing out ends the session and it cannot outlive `ttl` by being re-signed.
+    def open_session(self, email: str, ttl: int) -> str:
+        sid = secrets.token_urlsafe(32)
+        self.store.set(_session_key(sid), email, ex=ttl)
+        return sid
+
+    def session_alive(self, sid: Any, email: str) -> bool:
+        if not isinstance(sid, str) or not sid:
+            return False
+        return self.store.get(_session_key(sid)) == email
+
+    def close_session(self, sid: Any) -> None:
+        if isinstance(sid, str) and sid:
+            self.store.delete(_session_key(sid))
 
     def actor_store(self) -> ActorStore:
         return ActorStore(self.store, self.admin_email)

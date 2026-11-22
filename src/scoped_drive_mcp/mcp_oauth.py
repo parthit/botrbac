@@ -243,8 +243,13 @@ def protected_resource_metadata_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/.well-known/oauth-protected-resource/mcp"
 
 
-def redirect_allowlist(base_url: str) -> frozenset[str]:
-    return ALLOWED_REDIRECT_URIS | {done_redirect(base_url)}
+def redirect_allowlist(base_url: str, test_callback: bool = False) -> frozenset[str]:
+    """Where an authorization code may be sent. This server's own `/oauth/done` page is
+    not one of them unless OAUTH_TEST_CALLBACK is on: a code sent there lands in front of
+    the person who clicked Allow, and anyone who registered the app could ask them for it."""
+    if test_callback:
+        return ALLOWED_REDIRECT_URIS | {done_redirect(base_url)}
+    return ALLOWED_REDIRECT_URIS
 
 
 def pkce_s256(verifier: str) -> str:
@@ -364,7 +369,9 @@ class McpOAuth:
         signed_in: Callable[[str], bool] | None = None,
         *,
         rate_limit: tuple[int, int] | None = None,
+        test_callback: bool = False,
     ):
+        self.test_callback = test_callback
         # (requests, window seconds) per address for the two unauthenticated endpoints.
         self.rate_limit = rate_limit
         self.store = store
@@ -390,7 +397,7 @@ class McpOAuth:
     def redirect_allowed(self, uri: str) -> bool:
         if not uri or any(ch in uri for ch in ("\r", "\n", "\t", " ", "\\")):
             return False
-        return uri in redirect_allowlist(self.base_url)
+        return uri in redirect_allowlist(self.base_url, self.test_callback)
 
     def completion_url_ok(self, url: str) -> bool:
         """True when `url` is an allowlisted redirect plus an optional query string."""
@@ -461,7 +468,7 @@ class McpOAuth:
             *[Route(path, self._asm, methods=["GET"]) for path in AS_PATHS],
             Route("/oauth/register", self._register, methods=["POST"]),
             Route("/oauth/token", self._token, methods=["POST"]),
-            Route("/oauth/done", self._done, methods=["GET"]),
+            *([Route("/oauth/done", self._done, methods=["GET"])] if self.test_callback else []),
         ]
 
     async def _prm(self, _: Request) -> JSONResponse:
@@ -524,11 +531,11 @@ class McpOAuth:
         return JSONResponse(body, headers=_NO_STORE)
 
     async def _done(self, request: Request) -> HTMLResponse:
-        code = html.escape(request.query_params.get("code", ""))
+        # Test deployments only (OAUTH_TEST_CALLBACK). The code is never shown.
         error = html.escape(request.query_params.get("error", ""))
         page = (
             "<!doctype html><meta charset=utf-8><title>OAuth</title>"
-            f"<p>error: {error}</p><p>code: {code}</p>"
+            f"<p>error: {error}</p><p>Test callback. Do not give this page's address to anyone.</p>"
         )
         return HTMLResponse(page, headers=_NO_STORE)
 

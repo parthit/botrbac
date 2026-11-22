@@ -7,6 +7,7 @@ limiter outage must not take down sign-in or `/mcp`.
 
 import hashlib
 import logging
+import os
 import time
 
 import anyio.to_thread
@@ -15,13 +16,35 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 logger = logging.getLogger(__name__)
 
 
+def trusted_proxy_hops() -> int:
+    """How many proxies in front of this server add to X-Forwarded-For.
+
+    TRUSTED_PROXY_HOPS when set. Otherwise 1 on Vercel, which replaces the header with the
+    caller's address, and 0 elsewhere: the header is then whatever the caller typed."""
+    raw = os.environ.get("TRUSTED_PROXY_HOPS", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 0
+    return 1 if os.environ.get("VERCEL") else 0
+
+
 def client_ip(headers: list[tuple[bytes, bytes]], fallback: str) -> str:
-    """First address in X-Forwarded-For, else the socket peer. Capped and stripped."""
-    for key, value in headers:
-        if key.lower() == b"x-forwarded-for":
-            first = value.decode("latin-1", "replace").split(",", 1)[0].strip()
-            if first:
-                return first[:80]
+    """The caller's address: the socket peer, or the X-Forwarded-For entry written by the
+    outermost proxy this deployment trusts. Entries to the left of that one come from the
+    caller and are ignored, so a made-up address does not get its own rate-limit bucket."""
+    hops = trusted_proxy_hops()
+    if hops:
+        chain = [
+            part.strip()
+            for key, value in headers
+            if key.lower() == b"x-forwarded-for"
+            for part in value.decode("latin-1", "replace").split(",")
+            if part.strip()
+        ]
+        if len(chain) >= hops:
+            return chain[-hops][:80]
     return (fallback or "unknown")[:80]
 
 

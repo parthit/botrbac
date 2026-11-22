@@ -390,13 +390,11 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers") or [])
                 # Pages are never cached. A static asset sets its own policy and keeps it.
-                cacheable = any(key.lower() == b"cache-control" for key, _ in headers)
-                headers += [
-                    item
-                    for item in SECURITY_HEADERS
-                    if not (cacheable and item[0] == b"cache-control")
-                ]
-                if self.hsts:
+                # A header that is already there stays as it is, so wrapping both the
+                # dashboard and the app around it does not send anything twice.
+                present = {key.lower() for key, _ in headers}
+                headers += [item for item in SECURITY_HEADERS if item[0] not in present]
+                if self.hsts and HSTS_HEADER[0] not in present:
                     headers.append(HSTS_HEADER)
                 message["headers"] = headers
             await send(message)
@@ -617,6 +615,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if not isinstance(owner, str) or not owner or ctx.directory is None:
             return None
         if not settings.sign_in_allowed(owner):
+            return None
+        if not ctx.directory.session_alive(request.session.get("sid"), owner):
             return None
         if not ctx.directory.is_known_user(owner):
             return None
@@ -916,6 +916,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         next_url = safe_next(request.session.get("oauth_next"))
         request.session.clear()
         request.session["owner"] = email
+        if ctx.directory is not None:
+            request.session["sid"] = await blocking(
+                ctx.directory.open_session, email, SESSION_MAX_AGE
+            )
         request.session["csrf"] = secrets.token_urlsafe(32)
         audit_owner("login")
         reset = current_actor.set(email)
@@ -1064,6 +1068,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
+        if ctx.directory is not None:
+            await blocking(ctx.directory.close_session, request.session.get("sid"))
         request.session.clear()
         # "Switch account" on a request page and "Use a different account" on the consent
         # page sign out, then signs in with ?next back.

@@ -10,6 +10,7 @@ import pytest
 
 from scoped_drive_mcp.access import AccessRequests
 from scoped_drive_mcp.humanize import app_names, assistant_label, describe, when
+from scoped_drive_mcp.store import ACTIVITY_KEY
 from tests.conftest import EVE, OWNER_EMAIL
 from tests.dash import (
     client,
@@ -461,9 +462,12 @@ def test_mailbox_refusals_are_not_blamed_on_drive() -> None:
 
 
 def test_repeated_refused_connections_fold_into_one_row(owner_c, p2_app) -> None:
+    # Written straight to the list: the log itself keeps one such row an hour, and this
+    # is about how rows already there (from before that rule, or several hours) are shown.
     log = p2_app.state.dashboard.activity
+    row = json.dumps({"ts": "2026-11-19T23:58:10.123+00:00", "event": "auth", "reason": "bad"})
     for _ in range(12):
-        log({"ts": "2026-11-19T23:58:10.123+00:00", "event": "auth", "reason": "bad"})
+        log.store.lpush(ACTIVITY_KEY, row)
     page = owner_c.get("/activity").text
     assert page.count("tried to connect with a missing") == 1
     assert "(12 times, newest shown)" in page

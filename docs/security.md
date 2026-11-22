@@ -10,7 +10,9 @@
   that permission is deleted in Drive.
 - **Dashboard sign-in** is Google OAuth for any verified Google account, or only the addresses in
   `ALLOWED_EMAILS` when that is set (`OWNER_EMAIL` is always allowed). `OWNER_EMAIL` is the admin and the only
-  account that can open `/admin`. The session is a signed, httponly, Secure, SameSite=Lax cookie (8 hours),
+  account that can open `/admin`. The session is a signed, httponly, Secure, SameSite=Lax cookie that carries a
+  random id the server also keeps: Sign out deletes the id, and it expires 8 hours after sign-in however
+  recently the cookie was used,
   with a CSRF token on every form, a same-origin check, and strict security headers. The MCP bearer
   tokens don't work on the dashboard, and the dashboard cookie doesn't work on `/mcp`.
 - **Stored secrets:** the sign-in refresh token is encrypted with `ENCRYPTION_KEY` (Fernet) before it goes into
@@ -46,10 +48,22 @@
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection is an admin token on `/mcp` and still cannot pass the allowlist.
   Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
-  Redirect URLs are an exact allow list (Claude, ChatGPT/Dots, Cursor, Grok Bot, Muse, and a local test callback).
+  Redirect URLs are an exact allow list (Claude, ChatGPT/Dots, Cursor, Grok Bot, Muse, and a loopback callback).
+  This server's own `/oauth/done` page is accepted only when `OAUTH_TEST_CALLBACK=1` (local testing). Leave
+  it off in production: a code sent there lands in front of the person who clicked Allow.
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
-  file names, search text and secrets are never logged.
+  file names, search text and secrets are never logged. The store is different: it keeps the names of the
+  items on your Access and Sharing lists, and the addresses of the people you are paired with, unencrypted,
+  so the dashboard can show them. Drive sign-ins and mailbox text are encrypted.
+- **Activity cannot be flushed by repeating a call.** The Activity page keeps the newest 500 rows. A paired
+  person's repeated call, and a rejected bearer token, are kept once an hour each; the server log has all.
+- **Rate limits use the caller's real address.** On Vercel that is the address Vercel reports. Elsewhere it
+  is the socket peer unless `TRUSTED_PROXY_HOPS` says how many proxies in front of the server add to
+  `X-Forwarded-For`. An address the caller typed into that header is ignored.
+- **The store is trusted.** Someone who can write to Redis or Postgres can add an allowlist entry or an app
+  connection. A Drive sign-in copied into another account's slot is refused, because the encrypted record
+  names its account.
 - New sign-ins request full Drive access (`https://www.googleapis.com/auth/drive`). The allowlist is still
   checked first. A token saved with only `drive.file` keeps that narrower grant until that person signs in
   again. Replace `GOOGLE_OAUTH_REFRESH_TOKEN` with `scripts/bootstrap_oauth.py` if it was minted with
@@ -63,8 +77,11 @@
   parent is missing or not visible, the walk stops and the file is out of scope. Parent-folder lookups are
   cached for `SCOPE_CACHE_TTL` seconds.
   Multiple parents, missing parents, trashed files and cycles are handled safely, and the walk is capped in
-  depth and number of lookups. Anything that doesn't reach the root is refused with the same "not found or
-  outside the allowed folder" message, so the server doesn't reveal whether an outside file exists.
+  depth and number of lookups. Anything that doesn't reach the root is refused. One thing does
+  tell an assistant that an id it already has is a real file of yours: the approval link. A refused file that
+  exists gets `access_required` and a request on your Requests page (with its name, which only you see); an
+  id that does not exist gets `not_found`. Drive ids are long random strings, so this cannot be used to find
+  files, only to check an id learned somewhere else.
 - Creates and uploads require the target **parent** folder to pass that check (without `parent_id`, the
   default is `ROOT_FOLDER_ID`, else the only granted folder). Updates, renames and trashes require the **file**
   to pass it; allowlisted items themselves can't be renamed or trashed.

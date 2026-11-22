@@ -24,6 +24,7 @@ from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -41,7 +42,13 @@ from .auth import (
 )
 from .bridge import Assistant, Mailbox, MailboxError, as_assistant
 from .config import Settings
-from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
+from .dashboard import (
+    DashboardContext,
+    SecurityHeadersMiddleware,
+    build_dashboard,
+    legal_routes,
+    render_plain,
+)
 from .drive_client import (
     DRIVE_SCOPE,
     BotNotConnectedError,
@@ -717,7 +724,9 @@ def build_app(
     actor_kv = directory.actor_store()
     allowlist = Allowlist(actor_kv)
     ext_allowlist = Allowlist(actor_kv, EXTERNAL_ALLOWLIST_KEY)
-    vault = TokenVault(actor_kv, enc_key)
+    vault = TokenVault(
+        actor_kv, enc_key, expected=lambda: current_actor.get() or settings.owner_email
+    )
     requests = AccessRequests(actor_kv)
     activity = ActivityLog(actor_kv)
     first_reads = FirstReads(actor_kv)
@@ -905,6 +914,7 @@ def build_app(
                 settings.sign_in_allowed(email) and directory.has_owner_refresh(email)
             ),
             rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
+            test_callback=settings.oauth_test_callback,
         )
         if base_url and not settings.dashboard_missing()
         else None
@@ -962,7 +972,12 @@ def build_app(
     if mcp_oauth is not None:
         routes.extend(mcp_oauth.routes())
     routes.append(Mount("/", app=dashboard))
-    app = Starlette(routes=routes)
+    # The dashboard sets these on its own pages. /mcp, /health, the OAuth endpoints and
+    # the discovery documents sit outside it and get the same headers here.
+    app = Starlette(
+        routes=routes,
+        middleware=[Middleware(SecurityHeadersMiddleware, hsts=settings.secure_cookies)],
+    )
     app.state.mcp = mcp
     app.state.mailbox = mailbox
     app.state.service = service

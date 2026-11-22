@@ -92,6 +92,7 @@ def make_settings(**overrides) -> Settings:
         "app_base_url": BASE_URL,
         "session_secret": SESSION_SECRET,
         "encryption_key": ENCRYPTION_KEY,
+        "oauth_test_callback": True,
     }
     values.update(overrides)
     return Settings(**values)

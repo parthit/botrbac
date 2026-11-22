@@ -98,6 +98,8 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `LOGIN_RATE_LIMIT`, `LOGIN_RATE_WINDOW_SECONDS` | no | sign-in attempts per IP. Defaults 30 per 600 seconds |
 | `EDGE_CONFIG` | no | added when you connect a Vercel Edge Config. Holds the `self_pairing` switch (see Bot Bridge). Without it, pairing your own assistants is on |
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | no | `/mcp` calls per bearer token. Defaults 300 per 60 seconds |
+| `TRUSTED_PROXY_HOPS` | no | how many proxies in front of the server add to `X-Forwarded-For`. Leave unset on Vercel. Behind your own reverse proxy set `1`; without it, rate limits use the socket address |
+| `OAUTH_TEST_CALLBACK` | no | `1` accepts this server's own `/oauth/done` as an OAuth redirect, for local testing. Leave unset in production |
 
 ### 3. Deploy
 
