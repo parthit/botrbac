@@ -69,6 +69,7 @@ The full list is in [docs/security.md](docs/security.md).
 | [docs/security.md](docs/security.md) | Security notes and how the allowlist check works |
 | [docs/google-verification.md](docs/google-verification.md) | Google OAuth verification steps for a public deployment |
 | [docs/development.md](docs/development.md) | Project layout and implementation notes |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Where the project is going: roles, delegated grants, events, an approvals inbox |
 | [docs/PLAN.md](docs/PLAN.md) | Original design notes |
 
 Google Drive is the first connection. More services are planned, and each one is added as its own
