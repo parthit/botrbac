@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -39,7 +40,14 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .access import PENDING, AccessRequests
+from .access import (
+    OWNER_INDEX,
+    OWNER_INDEX_SINCE,
+    PENDING,
+    REQUEST_TTL,
+    AccessRequests,
+    validate_request_id,
+)
 from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
@@ -1908,6 +1916,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         bits, so this only ever matches a link someone was sent. It says nothing about whose
         request it is."""
         if ctx.directory is None:
+            return False
+        try:
+            validate_request_id(rid)
+        except InvalidInputError:
+            return False
+        owner = ctx.store.get(f"{OWNER_INDEX}{rid}")
+        if owner:
+            return owner != email
+        # Requests filed before the index existed are not in it. They expire REQUEST_TTL
+        # after they were filed, so the look through every account is only needed that long.
+        now = time.time()
+        since = ctx.store.get(OWNER_INDEX_SINCE)
+        if since is None:
+            ctx.store.set(OWNER_INDEX_SINCE, f"{now:.0f}")
+            since = f"{now:.0f}"
+        try:
+            if now - float(since) >= REQUEST_TTL:
+                return False
+        except ValueError:
             return False
         for person in ctx.directory.known_users():
             if person == email:

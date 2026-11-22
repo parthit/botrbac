@@ -316,3 +316,84 @@ def test_an_ignored_forwarded_address_is_said_once(monkeypatch, caplog) -> None:
     messages = [r.getMessage() for r in caplog.records]
     assert sum("TRUSTED_PROXY_HOPS to the number" in m for m in messages) == 1
     assert sum("not a number" in m for m in messages) == 1
+
+
+# ---- one app cannot bury the Requests page ----
+
+
+def test_an_app_may_have_fifty_requests_waiting_and_no_more() -> None:
+    from scoped_drive_mcp.access import (
+        MAX_PENDING_PER_APP,
+        AccessRequests,
+        TooManyPending,
+    )
+
+    assert MAX_PENDING_PER_APP == 50
+    assert Settings.model_fields["max_pending_requests"].default == 50
+    requests = AccessRequests(MemoryStore())
+
+    def ask(app: str, file_id: str | None = None):
+        return requests.create(
+            tool="request_access", token_name=app, reason="r", file_id=file_id, max_pending=50
+        )
+
+    first, _ = ask("grok", "file-1")
+    made = [ask("grok")[0] for _ in range(49)]
+    with pytest.raises(TooManyPending):
+        ask("grok")
+    with pytest.raises(TooManyPending):
+        ask("grok", "file-2")
+    # A file that already has a request waiting still gets that one back.
+    assert ask("grok", "file-1") == (first, False)
+    # Another app has its own fifty.
+    assert ask("claude")[1] is True
+    # Answering one frees a place.
+    requests.decide(made[0], "denied")
+    assert ask("grok")[1] is True
+
+
+def test_at_the_cap_the_assistant_is_told_and_nothing_is_filed(p2_app) -> None:
+    c = client(p2_app)
+    login(c)
+    for i in range(50):
+        out = mcp_call(c, "request_access", description=f"thing {i}", reason="asked")
+        assert out["structuredContent"]["status"] == "pending"
+    waiting = p2_app.state.dashboard.requests.pending_count()
+    out = mcp_call(c, "request_access", description="one more", reason="asked")["structuredContent"]
+    assert out["status"] == "too_many_requests" and "approval_url" not in out
+    refused = mcp_call(c, "read_file", file_id="priv-secret")
+    assert refused["isError"] is True
+    assert refused["structuredContent"]["error"] == "too_many_requests"
+    assert "approval_url" not in refused["structuredContent"]
+    assert p2_app.state.dashboard.requests.pending_count() == waiting == 50
+
+
+# ---- an approval link for another account is found with one read ----
+
+
+def test_whose_request_a_link_is_comes_from_an_index_not_a_look_through_every_account(
+    world, memstore, oauth
+) -> None:
+    from scoped_drive_mcp.access import OWNER_INDEX, OWNER_INDEX_SINCE, REQUEST_TTL
+
+    app = _app(world, memstore, oauth)
+    owner, eve = client(app), client(app)
+    login(owner)
+    login(eve, "eve-code")
+    rid = mcp_call(owner, "request_access", description="memo", reason="asked")[
+        "structuredContent"
+    ]["request_id"]
+    store = app.state.dashboard.store
+    assert store.get(f"{OWNER_INDEX}{rid}") == OWNER_EMAIL
+    assert eve.get(f"/requests/{rid}").status_code == 403
+    assert owner.get(f"/requests/{rid}").status_code == 200
+    assert eve.get("/requests/" + "A" * 32).status_code == 404
+
+    # Once every request older than the index has expired, an id that is not in the
+    # index is simply not found: no account is searched for it.
+    store.delete(f"{OWNER_INDEX}{rid}")
+    store.set(OWNER_INDEX_SINCE, f"{time.time() - REQUEST_TTL - 1:.0f}")
+    assert eve.get(f"/requests/{rid}").status_code == 404
+    # Until then, a request from before the index is still recognised.
+    store.set(OWNER_INDEX_SINCE, f"{time.time():.0f}")
+    assert eve.get(f"/requests/{rid}").status_code == 403

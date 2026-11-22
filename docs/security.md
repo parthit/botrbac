@@ -23,7 +23,8 @@
 - **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a
   session) answer `405` with `Allow: POST` instead of holding the connection open.
 - **Access requests** have 192-bit random IDs, expire after 7 days, and only the person they belong to can open them. A pending
-  request for the same file is reused rather than duplicated.
+  request for the same file is reused rather than duplicated. One connected app can have 50 requests waiting
+  (`MAX_PENDING_REQUESTS`). Past that it is told to ask you to answer some, and nothing new is filed.
 - **Sharing is inherited.** Anything placed inside a shared folder, by you or anyone else with access, becomes
   visible to Grok. Moving a file *out* removes access: immediately for the file itself, and within
   `SCOPE_CACHE_TTL` seconds (default 60) for files under a moved subfolder.
@@ -57,13 +58,15 @@
   items on your Access and Sharing lists, and the addresses of the people you are paired with, unencrypted,
   so the dashboard can show them. Drive sign-ins and mailbox text are encrypted.
 - **Activity cannot be flushed by repeating a call.** The Activity page keeps the newest 500 rows. A paired
-  person's repeated call, and a rejected bearer token, are kept once an hour each; the server log has all.
+  person's repeated call, and a rejected bearer token, are kept once an hour each, so the page shows a paired
+  person's read of the same file once an hour. The server log has every call.
 - **Rate limits use the caller's real address.** On Vercel that is the address Vercel reports. Elsewhere it
   is the socket peer unless `TRUSTED_PROXY_HOPS` says how many proxies in front of the server add to
   `X-Forwarded-For`. An address the caller typed into that header is ignored.
 - **The store is trusted.** Someone who can write to Redis or Postgres can add an allowlist entry or an app
   connection. A Drive sign-in copied into another account's slot is refused, because the encrypted record
-  names its account.
+  names its account. A sign-in saved before the account was written into the record has no name to check,
+  and is covered once that person reconnects Google Drive.
 - New sign-ins request full Drive access (`https://www.googleapis.com/auth/drive`). The allowlist is still
   checked first. A token saved with only `drive.file` keeps that narrower grant until that person signs in
   again. Replace `GOOGLE_OAUTH_REFRESH_TOKEN` with `scripts/bootstrap_oauth.py` if it was minted with

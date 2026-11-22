@@ -31,7 +31,7 @@ from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
 from . import audit as audit_module
-from .access import AccessRequests, AccessService
+from .access import OWNER_INDEX, REQUEST_TTL, AccessRequests, AccessService
 from .audit import audit_owner
 from .auth import (
     BearerAuthMiddleware,
@@ -727,7 +727,13 @@ def build_app(
     vault = TokenVault(
         actor_kv, enc_key, expected=lambda: current_actor.get() or settings.owner_email
     )
-    requests = AccessRequests(actor_kv)
+
+    def note_request_owner(rid: str) -> None:
+        who = current_actor.get() or settings.owner_email
+        if who:
+            kv.set(f"{OWNER_INDEX}{rid}", who, ex=REQUEST_TTL)
+
+    requests = AccessRequests(actor_kv, on_create=note_request_owner)
     activity = ActivityLog(actor_kv)
     first_reads = FirstReads(actor_kv)
     audit_module.set_sinks([activity])
@@ -889,6 +895,7 @@ def build_app(
             probe=service.probe,
             sharer_of=sharer_of,
             limited_sign_in=limited_sign_in,
+            max_pending=settings.max_pending_requests,
         )
         if settings.app_base_url
         else None

@@ -56,4 +56,5 @@ When a tool is refused because the item isn't shared (not because of the role), 
  "file_id": "…", "message": "This item has not been shared with you. Show the user this approval link …"}
 ```
 
-Grok shows you the link; after you approve, it retries (or calls `check_access_request`).
+Grok shows you the link; after you approve, it retries (or calls `check_access_request`). An app with 50
+requests already waiting gets `too_many_requests` instead, with no link, until you answer some.
