@@ -966,6 +966,8 @@ class TokenVault:
         record = self._take(OWNER_TOKEN_KEY)
         want = self.expected() if self.expected is not None else None
         have = record.get("email") if record else None
+        # A record saved before the account was written into it has no email and is
+        # accepted. Every record written since has one, so a copied one is caught.
         if want and have and str(have).strip().lower() != want.strip().lower():
             logger.warning("stored Drive sign-in belongs to a different account; ignored")
             return None
@@ -1022,7 +1024,12 @@ class ActivityLog:
         else:
             return True
         digest = hashlib.sha256("\x00".join(parts).encode()).hexdigest()[:32]
-        return self.store.set_if_absent(f"activity_seen:{digest}", "1", ex=GUEST_ROW_EVERY)
+        try:
+            return self.store.set_if_absent(f"activity_seen:{digest}", "1", ex=GUEST_ROW_EVERY)
+        except Exception:
+            # Not knowing whether it is a repeat is no reason to lose the record.
+            logger.warning("activity repeat check failed; keeping the row", exc_info=True)
+            return True
 
     def recent(self, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

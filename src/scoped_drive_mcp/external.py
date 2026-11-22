@@ -77,7 +77,11 @@ def _guest_notes(result: Any) -> Any:
 
 def _hide_other_guests(result: Any, you: str) -> Any:
     """Who else wrote into or renamed something in a share is the owner's business. A guest
-    sees their own address, and "another person" for anyone else."""
+    sees their own address, and "another person" for anyone else.
+
+    `written_by` and `renamed_by` are the only fields that name a person today. A new field
+    that does has to be added here. The dicts are built for this one response, so changing
+    them in place is safe."""
     if isinstance(result, dict):
         for key in ("written_by", "renamed_by"):
             if isinstance(result.get(key), str) and result[key] != you:

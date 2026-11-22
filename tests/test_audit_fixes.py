@@ -95,6 +95,11 @@ def test_a_name_a_paired_person_chose_is_marked_for_the_owners_assistant(shared)
     assert row["renamed_by"] == EVE and row["name_trust"] == "untrusted_peer"
     # Renaming is not writing: the content is still the owner's.
     assert "written_by" not in row
+    # Once the owner's own assistant names it, the name is the owner's again.
+    mcp_call(owner, "rename_file", role="admin", file_id="proj-notes", new_name="notes.txt")
+    row = mcp_call(owner, "get_metadata", role="admin", file_id="proj-notes")["structuredContent"]
+    assert row["name"] == "notes.txt"
+    assert "renamed_by" not in row and "name_trust" not in row
 
 
 def test_an_item_on_the_sharing_list_keeps_its_name(shared, world) -> None:
@@ -285,3 +290,29 @@ def test_repeated_guest_calls_and_bad_tokens_do_not_push_a_read_off_the_list() -
     for _ in range(3):
         log({"event": "tool_call", "tool": "read_file", "decision": "allow", "reason": "ok"})
     assert len(log.recent()) == 6
+
+
+def test_a_store_error_while_checking_for_a_repeat_keeps_the_row() -> None:
+    class Flaky(MemoryStore):
+        def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+            raise RuntimeError("store is down")
+
+    log = ActivityLog(Flaky())
+    log({"event": "tool_call", "tool": "read_shared_file", "guest": EVE, "decision": "allow"})
+    assert len(log.recent()) == 1
+
+
+def test_an_ignored_forwarded_address_is_said_once(monkeypatch, caplog) -> None:
+    from scoped_drive_mcp import ratelimit
+
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+    monkeypatch.setattr(ratelimit, "_warned", set())
+    with caplog.at_level("WARNING", logger="scoped_drive_mcp.ratelimit"):
+        for _ in range(3):
+            client_ip([(b"x-forwarded-for", b"6.6.6.6")], "10.0.0.1")
+        monkeypatch.setenv("TRUSTED_PROXY_HOPS", "two")
+        assert client_ip([(b"x-forwarded-for", b"6.6.6.6")], "10.0.0.1") == "10.0.0.1"
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("TRUSTED_PROXY_HOPS to the number" in m for m in messages) == 1
+    assert sum("not a number" in m for m in messages) == 1

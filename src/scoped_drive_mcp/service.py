@@ -615,13 +615,17 @@ class DriveService:
 
     def rename_file(self, file_id: str, new_name: str) -> dict[str, Any]:
         new_name = validate_name(new_name, "new_name")
-        self._get_in_scope(file_id, allow_root=False)
+        meta = self._get_in_scope(file_id, allow_root=False)
         # A rename changes no content, so the file is not marked as written by a peer. The
         # name is theirs though, and is marked so whoever lists the file knows that.
         metadata: dict[str, Any] = {"name": new_name}
         who = self.writer() if self.writer is not None else None
         if who:
             metadata["properties"] = {RENAMER_PROPERTY: f"guest:{who}"}
+        elif (meta.get("properties") or {}).get(RENAMER_PROPERTY):
+            # The owner's own assistant chose this name, so it is no longer a peer's.
+            # Drive deletes a property that is set to null.
+            metadata["properties"] = {RENAMER_PROPERTY: None}
         updated = self.drive.update(file_id, metadata, None, None, fields=META_FIELDS)
         return self._public(updated)
 

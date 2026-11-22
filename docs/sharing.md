@@ -104,7 +104,8 @@ a resume that any paired person's assistant may see.
   **Read and edit** or **Full**. Writes run as your Google account, so Drive shows you as the editor; Bot RBAC
   records the real writer on the file (`properties.botrbac_writer = guest:<email>`, and a description on new
   files) and on your Activity page; a rename does not mark the content as theirs, but the name is:
-  the file carries `renamed_by` and `name_trust: untrusted_peer` wherever your assistant sees it. An item that
+  the file carries `renamed_by` and `name_trust: untrusted_peer` wherever your assistant sees it. Renaming it
+  with your own assistant clears that mark. An item that
   is itself on your Sharing list cannot be renamed, also when it sits inside a folder they may edit. Another
   paired person sees `written_by` and `renamed_by` as "another person", not as an address. Each person may make
   at most 30 changes an hour to your share. Wherever your own assistant later sees such a file (`read_file`,

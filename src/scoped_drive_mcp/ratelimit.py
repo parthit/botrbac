@@ -26,8 +26,18 @@ def trusted_proxy_hops() -> int:
         try:
             return max(0, int(raw))
         except ValueError:
+            _warn_once("bad-hops", "TRUSTED_PROXY_HOPS is not a number; using 0")
             return 0
     return 1 if os.environ.get("VERCEL") else 0
+
+
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key not in _warned:
+        _warned.add(key)
+        logger.warning(message)
 
 
 def client_ip(headers: list[tuple[bytes, bytes]], fallback: str) -> str:
@@ -45,6 +55,14 @@ def client_ip(headers: list[tuple[bytes, bytes]], fallback: str) -> str:
         ]
         if len(chain) >= hops:
             return chain[-hops][:80]
+    elif any(key.lower() == b"x-forwarded-for" for key, _ in headers):
+        # Behind a reverse proxy every caller then shares the proxy's address, and one
+        # of them can use up the limit for all. Said once, so the log is not flooded.
+        _warn_once(
+            "ignored-xff",
+            "X-Forwarded-For is present but ignored, so rate limits use the socket address. "
+            "Behind a reverse proxy, set TRUSTED_PROXY_HOPS to the number of proxies.",
+        )
     return (fallback or "unknown")[:80]
 
 

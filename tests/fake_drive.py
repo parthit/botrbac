@@ -326,7 +326,12 @@ class FakeDrive:
         if metadata.get("trashed"):
             f.trashed = True
         if "properties" in metadata:
-            f.properties.update(metadata["properties"] or {})
+            # Like Drive: a property set to null is deleted.
+            for key, value in (metadata["properties"] or {}).items():
+                if value is None:
+                    f.properties.pop(key, None)
+                else:
+                    f.properties[key] = value
         if content is not None:
             f.content = content
         return f.as_api(fields)
