@@ -85,6 +85,11 @@
   <p>The app runs on Vercel. The encrypted token, the list you ticked, requests, activity log, and
      mailbox text are stored in Upstash Redis or Postgres so the gateway can run. File
      contents are not stored with them.</p>
+  <p>Vercel also measures how fast pages load and how many times each page is viewed
+     (Vercel Speed Insights and Web Analytics). These use no cookies. What is sent is the
+     page’s address with ids and search text removed (for example <code>/requests/:id</code>),
+     the browser, device type, country and load timings. File names, file contents, your
+     email address and Drive ids are not sent.</p>
 
   <h2>Limited use</h2>
   <p>Bot RBAC’s use of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
@@ -119,6 +124,6 @@
   <p>Bot RBAC is not directed at children under 13 and does not knowingly collect
      their information.</p>
   <p>See also the <a href="/terms">terms of service</a>.</p>
-  <p class="muted">Last updated November 19, 2026.</p>
+  <p class="muted">Last updated November 21, 2026.</p>
 </div>
 {% endblock %}

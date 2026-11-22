@@ -58,12 +58,24 @@
     var btn = event.target.closest("[data-copy]");
     if (!btn) return;
     var value = btn.getAttribute("data-copy") || "";
-    var label = btn.textContent;
+    // The label and width are taken once, so a second click while it says "Copied"
+    // neither keeps "Copied" as the label nor holds the button at that width.
+    if (btn.__label == null) {
+      btn.__label = btn.textContent;
+      // Hold the button's width so the shorter "Copied" does not pull the row in.
+      btn.style.minWidth = btn.getBoundingClientRect().width + "px";
+    }
+    var label = btn.__label;
     // Only say "Copied" when it was, and say it to screen readers too.
     var done = function (ok) {
       btn.textContent = ok ? "Copied" : "Copy failed";
       announce(ok ? "ok" : "error", ok ? "Copied to the clipboard." : "Could not copy. Select the text and copy it yourself.");
-      window.setTimeout(function () { btn.textContent = label; }, 1500);
+      window.clearTimeout(btn.__copyTimer);
+      btn.__copyTimer = window.setTimeout(function () {
+        btn.textContent = label;
+        btn.style.minWidth = "";
+        btn.__label = null;
+      }, 1500);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(value).then(
@@ -233,6 +245,20 @@
       }
     }
   }
+
+  // The Allowed tab's number follows Allow / Remove on the same page.
+  function setAllowCount(n) {
+    var count = document.querySelector('.tabs a[href="/files?tab=allowed"] .count');
+    if (count) count.textContent = String(n);
+  }
+
+  // Tabs stay on one row and scroll sideways on a narrow screen; keep the current one in view.
+  Array.prototype.forEach.call(document.querySelectorAll(".tabs"), function (tabs) {
+    var on = tabs.querySelector("[aria-current]");
+    if (!on || tabs.scrollWidth <= tabs.clientWidth) return;
+    var left = on.getBoundingClientRect().left - tabs.getBoundingClientRect().left;
+    if (left + on.offsetWidth > tabs.clientWidth) tabs.scrollLeft = left - 16;
+  });
 
   if (window.fetch && window.URLSearchParams && window.FormData) window.__asyncForms = true;
 
@@ -456,6 +482,7 @@
       })
       .then(function (data) {
         showFlash(data.ok ? "ok" : "error", data.message);
+        if (typeof data.allow_count === "number") setAllowCount(data.allow_count);
         var changed = typeof data.changed === "boolean" ? data.changed : data.ok;
         if (!changed) return;
         if (form.getAttribute("data-on-success") === "remove-row") removeRow(form);

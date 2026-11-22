@@ -26,6 +26,44 @@
   font-display: swap;
   src: url("/fonts/geist-mono-500.woff2") format("woff2");
 }
+/* Fallback faces sized to Geist (widths measured per weight in Chrome, heights from the
+   font files), so text laid out before Geist arrives takes the same space and nothing
+   moves when it swaps in. Arial and Liberation Sans share metrics. */
+@font-face {
+  font-family: "Geist Fallback";
+  font-weight: 400;
+  src: local("Arial"), local("ArialMT"), local("Liberation Sans"), local("LiberationSans");
+  size-adjust: 102.72%;
+  ascent-override: 97.84%;
+  descent-override: 28.72%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Fallback";
+  font-weight: 500;
+  src: local("Arial"), local("ArialMT"), local("Liberation Sans"), local("LiberationSans");
+  size-adjust: 105.21%;
+  ascent-override: 95.52%;
+  descent-override: 28.04%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Fallback";
+  font-weight: 600 700;
+  src: local("Arial Bold"), local("Arial-BoldMT"), local("Liberation Sans Bold"), local("LiberationSans-Bold");
+  size-adjust: 99.93%;
+  ascent-override: 100.57%;
+  descent-override: 29.52%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Mono Fallback";
+  src: local("Courier New"), local("CourierNewPSMT"), local("Liberation Mono");
+  size-adjust: 99.98%;
+  ascent-override: 100.52%;
+  descent-override: 29.5%;
+  line-gap-override: 0%;
+}
 
 :root {
   --paper: #f6f2ea;
@@ -53,8 +91,8 @@
   --c-sign: #2f6bd0;
   --c-pick: #b0640c;
   --c-revoke: #2d8270;
-  --mono: "Geist Mono", ui-monospace, monospace;
-  --font: Geist, system-ui, sans-serif;
+  --mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
+  --font: Geist, "Geist Fallback", system-ui, sans-serif;
   --shadow: 5px 5px 0 -1.5px var(--wash), 5px 5px 0 0 var(--ink);
   color-scheme: light dark;
 }
@@ -895,14 +933,26 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
 .switch-account { margin: 0 0 1em; }
 
 /* ---- Navigation restructure (Files · Requests · Sharing, Settings) -------------- */
-.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--line); }
+/* One row at every width: on a phone the row scrolls sideways instead of wrapping, so
+   switching tabs never moves the underline to another line. The base line is an inset
+   shadow because overflow would clip a tab border pulled over a real border. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 18px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+.tabs::-webkit-scrollbar { display: none; }
 .tabs a {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 6px;
   min-height: 44px;
   padding: 0 14px;
-  margin-bottom: -1px;
+  white-space: nowrap;
   color: var(--ink2);
   font-weight: 600;
   font-size: 15px;
@@ -910,6 +960,8 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   border-bottom: 2px solid transparent;
 }
 .tabs a:hover { color: var(--ink); }
+/* Inside the tab, since the row's sideways scrolling would clip an outline drawn outside. */
+.tabs a:focus-visible { outline-offset: -3px; border-radius: 6px; }
 .tabs a[aria-current] { color: var(--ink); border-bottom-color: var(--accent); }
 .lead { max-width: 680px; }
 .small { font-size: 14px; }
@@ -1134,4 +1186,18 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
   /* Phones: the who-label on the left, its button on the right edge. */
   .file-actions:has(.act-line) { align-items: stretch; }
   .act-line { justify-content: space-between; }
+}
+
+/* ---- Page changes ------------------------------------------------------------------
+   Every tab and nav link is a full page load. Where the browser supports it, the new page
+   fades in over the old one and the header stays still, instead of a blank flash. */
+@view-transition { navigation: auto; }
+header { view-transition-name: site-header; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 140ms; }
+@media (prefers-reduced-motion: reduce) {
+  @view-transition { navigation: none; }
+}
+@media (max-width: 420px) {
+  .tabs { gap: 0; }
+  .tabs a { padding: 0 8px; }
 }

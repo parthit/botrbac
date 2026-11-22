@@ -711,6 +711,8 @@ def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
         "kind": "ok",
         "message": "Allowed “Projects” for the assistant.",
         "changed": True,
+        # The Allowed tab's number, so the page can update it without a reload.
+        "allow_count": 1,
     }
     # No flash left behind for the next full page load.
     assert "for the assistant." not in owner_c.get("/files?tab=allowed").text.split("<h1>")[0]
@@ -718,12 +720,14 @@ def test_row_actions_answer_json_so_only_the_row_updates(owner_c) -> None:
 
     r = _post_json(owner_c, "/revoke", file_id="proj", next="/browse")
     assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.json()["allow_count"] == 0
     assert "Projects" not in owner_c.get("/files?tab=allowed").text
 
     r = _post_json(owner_c, "/grant", file_id="does-not-exist", next="/browse")
     assert r.status_code == 400
     body = r.json()
     assert body["ok"] is False and "not found" in body["message"]
+    assert "allow_count" not in body
 
 
 def test_browse_rows_render_both_toggle_states(owner_c) -> None:
