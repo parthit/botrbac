@@ -1813,7 +1813,9 @@ class Mailbox:
                 key = f"bridge:appr:{link_id}"
                 for side, raw in self.store.hgetall(key).items():
                     if "|" not in raw:
-                        link = self._link(link_id) or {}
+                        link = self._link(link_id)
+                        if link is None:
+                            break  # no readable link record: nothing to say it is for
                         kind = "self" if link.get("same_account") else "pair"
                         self.store.hset(key, side, f"{raw}|{peer}|{kind}")
                         changed += 1

@@ -81,7 +81,8 @@
     permission. A pairing approval names the person who had joined, so replacing who joined does not carry
     the approval over, and the Approve button approves only the account its page showed. An approval also
     says which kind of pairing it was for, your own two assistants or another person, and counts only for
-    that kind. A pairing that
+    that kind. An approval from before approvals named anyone has none of this and is accepted as it is
+    until the variable is on, which is one more reason to sign and turn it on soon. A pairing that
     was turned off says so in its signed record and loses both approvals (the admin action does the same
     for ones turned off earlier).
     An app whose role record is missing is read only. An access token carries its own end time.
