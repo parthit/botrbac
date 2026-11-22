@@ -1524,7 +1524,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             await blocking(grants.revoke, file_id)
         except GrantError as exc:
             gone = await blocking(lambda: ctx.allowlist.get(file_id) is None)
-            return action_done(request, "error", str(exc), next_url, changed=gone)
+            return action_done(
+                request,
+                "error",
+                str(exc),
+                next_url,
+                changed=gone,
+                extra=await allow_count_extra(request) if gone else None,
+            )
         root = ctx.visible_root_folder_id()
         extra = {root: "the folder set on the server"} if root else None
         cover = await still_covered(grants, file_id, extra)

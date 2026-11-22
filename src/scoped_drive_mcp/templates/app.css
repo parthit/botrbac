@@ -960,6 +960,8 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
   border-bottom: 2px solid transparent;
 }
 .tabs a:hover { color: var(--ink); }
+/* Inside the tab, since the row's sideways scrolling would clip an outline drawn outside. */
+.tabs a:focus-visible { outline-offset: -3px; border-radius: 6px; }
 .tabs a[aria-current] { color: var(--ink); border-bottom-color: var(--accent); }
 .lead { max-width: 680px; }
 .small { font-size: 14px; }

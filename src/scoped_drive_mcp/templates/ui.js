@@ -58,14 +58,24 @@
     var btn = event.target.closest("[data-copy]");
     if (!btn) return;
     var value = btn.getAttribute("data-copy") || "";
-    var label = btn.textContent;
-    // Hold the button's width so the shorter "Copied" does not pull the row in.
-    btn.style.minWidth = btn.getBoundingClientRect().width + "px";
+    // The label and width are taken once, so a second click while it says "Copied"
+    // neither keeps "Copied" as the label nor holds the button at that width.
+    if (btn.__label == null) {
+      btn.__label = btn.textContent;
+      // Hold the button's width so the shorter "Copied" does not pull the row in.
+      btn.style.minWidth = btn.getBoundingClientRect().width + "px";
+    }
+    var label = btn.__label;
     // Only say "Copied" when it was, and say it to screen readers too.
     var done = function (ok) {
       btn.textContent = ok ? "Copied" : "Copy failed";
       announce(ok ? "ok" : "error", ok ? "Copied to the clipboard." : "Could not copy. Select the text and copy it yourself.");
-      window.setTimeout(function () { btn.textContent = label; btn.style.minWidth = ""; }, 1500);
+      window.clearTimeout(btn.__copyTimer);
+      btn.__copyTimer = window.setTimeout(function () {
+        btn.textContent = label;
+        btn.style.minWidth = "";
+        btn.__label = null;
+      }, 1500);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(value).then(
