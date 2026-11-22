@@ -48,6 +48,7 @@ from .access import (
     AccessRequests,
     validate_request_id,
 )
+from .agent_roles import AgentRole, AgentRoleError
 from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
@@ -191,6 +192,8 @@ class DashboardContext:
     directory: Any = None
     drive_router: Any = None
     mailbox: Any = None
+    # This person's named roles (agent_roles.py). None hides the Roles section.
+    agent_roles: Any = None
     # The list other people's assistants may read (external.py). None disables Sharing.
     ext_allowlist: Allowlist | None = None
     on_ext_change: Callable[[], None] = lambda: None
@@ -2463,9 +2466,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
 
         def gather() -> dict[str, Any]:
+            entries = ctx.allowlist.entries()
+            roles = ctx.agent_roles.all() if ctx.agent_roles is not None else []
             return {
                 "rows": ctx.connection_rows(),
                 **assistant_rows(email),
+                "roles_on": ctx.agent_roles is not None,
+                # Each role with the items it still reaches: one taken off the allowlist
+                # stays on the record but no longer counts.
+                "roles": [{"role": r, "live": [i for i in r.items if i in entries]} for r in roles],
+                "allowed_items": sorted(entries.values(), key=lambda e: e.name.lower()),
             }
 
         data = await blocking(gather)
@@ -2473,6 +2483,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "settings.html",
             mcp_url=f"{settings.app_base_url}/mcp",
+            role_url_base=f"{settings.app_base_url}/mcp/role/",
+            describe_mime=describe_mime,
             drive_connected=any(r["connected"] for r in data["rows"]),
             next="/settings",
             missing=settings.missing_settings(),
@@ -2690,6 +2702,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )
 
+    async def role_save(request: Request, form: dict[str, str]) -> Response:
+        """The owner creates a named role, or replaces the one with the same name."""
+        back = "/settings#roles"
+        if ctx.agent_roles is None:
+            return action_done(request, "error", "Roles are not set up on this server.", back)
+        items = [str(v) for v in (await request.form()).getlist("item")]
+
+        def save() -> AgentRole:
+            return ctx.agent_roles.save(
+                form.get("name") or "", form.get("level") or "", items, ctx.allowlist.entries()
+            )
+
+        try:
+            role = await blocking(save)
+        except AgentRoleError as exc:
+            return action_done(request, "error", str(exc), back)
+        # The scope guard caches each role's part of the list.
+        ctx.on_allowlist_change()
+        audit_owner("role_save", name=role.name, level=role.level, count=str(len(role.items)))
+        return action_done(
+            request, "ok", f"Saved the role {role.name}. Its next call uses these files.", back
+        )
+
+    async def role_delete(request: Request, form: dict[str, str]) -> Response:
+        back = "/settings#roles"
+        slug = form.get("slug") or ""
+        role = None if ctx.agent_roles is None else await blocking(ctx.agent_roles.get, slug)
+        if role is None or not await blocking(ctx.agent_roles.delete, slug):
+            return action_done(request, "error", "That role was not found.", back)
+        ctx.on_allowlist_change()
+        audit_owner("role_delete", name=role.name)
+        return action_done(
+            request, "ok", "Deleted the role. Agents using its address are refused.", back
+        )
+
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
@@ -2747,6 +2794,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
         Route("/first-reads/clear", csrf_protected(first_reads_clear), methods=["POST"]),
         Route("/oauth/grants/role", csrf_protected(oauth_grant_role), methods=["POST"]),
+        Route("/roles/save", csrf_protected(role_save), methods=["POST"]),
+        Route("/roles/delete", csrf_protected(role_delete), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),

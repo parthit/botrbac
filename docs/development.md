@@ -17,6 +17,7 @@ src/scoped_drive_mcp/
   scope.py                    the allowlist scope guard and search query builder
   policy.py                   role → tool map and @require decorator (access_required errors)
   access.py                   access requests (storage, dedupe, request tools)
+  agent_roles.py              named roles: /mcp/role/<slug> narrows a call to part of the allowlist
   bridge.py                   pairings; mailbox between one person's own assistants
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log

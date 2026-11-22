@@ -36,6 +36,9 @@ class Principal:
     # name. Lets one person's Grok and Claude be told apart in the mailbox.
     grant_id: str | None = None
     client_name: str | None = None
+    # Set when the call came in through a named role's address (agent_roles.py). `role`
+    # above is then already the lower of the connection's and the named role's.
+    agent_role: str | None = None
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)

@@ -18,6 +18,12 @@
 - **Stored secrets:** the sign-in refresh token is encrypted with `ENCRYPTION_KEY` (Fernet) before it goes into
   Redis. Anyone with `ENCRYPTION_KEY` *and* Redis access could use it, so keep both private. The token has full
   Drive scope, and the tools use it, which is why the allowlist is the limit.
+- **Named roles** (`/mcp/role/<role>`, [roles.md](roles.md)) only narrow a call: the files are the allowlist
+  entries the role lists, the level is the lower of the connection's and the role's, and only the tools for
+  your own Drive files are offered. Role records are signed like the allowlist, and a role that is missing or
+  unreadable refuses the call instead of falling back to the whole list. The role is chosen by the address,
+  not bound to the token: a token also works on plain `/mcp`, so a role limits an agent configured with its
+  address, not someone who holds the token.
 - **Parent ids:** tool results only list parent folders that are themselves shared (or inside something shared),
   so Grok never learns the ids of your other folders.
 - **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a

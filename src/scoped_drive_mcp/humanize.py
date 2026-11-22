@@ -278,6 +278,10 @@ def _tool_row(
     )
     via_dashboard = record.get("via") == "dashboard"
     who = assistant_label(record.get("token_name"), apps)
+    named_role = record.get("agent_role")
+    if isinstance(named_role, str) and named_role:
+        # The call came in through a named role's address (agent_roles.py).
+        who = f"{who} (role {named_role})"
     done, attempt = _TOOL_TEXT.get(tool, ("used {item}", "use {item}"))
     item = _item_text(record, names, request_names, tool)
     owner = record.get("owner")
@@ -369,6 +373,11 @@ def _owner_row(
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
         "oauth_role": (f"You changed what {client} can do: {role_words}.", _DONE),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
+        "role_save": (f"You saved the role {record.get('name') or 'a role'}.", _DONE),
+        "role_delete": (
+            f"You deleted the role {record.get('name') or 'a role'}.",
+            Badge("", "Deleted", "–"),
+        ),
     }
     group = "you"
     if decision == "deny":
@@ -422,10 +431,15 @@ def describe(
     if event == "owner":
         return _owner_row(record, names, request_names)
     if event == "auth":
+        unknown_role = record.get("reason") == "unknown_role"
         return ActivityRow(
             ts=str(record.get("ts") or ""),
-            who="Unknown app",
-            text="An app tried to connect with a missing, wrong or expired key.",
+            who="An assistant" if unknown_role else "Unknown app",
+            text=(
+                "An assistant asked for a role that does not exist. The call was refused."
+                if unknown_role
+                else "An app tried to connect with a missing, wrong or expired key."
+            ),
             badge=_BLOCKED,
             group="security",
             # Refused already and nothing for the person to do, so it does not count

@@ -24,6 +24,8 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
   you. You approve or deny it in the dashboard.
 - **A role for each app.** Read only, read and edit, or full. An app only sees the tools its role allows.
   There are no tools to move, share or permanently delete files.
+- **Named roles for agents and subagents.** A role is a named part of your list with its own level. An agent
+  that connects to `/mcp/role/<role>` reaches only that role's files. See [docs/roles.md](docs/roles.md).
 - **An activity log.** Every call, grant, revoke and refusal, without file contents.
 - **Sharing with people you pair with.** Their assistants can read the items you put on a separate Sharing
   list, and edit only where you say so. Their assistants can never message yours.
@@ -65,6 +67,7 @@ The full list is in [docs/security.md](docs/security.md).
 | --- | --- |
 | [docs/self-hosting.md](docs/self-hosting.md) | Deploy your own copy: Google Cloud, Vercel, environment variables, connecting each assistant, testing |
 | [docs/tools.md](docs/tools.md) | Every tool, which role may call it, and how files are read |
+| [docs/roles.md](docs/roles.md) | Named roles: give an agent or subagent only part of your allowed list |
 | [docs/sharing.md](docs/sharing.md) | Pairing assistants, the mailbox between your own assistants, sharing with other people, wake-ups |
 | [docs/security.md](docs/security.md) | Security notes and how the allowlist check works |
 | [docs/google-verification.md](docs/google-verification.md) | Google OAuth verification steps for a public deployment |

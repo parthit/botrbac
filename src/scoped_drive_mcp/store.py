@@ -32,6 +32,8 @@ ALLOWLIST_KEY = "allowlist"
 # ALLOWLIST_KEY so an item can be shared with paired people without the owner's own bot
 # seeing it, and the reverse.
 EXTERNAL_ALLOWLIST_KEY = "ext_allowlist"
+# Named roles (agent_roles.py): each is a part of ALLOWLIST_KEY with its own ceiling.
+AGENT_ROLES_KEY = "agent_roles"
 # Who may read an external entry: AUDIENCE_LINKED is anyone with an active pairing with
 # the owner; otherwise the entry names the people (a tuple of emails) who may read it.
 AUDIENCE_LINKED = "linked"
@@ -433,7 +435,7 @@ class PrefixedStore:
 SIGNED_MARK = "s1."
 _MAC_LENGTH = 43  # urlsafe base64 of 32 bytes, without padding
 _MAC_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-_SIGNED_HASHES = frozenset({ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY})
+_SIGNED_HASHES = frozenset({ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY, AGENT_ROLES_KEY})
 _SIGNED_PREFIXES = (
     "oauth:",
     "bridge:link:",

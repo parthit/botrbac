@@ -53,11 +53,25 @@
 {% if last %}Last wake {{ last.at | when }}: {% if last.ok %}delivered{% else %}failed ({{ last.error }}){% endif %}{% if last.http %}, HTTP {{ last.http }}{% endif %}.
 {% else %}No wake sent yet.{% endif %}</span>
 {%- endmacro %}
+{% macro role_fields(role=None) -%}
+  <label>Can
+    <select name="level">
+      {% for key, label in role_labels.items() %}<option value="{{ key }}"{% if (role.level if role else 'viewer') == key %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <fieldset>
+    <legend>Files and folders this role can use</legend>
+    {% for e in allowed_items %}
+    <label class="check"><input type="checkbox" name="item" value="{{ e.id }}"{% if role and e.id in role.items %} checked{% endif %}> <span>{{ e.name or e.id }} <span class="muted hint">{{ describe_mime(e.mime_type) }}</span></span></label>
+    {% endfor %}
+  </fieldset>
+{%- endmacro %}
 {% block content %}
 <h1>Settings</h1>
 <nav class="tabs" aria-label="Settings sections">
   <a href="#services">Services</a>
   <a href="#assistants">Assistants</a>
+  {% if roles_on %}<a href="#roles">Roles</a>{% endif %}
   {% if wake_on and account_hook and account_hook.configured %}<a href="#other-people">Old wake-up</a>{% endif %}
   {% if is_admin %}<a href="#server">Server</a>{% endif %}
 </nav>
@@ -206,6 +220,56 @@
 </div>
 {% endfor %}
 </section>
+
+{% if roles_on %}
+<section id="roles">
+<h2>Roles</h2>
+<p class="muted lead">A role is a named part of your allowed files. An agent that connects to a role’s address reaches only that role’s files, at most at the role’s level, and never more than its own connection allows. Use one address per agent or subagent.</p>
+{% for r in roles %}
+{% set role = r.role %}
+<article class="card" id="role-{{ role.slug }}">
+  <div class="card-head"><h3>{{ role.name }}</h3><span class="pill">{{ role_labels[role.level] }}</span></div>
+  <p class="muted">{{ r.live | length }} of your allowed items{% if r.live | length != role.items | length %} · {{ role.items | length - r.live | length }} no longer allowed{% endif %}</p>
+  <div class="copy-row">
+    <label class="sr-only" for="role-url-{{ role.slug }}">Address for {{ role.name }}</label>
+    <input id="role-url-{{ role.slug }}" type="text" readonly value="{{ role_url_base }}{{ role.slug }}">
+    <button type="button" data-copy="{{ role_url_base }}{{ role.slug }}">Copy role URL</button>
+  </div>
+  <details class="disclosure-form" id="edit-role-{{ role.slug }}"><summary>Change level or files</summary>
+    <form class="stack" method="post" action="/roles/save">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="name" value="{{ role.name }}">
+      {{ role_fields(role) }}
+      <div class="actions"><button class="primary" type="submit">Save<span class="sr-only"> {{ role.name }}</span></button></div>
+    </form>
+  </details>
+  <div class="actions">
+    <form class="inline" method="post" action="/roles/delete" data-confirm="Delete the role {{ role.name }}? Agents that use its address are refused from then on." data-confirm-action="Delete role">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="slug" value="{{ role.slug }}">
+      <button class="danger" type="submit">Delete role<span class="sr-only"> {{ role.name }}</span></button>
+    </form>
+  </div>
+</article>
+{% endfor %}
+<article class="card" id="new-role">
+  <h3>New role</h3>
+  {% if allowed_items %}
+  <form class="stack" method="post" action="/roles/save">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Name
+      <input name="name" type="text" required maxlength="40" autocomplete="off" placeholder="Researcher">
+    </label>
+    {{ role_fields() }}
+    <div class="actions"><button class="primary" type="submit">Create role</button></div>
+  </form>
+  <p class="muted small">Saving a role with the name of an existing one replaces it.</p>
+  {% else %}
+  <p class="muted">A role is made from files you already allow. <a href="/files">Allow a file or folder</a> first.</p>
+  {% endif %}
+</article>
+</section>
+{% endif %}
 
 {% if wake_on and account_hook and account_hook.configured %}
 <section id="other-people">

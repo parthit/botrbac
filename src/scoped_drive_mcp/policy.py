@@ -85,6 +85,26 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
+# What a call made through a named role (agent_roles.py) may use: the tools for this
+# person's own Drive files, which the role cuts down to its own items. Everything else
+# (the mailbox, pairing, webhooks, access requests, other people's shared files) is not
+# part of a role, so a role-limited agent is not offered it.
+AGENT_ROLE_TOOLS: frozenset[str] = frozenset(
+    {
+        "search_files",
+        "list_folder",
+        "get_metadata",
+        "read_file",
+        "download_file",
+        "create_folder",
+        "create_doc",
+        "upload_file",
+        "update_file_content",
+        "rename_file",
+        "trash_file",
+    }
+)
+
 _AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id", "owner")
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
@@ -107,9 +127,20 @@ def is_allowed(role: Role | str | None, tool: str) -> bool:
         return False
 
 
+def may_call(principal: Principal | None, tool: str) -> bool:
+    """The level check, plus the shorter tool list of a call made through a named role."""
+    if principal is None:
+        return False
+    if principal.agent_role is not None and tool not in AGENT_ROLE_TOOLS:
+        return False
+    return is_allowed(principal.role, tool)
+
+
 def check_permission(principal: Principal | None, tool: str) -> Principal:
     if principal is None:
         raise PermissionDeniedError("not authenticated")
+    if principal.agent_role is not None and tool not in AGENT_ROLE_TOOLS:
+        raise PermissionDeniedError(f"'{tool}' is not available through a named role")
     if not is_allowed(principal.role, tool):
         raise PermissionDeniedError(f"role '{principal.role}' may not call '{tool}'")
     return principal
@@ -171,6 +202,9 @@ def require(
                 "token_name": principal.token_name if principal else None,
                 "role": str(principal.role) if principal else None,
             }
+            named_role = principal.agent_role if principal else None
+            if named_role:
+                who["agent_role"] = named_role
             try:
                 check_permission(principal, tool)
             except PermissionDeniedError as exc:
@@ -181,6 +215,13 @@ def require(
                 result = await fn(*args, **kwargs)
             except OutOfScopeError as exc:
                 audit(tool=tool, decision="deny", reason="out_of_scope", **who, **ids)
+                if named_role:
+                    # No access request: approving one adds to the allowlist, not to the
+                    # role, so the retry would be refused again. The owner edits the role.
+                    raise ToolError(
+                        f"Forbidden: not available to the role '{named_role}'. "
+                        "Its owner chooses the role's files in Bot RBAC Settings."
+                    ) from None
                 if on_scope_denied is None:
                     raise ToolError(f"Forbidden: {exc}") from None
                 try:
