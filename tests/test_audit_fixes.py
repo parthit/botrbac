@@ -773,3 +773,119 @@ def test_an_access_token_put_back_without_an_expiry_still_ends(
     monkeypatch.setattr(mcp_oauth.time, "time", lambda: later)
     assert memstore.get(key) is not None
     assert oauth_server.resolve_access(token) is None
+
+
+# ---- from the second review of the signing layer ----
+
+
+def _loose_then_strict(world, memstore, oauth):
+    """An app as it runs right after deploy (unsigned records accepted), and a builder
+    for the same store once REQUIRE_SIGNED_RECORDS is on."""
+    from scoped_drive_mcp.server import build_app
+    from tests.conftest import make_settings
+    from tests.test_multi_user import _accounts, _extend
+
+    _accounts(oauth)
+    _extend(world)
+
+    def build(require: bool):
+        return build_app(
+            make_settings(
+                root_folder_id=None,
+                google_oauth_refresh_token=None,
+                allowlist_cache_ttl=0,
+                require_signed_records=require,
+            ),
+            store=memstore,
+            owner_drive_factory=lambda token: world.as_user(token.removeprefix("rt-")),
+            oauth=oauth,
+            bot_drive_factory=lambda token: world.as_user(token.removeprefix("rt-")),
+        )
+
+    return build(False), build
+
+
+def test_a_pairing_turned_off_before_signing_stays_off_after_it(world, memstore, oauth) -> None:
+    """Turned off by the code from before: only a marker says so, and both approvals are
+    still there. The admin action must make that permanent, not sign the approvals."""
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    loose, build = _loose_then_strict(world, memstore, oauth)
+    owner = client(loose)
+    assert login(owner).status_code == 303
+    box = loose.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    lid = link["link_id"]
+    box.request_link(EVE, link["invite_code"])
+    for side in ("a", "b"):
+        box.store.hset(f"bridge:appr:{lid}", side, "2026-11-01T00:00:00+00:00")
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
+    at = "2026-11-02T00:00:00+00:00"
+    ended = json.dumps({"by": OWNER_EMAIL, "at": at, "how": "turned_off"})
+    box.store.set(f"bridge:ended:{lid}", ended)
+    box.store.set(f"bridge:revoked:{lid}", at)
+
+    assert post(owner, "/admin/sign-records").status_code == 303
+    assert box.store.hgetall(f"bridge:appr:{lid}") == {}
+    assert json.loads(box.store.get(f"bridge:link:{lid}"))["ended_at"] == at
+
+    strict_box = build(True).state.mailbox
+    memstore.delete(f"{KEY_PREFIX}bridge:revoked:{lid}")
+    memstore.delete(f"{KEY_PREFIX}bridge:ended:{lid}")
+    assert strict_box.active_peers(OWNER_EMAIL) == []
+
+
+def test_an_approval_is_for_the_account_the_page_showed(strict, memstore) -> None:
+    """Carol is waiting on the owner's page. Before the owner clicks, the record of who
+    joined is replaced and Eve joins. The click must not approve Eve."""
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, _eve = strict
+    box = app.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    lid = link["link_id"]
+    box.request_link(CAROL, link["invite_code"])
+    page = owner.get("/sharing?tab=people").text
+    assert f'name="peer" value="{CAROL}"' in page
+    memstore.delete(f"{KEY_PREFIX}bridge:peer:{lid}")
+    box.request_link(EVE, link["invite_code"])
+
+    assert post(owner, f"/bridge/{lid}/approve", peer=CAROL).status_code == 303
+    assert box.store.hgetall(f"bridge:appr:{lid}") == {}
+    # A post that does not say who it is approving is refused too.
+    assert post(owner, f"/bridge/{lid}/approve").status_code == 303
+    assert box.store.hgetall(f"bridge:appr:{lid}") == {}
+    assert post(owner, f"/bridge/{lid}/approve", peer=EVE).status_code == 303
+    assert list(box.store.hgetall(f"bridge:appr:{lid}")) == ["a"]
+
+
+def test_nothing_is_signed_once_unsigned_records_are_ignored(strict, memstore) -> None:
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, _eve = strict
+    planted = '{"id":"priv-secret","name":"x","mime_type":"text/plain","permission_id":null}'
+    memstore.hset(f"{KEY_PREFIX}allowlist", "priv-secret", planted)
+    assert post(owner, "/admin/sign-records").status_code == 303
+    assert memstore.hget(f"{KEY_PREFIX}allowlist", "priv-secret") == planted
+    assert "priv-secret" not in app.state.dashboard.allowlist.entries()
+
+
+def test_settings_still_says_an_older_app_is_full_only_because_it_is_old(strict, memstore) -> None:
+    from scoped_drive_mcp.mcp_oauth import GRANTS_KEY
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, _eve = strict
+    _editor_app(owner, "Old app")
+    oauth_server = app.state.dashboard.mcp_oauth
+    oauth_server.strict = False
+    grant_id = oauth_server.list_grants(OWNER_EMAIL)[0].id
+    grant = json.loads(oauth_server.store.hget(GRANTS_KEY, grant_id))
+    grant.pop("roles")
+    oauth_server.store.hset(GRANTS_KEY, grant_id, json.dumps(grant))
+    memstore.delete(f"{KEY_PREFIX}oauth:role:{grant_id}")
+    memstore.delete(f"{KEY_PREFIX}oauth:rolechosen:{grant_id}")
+    assert oauth_server.list_grants(OWNER_EMAIL)[0].legacy_full is True
+    assert oauth_server.pin_legacy_roles() == (1, 0)
+    assert oauth_server.list_grants(OWNER_EMAIL)[0].legacy_full is True
+    assert oauth_server.set_role(grant_id, OWNER_EMAIL, "viewer") is True
+    assert oauth_server.list_grants(OWNER_EMAIL)[0].legacy_full is False

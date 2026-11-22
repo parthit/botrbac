@@ -405,6 +405,8 @@ class Mailbox:
         already = status == "revoked"
         if not already:
             self._end(link, you, "turned_off" if status == "active" else "cancelled")
+        else:
+            self._seal_ended(link)
         deleted = self._purge(link["link_id"]) if purge else 0
         return {
             "link_id": link["link_id"],
@@ -460,7 +462,11 @@ class Mailbox:
         self.store.hdel(f"bridge:user:{you}", link["link_id"])
         return {"link_id": link["link_id"], "removed": True}
 
-    def decide(self, email: str, link_id: str, decision: str) -> dict[str, Any]:
+    def decide(
+        self, email: str, link_id: str, decision: str, expect_peer: str | None = None
+    ) -> dict[str, Any]:
+        """`expect_peer` is the account the person was looking at when they chose. An
+        approval is refused if someone else is joined by the time it arrives."""
         you = _email(email)
         if decision not in ("approve", "deny"):
             raise MailboxError("invalid_input", "Choose approve or deny.")
@@ -486,6 +492,14 @@ class Mailbox:
                 link_id=link["link_id"],
                 status=status,
                 invite_code=link["invite_code"],
+            )
+        if expect_peer and self._other(link, you) != expect_peer.strip().lower():
+            raise MailboxError(
+                "peer_changed",
+                "The account on this pairing is not the one this page showed. Reload the "
+                "page and check who is asking before you approve.",
+                link_id=link["link_id"],
+                status=status,
             )
         if link.get("same_account"):
             if not self.self_pairing(you):
@@ -1709,15 +1723,41 @@ class Mailbox:
             return not self.strict
         return bool(who) and who == (peer or self._peer(link_id))
 
+    def _seal_ended(self, link: dict[str, Any]) -> bool:
+        """Make "off" permanent for a pairing that only has the old marker: write it into
+        the signed link record and remove both approvals. True when something changed."""
+        link_id = link["link_id"]
+        approvals = self.store.hgetall(f"bridge:appr:{link_id}")
+        if link.get("ended_at") and not approvals:
+            return False
+        if not link.get("ended_at"):
+            ended = self._ended(link_id) or {}
+            marker = self.store.get(f"bridge:revoked:{link_id}")
+            self._mark_ended(link, str(ended.get("at") or marker or self._iso()))
+        for side in approvals:
+            self.store.hdel(f"bridge:appr:{link_id}", side)
+        return True
+
+    def seal_ended_pairings(self, people: list[str]) -> int:
+        """Pairings that were turned off before "off" was written into the link record
+        have only a marker saying so. Give each the permanent form. Returns how many
+        changed. Run from the admin page before REQUIRE_SIGNED_RECORDS is turned on."""
+        changed = 0
+        for link_id in dict.fromkeys(i for email in people for i in self._user_link_ids(email)):
+            link = self._link(link_id)
+            if link is not None and self._revoked(link_id, link) and self._seal_ended(link):
+                changed += 1
+        return changed
+
     def bind_legacy_approvals(self, people: list[str]) -> int:
         """Rewrite approvals from before they named the person who joined, using who is
-        joined now. Returns how many changed. Run from the admin page before
-        REQUIRE_SIGNED_RECORDS is turned on."""
+        joined now. A pairing that is off is left alone. Returns how many changed. Run
+        from the admin page before REQUIRE_SIGNED_RECORDS is turned on."""
         changed = 0
         for email in people:
             for link_id in self._user_link_ids(email):
                 peer = self._peer(link_id)
-                if not peer:
+                if not peer or self._revoked(link_id):
                     continue
                 key = f"bridge:appr:{link_id}"
                 for side, raw in self.store.hgetall(key).items():

@@ -356,6 +356,11 @@ def _chosen_key(grant_id: str) -> str:
     return f"oauth:rolechosen:{grant_id}"
 
 
+def _pinned_key(grant_id: str) -> str:
+    """Set when the role of an app from before roles existed was written down for it."""
+    return f"oauth:rolepinned:{grant_id}"
+
+
 def _seen_key(grant_id: str) -> str:
     return f"oauth:seen:{grant_id}"
 
@@ -959,7 +964,7 @@ class McpOAuth:
                         created_at=grant.created_at,
                         last_used=self._displayed_last_used(grant),
                         role=self.role_of(grant),
-                        legacy_full=not grant.roles and self.store.get(_role_key(grant.id)) is None,
+                        legacy_full=self._legacy_full(grant),
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -1004,7 +1009,16 @@ class McpOAuth:
             return Role.VIEWER.value
         return Role.ADMIN.value
 
-    def pin_legacy_roles(self) -> int:
+    def _legacy_full(self, grant: "OAuthGrant") -> bool:
+        """Full access only because the app was connected before roles existed, and the
+        owner has not chosen since. True both before and after that role is written down."""
+        if self.store.get(_chosen_key(grant.id)) is not None:
+            return False
+        if self.store.get(_pinned_key(grant.id)) is not None:
+            return self.store.get(_role_key(grant.id)) == Role.ADMIN.value
+        return not grant.roles and self.store.get(_role_key(grant.id)) is None
+
+    def pin_legacy_roles(self) -> tuple[int, int]:
         """Write down the role of every app from before apps had roles, and mark its
         grant as having one. Afterwards a role record that goes missing means read only
         for these apps too, as it already does for newer ones. Returns (changed, could not
@@ -1018,6 +1032,8 @@ class McpOAuth:
             if self.store.get(_role_key(grant.id)) not in APP_ROLES:
                 # Only if there is still none: a role the owner picks at this moment wins.
                 self.store.set_if_absent(_role_key(grant.id), self.role_of(grant), ex=_FOR_GOOD)
+                # Written down here, not chosen by the owner: Settings still says so.
+                self.store.set(_pinned_key(grant.id), "1")
             if self._mark_roles(grant):
                 changed += 1
             else:

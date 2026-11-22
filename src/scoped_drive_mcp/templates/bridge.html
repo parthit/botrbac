@@ -101,6 +101,7 @@
   <div class="actions">
     <form class="inline" method="post" action="/bridge/{{ link.link_id }}/approve">
       <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="peer" value="{{ peer }}">
       <button class="primary" type="submit">Approve pairing</button>
     </form>
     <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny" data-confirm="Decline pairing with {{ peer }}? This cannot be undone; pairing later needs a new invite.">

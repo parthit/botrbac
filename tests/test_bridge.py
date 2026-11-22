@@ -304,7 +304,7 @@ def test_dashboard_requires_csrf_and_both_approvals(p2_app) -> None:
     assert "Needs your approval" in page.text
     assert "pending_approval" not in page.text
     approved = owner.post(
-        f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/sharing?tab=people")}
+        f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/sharing?tab=people"), "peer": EVE}
     )
     assert approved.status_code == 303
     assert approved.headers["location"] == "/sharing?tab=people"
@@ -314,7 +314,10 @@ def test_dashboard_requires_csrf_and_both_approvals(p2_app) -> None:
     login(eve, "eve-code")
     eve_page = eve.get("/sharing?tab=people")
     assert OWNER_EMAIL in eve_page.text
-    done = eve.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(eve, "/sharing?tab=people")})
+    done = eve.post(
+        f"/bridge/{link_id}/approve",
+        data={"csrf": csrf(eve, "/sharing?tab=people"), "peer": OWNER_EMAIL},
+    )
     assert done.status_code == 303
     assert box.list_links(EVE)["links"][0]["status"] == "active"
 

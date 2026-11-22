@@ -576,7 +576,9 @@ class SignedStore:
         return out
 
     def replace(self, key: str, old: str, new: str) -> bool:
-        """Change a string from `old` to `new` only if it still says `old`. Keeps its expiry."""
+        """Change a string from `old` to `new` only if it still says `old`. Keeps its expiry.
+        False both when it changed meanwhile and when the store below cannot swap; a
+        caller that retries ends with a plain write either way."""
         raw = self.inner.get(key)
         swap = getattr(self.inner, "swap", None)
         if raw is None or swap is None or self._open(key, None, raw) != old:

@@ -2165,6 +2165,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         """Sign the allowlist, app and pairing records saved before records were signed."""
         if session_user(request) != settings.owner_email or ctx.directory is None:
             return render(request, "error.html", 404, message="Page not found.")
+        if isinstance(ctx.store, SignedStore) and ctx.store.require:
+            # Signing is for records from before. Once unsigned ones are ignored, signing
+            # whatever is in the store would bring back one that was planted since.
+            flash(
+                request,
+                "error",
+                "REQUIRE_SIGNED_RECORDS is on, so nothing was signed. Unsigned records are "
+                "ignored now.",
+            )
+            return RedirectResponse("/admin", status_code=303)
 
         def run() -> tuple[int, int]:
             people = ctx.directory.known_users()
@@ -2172,7 +2182,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # First the two records whose older form says less than it should: an
             # approval that does not name who joined, and an app with no written role.
             if ctx.mailbox is not None:
-                ctx.mailbox.bind_legacy_approvals([e for e in everyone if e])
+                known = [e for e in everyone if e]
+                ctx.mailbox.seal_ended_pairings(known)
+                ctx.mailbox.bind_legacy_approvals(known)
             unpinned = 0
             if ctx.mcp_oauth is not None:
                 _pinned, unpinned = ctx.mcp_oauth.pin_legacy_roles()
@@ -2498,7 +2510,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         return go
 
-    def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
+    def _bridge_act(
+        request: Request,
+        link_id: str,
+        action: str,
+        purge: bool = False,
+        expect_peer: str | None = None,
+    ) -> str:
         email = str(request.session.get("owner") or "")
         if action == "cancel":
             ctx.mailbox.cancel_invite(email, link_id)
@@ -2539,7 +2557,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if purge:
                 return message + " Stored messages were deleted."
             return message + " Messages already delivered stay readable until they expire."
-        result = ctx.mailbox.decide(email, link_id, action)
         same = next(
             (
                 link.get("same_account", False)
@@ -2547,6 +2564,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 if link["link_id"] == link_id
             ),
             False,
+        )
+        # Approving another person is approving that account. The form names the account
+        # the page showed, and the approval is refused if someone else is joined by now.
+        if action == "approve" and not same and not expect_peer:
+            raise MailboxError(
+                "peer_changed",
+                "Reload the page and check who is asking before you approve.",
+            )
+        result = ctx.mailbox.decide(
+            email, link_id, action, expect_peer if action == "approve" else None
         )
         if same and result["status"] == "active":
             return "Approved. Your two assistants can message each other now."
@@ -2565,7 +2592,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="That page is not available.")
         purge = form.get("purge") == "on"
         try:
-            message = await blocking(_bridge_act, request, link_id, action, purge)
+            message = await blocking(
+                _bridge_act, request, link_id, action, purge, form.get("peer") or None
+            )
         except MailboxError as exc:
             flash(request, "error", exc.message)
         else:

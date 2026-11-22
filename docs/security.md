@@ -77,13 +77,17 @@
     straight into the store is still accepted. The variable is refused without `ENCRYPTION_KEY`.
   - **Deleting a record adds nothing.** With the variable on, a missing record is never read as
     permission. A pairing approval names the person who had joined, so replacing who joined does not carry
-    the approval over. A pairing that was turned off says so in its signed record and loses both approvals.
+    the approval over, and the Approve button approves only the account its page showed. A pairing that
+    was turned off says so in its signed record and loses both approvals (the admin action does the same
+    for ones turned off earlier).
     An app whose role record is missing is read only. An access token carries its own end time.
   - **What signing does not stop.** Someone who copied signed records earlier and can still write to the
     store can put them back: an app you disconnected can be restored that way until its tokens end (an
     hour for access, 30 days from connection for refresh). Someone who can read the store can see open
     invite codes and join one, which still needs your approval of their account by name. They can also
-    delete records, which removes access but never adds it.
+    delete records, which removes access but never adds it. For up to 30 days after you turn the variable
+    on, reusing a refresh token that an app replaced before signing does not disconnect that app, because
+    the note that it was replaced is from before signing and cannot be found to sign.
   - Changing `ENCRYPTION_KEY` makes every signed record unreadable, as it already does for stored Drive
     sign-ins. A version of the server from before signing cannot read signed records, so do not roll back
     to one.
