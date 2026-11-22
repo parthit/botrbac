@@ -302,6 +302,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `LOGIN_RATE_LIMIT`, `LOGIN_RATE_WINDOW_SECONDS` | no | sign-in attempts per IP. Defaults 30 per 600 seconds |
 | `EDGE_CONFIG` | no | added when you connect a Vercel Edge Config. Holds the `self_pairing` switch (see Bot Bridge). Without it, pairing your own assistants is on |
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | no | `/mcp` calls per bearer token. Defaults 300 per 60 seconds |
+| `VERCEL_OBSERVABILITY` | no | `off` removes the Vercel Speed Insights and Web Analytics scripts. On by default on Vercel. Turn both on under the project's **Speed Insights** and **Analytics** tabs. Addresses are sent without ids or query strings |
 
 ### 3. Deploy
 
