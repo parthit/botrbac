@@ -798,6 +798,7 @@ def build_app(
         kv,
         base_url=settings.app_base_url or "",
         self_pairing=flags.self_pairing_enabled,
+        strict=isinstance(kv, SignedStore) and kv.require,
         encryption_key=enc_key,
         wake=WakeSettings(
             enabled=settings.webhooks_enabled,
@@ -927,6 +928,7 @@ def build_app(
             ),
             rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
             test_callback=settings.oauth_test_callback,
+            strict=isinstance(kv, SignedStore) and kv.require,
         )
         if base_url and not settings.dashboard_missing()
         else None

@@ -134,8 +134,11 @@ class Mailbox:
         encryption_key: str | None = None,
         wake: WakeSettings | None = None,
         self_pairing: Callable[[str], bool] | None = None,
+        strict: bool = False,
     ) -> None:
         self.store = store
+        # REQUIRE_SIGNED_RECORDS is on: an approval has to name the person who joined.
+        self.strict = strict
         # Whether this person may pair two of their own assistants (Edge Config switch).
         self.self_pairing = self_pairing or (lambda _email: True)
         self.base_url = base_url.rstrip("/")
@@ -489,9 +492,9 @@ class Mailbox:
                 raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
             # One person, one click: approving covers both of their assistants.
             for both in ("a", "b"):
-                self.store.hset(f"bridge:appr:{link['link_id']}", both, self._iso())
+                self.store.hset(f"bridge:appr:{link['link_id']}", both, self._approval(link))
         else:
-            self.store.hset(f"bridge:appr:{link['link_id']}", side, self._iso())
+            self.store.hset(f"bridge:appr:{link['link_id']}", side, self._approval(link))
         updated = self._status(link)
         return {"link_id": link["link_id"], "status": updated}
 
@@ -1478,6 +1481,12 @@ class Mailbox:
         record = json.dumps({"by": you, "at": at, "how": how})
         self.store.set_if_absent(f"bridge:ended:{link['link_id']}", record, ex=PEER_TTL)
         self.store.set(f"bridge:revoked:{link['link_id']}", at)
+        # Also written into the signed link record, and both approvals are removed: a
+        # pairing that was turned off stays off if the marker above goes missing.
+        current = self._link(link["link_id"]) or link
+        self.store.set(f"bridge:link:{link['link_id']}", json.dumps({**current, "ended_at": at}))
+        for side in ("a", "b"):
+            self.store.hdel(f"bridge:appr:{link['link_id']}", side)
         peer = self._peer(link["link_id"])
         if self.on_unpaired is None or link.get("same_account") or not peer:
             return
@@ -1653,19 +1662,57 @@ class Mailbox:
         return link
 
     def _status(self, link: dict[str, Any]) -> str:
-        if self._revoked(link["link_id"]):
+        link_id = link["link_id"]
+        if self._revoked(link_id, link):
             return "revoked"
-        if not self._peer(link["link_id"]):
+        peer = self._peer(link_id)
+        if not peer:
             return "awaiting_peer"
-        if self._approved(link["link_id"], "a") and self._approved(link["link_id"], "b"):
+        if self._approved(link_id, "a", peer) and self._approved(link_id, "b", peer):
             return "active"
         return "pending_approval"
 
-    def _approved(self, link_id: str, side: str) -> bool:
-        return self.store.hget(f"bridge:appr:{link_id}", side) is not None
+    def _approval(self, link: dict[str, Any]) -> str:
+        """What an approval stores: when, and who had joined. An approval is for that
+        person. If the record of who joined is ever replaced, it no longer counts."""
+        return f"{self._iso()}|{self._peer(link['link_id']) or ''}"
 
-    def _revoked(self, link_id: str) -> bool:
-        return self.store.get(f"bridge:revoked:{link_id}") is not None
+    def _approved(self, link_id: str, side: str, peer: str | None = None) -> bool:
+        raw = self.store.hget(f"bridge:appr:{link_id}", side)
+        if raw is None:
+            return False
+        _when, named, who = raw.partition("|")
+        if not named:
+            # From before approvals named the person. Accepted until records must be
+            # signed; `bind_legacy_approvals` rewrites these first.
+            return not self.strict
+        return bool(who) and who == (peer or self._peer(link_id))
+
+    def bind_legacy_approvals(self, people: list[str]) -> int:
+        """Rewrite approvals from before they named the person who joined, using who is
+        joined now. Returns how many changed. Run from the admin page before
+        REQUIRE_SIGNED_RECORDS is turned on."""
+        changed = 0
+        for email in people:
+            for link_id in self._user_link_ids(email):
+                peer = self._peer(link_id)
+                if not peer:
+                    continue
+                key = f"bridge:appr:{link_id}"
+                for side, raw in self.store.hgetall(key).items():
+                    if "|" not in raw:
+                        self.store.hset(key, side, f"{raw}|{peer}")
+                        changed += 1
+        return changed
+
+    def _revoked(self, link_id: str, link: dict[str, Any] | None = None) -> bool:
+        """Off for good. The marker is what was always read; the link record says so too,
+        and that record is signed, so deleting the marker does not turn a pairing back on."""
+        if self.store.get(f"bridge:revoked:{link_id}") is not None:
+            return True
+        if link is None:
+            link = self._link(link_id)
+        return bool(link and link.get("ended_at"))
 
     def _peer(self, link_id: str) -> str | None:
         value = self.store.get(f"bridge:peer:{link_id}")

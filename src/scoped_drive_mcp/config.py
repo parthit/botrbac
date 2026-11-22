@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -352,6 +352,14 @@ class Settings(BaseSettings):
         if self.postgres_configured:
             missing = [name for name in missing if not name.startswith("UPSTASH_")]
         return missing
+
+    @model_validator(mode="after")
+    def _signing_needs_a_key(self) -> "Settings":
+        # Records are signed with a key made from ENCRYPTION_KEY. Without it nothing is
+        # signed or checked, so asking for signed records must not quietly do nothing.
+        if self.require_signed_records and self.encryption_key is None:
+            raise ValueError("REQUIRE_SIGNED_RECORDS needs ENCRYPTION_KEY to be set")
+        return self
 
     def dashboard_missing(self) -> list[str]:
         """Settings the web dashboard cannot run without (Redis may fall back to memory)."""

@@ -437,35 +437,89 @@ def test_a_signed_record_cannot_be_changed_or_moved() -> None:
     assert store.refused >= 4
 
 
-def test_an_older_unsigned_record_is_signed_when_read_then_refused_once_required() -> None:
+def test_older_records_are_signed_by_the_admin_action_not_by_reading_them() -> None:
     from scoped_drive_mcp.store import sign_existing_records
 
     raw, store = _signed()
     raw.hset("allowlist", "old", '{"id":"old"}')
-    raw.hset("oauth:grants", "g1", '{"id":"g1"}')
+    grant = {"id": "g1", "access_hashes": ["aaa"], "refresh_hash": "rrr"}
+    raw.hset("oauth:grants", "g1", json.dumps(grant))
     raw.set("oauth:role:g1", "editor")
+    raw.set("oauth:at:aaa", "access", ex=60)
+    raw.set("oauth:rt:rrr", "refresh", ex=600)
     raw.hset(f"bridge:user:{EVE}", "link1", "2026-01-01")
-    raw.set("bridge:link:link1", '{"link_id":"link1"}')
-    raw.set("oauth:rt:tok", "payload", ex=60)
-    assert sign_existing_records(store, [EVE], OWNER_EMAIL) == 5
-    for stored in (
-        raw.hget("allowlist", "old"),
-        raw.hget("oauth:grants", "g1"),
-        raw.get("oauth:role:g1"),
-        raw.hget(f"bridge:user:{EVE}", "link1"),
-        raw.get("bridge:link:link1"),
-    ):
-        assert stored.startswith("s1.")
-    assert sign_existing_records(store, [EVE], OWNER_EMAIL) == 0
-    # A token keeps its expiry, so it is not rewritten. It is still read until required.
-    assert raw.get("oauth:rt:tok") == "payload" and store.get("oauth:rt:tok") == "payload"
+    raw.set("bridge:link:link1", '{"link_id":"link1","invite_code":"CODE"}')
+    raw.set("bridge:invite:CODE", "link1", ex=600)
+    raw.set("bridge:peer:link1", "s1.smith@example.com", ex=600)
+
+    # Reading accepts them and leaves the store alone.
+    assert store.hget("allowlist", "old") == '{"id":"old"}'
+    assert store.get("bridge:peer:link1") == "s1.smith@example.com"  # not taken for signed
+    assert raw.hget("allowlist", "old") == '{"id":"old"}'
+
+    assert sign_existing_records(store, [EVE], OWNER_EMAIL) == (9, 0)
+    assert sign_existing_records(store, [EVE], OWNER_EMAIL) == (0, 0)
+    assert raw.get("oauth:at:aaa").startswith("s1.") and raw.get("oauth:rt:rrr").startswith("s1.")
+    # A token keeps the time it had left.
+    assert raw._values["oauth:at:aaa"][0] is not None
 
     _, strict = _signed(require=True)
     strict.inner = raw
     assert strict.hget("allowlist", "old") == '{"id":"old"}'
-    assert strict.get("oauth:rt:tok") is None
+    assert strict.get("oauth:at:aaa") == "access"
+    assert strict.get("bridge:peer:link1") == "s1.smith@example.com"
     raw.hset("allowlist", "forged", '{"id":"forged"}')
     assert "forged" not in strict.hgetall("allowlist")
+
+
+def test_signing_a_record_does_not_undo_a_change_made_at_the_same_moment() -> None:
+    """Signing is a compare-and-swap. A record removed or changed between the read and
+    the write stays removed or changed, and is reported as not signed."""
+    from scoped_drive_mcp.store import sign_existing_records
+
+    raw, store = _signed()
+    raw.hset("allowlist", "f1", '{"id":"f1"}')
+    raw.set("oauth:role:g1", "admin")
+    read_hash, read_string = raw.hget, raw.get
+
+    def hget_then_removed(key, field):
+        value = read_hash(key, field)
+        raw.hdel(key, field)  # the owner's "remove" lands here
+        return value
+
+    def get_then_lowered(key):
+        value = read_string(key)
+        if key == "oauth:role:g1":
+            raw.set(key, "viewer")  # the owner's "read only" lands here
+        return value
+
+    raw.hget, raw.get = hget_then_removed, get_then_lowered
+    assert store.sign_in_place("allowlist", "f1") == "failed"
+    assert store.sign_in_place("oauth:role:g1") == "failed"
+    raw.hget, raw.get = read_hash, read_string
+    assert raw.hgetall("allowlist") == {}
+    assert raw.get("oauth:role:g1") == "viewer"
+    raw.hset("oauth:grants", "g1", '{"id":"g1"}')
+    assert sign_existing_records(store, [], OWNER_EMAIL) == (2, 0)
+
+
+def test_a_refused_record_is_not_consumed() -> None:
+    raw, strict = _signed(require=True)
+    raw.set("oauth:rt:tok", "unsigned refresh token", ex=600)
+    assert strict.getdel("oauth:rt:tok") is None
+    assert raw.get("oauth:rt:tok") == "unsigned refresh token"
+    strict.set("oauth:rt:good", "payload", ex=600)
+    assert strict.getdel("oauth:rt:good") == "payload"
+    assert raw.get("oauth:rt:good") is None
+
+
+def test_asking_for_signed_records_without_a_key_is_a_configuration_error() -> None:
+    from pydantic import ValidationError
+
+    from tests.conftest import make_settings
+
+    with pytest.raises(ValidationError, match="REQUIRE_SIGNED_RECORDS"):
+        make_settings(encryption_key=None, require_signed_records=True)
 
 
 def test_a_store_writer_cannot_add_an_app_and_an_allowlist_entry(world, memstore, oauth) -> None:
@@ -590,3 +644,131 @@ def test_the_picker_token_is_limited_to_picked_files(monkeypatch, status, scope,
         with pytest.raises(oauth.OAuthError):
             oauth.refresh_access_token("id", "secret", "rt")
     assert sent["scope"] == "https://www.googleapis.com/auth/drive.file"
+
+
+# ---- deleting a record must never add access (records must be signed: strict mode) ----
+
+
+@pytest.fixture
+def strict(world, memstore, oauth):
+    from scoped_drive_mcp.server import build_app
+    from tests.conftest import make_settings
+    from tests.test_multi_user import _accounts, _extend
+
+    _accounts(oauth)
+    _extend(world)
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            google_oauth_refresh_token=None,
+            allowlist_cache_ttl=0,
+            require_signed_records=True,
+        ),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(token.removeprefix("rt-")),
+        oauth=oauth,
+        bot_drive_factory=lambda token: world.as_user(token.removeprefix("rt-")),
+    )
+    owner, eve = client(app), client(app)
+    assert login(owner).status_code == 303
+    assert login(eve, "eve-code").status_code == 303
+    return app, owner, eve
+
+
+def test_replacing_who_joined_a_pairing_does_not_inherit_its_approvals(strict, memstore) -> None:
+    """The owner paired with Carol and both approved. Someone who can write to the store
+    deletes the record of who joined and joins with the invite code themselves."""
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, eve = strict
+    eve_token = _editor_app(eve, "Grok Eve")
+    box = app.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    box.request_link(CAROL, link["invite_code"])
+    box.decide(OWNER_EMAIL, link["link_id"], "approve")
+    box.decide(CAROL, link["link_id"], "approve")
+    assert box.active_peers(OWNER_EMAIL) == [CAROL]
+    assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
+
+    memstore.delete(f"{KEY_PREFIX}bridge:peer:{link['link_id']}")
+    joined = _mcp(eve, eve_token, "request_link", invite_code=link["invite_code"])
+    assert joined["isError"] is False, joined
+    assert joined["structuredContent"]["status"] == "pending_approval"
+    assert box.active_peers(OWNER_EMAIL) == []
+    got = _mcp(eve, eve_token, "read_shared_file", owner=OWNER_EMAIL, file_id="loose-doc")
+    assert got["isError"] is True
+
+
+def test_a_pairing_that_was_turned_off_stays_off_without_its_marker(strict, memstore) -> None:
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, _owner, _eve = strict
+    box = app.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    box.request_link(EVE, link["invite_code"])
+    box.decide(OWNER_EMAIL, link["link_id"], "approve")
+    box.decide(EVE, link["link_id"], "approve")
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
+    box.revoke(OWNER_EMAIL, link["link_id"])
+    memstore.delete(f"{KEY_PREFIX}bridge:revoked:{link['link_id']}")
+    assert box.active_peers(OWNER_EMAIL) == []
+    assert box.list_links(OWNER_EMAIL)["links"][0]["status"] in ("revoked", "declined")
+
+
+def test_an_approval_from_before_they_named_the_person_needs_binding_first(strict) -> None:
+    app, _owner, _eve = strict
+    box = app.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    box.request_link(EVE, link["invite_code"])
+    for side in ("a", "b"):  # what an approval looked like before: a time and nothing else
+        box.store.hset(f"bridge:appr:{link['link_id']}", side, "2026-01-01T00:00:00+00:00")
+    assert box.active_peers(OWNER_EMAIL) == []
+    box.strict = False
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
+    assert box.bind_legacy_approvals([OWNER_EMAIL]) == 2
+    box.strict = True
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
+
+
+def test_deleting_an_older_apps_role_records_does_not_make_it_full(strict, memstore) -> None:
+    from scoped_drive_mcp.mcp_oauth import GRANTS_KEY
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, _eve = strict
+    token = _editor_app(owner, "Old app")
+    oauth_server = app.state.dashboard.mcp_oauth
+    grant_id = oauth_server.list_grants(OWNER_EMAIL)[0].id
+    # Make it an app from before apps had roles: no flag on the grant, no role record.
+    grant = json.loads(oauth_server.store.hget(GRANTS_KEY, grant_id))
+    grant.pop("roles")
+    oauth_server.store.hset(GRANTS_KEY, grant_id, json.dumps(grant))
+    memstore.delete(f"{KEY_PREFIX}oauth:role:{grant_id}")
+
+    oauth_server.strict = False
+    assert oauth_server.resolve_access(token).role.value == "admin"  # as it always was
+    assert oauth_server.pin_legacy_roles() == 1  # the admin action writes that down
+    oauth_server.strict = True
+    assert oauth_server.resolve_access(token).role.value == "admin"
+    memstore.delete(f"{KEY_PREFIX}oauth:role:{grant_id}")
+    memstore.delete(f"{KEY_PREFIX}oauth:rolechosen:{grant_id}")
+    assert oauth_server.resolve_access(token).role.value == "viewer"
+
+
+def test_an_access_token_put_back_without_an_expiry_still_ends(
+    strict, memstore, monkeypatch
+) -> None:
+    import hashlib
+
+    from scoped_drive_mcp import mcp_oauth
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, _eve = strict
+    token = _editor_app(owner, "Some app")
+    key = f"{KEY_PREFIX}oauth:at:{hashlib.sha256(token.encode()).hexdigest()}"
+    memstore.set(key, memstore.get(key))  # the same signed record, now with no expiry
+    oauth_server = app.state.dashboard.mcp_oauth
+    assert oauth_server.resolve_access(token) is not None
+    later = mcp_oauth.time.time() + mcp_oauth.ACCESS_TTL + 1
+    monkeypatch.setattr(mcp_oauth.time, "time", lambda: later)
+    assert memstore.get(key) is not None
+    assert oauth_server.resolve_access(token) is None

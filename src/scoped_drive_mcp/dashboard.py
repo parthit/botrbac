@@ -2165,16 +2165,37 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         """Sign the allowlist, app and pairing records saved before records were signed."""
         if session_user(request) != settings.owner_email or ctx.directory is None:
             return render(request, "error.html", 404, message="Page not found.")
-        people = await blocking(ctx.directory.known_users)
-        count = await blocking(sign_existing_records, ctx.store, people, settings.owner_email)
-        audit_owner("sign_records", count=str(count))
-        flash(
-            request,
-            "ok",
-            f"Signed {count} stored record{'' if count == 1 else 's'}."
-            if count
-            else "Every stored record was already signed.",
-        )
+
+        def run() -> tuple[int, int]:
+            people = ctx.directory.known_users()
+            everyone = list(dict.fromkeys([*people, settings.owner_email or ""]))
+            # First the two records whose older form says less than it should: an
+            # approval that does not name who joined, and an app with no written role.
+            if ctx.mailbox is not None:
+                ctx.mailbox.bind_legacy_approvals([e for e in everyone if e])
+            if ctx.mcp_oauth is not None:
+                ctx.mcp_oauth.pin_legacy_roles()
+            return sign_existing_records(ctx.store, people, settings.owner_email)
+
+        signed, failed = await blocking(run)
+        audit_owner("sign_records", count=str(signed), failed=str(failed))
+        if failed:
+            flash(
+                request,
+                "error",
+                f"Signed {signed}, but {failed} could not be signed because they changed "
+                "at that moment or the store refused. Run this again, and do not turn on "
+                "REQUIRE_SIGNED_RECORDS until it reports none left.",
+            )
+        else:
+            flash(
+                request,
+                "ok",
+                f"Signed {signed} stored record{'' if signed == 1 else 's'}. None are left "
+                "unsigned."
+                if signed
+                else "Every stored record was already signed.",
+            )
         return RedirectResponse("/admin", status_code=303)
 
     def _directory_rows() -> list[dict[str, Any]]:

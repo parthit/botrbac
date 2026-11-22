@@ -69,13 +69,23 @@
   one, change one, or copy one to another person. A Drive sign-in copied into another account's slot is
   refused too, because the encrypted record names its account (a sign-in saved before that was written into
   the record is covered once that person reconnects Google Drive).
-  Records saved before signing existed are still accepted until you turn on `REQUIRE_SIGNED_RECORDS=1`:
-  open **People** (`/admin`), choose **Sign existing records**, then set the variable. Until it is on, an
-  unsigned record written straight into the store is still accepted. Signing does not stop someone with
-  write access deleting a record, or putting back an older signed value they copied from the same place.
-  Changing `ENCRYPTION_KEY` makes every signed record unreadable, as it already does for stored Drive
-  sign-ins. A version of the server from before signing cannot read signed records, so do not roll back
-  to one.
+  - **Turning it on.** Records saved before signing existed are still accepted until
+    `REQUIRE_SIGNED_RECORDS=1`. Open **People** (`/admin`) and choose **Sign existing records**. It signs
+    each one with a compare-and-swap, so a change made at the same moment is never undone, and it tells you
+    if any are left. When it reports none, set the variable. Until it is on, an unsigned record written
+    straight into the store is still accepted. The variable is refused without `ENCRYPTION_KEY`.
+  - **Deleting a record adds nothing.** With the variable on, a missing record is never read as
+    permission. A pairing approval names the person who had joined, so replacing who joined does not carry
+    the approval over. A pairing that was turned off says so in its signed record and loses both approvals.
+    An app whose role record is missing is read only. An access token carries its own end time.
+  - **What signing does not stop.** Someone who copied signed records earlier and can still write to the
+    store can put them back: an app you disconnected can be restored that way until its tokens end (an
+    hour for access, 30 days from connection for refresh). Someone who can read the store can see open
+    invite codes and join one, which still needs your approval of their account by name. They can also
+    delete records, which removes access but never adds it.
+  - Changing `ENCRYPTION_KEY` makes every signed record unreadable, as it already does for stored Drive
+    sign-ins. A version of the server from before signing cannot read signed records, so do not roll back
+    to one.
 - **The Google Picker gets a narrow token.** When the Picker is configured, the browser is given a Google
   token limited to files picked there (`drive.file`), and only if Google confirms that is what it issued. A
   token for the whole Drive never leaves the server. If Google will not narrow a sign-in, the Picker button

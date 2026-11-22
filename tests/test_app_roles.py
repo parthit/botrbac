@@ -176,8 +176,12 @@ def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memsto
     memstore.delete(f"sdm:oauth:role:{grant}")
     names = tool_names(owner_c, token)
     assert "trash_file" not in names and not names & WRITE_TOOLS
-    # Choosing never rewrites the grant record (a token refresh rewrites it too).
-    assert "roles" not in json.loads(unsealed(memstore.hget(f"sdm:{GRANTS_KEY}", grant)))
+    # Choosing also marks the grant itself, which is signed, so deleting the side keys
+    # cannot bring full access back. It is a compare-and-swap: a token refresh rewriting
+    # the same record at that moment wins, and the side key still holds.
+    assert json.loads(unsealed(memstore.hget(f"sdm:{GRANTS_KEY}", grant)))["roles"] is True
+    memstore.delete(f"sdm:oauth:rolechosen:{grant}")
+    assert "trash_file" not in tool_names(owner_c, token)
 
 
 def test_a_role_change_reads_clearly_on_activity(owner_c, memstore) -> None:  # noqa: F811

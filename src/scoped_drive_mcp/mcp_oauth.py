@@ -262,6 +262,12 @@ def _same(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+def _expired(saved: dict[str, Any]) -> bool:
+    """A token record past the time it carries. Records from before that have none."""
+    exp = saved.get("exp")
+    return isinstance(exp, (int, float)) and time.time() >= exp
+
+
 def _safe_state(value: str) -> bool:
     if not 1 <= len(value) <= 1024:
         return False
@@ -370,8 +376,12 @@ class McpOAuth:
         *,
         rate_limit: tuple[int, int] | None = None,
         test_callback: bool = False,
+        strict: bool = False,
     ):
         self.test_callback = test_callback
+        # REQUIRE_SIGNED_RECORDS is on: a record that is missing is never read as
+        # permission, because someone who can write to the store can also delete from it.
+        self.strict = strict
         # (requests, window seconds) per address for the two unauthenticated endpoints.
         self.rate_limit = rate_limit
         self.store = store
@@ -859,11 +869,12 @@ class McpOAuth:
         access_digest = hash_token(access)
         refresh_digest = hash_token(refresh)
         access_ttl = min(ACCESS_TTL, remaining)
-        payload = json.dumps(
-            {"grant_id": grant.id, "client_id": grant.client_id, "email": grant.email},
-            separators=(",", ":"),
-        )
+        claims = {"grant_id": grant.id, "client_id": grant.client_id, "email": grant.email}
+        # The record says when it ends, as well as the store dropping it then: a signed
+        # record put back in the store without an expiry is still over at that time.
+        payload = json.dumps({**claims, "exp": now + access_ttl}, separators=(",", ":"))
         self.store.set(_at_key(access_digest), payload, ex=access_ttl)
+        payload = json.dumps({**claims, "exp": now + remaining}, separators=(",", ":"))
         self.store.set(_rt_key(refresh_digest), payload, ex=remaining)
         grant.access_hashes.append(access_digest)
         while len(grant.access_hashes) > MAX_ACCESS_TOKENS:
@@ -910,6 +921,7 @@ class McpOAuth:
             or not self._may_act(grant.email)
             or digest not in grant.access_hashes
             or not _same(str(saved.get("client_id", "")), grant.client_id)
+            or _expired(saved)
         ):
             return None
         # Last-use is a side key. Rewriting the grant here races _issue_tokens and can
@@ -982,9 +994,46 @@ class McpOAuth:
         stored = self.store.get(_role_key(grant.id))
         if stored in APP_ROLES:
             return str(stored)
-        if grant.roles or self.store.get(_chosen_key(grant.id)) is not None:
+        if grant.roles or self.strict or self.store.get(_chosen_key(grant.id)) is not None:
             return Role.VIEWER.value
         return Role.ADMIN.value
+
+    def pin_legacy_roles(self) -> int:
+        """Write down the role of every app from before apps had roles, and mark its
+        grant as having one. Afterwards a role record that goes missing means read only
+        for these apps too, as it already does for newer ones. Returns how many changed.
+        Run before REQUIRE_SIGNED_RECORDS is turned on (the admin page does)."""
+        changed = 0
+        for grant_id in list(self.store.hgetall(GRANTS_KEY)):
+            grant = self._grant(grant_id)
+            if grant is None or grant.roles:
+                continue
+            if self.store.get(_role_key(grant.id)) not in APP_ROLES:
+                self.store.set(_role_key(grant.id), self.role_of(grant))
+            if self._mark_roles(grant):
+                changed += 1
+        return changed
+
+    def _mark_roles(self, grant: "OAuthGrant") -> bool:
+        """Set `roles` on the stored grant, only if nothing else changed it meanwhile (a
+        token refresh rewrites the same record). False when it lost that race."""
+        replace = getattr(self.store, "hreplace", None)
+        if replace is None:
+            return False
+        try:
+            # The stored text, not this object written out again: an older record may
+            # be spelled differently and would never compare equal.
+            before = self.store.hget(GRANTS_KEY, grant.id)
+            if not before:
+                return False
+            after = json.dumps({**json.loads(before), "roles": True}, separators=(",", ":"))
+            if not replace(GRANTS_KEY, grant.id, before, after):
+                return False
+            grant.roles = True
+            return True
+        except Exception:
+            logger.warning("could not mark a grant as having a role", exc_info=True)
+            return False
 
     def set_role(self, grant_id: str, email: str, role: str) -> bool:
         """The owner changes what one of their apps may do. Applies on its next call."""
@@ -997,6 +1046,10 @@ class McpOAuth:
         # rewrites) marks that, so a lost role key fails closed to read from here on.
         self.store.set(_chosen_key(grant.id), "1")
         self.store.set(_role_key(grant.id), role)
+        if not grant.roles:
+            # Best effort: also say so on the grant itself, which is signed, so deleting
+            # the two side keys cannot bring full access back.
+            self._mark_roles(grant)
         return True
 
     def _note_use(self, grant_id: str) -> None:

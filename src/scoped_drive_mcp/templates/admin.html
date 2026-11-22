@@ -45,7 +45,7 @@
   {% if signing.required %}
   <p>Allowlist, app and pairing records are signed, and an unsigned one is ignored (<code>REQUIRE_SIGNED_RECORDS</code> is on).</p>
   {% else %}
-  <p>Allowlist, app and pairing records are signed when they are saved. Ones saved before that are still accepted, and are signed when they are next read. Sign them all now, then set <code>REQUIRE_SIGNED_RECORDS=1</code> so an unsigned record is ignored. An app that has not been used between the day this server started signing records and the day you turn that on has to be connected again, and so does an invite that was still open.</p>
+  <p>Allowlist, app and pairing records are signed when they are saved. Ones saved before that are still accepted. Sign them all here. When this reports that none are left, set <code>REQUIRE_SIGNED_RECORDS=1</code> so an unsigned record is ignored.</p>
   <form method="post" action="/admin/sign-records">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit">Sign existing records</button>
