@@ -55,6 +55,13 @@ def client_ip(headers: list[tuple[bytes, bytes]], fallback: str) -> str:
         ]
         if len(chain) >= hops:
             return chain[-hops][:80]
+        # The proxy this deployment trusts did not write the header. Every caller then
+        # shares the proxy's own address, so say so once instead of failing quietly.
+        _warn_once(
+            "short-xff",
+            "X-Forwarded-For has fewer entries than TRUSTED_PROXY_HOPS expects, so rate "
+            "limits use the socket address.",
+        )
     elif any(key.lower() == b"x-forwarded-for" for key, _ in headers):
         # Behind a reverse proxy every caller then shares the proxy's address, and one
         # of them can use up the limit for all. Said once, so the log is not flooded.

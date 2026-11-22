@@ -1929,14 +1929,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         # Requests filed before the index existed are not in it. They expire REQUEST_TTL
         # after they were filed, so the look through every account is only needed that long.
         now = time.time()
-        since = ctx.store.get(OWNER_INDEX_SINCE)
-        if since is None:
-            ctx.store.set(OWNER_INDEX_SINCE, f"{now:.0f}")
-            since = f"{now:.0f}"
+        # Ten years: the mark only has to outlive the window it starts.
+        ctx.store.set_if_absent(OWNER_INDEX_SINCE, f"{now:.0f}", ex=10 * 365 * 24 * 3600)
+        since = ctx.store.get(OWNER_INDEX_SINCE) or f"{now:.0f}"
         try:
             if now - float(since) >= REQUEST_TTL:
                 return False
         except ValueError:
+            return False
+        # While the look-through is still needed, one person may cause it a few times an
+        # hour. Past that an unknown link is simply not found.
+        if not allow(ctx.store, "request-lookup", email or "anon", 20, 3600):
             return False
         for person in ctx.directory.known_users():
             if person == email:
