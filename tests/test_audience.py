@@ -16,7 +16,7 @@ from scoped_drive_mcp.store import (
     Allowlist,
     MemoryStore,
 )
-from tests.conftest import EVE, OWNER_EMAIL, FakeClock
+from tests.conftest import EVE, OWNER_EMAIL, FakeClock, unsealed
 from tests.dash import client, csrf, login, post
 from tests.test_external_sharing import LOOSE_TEXT, _error, _pair
 from tests.test_multi_user import CAROL, EVE_DOC, _app, _grok, _mcp
@@ -59,7 +59,7 @@ def _read(reader, file_id: str = "loose-doc") -> dict:
 
 
 def _stored(memstore, file_id: str) -> dict:
-    raw = memstore.hget(f"{KEY_PREFIX}{EXTERNAL_ALLOWLIST_KEY}", file_id)
+    raw = unsealed(memstore.hget(f"{KEY_PREFIX}{EXTERNAL_ALLOWLIST_KEY}", file_id))
     return json.loads(raw)
 
 
@@ -304,7 +304,7 @@ def test_a_failed_prune_on_one_side_still_prunes_the_other(three, memstore, monk
     box.revoke(EVE, link)  # the pairing still turns off
     assert box.is_linked(OWNER_EMAIL, EVE) is False
     # Eve's side was still pruned even though the owner's side failed.
-    eve_raw = memstore.hget(f"{KEY_PREFIX}u:{EVE}:{EXTERNAL_ALLOWLIST_KEY}", EVE_DOC)
+    eve_raw = unsealed(memstore.hget(f"{KEY_PREFIX}u:{EVE}:{EXTERNAL_ALLOWLIST_KEY}", EVE_DOC))
     assert json.loads(eve_raw)["audience"] == []
 
 

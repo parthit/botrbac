@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     login_rate_limit: int = Field(default=30, ge=1, le=10_000)
     login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
     mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)
+    # Off: an unsigned allowlist, app or pairing record is accepted and signed when read.
+    # On: it is ignored. Turn on once the records from before signing have been signed.
+    require_signed_records: bool = False
     # Access requests one connected app may have waiting for the person at once.
     max_pending_requests: int = Field(default=50, ge=1, le=300)
     mcp_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)

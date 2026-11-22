@@ -63,10 +63,23 @@
 - **Rate limits use the caller's real address.** On Vercel that is the address Vercel reports. Elsewhere it
   is the socket peer unless `TRUSTED_PROXY_HOPS` says how many proxies in front of the server add to
   `X-Forwarded-For`. An address the caller typed into that header is ignored.
-- **The store is trusted.** Someone who can write to Redis or Postgres can add an allowlist entry or an app
-  connection. A Drive sign-in copied into another account's slot is refused, because the encrypted record
-  names its account. A sign-in saved before the account was written into the record has no name to check,
-  and is covered once that person reconnects Google Drive.
+- **Records that decide access are signed.** Allowlist and Sharing entries, connected apps (their roles,
+  tokens and codes) and pairings are stored with a signature made from `ENCRYPTION_KEY`, over the record and
+  the place it is stored. Someone who can write to Redis or Postgres but does not have that key cannot add
+  one, change one, or copy one to another person. A Drive sign-in copied into another account's slot is
+  refused too, because the encrypted record names its account (a sign-in saved before that was written into
+  the record is covered once that person reconnects Google Drive).
+  Records saved before signing existed are still accepted until you turn on `REQUIRE_SIGNED_RECORDS=1`:
+  open **People** (`/admin`), choose **Sign existing records**, then set the variable. Until it is on, an
+  unsigned record written straight into the store is still accepted. Signing does not stop someone with
+  write access deleting a record, or putting back an older signed value they copied from the same place.
+  Changing `ENCRYPTION_KEY` makes every signed record unreadable, as it already does for stored Drive
+  sign-ins. A version of the server from before signing cannot read signed records, so do not roll back
+  to one.
+- **The Google Picker gets a narrow token.** When the Picker is configured, the browser is given a Google
+  token limited to files picked there (`drive.file`), and only if Google confirms that is what it issued. A
+  token for the whole Drive never leaves the server. If Google will not narrow a sign-in, the Picker button
+  reports an error for that person and Browse does the same job.
 - New sign-ins request full Drive access (`https://www.googleapis.com/auth/drive`). The allowlist is still
   checked first. A token saved with only `drive.file` keeps that narrower grant until that person signs in
   again. Replace `GOOGLE_OAUTH_REFRESH_TOKEN` with `scripts/bootstrap_oauth.py` if it was minted with

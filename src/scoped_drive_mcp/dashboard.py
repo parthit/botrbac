@@ -94,7 +94,9 @@ from .store import (
     EXTERNAL_ALLOWLIST_KEY,
     ActivityLog,
     Allowlist,
+    SignedStore,
     TokenVault,
+    sign_existing_records,
 )
 
 logger = logging.getLogger(__name__)
@@ -1501,7 +1503,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 record["t"],
             )
         except OAuthError as exc:
-            logger.warning("picker token refresh failed")
+            logger.warning("picker token not issued: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=502)
         return JSONResponse(
             {
@@ -2151,7 +2153,26 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             people = await blocking(_directory_rows)
         finally:
             current_actor.reset(reset)
-        return render(request, "admin.html", people=people)
+        signing = None
+        if isinstance(ctx.store, SignedStore):
+            signing = {"required": ctx.store.require}
+        return render(request, "admin.html", people=people, signing=signing)
+
+    async def admin_sign_records(request: Request, form: dict[str, str]) -> Response:
+        """Sign the allowlist, app and pairing records saved before records were signed."""
+        if session_user(request) != settings.owner_email or ctx.directory is None:
+            return render(request, "error.html", 404, message="Page not found.")
+        people = await blocking(ctx.directory.known_users)
+        count = await blocking(sign_existing_records, ctx.store, people, settings.owner_email)
+        audit_owner("sign_records", count=str(count))
+        flash(
+            request,
+            "ok",
+            f"Signed {count} stored record{'' if count == 1 else 's'}."
+            if count
+            else "Every stored record was already signed.",
+        )
+        return RedirectResponse("/admin", status_code=303)
 
     def _directory_rows() -> list[dict[str, Any]]:
         if ctx.directory is None:
@@ -2685,6 +2706,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/bridge/webhook", csrf_protected(bridge_webhook), methods=["POST"]),
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", safely(admin_page), methods=["GET"]),
+        Route("/admin/sign-records", csrf_protected(admin_sign_records), methods=["POST"]),
         Route("/oauth/authorize", safely(oauth_authorize), methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),

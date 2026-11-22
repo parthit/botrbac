@@ -5,7 +5,7 @@ import json
 import pytest
 
 from scoped_drive_mcp import external
-from tests.conftest import EVE, OWNER_EMAIL
+from tests.conftest import EVE, OWNER_EMAIL, unsealed
 from tests.dash import client, csrf, login, post
 from tests.test_external_sharing import _error, _pair
 from tests.test_mcp_oauth import DONE, auth_params, code_from, exchange, posted_redirect, register
@@ -192,7 +192,7 @@ def test_a_post_without_the_edit_field_keeps_editing_on(setup, memstore) -> None
     _app_, owner, eve, _carol = setup
     _set(owner, "proj")
     _set(owner, "proj", who="people", people=[EVE], access="omit")  # an old page
-    row = json.loads(memstore.hget(f"{KEY_PREFIX}{EXTERNAL_ALLOWLIST_KEY}", "proj"))
+    row = json.loads(unsealed(memstore.hget(f"{KEY_PREFIX}{EXTERNAL_ALLOWLIST_KEY}", "proj")))
     assert row["access"] == "edit" and row["audience"] == [EVE]
     assert _create(eve)["isError"] is False
 

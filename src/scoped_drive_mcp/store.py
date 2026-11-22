@@ -8,7 +8,9 @@ All keys are prefixed with `sdm:`. The admin keeps the original key names. Every
 is stored under `u:{email}:` on that same prefixed store.
 """
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -378,6 +380,198 @@ class PrefixedStore:
             return method(self.prefix + key, *args, **kwargs)
 
         return call
+
+
+# ---- signed records ---------------------------------------------------------
+#
+# The records that decide who may reach what: allowlist and Sharing entries, connected
+# apps (grants, roles, access and refresh tokens, codes) and pairings. Each is stored
+# with an HMAC over its key, its hash field and its value, made with a key derived from
+# ENCRYPTION_KEY. Someone who can write to the store but does not have that key cannot
+# add one or move one to another person's keys. It does not stop them deleting a
+# record, or putting back an older value they copied from the same place.
+SIGNED_MARK = "s1."
+_SIGNED_HASHES = frozenset({ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY})
+_SIGNED_PREFIXES = (
+    "oauth:",
+    "bridge:link:",
+    "bridge:appr:",
+    "bridge:peer:",
+    "bridge:user:",
+    "bridge:invite:",
+    "bridge:selfclaim:",
+)
+# String records that are signed in place when read unsigned, with the lifetime to give
+# them back (None: they do not expire). Other strings expire within 30 days and are
+# written signed the next time the app refreshes or the code is issued.
+_RESIGN_STRINGS: dict[str, int | None] = {
+    "oauth:role:": None,
+    "oauth:rolechosen:": None,
+    "bridge:link:": None,
+    "bridge:peer:": 10 * 365 * 24 * 3600,
+    "bridge:selfclaim:": 10 * 365 * 24 * 3600,
+}
+_TENANT_PREFIX = re.compile(r"^u:[^:]+:")
+
+
+def signs(key: str) -> bool:
+    """Whether `key` (as seen below the `sdm:` prefix) holds a signed record."""
+    name = _TENANT_PREFIX.sub("", key, count=1)
+    return name in _SIGNED_HASHES or name.startswith(_SIGNED_PREFIXES)
+
+
+def signing_key(encryption_key: str) -> bytes:
+    return hmac.new(
+        encryption_key.strip().encode(), b"botrbac record signing v1", hashlib.sha256
+    ).digest()
+
+
+class SignedStore:
+    """Signs the records `signs()` names on the way in and checks them on the way out.
+
+    A record whose signature does not match is treated as missing. An unsigned record is
+    accepted and signed in place until `require` is on (REQUIRE_SIGNED_RECORDS), and is
+    treated as missing after that. Every other key passes straight through."""
+
+    def __init__(self, inner: KeyValueStore, key: bytes, *, require: bool = False):
+        self.inner = inner
+        self.kind = getattr(inner, "kind", "custom")
+        self.require = require
+        self._key = key
+        # Counted since this process started, for the admin page.
+        self.signed_now = 0
+        self.refused = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def _mac(self, key: str, field: str | None, value: str) -> str:
+        message = "\x00".join((key, field or "", value)).encode()
+        digest = hmac.new(self._key, message, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+    def _seal(self, key: str, field: str | None, value: str) -> str:
+        return f"{SIGNED_MARK}{self._mac(key, field, value)}.{value}"
+
+    def _open(self, key: str, field: str | None, raw: Any) -> tuple[str | None, bool]:
+        """(value, was_unsigned). The value is None when the record is refused."""
+        if not isinstance(raw, str):
+            return raw, False
+        if raw.startswith(SIGNED_MARK):
+            mac, _, value = raw[len(SIGNED_MARK) :].partition(".")
+            if hmac.compare_digest(mac.encode(), self._mac(key, field, value).encode()):
+                return value, False
+            self.refused += 1
+            logger.warning("stored record failed its signature check and was ignored")
+            return None, False
+        if self.require:
+            self.refused += 1
+            logger.warning("unsigned stored record ignored (REQUIRE_SIGNED_RECORDS is on)")
+            return None, True
+        return raw, True
+
+    def _resign(self, write: Callable[[], None]) -> None:
+        try:
+            write()
+            self.signed_now += 1
+        except Exception:
+            logger.warning("could not sign a stored record in place", exc_info=True)
+
+    def get(self, key: str) -> str | None:
+        raw = self.inner.get(key)
+        if raw is None or not signs(key):
+            return raw
+        value, unsigned = self._open(key, None, raw)
+        if value is not None and unsigned:
+            self._resign_string(key, value)
+        return value
+
+    def _resign_string(self, key: str, value: str) -> None:
+        name = _TENANT_PREFIX.sub("", key, count=1)
+        match = next((p for p in _RESIGN_STRINGS if name.startswith(p)), None)
+        if match is None:
+            return
+        ttl = _RESIGN_STRINGS[match]
+        sealed = self._seal(key, None, value)
+        if ttl is None:
+            self._resign(lambda: self.inner.set(key, sealed))
+        else:
+            self._resign(lambda: self.inner.set(key, sealed, ex=ttl))
+
+    def getdel(self, key: str) -> str | None:
+        consume = getattr(self.inner, "getdel", None)
+        if consume is not None:
+            raw = consume(key)
+        else:
+            raw = self.inner.get(key)
+            if raw is not None:
+                self.inner.delete(key)
+        if raw is None or not signs(key):
+            return raw
+        return self._open(key, None, raw)[0]
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        stored = self._seal(key, None, value) if signs(key) else value
+        if ex is None:
+            self.inner.set(key, stored)
+        else:
+            self.inner.set(key, stored, ex=ex)
+
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+        stored = self._seal(key, None, value) if signs(key) else value
+        return self.inner.set_if_absent(key, stored, ex=ex)
+
+    def hset(self, key: str, field: str, value: str) -> None:
+        self.inner.hset(key, field, self._seal(key, field, value) if signs(key) else value)
+
+    def hget(self, key: str, field: str) -> str | None:
+        raw = self.inner.hget(key, field)
+        if raw is None or not signs(key):
+            return raw
+        value, unsigned = self._open(key, field, raw)
+        if value is not None and unsigned:
+            sealed = self._seal(key, field, value)
+            self._resign(lambda: self.inner.hset(key, field, sealed))
+        return value
+
+    def hgetall(self, key: str) -> dict[str, str]:
+        rows = self.inner.hgetall(key)
+        if not signs(key):
+            return rows
+        out: dict[str, str] = {}
+        for name, raw in rows.items():
+            value, unsigned = self._open(key, name, raw)
+            if value is None:
+                continue
+            out[name] = value
+            if unsigned:
+                sealed = self._seal(key, name, value)
+                self._resign(lambda f=name, s=sealed: self.inner.hset(key, f, s))
+        return out
+
+
+def sign_existing_records(store: Any, people: list[str], admin_email: str | None) -> int:
+    """Read every record that should be signed, so each unsigned one is signed in place.
+    Returns how many were signed. Run from the admin page before REQUIRE_SIGNED_RECORDS is
+    turned on. Access tokens, refresh tokens, codes and open invites are left out: they
+    expire within 30 days and are written signed the next time they are issued."""
+    if not isinstance(store, SignedStore):
+        return 0
+    before = store.signed_now
+    for email in dict.fromkeys([*people, *([admin_email] if admin_email else [])]):
+        prefix = "" if email == admin_email else f"u:{email}:"
+        store.hgetall(prefix + ALLOWLIST_KEY)
+        store.hgetall(prefix + EXTERNAL_ALLOWLIST_KEY)
+        for link_id in store.hgetall(f"bridge:user:{email}"):
+            store.get(f"bridge:link:{link_id}")
+            store.hgetall(f"bridge:appr:{link_id}")
+            store.get(f"bridge:peer:{link_id}")
+            store.get(f"bridge:selfclaim:{link_id}")
+    store.hgetall("oauth:clients")
+    for grant_id in store.hgetall("oauth:grants"):
+        store.get(f"oauth:role:{grant_id}")
+        store.get(f"oauth:rolechosen:{grant_id}")
+    return store.signed_now - before
 
 
 class ActorStore:

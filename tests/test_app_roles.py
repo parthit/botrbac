@@ -3,7 +3,7 @@
 import json
 
 from scoped_drive_mcp.mcp_oauth import GRANTS_KEY
-from tests.conftest import OWNER_EMAIL
+from tests.conftest import OWNER_EMAIL, unsealed
 from tests.dash import MCP_HEADERS, csrf, post
 from tests.test_mcp_oauth import (
     DONE,
@@ -46,7 +46,7 @@ def _call(c, token: str, tool: str, **args) -> dict:  # noqa: F811
 
 
 def _grant_id(memstore) -> str:
-    grants = memstore.hgetall(f"sdm:{GRANTS_KEY}")
+    grants = unsealed(memstore.hgetall(f"sdm:{GRANTS_KEY}"))
     return sorted(grants, key=lambda g: json.loads(grants[g])["created_at"])[-1]
 
 
@@ -114,7 +114,7 @@ def test_apps_connected_before_roles_keep_full_access(owner_c, memstore) -> None
     assert "trash_file" not in tool_names(owner_c, token)
     assert not tool_names(owner_c, token) & WRITE_TOOLS
     # A grant from before roles (no marker on the record) keeps full access.
-    raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    raw = json.loads(unsealed(memstore.hget(f"sdm:{GRANTS_KEY}", grant)))
     raw.pop("roles", None)
     memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
     assert "trash_file" in tool_names(owner_c, token)
@@ -134,19 +134,19 @@ def test_only_the_owner_can_change_an_apps_role(owner_c, memstore) -> None:  # n
     oauth = owner_c.app.state.dashboard.mcp_oauth
     assert oauth.set_role(grant, "eve@example.com", "admin") is False
     assert oauth.set_role("no-such-grant-id", OWNER_EMAIL, "admin") is False
-    assert memstore.get(f"sdm:oauth:role:{grant}") == "viewer"
+    assert unsealed(memstore.get(f"sdm:oauth:role:{grant}")) == "viewer"
 
 
 def test_disconnecting_an_app_drops_its_role(owner_c, memstore) -> None:  # noqa: F811
     _connect(owner_c, role="editor")
     grant = _grant_id(memstore)
-    assert memstore.get(f"sdm:oauth:role:{grant}") == "editor"
+    assert unsealed(memstore.get(f"sdm:oauth:role:{grant}")) == "editor"
     assert owner_c.app.state.dashboard is not None
     gone = owner_c.post(
         "/oauth/grants/revoke", data={"csrf": csrf(owner_c, "/settings"), "grant_id": grant}
     )
     assert gone.status_code in (200, 303)
-    assert memstore.get(f"sdm:oauth:role:{grant}") is None
+    assert unsealed(memstore.get(f"sdm:oauth:role:{grant}")) is None
     assert OWNER_EMAIL  # the owner made every change above
 
 
@@ -154,7 +154,7 @@ def test_settings_flags_apps_that_are_full_only_because_they_are_old(owner_c, me
     _connect(owner_c)
     grant = _grant_id(memstore)
     assert "connected before you could choose" not in owner_c.get("/settings").text
-    raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    raw = json.loads(unsealed(memstore.hget(f"sdm:{GRANTS_KEY}", grant)))
     raw.pop("roles", None)
     memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
     memstore.delete(f"sdm:oauth:role:{grant}")
@@ -164,7 +164,7 @@ def test_settings_flags_apps_that_are_full_only_because_they_are_old(owner_c, me
 def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memstore) -> None:  # noqa: F811
     token = _connect(owner_c)
     grant = _grant_id(memstore)
-    raw = json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    raw = json.loads(unsealed(memstore.hget(f"sdm:{GRANTS_KEY}", grant)))
     raw.pop("roles", None)
     memstore.hset(f"sdm:{GRANTS_KEY}", grant, json.dumps(raw))
     memstore.delete(f"sdm:oauth:role:{grant}")
@@ -177,7 +177,7 @@ def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memsto
     names = tool_names(owner_c, token)
     assert "trash_file" not in names and not names & WRITE_TOOLS
     # Choosing never rewrites the grant record (a token refresh rewrites it too).
-    assert "roles" not in json.loads(memstore.hget(f"sdm:{GRANTS_KEY}", grant))
+    assert "roles" not in json.loads(unsealed(memstore.hget(f"sdm:{GRANTS_KEY}", grant)))
 
 
 def test_a_role_change_reads_clearly_on_activity(owner_c, memstore) -> None:  # noqa: F811

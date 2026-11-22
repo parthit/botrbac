@@ -144,14 +144,19 @@ class GoogleOAuthClient:
             httpx.post(REVOKE_URL, data={"token": token}, timeout=self.timeout)
 
 
+PICKER_SCOPE = "https://www.googleapis.com/auth/drive.file"
+FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+
+
 def refresh_access_token(
     client_id: str, client_secret: str, refresh_token: str, timeout: float = 15
 ) -> str:
-    """Mint a short-lived access token for the Google Picker.
+    """Mint a short-lived access token for the Google Picker, which runs in the browser.
 
-    The scope parameter is omitted on purpose: Google returns the scopes that
-    already belong to this refresh token. A full-Drive sign-in and a leftover
-    drive.file sign-in both refresh. The new access token is not stored.
+    The token is asked for with only `drive.file`, the permission the Picker needs, and
+    Google's answer has to say that is what it gave. A token that can open the whole
+    Drive is never returned: page script could use it outside the allowlist. If Google
+    will not narrow a sign-in, the Picker is unavailable for it and Browse does the job.
     """
     try:
         resp = httpx.post(
@@ -161,14 +166,19 @@ def refresh_access_token(
                 "client_secret": client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
+                "scope": PICKER_SCOPE,
             },
             timeout=timeout,
         )
     except httpx.HTTPError:
         raise OAuthError("could not reach Google") from None
     if resp.status_code != 200:
-        raise OAuthError("Google did not refresh the sign-in")
-    token = resp.json().get("access_token")
+        raise OAuthError("Google did not give a token limited to picked files")
+    body = resp.json()
+    token = body.get("access_token")
     if not isinstance(token, str) or not token:
         raise OAuthError("Google did not refresh the sign-in")
+    granted = str(body.get("scope") or "").split()
+    if PICKER_SCOPE not in granted or FULL_DRIVE_SCOPE in granted:
+        raise OAuthError("Google did not give a token limited to picked files")
     return token

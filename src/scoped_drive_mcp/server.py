@@ -78,9 +78,11 @@ from .store import (
     KeyValueStore,
     MemoryStore,
     PrefixedStore,
+    SignedStore,
     TenantDirectory,
     TokenVault,
     build_store,
+    signing_key,
 )
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
@@ -720,6 +722,9 @@ def build_app(
 
     kv = PrefixedStore(store) if store is not None else build_store(settings)
     enc_key = settings.encryption_key.get_secret_value() if settings.encryption_key else None
+    if enc_key:
+        # Everything below reads and writes through this, whichever account it is for.
+        kv = SignedStore(kv, signing_key(enc_key), require=settings.require_signed_records)
     directory = TenantDirectory(kv, settings.owner_email, enc_key)
     actor_kv = directory.actor_store()
     allowlist = Allowlist(actor_kv)

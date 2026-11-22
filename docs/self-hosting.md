@@ -99,6 +99,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `EDGE_CONFIG` | no | added when you connect a Vercel Edge Config. Holds the `self_pairing` switch (see Bot Bridge). Without it, pairing your own assistants is on |
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | no | `/mcp` calls per bearer token. Defaults 300 per 60 seconds |
 | `VERCEL_OBSERVABILITY` | no | `off` removes the Vercel Speed Insights and Web Analytics scripts. On by default on Vercel. Turn both on under the project's **Speed Insights** and **Analytics** tabs. Addresses are sent without ids or query strings |
+| `REQUIRE_SIGNED_RECORDS` | no | `1` ignores an allowlist, app or pairing record that is not signed. Turn on after **Sign existing records** on `/admin`. See [security.md](security.md) |
 | `MAX_PENDING_REQUESTS` | no | access requests one connected app may have waiting at once. Default 50 |
 | `TRUSTED_PROXY_HOPS` | no | how many proxies in front of the server add to `X-Forwarded-For`. Leave unset on Vercel. Behind your own reverse proxy set `1`; without it, rate limits use the socket address |
 | `OAUTH_TEST_CALLBACK` | no | `1` accepts this server's own `/oauth/done` as an OAuth redirect, for local testing. Leave unset in production |

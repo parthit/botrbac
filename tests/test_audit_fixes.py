@@ -397,3 +397,196 @@ def test_whose_request_a_link_is_comes_from_an_index_not_a_look_through_every_ac
     # Until then, a request from before the index is still recognised.
     store.set(OWNER_INDEX_SINCE, f"{time.time():.0f}")
     assert eve.get(f"/requests/{rid}").status_code == 403
+
+
+# ---- records that decide access are signed ----
+
+
+def _signed(require: bool = False):
+    from scoped_drive_mcp.store import SignedStore, signing_key
+
+    raw = MemoryStore()
+    return raw, SignedStore(raw, signing_key(ENCRYPTION_KEY), require=require)
+
+
+def test_a_signed_record_cannot_be_changed_or_moved() -> None:
+    raw, store = _signed()
+    store.hset("allowlist", "f1", '{"id":"f1"}')
+    store.set("oauth:at:abc", "grant-1", ex=60)
+    store.set("activity_note", "plain")
+    assert raw.hget("allowlist", "f1").startswith("s1.")
+    assert raw.get("activity_note") == "plain"  # not a record that decides access
+    assert store.hget("allowlist", "f1") == '{"id":"f1"}'
+    assert store.hgetall("allowlist") == {"f1": '{"id":"f1"}'}
+    assert store.get("oauth:at:abc") == "grant-1"
+
+    # Changed in place.
+    raw.hset("allowlist", "f1", raw.hget("allowlist", "f1").replace("f1", "f2"))
+    assert store.hget("allowlist", "f1") is None and store.hgetall("allowlist") == {}
+    # A real record copied to another field, another key, or another person's keys.
+    store.hset("allowlist", "f1", '{"id":"f1"}')
+    sealed = raw.hget("allowlist", "f1")
+    raw.hset("allowlist", "other-file", sealed)
+    raw.hset("ext_allowlist", "f1", sealed)
+    raw.hset(f"u:{EVE}:allowlist", "f1", sealed)
+    assert store.hgetall("allowlist") == {"f1": '{"id":"f1"}'}
+    assert store.hgetall("ext_allowlist") == {}
+    assert store.hgetall(f"u:{EVE}:allowlist") == {}
+    raw.set("oauth:at:other", raw.get("oauth:at:abc"))
+    assert store.get("oauth:at:other") is None
+    assert store.refused >= 4
+
+
+def test_an_older_unsigned_record_is_signed_when_read_then_refused_once_required() -> None:
+    from scoped_drive_mcp.store import sign_existing_records
+
+    raw, store = _signed()
+    raw.hset("allowlist", "old", '{"id":"old"}')
+    raw.hset("oauth:grants", "g1", '{"id":"g1"}')
+    raw.set("oauth:role:g1", "editor")
+    raw.hset(f"bridge:user:{EVE}", "link1", "2026-01-01")
+    raw.set("bridge:link:link1", '{"link_id":"link1"}')
+    raw.set("oauth:rt:tok", "payload", ex=60)
+    assert sign_existing_records(store, [EVE], OWNER_EMAIL) == 5
+    for stored in (
+        raw.hget("allowlist", "old"),
+        raw.hget("oauth:grants", "g1"),
+        raw.get("oauth:role:g1"),
+        raw.hget(f"bridge:user:{EVE}", "link1"),
+        raw.get("bridge:link:link1"),
+    ):
+        assert stored.startswith("s1.")
+    assert sign_existing_records(store, [EVE], OWNER_EMAIL) == 0
+    # A token keeps its expiry, so it is not rewritten. It is still read until required.
+    assert raw.get("oauth:rt:tok") == "payload" and store.get("oauth:rt:tok") == "payload"
+
+    _, strict = _signed(require=True)
+    strict.inner = raw
+    assert strict.hget("allowlist", "old") == '{"id":"old"}'
+    assert strict.get("oauth:rt:tok") is None
+    raw.hset("allowlist", "forged", '{"id":"forged"}')
+    assert "forged" not in strict.hgetall("allowlist")
+
+
+def test_a_store_writer_cannot_add_an_app_and_an_allowlist_entry(world, memstore, oauth) -> None:
+    """The exploit from the audit: with write access to the store and nothing else, make up
+    an app connection and an allowlist entry, then read a file nobody allowed."""
+    import hashlib
+
+    from scoped_drive_mcp.server import build_app
+    from scoped_drive_mcp.store import KEY_PREFIX
+    from tests.conftest import make_settings
+    from tests.dash import MCP_HEADERS
+
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            google_oauth_refresh_token=None,
+            allowlist_cache_ttl=0,
+            require_signed_records=True,
+        ),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(token.removeprefix("rt-")),
+        oauth=oauth,
+        bot_drive_factory=lambda token: world.as_user(token.removeprefix("rt-")),
+    )
+    victim = client(app)
+    assert login(victim).status_code == 303
+
+    bearer = "store-writer-chosen-value"
+    digest = hashlib.sha256(bearer.encode()).hexdigest()
+    grant = {
+        "id": "forged0001grant",
+        "client_id": "x",
+        "client_name": "x",
+        "email": OWNER_EMAIL,
+        "created_at": "",
+        "access_hashes": [digest],
+        "roles": True,
+    }
+    memstore.hset(KEY_PREFIX + "oauth:grants", grant["id"], json.dumps(grant))
+    memstore.set(KEY_PREFIX + "oauth:role:" + grant["id"], "admin")
+    memstore.set(
+        KEY_PREFIX + "oauth:at:" + digest,
+        json.dumps({"grant_id": grant["id"], "client_id": "x", "email": OWNER_EMAIL}),
+    )
+    folder = {
+        "id": "owner-root",
+        "name": "x",
+        "mime_type": "application/vnd.google-apps.folder",
+        "permission_id": None,
+    }
+    memstore.hset(KEY_PREFIX + "allowlist", "owner-root", json.dumps(folder))
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "read_file", "arguments": {"file_id": "priv-secret"}},
+    }
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {bearer}"}
+    assert client(app).post("/mcp", json=body, headers=headers).status_code == 401
+    # The person's own, real connection still works, and does not see the made-up folder.
+    assert post(victim, "/grant", file_id="shared-doc").status_code in (303, 200)
+    assert "owner-root" not in app.state.dashboard.allowlist.entries()
+
+
+def test_the_admin_can_sign_older_records_from_the_people_page(p2_app, memstore) -> None:
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    c = client(p2_app)
+    login(c)
+    memstore.hset(KEY_PREFIX + "allowlist", "old-one", '{"id":"old-one","name":"n"}')
+    page = c.get("/admin").text
+    assert "Sign existing records" in page
+    assert c.post("/admin/sign-records", data={"csrf": csrf(c)}).status_code == 303
+    assert memstore.hget(KEY_PREFIX + "allowlist", "old-one").startswith("s1.")
+    # A page that read the allowlist on the way may have signed it already.
+    after = c.get("/admin").text
+    assert "Signed 1 stored record." in after or "already signed" in after
+
+
+# ---- the Picker never gets a token for the whole Drive ----
+
+
+class _GoogleAnswer:
+    def __init__(self, status: int, body: dict) -> None:
+        self.status_code = status
+        self._body = body
+
+    def json(self) -> dict:
+        return self._body
+
+
+@pytest.mark.parametrize(
+    ("status", "scope", "issued"),
+    [
+        (200, "https://www.googleapis.com/auth/drive.file", True),
+        # Google ignored the request to narrow, or did not say what it gave.
+        (200, "https://www.googleapis.com/auth/drive", False),
+        (
+            200,
+            "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive",
+            False,
+        ),
+        (200, "", False),
+        # Google refused to narrow this sign-in.
+        (400, "", False),
+    ],
+)
+def test_the_picker_token_is_limited_to_picked_files(monkeypatch, status, scope, issued) -> None:
+    from scoped_drive_mcp import oauth
+
+    sent: dict = {}
+
+    def fake_post(url, data, timeout):
+        sent.update(data)
+        return _GoogleAnswer(status, {"access_token": "ya29-token", "scope": scope})
+
+    monkeypatch.setattr(oauth.httpx, "post", fake_post)
+    if issued:
+        assert oauth.refresh_access_token("id", "secret", "rt") == "ya29-token"
+    else:
+        with pytest.raises(oauth.OAuthError):
+            oauth.refresh_access_token("id", "secret", "rt")
+    assert sent["scope"] == "https://www.googleapis.com/auth/drive.file"
