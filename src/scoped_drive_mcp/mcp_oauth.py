@@ -262,6 +262,9 @@ def _same(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+# Marks a parked redirect URL that is encrypted (see park_completion).
+_SEALED = "enc1."
+
 # set_if_absent takes a lifetime. Ten years stands in for "does not expire".
 _FOR_GOOD = 10 * 365 * 24 * 3600
 
@@ -388,7 +391,20 @@ class McpOAuth:
         rate_limit: tuple[int, int] | None = None,
         test_callback: bool = False,
         strict: bool = False,
+        encryption_key: str | None = None,
     ):
+        # Encrypts the one value kept here that is a usable secret as it stands: the
+        # redirect URL parked between Allow and the redirect, which carries the code.
+        self._fernet = None
+        if encryption_key:
+            from cryptography.fernet import Fernet
+
+            self._fernet = Fernet(encryption_key.strip().encode())
+        else:
+            logger.warning(
+                "ENCRYPTION_KEY is not set: a sign-in code waiting for its redirect is "
+                "readable in the store for up to two minutes"
+            )
         self.test_callback = test_callback
         # REQUIRE_SIGNED_RECORDS is on: a record that is missing is never read as
         # permission, because someone who can write to the store can also delete from it.
@@ -433,6 +449,9 @@ class McpOAuth:
             raise AuthorizeError("invalid_request", "That redirect URL is not allowed.")
         ticket = secrets.token_urlsafe(32)
         payload = json.dumps({"url": url, "email": email}, separators=(",", ":"))
+        if self._fernet is not None:
+            # Someone who can read the store must not be able to read the code out of it.
+            payload = _SEALED + self._fernet.encrypt(payload.encode()).decode()
         self.store.set(_bounce_key(hash_token(ticket)), payload, ex=120)
         return ticket
 
@@ -443,6 +462,22 @@ class McpOAuth:
             return None
         raw = self._consume(_bounce_key(hash_token(ticket)))
         if not raw:
+            return None
+        if raw.startswith(_SEALED):
+            if self._fernet is None:
+                logger.warning("parked redirect is encrypted but ENCRYPTION_KEY is not set")
+                return None
+            from cryptography.fernet import InvalidToken
+
+            try:
+                raw = self._fernet.decrypt(raw[len(_SEALED) :].encode()).decode()
+            except (InvalidToken, ValueError):
+                logger.warning("parked redirect could not be decrypted; Allow has to be redone")
+                return None
+        elif self._fernet is not None:
+            # With a key every parked URL is encrypted. This one is from just before a
+            # deploy, or was planted. Either way the person clicks Allow again.
+            logger.warning("unencrypted parked redirect refused; Allow has to be redone")
             return None
         try:
             saved = json.loads(raw)

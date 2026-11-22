@@ -66,7 +66,9 @@
 - **Records that decide access are signed.** Allowlist and Sharing entries, connected apps (their roles,
   tokens and codes) and pairings are stored with a signature made from `ENCRYPTION_KEY`, over the record and
   the place it is stored. Someone who can write to Redis or Postgres but does not have that key cannot add
-  one, change one, or copy one to another person. A Drive sign-in copied into another account's slot is
+  one, change one, or copy one to another person. Signed records can still be read by someone who can read
+  the store, so the one that would be usable as it stands, the redirect address holding a sign-in code for
+  the two minutes between Allow and the redirect, is encrypted as well. A Drive sign-in copied into another account's slot is
   refused too, because the encrypted record names its account (a sign-in saved before that was written into
   the record is covered once that person reconnects Google Drive).
   - **Turning it on.** Records saved before signing existed are still accepted until
@@ -77,7 +79,10 @@
     straight into the store is still accepted. The variable is refused without `ENCRYPTION_KEY`.
   - **Deleting a record adds nothing.** With the variable on, a missing record is never read as
     permission. A pairing approval names the person who had joined, so replacing who joined does not carry
-    the approval over, and the Approve button approves only the account its page showed. A pairing that
+    the approval over, and the Approve button approves only the account its page showed. An approval also
+    says which kind of pairing it was for, your own two assistants or another person, and counts only for
+    that kind. An approval from before approvals named anyone has none of this and is accepted as it is
+    until the variable is on, which is one more reason to sign and turn it on soon. A pairing that
     was turned off says so in its signed record and loses both approvals (the admin action does the same
     for ones turned off earlier).
     An app whose role record is missing is read only. An access token carries its own end time.

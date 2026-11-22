@@ -186,7 +186,7 @@ class Mailbox:
                 own += 1 if link.get("same_account") else 0
             elif status == "pending_approval":
                 side = "a" if you == link["email_a"] else "b"
-                if not self._approved(link_id, side):
+                if not self._approved(link_id, side, link=link):
                     needs += 1
         unread = len(self._inbox_index(you, None, unread_only=True))
         return {
@@ -209,7 +209,7 @@ class Mailbox:
             if link is None or you not in _parties(link, peer):
                 continue
             side = "a" if you == link["email_a"] else "b"
-            if not self._approved(link_id, side):
+            if not self._approved(link_id, side, peer, link):
                 count += 1
         return count
 
@@ -485,7 +485,10 @@ class Mailbox:
             # it was on and mail may have moved, so it must not read as "never turned on".
             self._end(link, you, "turned_off" if status == "active" else "declined")
             return {"link_id": link["link_id"], "status": "revoked"}
-        if not self._peer(link["link_id"]):
+        # Who joined is read once here and used for every check below and for what the
+        # approval stores, so it cannot be one account for the check and another after.
+        peer = self._peer(link["link_id"])
+        if not peer:
             raise MailboxError(
                 "waiting_for_peer",
                 "The other person has not joined yet, so there is no account to confirm.",
@@ -493,7 +496,30 @@ class Mailbox:
                 status=status,
                 invite_code=link["invite_code"],
             )
-        if expect_peer and self._other(link, you) != expect_peer.strip().lower():
+        owner_of_link = str(link["email_a"])
+        if link.get("same_account"):
+            # A pairing of one person's own assistants is that person's alone to approve,
+            # and only while the account recorded as joined is theirs too.
+            if you != owner_of_link or peer != owner_of_link:
+                raise MailboxError(
+                    "peer_changed",
+                    "This pairing is not between two of your own assistants any more. "
+                    "Turn it off and start a new one.",
+                    link_id=link["link_id"],
+                    status=status,
+                )
+            other = owner_of_link
+        else:
+            if peer == owner_of_link:
+                raise MailboxError(
+                    "peer_changed",
+                    "The account on this pairing is not the one this page showed. Reload "
+                    "the page and check who is asking before you approve.",
+                    link_id=link["link_id"],
+                    status=status,
+                )
+            other = peer if you == owner_of_link else owner_of_link
+        if expect_peer and other != expect_peer.strip().lower():
             raise MailboxError(
                 "peer_changed",
                 "The account on this pairing is not the one this page showed. Reload the "
@@ -506,9 +532,9 @@ class Mailbox:
                 raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
             # One person, one click: approving covers both of their assistants.
             for both in ("a", "b"):
-                self.store.hset(f"bridge:appr:{link['link_id']}", both, self._approval(link))
+                self.store.hset(f"bridge:appr:{link['link_id']}", both, self._approval(link, peer))
         else:
-            self.store.hset(f"bridge:appr:{link['link_id']}", side, self._approval(link))
+            self.store.hset(f"bridge:appr:{link['link_id']}", side, self._approval(link, peer))
         updated = self._status(link)
         return {"link_id": link["link_id"], "status": updated}
 
@@ -1336,11 +1362,13 @@ class Mailbox:
             return self._public_self_link(link, you)
         peer = self._other(link, you)
         status = self._status(link)
-        you_approved = self._approved(link["link_id"], "a" if you == link["email_a"] else "b")
+        you_approved = self._approved(
+            link["link_id"], "a" if you == link["email_a"] else "b", link=link
+        )
         peer_approved = False
         if peer:
             peer_side = "b" if you == link["email_a"] else "a"
-            peer_approved = self._approved(link["link_id"], peer_side)
+            peer_approved = self._approved(link["link_id"], peer_side, link=link)
         page = self._page()
         code_live = self._invite_live(link)
         show_code = status in ("awaiting_peer", "pending_approval") and code_live
@@ -1390,7 +1418,7 @@ class Mailbox:
         status = self._status(link)
         ended = self._ended(link["link_id"]) if status == "revoked" else None
         allowed = self.self_pairing(you)
-        approved = self._approved(link["link_id"], "a")
+        approved = self._approved(link["link_id"], "a", link=link)
         page = self._page()
         needs_you = status == "pending_approval" and not approved and allowed
         you_label = str(link.get(f"label_{side}") or link.get("label_a") or "") if side else None
@@ -1703,25 +1731,48 @@ class Mailbox:
         peer = self._peer(link_id)
         if not peer:
             return "awaiting_peer"
-        if self._approved(link_id, "a", peer) and self._approved(link_id, "b", peer):
+        if self._approved(link_id, "a", peer, link) and self._approved(link_id, "b", peer, link):
             return "active"
         return "pending_approval"
 
-    def _approval(self, link: dict[str, Any]) -> str:
-        """What an approval stores: when, and who had joined. An approval is for that
-        person. If the record of who joined is ever replaced, it no longer counts."""
-        return f"{self._iso()}|{self._peer(link['link_id']) or ''}"
+    def _approval(self, link: dict[str, Any], peer: str) -> str:
+        """What an approval stores: when, who had joined, and which kind of pairing it
+        was for ("self": one person's own assistants; "pair": two people). It counts
+        only while all of that is still what the pairing says."""
+        kind = "self" if link.get("same_account") else "pair"
+        return f"{self._iso()}|{peer}|{kind}"
 
-    def _approved(self, link_id: str, side: str, peer: str | None = None) -> bool:
+    def _approved(
+        self,
+        link_id: str,
+        side: str,
+        peer: str | None = None,
+        link: dict[str, Any] | None = None,
+    ) -> bool:
         raw = self.store.hget(f"bridge:appr:{link_id}", side)
         if raw is None:
             return False
-        _when, named, who = raw.partition("|")
-        if not named:
+        parts = raw.split("|")
+        if len(parts) == 1:
             # From before approvals named the person. Accepted until records must be
             # signed; `bind_legacy_approvals` rewrites these first.
             return not self.strict
-        return bool(who) and who == (peer or self._peer(link_id))
+        if link is None:
+            link = self._link(link_id)
+        if link is None:
+            return False
+        if peer is None:
+            peer = self._peer(link_id)
+        who = parts[1]
+        # An approval written before the kind was stored was for two people, unless it
+        # names the link's own creator, which only a pairing of their own assistants does.
+        owner_of_link = str(link["email_a"])
+        kind = parts[2] if len(parts) > 2 else ("self" if who == owner_of_link else "pair")
+        if not who or who != peer:
+            return False
+        if link.get("same_account"):
+            return kind == "self" and peer == owner_of_link
+        return kind == "pair" and peer != owner_of_link
 
     def _seal_ended(self, link: dict[str, Any]) -> bool:
         """Make "off" permanent for a pairing that only has the old marker: write it into
@@ -1762,7 +1813,11 @@ class Mailbox:
                 key = f"bridge:appr:{link_id}"
                 for side, raw in self.store.hgetall(key).items():
                     if "|" not in raw:
-                        self.store.hset(key, side, f"{raw}|{peer}")
+                        link = self._link(link_id)
+                        if link is None:
+                            break  # no readable link record: nothing to say it is for
+                        kind = "self" if link.get("same_account") else "pair"
+                        self.store.hset(key, side, f"{raw}|{peer}|{kind}")
                         changed += 1
         return changed
 

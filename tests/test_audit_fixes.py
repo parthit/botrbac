@@ -889,3 +889,158 @@ def test_settings_still_says_an_older_app_is_full_only_because_it_is_old(strict,
     assert oauth_server.list_grants(OWNER_EMAIL)[0].legacy_full is True
     assert oauth_server.set_role(grant_id, OWNER_EMAIL, "viewer") is True
     assert oauth_server.list_grants(OWNER_EMAIL)[0].legacy_full is False
+
+
+# ---- from the third review of the signing layer ----
+
+
+def _stored(memstore, key: str) -> str:
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    return memstore.get(f"{KEY_PREFIX}{key}")
+
+
+def test_a_pairing_of_your_own_assistants_cannot_become_one_with_someone_else(
+    strict, memstore
+) -> None:
+    """The owner pairs two of their own assistants. Someone who can write to the store
+    swaps the link record between its two earlier forms, replaces who joined, and joins
+    as themselves. Neither their own Approve click nor the owner's may turn that into an
+    active pairing with them."""
+    from scoped_drive_mcp.store import KEY_PREFIX
+
+    app, owner, eve = strict
+    box = app.state.mailbox
+    grok = _editor_app(owner, "Grok One")
+    claude = _editor_app(owner, "Claude Two")
+    eve_token = _editor_app(eve, "Grok Eve")
+    assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
+
+    made = _mcp(owner, grok, "request_link")["structuredContent"]
+    lid, code = made["link_id"], made["invite_code"]
+    two_people_form = _stored(memstore, f"bridge:link:{lid}")
+    assert _mcp(owner, claude, "request_link", invite_code=code)["isError"] is False
+    own_assistants_form = _stored(memstore, f"bridge:link:{lid}")
+    assert '"same_account": true' in own_assistants_form
+
+    memstore.set(f"{KEY_PREFIX}bridge:link:{lid}", two_people_form)
+    memstore.delete(f"{KEY_PREFIX}bridge:peer:{lid}")
+    assert _mcp(eve, eve_token, "request_link", invite_code=code)["isError"] is False
+    memstore.set(f"{KEY_PREFIX}bridge:link:{lid}", own_assistants_form)
+
+    # Eve's click, then the owner's click on a card that says "two of your own assistants".
+    assert post(eve, f"/bridge/{lid}/approve").status_code == 303
+    assert post(owner, f"/bridge/{lid}/approve").status_code == 303
+    assert box.store.hgetall(f"bridge:appr:{lid}") == {}
+    for form in (own_assistants_form, two_people_form):
+        memstore.set(f"{KEY_PREFIX}bridge:link:{lid}", form)
+        assert box.active_peers(OWNER_EMAIL) == []
+        got = _mcp(eve, eve_token, "read_shared_file", owner=OWNER_EMAIL, file_id="loose-doc")
+        assert got["isError"] is True
+
+
+def test_an_approval_counts_only_for_the_kind_of_pairing_it_was_given_to(strict) -> None:
+    app, _owner, _eve = strict
+    box = app.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    lid = link["link_id"]
+    box.request_link(EVE, link["invite_code"])
+    record = box._link(lid)
+    # Approvals that name Eve but were given to a pairing of one person's own assistants.
+    for side in ("a", "b"):
+        box.store.hset(f"bridge:appr:{lid}", side, f"2026-11-22T00:00:00+00:00|{EVE}|self")
+    assert box._status(record) == "pending_approval"
+    # The real thing still works, and says which kind it is for.
+    box.decide(OWNER_EMAIL, lid, "approve", EVE)
+    box.decide(EVE, lid, "approve", OWNER_EMAIL)
+    assert box.store.hget(f"bridge:appr:{lid}", "a").endswith(f"|{EVE}|pair")
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
+
+
+def test_an_approval_is_stored_for_the_account_it_was_checked_against(strict) -> None:
+    """Who joined is read once. If the record changes while the click is being handled,
+    the approval names the account that was checked, so it does not count for the new one."""
+    app, _owner, _eve = strict
+    box = app.state.mailbox
+    link = box.request_link(OWNER_EMAIL)
+    lid = link["link_id"]
+    box.request_link(CAROL, link["invite_code"])
+    real_peer, real_approval = box._peer, box._approval
+    changed = []
+
+    def approval_while_the_record_changes(*args):
+        changed.append(True)  # from here on, the store says Eve is the one joined
+        return real_approval(*args)
+
+    box._peer = lambda link_id: EVE if changed else real_peer(link_id)
+    box._approval = approval_while_the_record_changes
+    try:
+        box.decide(OWNER_EMAIL, lid, "approve", CAROL)
+    finally:
+        box._peer, box._approval = real_peer, real_approval
+    assert changed
+    assert box.store.hget(f"bridge:appr:{lid}", "a").split("|")[1] == CAROL
+
+
+def test_the_code_parked_between_allow_and_the_redirect_cannot_be_read_from_the_store(
+    strict, memstore
+) -> None:
+    from scoped_drive_mcp.store import KEY_PREFIX
+    from tests.test_mcp_oauth import GROK, auth_params, register
+
+    _app_, owner, eve = strict
+    client_id = register(eve, GROK, name="Some app").json()["client_id"]
+    _verifier, params = auth_params(client_id, GROK)
+    assert owner.get("/oauth/authorize", params=params).status_code == 200
+    allowed = post(owner, "/oauth/authorize", decision="allow")
+    assert allowed.status_code == 303 and "/oauth/continue" in allowed.headers["location"]
+    parked = [
+        value
+        for key, (_expires, value) in memstore._values.items()
+        if key.startswith(f"{KEY_PREFIX}oauth:bounce:")
+    ]
+    assert len(parked) == 1
+    assert "code=" not in parked[0] and "http" not in parked[0]
+    # The person's own browser still completes the hand-off.
+    done = owner.get(allowed.headers["location"], follow_redirects=False)
+    assert "code=" in (done.headers.get("location") or done.text)
+
+
+def test_approvals_stored_before_the_kind_was_added_keep_working(strict) -> None:
+    """What the previous release wrote: a time and the account, no kind."""
+    app, owner, _eve = strict
+    box = app.state.mailbox
+    # Two people.
+    link = box.request_link(OWNER_EMAIL)
+    lid = link["link_id"]
+    box.request_link(EVE, link["invite_code"])
+    for side in ("a", "b"):
+        box.store.hset(f"bridge:appr:{lid}", side, f"2026-11-22T00:00:00+00:00|{EVE}")
+    assert box.active_peers(OWNER_EMAIL) == [EVE]
+    # One person's own two assistants: the account named is the creator's own.
+    grok = _editor_app(owner, "Grok One")
+    claude = _editor_app(owner, "Claude Two")
+    made = _mcp(owner, grok, "request_link")["structuredContent"]
+    own = made["link_id"]
+    assert _mcp(owner, claude, "request_link", invite_code=made["invite_code"])["isError"] is False
+    for side in ("a", "b"):
+        box.store.hset(f"bridge:appr:{own}", side, f"2026-11-22T00:00:00+00:00|{OWNER_EMAIL}")
+    assert box._status(box._link(own)) == "active"
+    # Neither counts for the other kind of pairing.
+    for side in ("a", "b"):
+        box.store.hset(f"bridge:appr:{own}", side, f"2026-11-22T00:00:00+00:00|{EVE}")
+        box.store.hset(f"bridge:appr:{lid}", side, f"2026-11-22T00:00:00+00:00|{OWNER_EMAIL}")
+    assert box._status(box._link(own)) == "pending_approval"
+    assert box.active_peers(OWNER_EMAIL) == []
+
+
+def test_an_encrypted_parked_redirect_needs_the_key_and_a_plain_one_is_refused_with_it() -> None:
+    url = "https://claude.ai/api/mcp/auth_callback?code=abc&state=s"
+    with_key = McpOAuth(MemoryStore(), BASE_URL, OWNER_EMAIL, encryption_key=ENCRYPTION_KEY)
+    ticket = with_key.park_completion(url, OWNER_EMAIL)
+    without_key = McpOAuth(with_key.store, BASE_URL, OWNER_EMAIL)
+    assert without_key.take_completion(ticket, OWNER_EMAIL) is None
+    ticket = with_key.park_completion(url, OWNER_EMAIL)
+    assert with_key.take_completion(ticket, OWNER_EMAIL) == url
+    plain = without_key.park_completion(url, OWNER_EMAIL)
+    assert with_key.take_completion(plain, OWNER_EMAIL) is None
