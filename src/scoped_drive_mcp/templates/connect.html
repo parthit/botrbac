@@ -26,25 +26,19 @@
     </p>
     <p class="muted">{{ conn.summary }}</p>
     {% if row.connected %}
-    {% if row.needs_upgrade %}
-    <p class="warn">This connection only covers some of your Drive. Reconnect to allow full Drive access. Your current access keeps working until you do.</p>
-    <p class="disclosure">{{ conn.disclosure }}</p>
-    <form method="post" action="/connect/{{ conn.key }}">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="next" value="{{ next }}">
-      <button class="primary" type="submit">Reconnect {{ conn.name }}</button>
-    </form>
-    {% endif %}
     <form class="inline" method="post" action="/connect/{{ conn.key }}/disconnect" data-confirm="Disconnect {{ conn.name }}? Assistants lose access to it immediately.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="danger" type="submit">Disconnect</button>
     </form>
     {% else %}
+    {% if row.needs_upgrade %}
+    <p class="warn" id="old-connection">Your earlier connection could reach your whole Drive, so Bot RBAC no longer uses it. Reconnecting ends it at Google first, then asks for access to only the files you pick. Afterwards, add your files again with <b>Add from Google Drive</b> on Files.</p>
+    {% endif %}
     <p class="disclosure">{{ conn.disclosure }}</p>
     <form method="post" action="/connect/{{ conn.key }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="next" value="{{ next }}">
-      <button class="primary" type="submit">Allow Bot RBAC to access {{ conn.name }}</button>
+      <button class="primary" type="submit">{% if row.needs_upgrade %}Reconnect {{ conn.name }}{% else %}Allow Bot RBAC to access {{ conn.name }}{% endif %}</button>
     </form>
     {% endif %}
   </article>

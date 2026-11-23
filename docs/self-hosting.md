@@ -9,7 +9,7 @@ or Postgres for storage. Allow about 30 minutes the first time.
 > exactly which buttons to click in Google Cloud and Vercel.
 
 - [What you need](#what-you-need)
-- [1. Google Cloud: OAuth client](#1-google-cloud-oauth-client)
+- [1. Google Cloud: OAuth client and file picker](#1-google-cloud-oauth-client-and-file-picker)
 - [2. Vercel: project and storage](#2-vercel-project-and-storage)
 - [3. Environment variables](#3-environment-variables)
 - [4. Deploy and check](#4-deploy-and-check)
@@ -33,18 +33,20 @@ git clone https://github.com/<you>/botrbac && cd botrbac   # your fork
 uv sync
 ```
 
-## 1. Google Cloud: OAuth client
+## 1. Google Cloud: OAuth client and file picker
 
 Signed in to <https://console.cloud.google.com/> with your own account:
 
 1. **Project:** project picker → **New project** → name it (e.g. `botrbac`) → **Create**.
-2. **Drive API:** **APIs & Services → Library** → **Google Drive API** → **Enable**.
+2. **APIs:** **APIs & Services → Library** → enable **Google Drive API** and **Google Picker API**.
 3. **Consent screen** (**APIs & Services → OAuth consent screen**, called **Google Auth Platform** in newer
    consoles):
    - App name (e.g. `Bot RBAC`), your email as support and developer contact.
    - **Audience:** **External**.
    - **Test users:** add your own address, and the address of anyone else who will sign in.
-   - **Data access / Scopes:** add `openid`, `email` and `https://www.googleapis.com/auth/drive`.
+   - **Data access / Scopes:** add `openid`, `email` and `https://www.googleapis.com/auth/drive.file`
+     ("only the specific files you use with this app"). Do **not** add `…/auth/drive`: Bot RBAC refuses
+     a connection that carries it.
 4. **OAuth client:** **APIs & Services → Credentials → Create credentials → OAuth client ID** (or
    **Clients → Create client**). Type: **Web application**. **Authorized redirect URIs:**
    - `https://<your-domain>/auth/callback`, e.g. `https://botrbac-yourname.vercel.app/auth/callback`
@@ -52,11 +54,23 @@ Signed in to <https://console.cloud.google.com/> with your own account:
    - `http://localhost:8000/auth/callback` (only for running on your computer)
 
    Copy the **Client ID** and **Client secret**.
+5. **Picker key:** **Credentials → Create credentials → API key**, then open the key:
+   - **Application restrictions:** Websites → `https://<your-domain>/*` (and `http://localhost:8000/*`
+     if you run it on your computer).
+   - **API restrictions:** Restrict key → **Google Picker API**.
+
+   Save and copy the key (`GOOGLE_PICKER_API_KEY`). It is visible in the page; the restrictions are what
+   protect it.
+6. **Project number:** console home → **Project info** → **Project number** (the long number, not the
+   project ID). This is `GOOGLE_CLOUD_PROJECT_NUMBER`.
+
+Bot RBAC only ever gets the files people pick in Google's file picker (the `drive.file` permission).
+Google enforces that, so the rest of each Drive stays closed to your server.
 
 While the app is in **Testing**, Google shows an "unverified app" warning (click **Advanced → Go to …**) and
 expires sign-ins after 7 days, so you will need to reconnect Drive weekly. For personal use you can instead
 click **Publish app** on the Audience page: the warning stays, but tokens stop expiring. Opening it to the
-public needs Google's verification of the restricted Drive scope; see
+public needs brand verification (`drive.file` is not a restricted scope, so no security assessment); see
 [google-verification.md](google-verification.md).
 
 ## 2. Vercel: project and storage
@@ -93,6 +107,8 @@ In Vercel, **Settings → Environment Variables** (Production), add:
 | `APP_BASE_URL` | e.g. `https://botrbac-yourname.vercel.app`, no trailing `/` |
 | `SESSION_SECRET` | from `make_secrets.py` |
 | `ENCRYPTION_KEY` | from `make_secrets.py`. Keep it safe: changing it makes stored Drive tokens unreadable |
+| `GOOGLE_PICKER_API_KEY` | from step 1.5 |
+| `GOOGLE_CLOUD_PROJECT_NUMBER` | from step 1.6 |
 
 Strongly recommended for a personal copy:
 
@@ -123,7 +139,11 @@ Preview deployments are usually behind Vercel's login, so use the production URL
    second Google screen, for Drive.
 3. In Drive, make a folder `Bot RBAC test` with a doc inside ("Test plan"). Put another doc ("Private note")
    **outside** it.
-4. In the dashboard, **Browse** → **Allow** next to `Bot RBAC test`.
+4. In the dashboard, open **Files** → **Add from Google Drive**. Google's own window opens; pick
+   `Bot RBAC test` and the doc inside it, then **Select**. They are now allowed.
+
+Google opens a file to Bot RBAC only once it is picked. Picking a folder may not open the files already
+inside it, so if an assistant can't read a file in an allowed folder, pick that file too.
 
 ## 6. Connect an assistant
 
@@ -196,7 +216,9 @@ uv run python scripts/make_secrets.py           # prints SESSION_SECRET and ENCR
 ```
 
 Edit `.env`: paste the two secrets, and set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
-`OWNER_EMAIL` and `APP_BASE_URL=http://localhost:8000`. Leave the Redis variables empty: locally the server
+`GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER`, `OWNER_EMAIL` and
+`APP_BASE_URL=http://localhost:8000`. The picker key's website restriction must include
+`http://localhost:8000/*`. Leave the Redis variables empty: locally the server
 uses an in-memory store, which is wiped on every restart.
 
 ```bash
@@ -232,6 +254,10 @@ uv run ruff check . && uv run ruff format --check .
 | `/health` returns 503 | A variable is malformed (e.g. `ENCRYPTION_KEY` is not a Fernet key, `APP_BASE_URL` is `http://` on a non-local host). Check the function logs |
 | Drive stops working after a week | The Google app is in Testing. Reconnect Drive, or publish the app (step 1) |
 | Assistant sees your whole Drive | Its built-in Google Drive connector is still connected. Disconnect it |
+| No **Add from Google Drive** button | `GOOGLE_PICKER_API_KEY` or `GOOGLE_CLOUD_PROJECT_NUMBER` is missing |
+| Picker opens, then errors | The API key's website restriction doesn't include this site, or the Picker API isn't enabled or allowed on the key |
+| A file in an allowed folder is "not found" | Google hasn't opened it to the app. Pick that file too |
+| "Google gave more access than Bot RBAC asks for" | An older full-Drive grant came back. Remove Bot RBAC at myaccount.google.com/permissions and connect again; remove `…/auth/drive` from the consent screen's scopes |
 | Assistant's OAuth fails with a redirect error | Its callback URL isn't in `ALLOWED_REDIRECT_URIS` (see step 6) |
 | Everyone got signed out | `SESSION_SECRET` changed. Expected |
 | "Reconnect Google Drive" after changing `ENCRYPTION_KEY` | Stored tokens can't be decrypted with the new key. Reconnect Drive |
@@ -249,9 +275,9 @@ uv run ruff check . && uv run ruff format --check .
 | `DATABASE_URL` or `POSTGRES_URL` | one store | Postgres instead of Redis. If both are set, Redis data is copied to Postgres once and Postgres is used |
 | `ALLOWED_EMAILS` | anyone | comma-separated addresses allowed to sign in (`OWNER_EMAIL` always is) |
 | `API_TOKENS` | none | static bearer tokens for the admin (`name:role:sha256`, comma-separated). See step 6 |
-| `ROOT_FOLDER_ID` | none | a Drive folder that is always allowed for the admin, on top of the ticks |
-| `GOOGLE_OAUTH_REFRESH_TOKEN` | none | overrides the admin's dashboard Drive connection (from `scripts/bootstrap_oauth.py`, which needs a Desktop client). Must be your own account's token |
-| `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER` | off | enable the Google Picker button. Restrict the key by HTTP referrer; it is visible in the page |
+| `ROOT_FOLDER_ID` | none | a Drive folder that is always allowed for the admin, on top of the ticks. It must also be picked, or Google won't open it |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | none | overrides the admin's dashboard Drive connection (from `scripts/bootstrap_oauth.py`, which needs a Desktop client). Every access token it yields is limited to `drive.file` |
+| `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER` | required | Google's file picker, which is how files are added. Restrict the key by HTTP referrer and to the Picker API; it is visible in the page |
 | `MAX_BYTES` | 5242880 | bytes fetched per read |
 | `MAX_CHARS` | 100000 | characters returned per read |
 | `SCOPE_CACHE_TTL` | 60 | seconds folder ancestry is cached |

@@ -69,15 +69,20 @@ If the `gcloud` CLI is installed and signed in, you may do 1 and 2 yourself
 screen and Web OAuth client must be done in the console.
 
 1. Create a project (e.g. `botrbac`).
-2. Enable **Google Drive API** (APIs & Services → Library).
+2. Enable **Google Drive API** and **Google Picker API** (APIs & Services → Library).
 3. OAuth consent screen / Google Auth Platform: External; app name; their email; add themselves (and every
    `ALLOWED_EMAILS` address) as **Test users**; add scopes `openid`, `email`,
-   `https://www.googleapis.com/auth/drive`.
+   `https://www.googleapis.com/auth/drive.file`. Not `…/auth/drive`: the server refuses it.
 4. Credentials → Create OAuth client ID → **Web application**. Authorized redirect URIs:
    - `http://localhost:8000/auth/callback`
    - `https://<vercel-domain>/auth/callback` (add after step D gives the domain)
 5. Put the Client ID and Client secret into `.env` as `GOOGLE_OAUTH_CLIENT_ID` and
    `GOOGLE_OAUTH_CLIENT_SECRET`.
+6. Credentials → Create credentials → **API key**. Restrict it: Websites →
+   `https://<vercel-domain>/*` and `http://localhost:8000/*`; API restrictions → **Google Picker API**.
+   Put it in `.env` as `GOOGLE_PICKER_API_KEY`.
+7. Console home → Project info → **Project number** (digits). Put it in `.env` as
+   `GOOGLE_CLOUD_PROJECT_NUMBER`.
 
 Mention: while the Google app is in Testing, Drive access expires every 7 days. For personal use they can
 click **Publish app** on the Audience page to stop that (the "unverified app" warning stays).
@@ -98,8 +103,9 @@ click **Publish app** on the Audience page to stop that (the "unverified app" wa
 
 ### E. Environment variables and deploy
 
-1. For each of `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `OWNER_EMAIL`, `SESSION_SECRET`,
-   `ENCRYPTION_KEY`, and `ALLOWED_EMAILS` if set, pipe the value from `.env` into
+1. For each of `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_PICKER_API_KEY`,
+   `GOOGLE_CLOUD_PROJECT_NUMBER`, `OWNER_EMAIL`, `SESSION_SECRET`, `ENCRYPTION_KEY`, and
+   `ALLOWED_EMAILS` if set, pipe the value from `.env` into
    `vercel env add <NAME> production` (e.g. `printf '%s' "$VALUE" | vercel env add NAME production`)
    so it is not shown on screen. Use the **same** `SESSION_SECRET` / `ENCRYPTION_KEY` as `.env` or new
    ones, either is fine, but never rotate `ENCRYPTION_KEY` later without warning the human.
@@ -113,8 +119,8 @@ click **Publish app** on the Audience page to stop that (the "unverified app" wa
 1. In `.env`, `APP_BASE_URL=http://localhost:8000` and leave the Redis variables empty.
 2. `uv run --env-file .env uvicorn api.index:app --reload --port 8000` (run in the background).
 3. `curl -s http://localhost:8000/health` → `{"status":"ok"}`.
-4. Tell the human to open <http://localhost:8000/>, sign in, click **Connect Google Drive**, then **Browse →
-   Allow** on a test folder. Data is in memory and is lost on restart.
+4. Tell the human to open <http://localhost:8000/>, sign in, click **Connect Google Drive**, then **Files →
+   Add from Google Drive** and pick a test folder and a file in it. Data is in memory and is lost on restart.
 5. To call the MCP tools locally: `uv run python scripts/make_token.py local admin`, add the printed
    `API_TOKENS=` entry to `.env`, restart the server, and give the human the token for MCP Inspector
    (`npx @modelcontextprotocol/inspector`, Streamable HTTP, `http://localhost:8000/mcp`,
@@ -126,7 +132,7 @@ click **Publish app** on the Audience page to stop that (the "unverified app" wa
 Tell the human, in this order:
 
 1. Open `https://<domain>/` → **Sign in with Google** → **Connect Google Drive**.
-2. **Browse** → **Allow** on a test folder.
+2. **Files** → **Add from Google Drive**, and pick a test folder and a file in it in Google's window.
 3. Add `https://<domain>/mcp` as a custom connector in their assistant (Claude: Settings → Connectors →
    Add custom connector; ChatGPT: developer mode → Settings → Apps → Create, OAuth; Grok Bot: say "Add this
    MCP server: https://<domain>/mcp"). Leave client id/secret empty.

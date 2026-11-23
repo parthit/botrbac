@@ -351,6 +351,9 @@ class Settings(BaseSettings):
             ("ENCRYPTION_KEY", _secret_set(self.encryption_key)),
             ("UPSTASH_REDIS_REST_URL", self.redis_rest_url is not None),
             ("UPSTASH_REDIS_REST_TOKEN", _secret_set(self.redis_rest_token)),
+            # Drive access is per file, and Google's file picker is how files are added.
+            ("GOOGLE_PICKER_API_KEY", self.google_picker_api_key is not None),
+            ("GOOGLE_CLOUD_PROJECT_NUMBER", self.google_cloud_project_number is not None),
         ]
         missing = [name for name, ok in checks if not ok]
         if self.postgres_configured:
@@ -366,8 +369,12 @@ class Settings(BaseSettings):
         return self
 
     def dashboard_missing(self) -> list[str]:
-        """Settings the web dashboard cannot run without (Redis may fall back to memory)."""
-        return [m for m in self.missing_settings() if not m.startswith("UPSTASH_")]
+        """Settings the web dashboard cannot run without (Redis may fall back to memory).
+
+        The picker settings are listed as missing but do not stop the dashboard: sign-in,
+        Settings and Disconnect still have to work while they are being set up."""
+        optional = ("UPSTASH_", "GOOGLE_PICKER_", "GOOGLE_CLOUD_PROJECT_NUMBER")
+        return [m for m in self.missing_settings() if not m.startswith(optional)]
 
     @property
     def secure_cookies(self) -> bool:

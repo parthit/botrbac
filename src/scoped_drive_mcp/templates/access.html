@@ -8,6 +8,10 @@
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so the assistant cannot reach your files. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
+{% if needs_pick %}
+<div class="warn" role="status" id="needs-pick">Google hasn’t opened {{ needs_pick | length }} of these {{ "item" if needs_pick | length == 1 else "items" }} to Bot RBAC yet, so assistants can’t use {{ "it" if needs_pick | length == 1 else "them" }}. Bot RBAC only gets the files you pick in Google’s file picker. Choose <b>Pick again</b> on each one marked below.</div>
+<p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
+{% endif %}
 {% if rows or root_folder_id %}
 <table class="cards" data-list>
   <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>How</th><th>Action</th></tr></thead>
@@ -24,7 +28,9 @@
   {% for e in rows %}
   <tr data-row>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}<a href="https://drive.google.com/open?id={{ e.id | urlencode }}" target="_blank" rel="noopener noreferrer">{{ e.name or e.id }}</a>{% endif %}
-      {% if covered.get(e.id) %}<div class="muted small">Also covered by “{{ covered[e.id] }}”. Removing only this entry changes nothing.</div>{% endif %}</td>
+      {% if covered.get(e.id) %}<div class="muted small">Also covered by “{{ covered[e.id] }}”. Removing only this entry changes nothing.</div>{% endif %}
+      {% if e.id in needs_pick %}<div class="small" data-needs-pick><span class="pill bad"><span aria-hidden="true">!</span> Not opened yet</span>
+        {% if picker_ready %}<button type="button" data-pick data-query="{{ e.name or '' }}" data-next="/files?tab=allowed">Pick again<span class="sr-only"> {{ e.name or e.id }}</span></button>{% endif %}</div>{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
     <td data-label="How">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">Approved request</a>{% else %}You allowed{% endif %}</td>
@@ -43,7 +49,7 @@
 {% endif %}
 <div class="card empty" data-empty{% if rows or root_folder_id %} hidden{% endif %}>
   <h2>Nothing is allowed yet</h2>
-  <p>Pick a file or folder, then choose Allow. The assistant cannot use your Drive until you do.</p>
+  <p>Choose <b>Add from Google Drive</b> on Files and pick a file or folder. The assistant can’t use anything until you do.</p>
   <p><a class="btn primary" href="/files">Choose files</a></p>
 </div>
 {% endblock %}

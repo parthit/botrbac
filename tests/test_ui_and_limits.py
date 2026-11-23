@@ -13,7 +13,7 @@ from scoped_drive_mcp.dashboard import browse_href, normalize_page_token
 from scoped_drive_mcp.oauth import GoogleOAuthClient
 from scoped_drive_mcp.server import build_app
 from tests.conftest import OWNER_EMAIL, make_settings
-from tests.dash import MCP_HEADERS, client, login, mcp_call
+from tests.dash import MCP_HEADERS, client, csrf, login, mcp_call
 
 
 @pytest.fixture
@@ -70,11 +70,11 @@ def test_favicon_and_robots_do_not_redirect(c) -> None:
     assert css.status_code == 200 and ".skip" in css.text
 
 
-def test_privacy_describes_full_drive(c) -> None:
+def test_privacy_describes_per_file_access(c) -> None:
     page = c.get("/privacy")
     assert page.status_code == 200
-    assert "https://www.googleapis.com/auth/drive</code>" in page.text
-    assert "drive.file" not in page.text
+    assert "https://www.googleapis.com/auth/drive.file</code>" in page.text
+    assert "https://www.googleapis.com/auth/drive</code>" not in page.text
 
 
 def test_opaque_drive_page_token_round_trips() -> None:
@@ -301,3 +301,33 @@ def test_mcp_is_rate_limited_per_token(world, memstore, oauth) -> None:
     assert blocked.headers["retry-after"] == "60"
     # A different made-up token must not start a fresh allowance for the same address.
     assert post("someone-else").status_code == 429
+
+
+def test_allowed_item_google_has_not_opened_offers_pick_again(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            google_picker_api_key="AIzaSyTestKeyValue",
+            google_cloud_project_number="123456789012",
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    assert login(c).status_code == 303
+    token = csrf(c, "/files")
+    for item in ("proj", "loose-doc"):
+        c.post("/grant", data={"csrf": token, "file_id": item, "next": "/files"})
+    page = c.get("/files?tab=allowed").text
+    assert 'id="needs-pick"' not in page
+    # Google no longer opens one of them to this app (e.g. allowed under an older
+    # full-Drive connection): it is kept, flagged, and can be picked again by name.
+    hidden = world.files.pop("loose-doc")
+    page = c.get("/files?tab=allowed").text
+    assert 'id="needs-pick"' in page and "1 of these item" in page
+    button = re.search(r"<button[^>]*data-pick[^>]*>", page)
+    assert button and f'data-query="{hidden.name}"' in button.group(0)
+    assert page.count("data-needs-pick") == 1

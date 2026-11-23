@@ -17,7 +17,7 @@
 <form method="get" action="/files" class="actions" role="search">
   {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
   <label class="sr-only" for="q">Search names</label>
-  <input id="q" type="search" name="q" value="{{ q or '' }}" placeholder="Search names in your Drive">
+  <input id="q" type="search" name="q" value="{{ q or '' }}" placeholder="Search files you’ve added">
   <button type="submit">Search</button>
   {% if q %}<a href="/files?folder=root{{ keep('') }}">Clear search</a>{% endif %}
   {% if picker_ready %}

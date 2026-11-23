@@ -533,8 +533,10 @@
   }
   localTimes();
 
-  var pick = document.getElementById("pick-drive");
-  if (!pick) return;
+  // "Add from Google Drive", "Choose the file to approve", and each "Pick again" button.
+  var pickButtons = document.querySelectorAll("#pick-drive, [data-pick]");
+  if (!pickButtons.length) return;
+  var pick = pickButtons[0];
 
   function loadPicker() {
     return new Promise(function (resolve, reject) {
@@ -626,6 +628,9 @@
     var view = new google.picker.DocsView(google.picker.ViewId.DOCS);
     view.setIncludeFolders(true);
     view.setSelectFolderEnabled(true);
+    // "Pick again" opens Google's search already filled in with the item's name.
+    var query = (pick.getAttribute("data-query") || "").slice(0, 200);
+    if (query && typeof view.setQuery === "function") view.setQuery(query);
     var builder = new google.picker.PickerBuilder()
       .addView(view)
       .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
@@ -644,7 +649,8 @@
     builder.build().setVisible(true);
   }
 
-  pick.addEventListener("click", function () {
+  function onPickClick(event) {
+    pick = event.currentTarget;
     var note = document.getElementById("pick-error");
     if (note) note.hidden = true;
     pick.disabled = true;
@@ -657,6 +663,9 @@
       .then(openPicker)
       .catch(function () { if (note) note.hidden = false; })
       .then(function () { pick.disabled = false; });
+  }
+  Array.prototype.forEach.call(pickButtons, function (button) {
+    button.addEventListener("click", onPickClick);
   });
 })();
 

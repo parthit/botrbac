@@ -34,7 +34,7 @@
 {% endmacro %}
 {% block content %}
 <h1>Requests</h1>
-<p class="muted">An assistant can ask for a file before it is allowed to open it. Approving adds that file to your allowed files. A sign-in that cannot see your whole Drive has to be renewed before those requests can be approved.</p>
+<p class="muted">An assistant can ask for a file before it is allowed to open it. Approving adds that file to your allowed files. If Bot RBAC can’t open the file yet, the request lets you choose it in Google’s file picker.</p>
 <h2>Waiting for you</h2>
 {{ table(pending, "No one is waiting. When an assistant asks for a file you have not allowed, it shows up here.") }}
 <h2>Recent decisions</h2>

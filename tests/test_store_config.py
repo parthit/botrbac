@@ -62,7 +62,11 @@ def test_phase2_env(monkeypatch) -> None:
         "ENCRYPTION_KEY",
         "UPSTASH_REDIS_REST_URL",
         "UPSTASH_REDIS_REST_TOKEN",
+        "GOOGLE_PICKER_API_KEY",
+        "GOOGLE_CLOUD_PROJECT_NUMBER",
     ]
+    # The picker is listed, but its absence does not take the dashboard down.
+    assert "GOOGLE_PICKER_API_KEY" not in s.dashboard_missing()
 
 
 @pytest.mark.parametrize(
@@ -393,7 +397,7 @@ def test_postgres_url_is_not_in_repr() -> None:
     store = build_store(settings)
     assert store.kind == "postgres"
     assert "secret-token" not in repr(store)
-    assert settings.missing_settings() == []
+    assert settings.missing_settings() == ["GOOGLE_PICKER_API_KEY", "GOOGLE_CLOUD_PROJECT_NUMBER"]
 
 
 def test_make_secrets_script(capsys) -> None:

@@ -1926,11 +1926,34 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     found[entry.id] = cover[1]
             return found
 
+        def unopened() -> set[str]:
+            # Google opens a file to this app only once it is picked (drive.file). An
+            # entry from an older connection stays on the list but can't be opened until
+            # it is picked again. Bounded: one lookup per entry.
+            found: set[str] = set()
+            if not data["drive_connected"]:
+                return found
+            try:
+                drive = ctx.owner_drive()
+            except Exception:
+                return found
+            for entry in rows[:COVER_CHECK_LIMIT]:
+                try:
+                    drive.get_file(entry.id, fields="id")
+                except DriveNotFoundError:
+                    found.add(entry.id)
+                except Exception:
+                    return found
+            return found
+
         covered = await blocking(overlaps)
+        needs_pick = await blocking(unopened)
         return render(
             request,
             "access.html",
             covered=covered,
+            needs_pick=needs_pick,
+            picker_ready=settings.picker_configured,
             rows=rows,
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,

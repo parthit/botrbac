@@ -202,3 +202,13 @@ def test_assistant_consent_waits_for_a_drive_connection(signed_in) -> None:
     connect_drive(signed_in)
     page = signed_in.get("/oauth/authorize", params=params)
     assert page.status_code == 200 and "Allow" in page.text
+
+
+def test_old_connection_shows_reconnect_with_explanation(signed_in, oauth, p2_app) -> None:
+    connect_drive(signed_in)
+    _plant_old_full_drive_token(p2_app)
+    page = signed_in.get("/settings").text
+    card = page[page.index('id="connection-google_drive"') :].split("</article>", 1)[0]
+    assert "Not connected" in card and 'id="old-connection"' in card
+    assert ">Reconnect Google Drive</button>" in card
+    assert "only the specific Google Drive files you use with this app" in card

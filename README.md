@@ -34,7 +34,8 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
 
 1. Open [botrbac.com](https://botrbac.com) and **sign in with Google** (this asks only for your email).
 2. **Connect Google Drive** (a second, separate Google permission screen).
-3. On **Browse**, click **Allow** next to a file or folder.
+3. On **Files**, click **Add from Google Drive** and pick files or folders in Google's window. Only what
+   you pick is ever opened to Bot RBAC.
 4. Add `https://botrbac.com/mcp` to your assistant as a custom connector, sign in when the browser opens,
    and choose what the app may do.
    - **Claude:** Settings → Connectors → Add custom connector.
@@ -63,8 +64,8 @@ My Google address (OWNER_EMAIL): <you@example.com>
 The agent installs, tests, generates secrets and deploys. It stops to tell you what to click in Google
 Cloud and Vercel. More prompts (including a local-only one) are in [docs/agent-setup.md](docs/agent-setup.md).
 
-**By hand.** About 30 minutes: create a Google OAuth client, deploy to Vercel, connect Upstash, set six
-environment variables. Step by step: [docs/self-hosting.md](docs/self-hosting.md).
+**By hand.** About 30 minutes: create a Google OAuth client and a file-picker key, deploy to Vercel,
+connect Upstash, set eight environment variables. Step by step: [docs/self-hosting.md](docs/self-hosting.md).
 
 **On your computer.** You need [uv](https://docs.astral.sh/uv/) and a Google OAuth client with
 `http://localhost:8000/auth/callback` as a redirect URI:
@@ -83,11 +84,12 @@ tunnel. The test suite needs no Google account: `uv run pytest`.
 
 ## What to know before you trust it
 
-- **The allowlist is the wall.** Connecting Drive gives the server Google's full Drive permission for your
-  account, stored as an encrypted refresh token. The assistant is held to your list by this server's check
-  on every call, not by Google. A bug in the server, or a leaked `ENCRYPTION_KEY` plus access to the store,
-  could expose more of that Drive than the list you ticked.
-- **Run your own copy** if you'd rather hold that token yourself (above).
+- **Google keeps the rest of your Drive closed.** Bot RBAC asks Google only for the files you pick in
+  Google's own file picker (`drive.file`). Google enforces that, so a bug in this server, a leaked token, or
+  the person running it can't reach the rest of your Drive. The allowlist is a second check on top: an
+  assistant only gets the picked items you allowed, with the role you gave it.
+- **Picked files are reachable by the server.** They are read with an encrypted refresh token held by
+  whoever runs the server. **Run your own copy** if you'd rather hold that token yourself (above).
 - **Documents are untrusted input.** A file can contain text written to steer an assistant. Give an app
   **Read only** unless it needs to write.
 
