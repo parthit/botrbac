@@ -26,6 +26,8 @@ src/scoped_drive_mcp/
   templates/                  dashboard HTML (Jinja2)
   auth.py                     bearer-token ASGI middleware for /mcp (API tokens and OAuth access tokens)
   audit.py                    JSON-lines audit log (+ Redis activity sink)
+  extract.py                  text from PDF, Word, PowerPoint, Excel, RTF and .doc bytes, under a work budget
+  extract_worker.py           runs extract.py in a child process with memory, CPU and time limits
   service.py                  tool implementations
   server.py                   FastMCP tools + build_app()
 tests/                        pytest suite with a fake Drive (owner and bot views) and in-memory store

@@ -163,13 +163,27 @@
   editor of the file can't remove the "untrusted" flag your assistants see or change whose name is shown.
   Marks written by older versions in the public `properties` are still read, but they can only mark a
   file untrusted, never clear that.
-- **Reading files is bounded.** Text extraction runs under one work budget per file, shared by every
-  part of it: at most 1000 parts (slides, sheets, headers), 500k XML elements nested at most 256 deep, 2M
-  spreadsheet cells and rows (empty rows count), 250k PDF content operators (a form is charged each time
-  it is drawn), 5000 PDF pages and 1M RTF tokens, with a 10-second limit on PDF work. A part listed more
-  than once is read once, and extraction stops as soon as it has `MAX_CHARS` characters. A file over any
-  limit fails with an error that points to `download_file`. XML is parsed with `defusedxml`, and RTF with
-  a linear scanner instead of regexes that backtrack on crafted input.
+- **Reading files is bounded.** PDF and Office files are read in a separate Python process
+  (`extract_worker.py`), started fresh for each file with `python -I -B`, no environment variables but
+  `PATH`-like ones (so no secrets) and its own limits set before it imports a parser: address space
+  `EXTRACT_MEMORY_MB` (768 MB by default), 20 CPU seconds, no files created, 64 open files. The server
+  kills it after 25 seconds, reads back at most a reply's worth of JSON, and runs at most two at once.
+  Running out of memory, being killed, timing out or a bad reply all end in an error that points to
+  `download_file`. `EXTRACT_ISOLATION=0` reads in the server process instead, for hosts that do not allow
+  starting a process. Inside that process, extraction also runs under one work budget per file, shared by
+  every part of it, so normal files stay well inside the hard limits: at most 1000 parts (slides, sheets,
+  headers), 500k XML elements and attributes (more for a `MAX_CHARS` above 100k) nested at most 256
+  deep, 2M spreadsheet cells and rows (empty rows count), 500k workbook tags plus 2M for the shared-string
+  table, 500k PDF operators (a form is charged by size each time it is drawn, a font by the size of its
+  tables each time pypdf builds it), 4 MB decoded and 1M tokens per PDF stream, 5000 PDF pages and 1M
+  RTF tokens, with a 10-second limit on PDF work. PDF strings are cut before pypdf expands them through
+  a font, and spreadsheet cells before they are joined, so neither can produce much more than
+  `MAX_CHARS`. Forms a page never draws are not decoded, and named cell styles (which openpyxl joins with
+  number formats quadratically) are not read. A part listed more than once is read once, and extraction
+  stops as soon as it has `MAX_CHARS` characters. A PDF page over a limit is skipped; when work runs out
+  after some text was read, that text is returned marked `truncated`, otherwise the file fails with an
+  error that points to `download_file`. XML is parsed with `defusedxml`, and RTF with a linear scanner
+  instead of regexes that backtrack on crafted input.
 - **Folders.** Picking a folder in Google's file picker may not open every file already inside it to the
   app. Those files are refused (Google answers "not found") until they are picked too. Files the
   assistant creates inside an allowed folder are the app's own, so they stay reachable.

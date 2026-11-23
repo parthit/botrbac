@@ -130,6 +130,11 @@ class Settings(BaseSettings):
 
     max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
+    # Read PDF and Office files in a separate process with hard memory and CPU limits.
+    # Turn off only where the host does not allow starting a process.
+    extract_isolation: bool = True
+    # Address-space limit for that process, in MB.
+    extract_memory_mb: int = Field(default=768, ge=256, le=8192)
     scope_cache_ttl: float = Field(default=60.0, ge=0, le=3600)
     # How long the allowlist is cached per instance; bounds how fast a revoke takes effect.
     allowlist_cache_ttl: float = Field(default=2.0, ge=0, le=10)

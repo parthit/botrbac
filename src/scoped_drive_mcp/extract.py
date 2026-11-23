@@ -1,16 +1,21 @@
 """Turn downloaded Office and PDF bytes into plain text.
 
-Extraction stays in-process (no temporary Drive copies, no native binaries such as
-poppler). Dependencies are pure Python so the Vercel function stays small. Legacy
-.doc files are read from the OLE compound document; the piece table is the Word 97
-layout, which later .doc files still start with.
+Extraction needs no temporary Drive copies and no native binaries such as poppler.
+Dependencies are pure Python so the Vercel function stays small. Legacy .doc files are
+read from the OLE compound document; the piece table is the Word 97 layout, which
+later .doc files still start with.
+
+These functions read untrusted bytes in the calling process. The service runs them in
+a child process with hard memory and CPU limits instead (see extract_worker.py); the
+limits here keep normal files well inside those.
 
 Every extractor works under one `_Budget` for the whole file. The byte caps bound how
 big a file is, not how much work it asks for: a part can be listed many times, an
 element can be nested or repeated, and a few kilobytes can compress a million empty
 rows. So each file also gets a fixed allowance of parts, XML elements, spreadsheet
 rows and cells, PDF operators and output characters, shared by all its parts, and
-extraction stops as soon as it has the characters the caller asked for.
+extraction stops as soon as it has the characters the caller asked for. When an
+allowance runs out after some text was read, that text is returned marked truncated.
 """
 
 import codecs
@@ -21,6 +26,7 @@ import time
 import zipfile
 import zlib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 from xml.etree.ElementTree import ParseError as XmlParseError
 
@@ -34,27 +40,52 @@ _PIECE_CAP = 10_000
 # Work limits for one file, shared by all of its parts (see the module docstring).
 # Parts read from one package: slides, sheets, headers and footers.
 _PART_CAP = 1000
-# XML elements parsed across every part. The defused parser costs about 2 us each.
+# XML elements and attributes parsed across every part, at least this many and more
+# for a larger character limit. The defused parser costs about 2 us each.
 _NODE_VISIT_CAP = 500_000
+_NODES_PER_CHAR = 5
 # RTF tokens (control words, text runs), about 0.3 us each.
 _RTF_TOKEN_CAP = 1_000_000
+_RTF_TOKENS_PER_CHAR = 10
 # How deep XML elements may nest. Real documents (tables in tables) stay far below it.
 _XML_DEPTH_CAP = 256
 # Spreadsheet cells plus rows. Empty rows count: a few bytes of `<row/>` are still work.
 _CELL_CAP = 2_000_000
 # Element tags openpyxl reads from a workbook. It costs a few microseconds per element.
 _XLSX_MARKUP_CAP = 500_000
+# The shared-string table has its own allowance: a workbook of short unique strings
+# keeps two or three tags per string there.
+_XLSX_STRINGS_MARKUP_CAP = 2_000_000
+# openpyxl joins every named style (<cellStyle>) with the custom number formats
+# (<numFmt>), which is quadratic. Named styles add no text, so they are not read.
+_XLSX_NAMED_STYLES = re.compile(
+    rb"<(?:[A-Za-z_][\w.-]*:)?cellStyles\b.*?</(?:[A-Za-z_][\w.-]*:)?cellStyles\s*>", re.DOTALL
+)
 # Text a legacy .doc may decode, including control characters that are thrown away.
 _TEXT_CAP = 4_000_000
-# PDF content-stream work across all pages and the forms they draw, in operators (a
-# form is charged by size each time it is drawn, before pypdf parses it again).
-_PDF_OPERATION_CAP = 250_000
-# Content-stream bytes per operator, roughly, for charging a form before it is parsed.
+# PDF content-stream work across all pages and the forms they draw, in operators. A
+# form is charged by size each time it is drawn, before pypdf parses it again, and a
+# font by the size of its tables each time pypdf builds it (once per page or form per
+# font name). One unit is roughly 3 to 10 us of pypdf's time. A larger character limit
+# allows more.
+_PDF_OPERATION_CAP = 500_000
+_PDF_OPERATIONS_PER_CHAR = 2
+# Decoded content-stream bytes per operator, roughly, for charging a form before it is
+# parsed, and ToUnicode bytes and font-array entries per unit for charging a font.
 _PDF_BYTES_PER_OPERATION = 8
-# Form XObjects looked at per page when sizing them.
-_PDF_FORM_SCAN_CAP = 256
+_PDF_CMAP_BYTES_PER_OPERATION = 32
+_PDF_ARRAY_ITEMS_PER_OPERATION = 16
+_PDF_FONT_COST = 5
+# What pypdf may decode from one stream, and how many tokens it may parse from one
+# content stream. A page over either is skipped and the text is marked truncated.
+_PDF_STREAM_BYTES = 4 * 1024 * 1024
+_PDF_STREAM_TOKENS = 1_000_000
+_PDF_RECOVERY_BYTES = 1_000_000
 _PDF_PAGE_CAP = 5000
-_PDF_FORM_CAP = 200
+# Forms one page may draw (pypdf skips the rest). Each draw is charged by size anyway.
+_PDF_FORM_CAP = 1000
+# How far estimated text may run past the character limit before strings are cut.
+_PDF_TEXT_SLACK = 4096
 # Backstop for PDF work the operator count cannot see, such as font and image decoding.
 _PDF_SECONDS = 10.0
 
@@ -109,25 +140,49 @@ class ExtractError(Exception):
     """Text could not be extracted. The message is safe to show to the caller."""
 
 
+class _OutOfBudget(ExtractError):
+    """A work allowance ran out. Text read before it may still be returned, truncated."""
+
+
+@dataclass(frozen=True)
+class Extracted:
+    """Text from a document. `truncated` is true when text past the end was not read,
+    because of the character limit or because a work allowance ran out."""
+
+    text: str
+    truncated: bool = False
+
+
 class _Budget:
     """The work one file may cost, shared by all of its parts.
 
     `full` turns true once the output has the characters the caller asked for; the
-    extractors check it and stop early. Going over any other allowance raises.
+    extractors check it and stop early. Going over any other allowance raises
+    `_OutOfBudget`; an extractor that has text by then returns it with `truncated` set.
     """
 
     def __init__(self, char_limit: int) -> None:
         self.char_goal = char_limit + 1
+        self.node_cap = max(_NODE_VISIT_CAP, _NODES_PER_CHAR * char_limit)
         self.chars = 0
         self.parts = 0
         self.nodes = 0
         self.cells = 0
         self.markup = 0
+        self.strings_markup = 0
         self.operations = 0
+        # Set when an extractor stopped before the end for a reason other than `full`.
+        self.truncated = False
+        self.reason = ""
 
     @property
     def full(self) -> bool:
         return self.chars >= self.char_goal
+
+    @property
+    def room(self) -> int:
+        """Characters still wanted."""
+        return max(self.char_goal - self.chars, 0)
 
     def add_chars(self, count: int) -> None:
         self.chars += count
@@ -137,26 +192,40 @@ class _Budget:
         if self.parts > _PART_CAP:
             raise ExtractError("file has too many parts to extract; use download_file")
 
-    def node(self, count: int = 1, cap: int = _NODE_VISIT_CAP) -> None:
+    def node(self, count: int = 1, cap: int | None = None) -> None:
         self.nodes += count
-        if self.nodes > cap:
-            raise ExtractError("document is too complex to extract; use download_file")
+        if self.nodes > (self.node_cap if cap is None else cap):
+            raise _OutOfBudget("document is too complex to extract; use download_file")
 
     def cell(self, count: int) -> None:
         self.cells += count
         if self.cells > _CELL_CAP:
-            raise ExtractError("spreadsheet is too large to extract; use download_file")
+            raise _OutOfBudget("spreadsheet is too large to extract; use download_file")
 
-    def xml_bytes(self, data: bytes) -> None:
+    def xml_bytes(self, data: bytes, *, strings: bool = False) -> None:
         """Count the element tags in raw XML a library is about to parse."""
-        self.markup += data.count(b"<") - data.count(b"</")
-        if self.markup > _XLSX_MARKUP_CAP:
-            raise ExtractError("spreadsheet is too large to extract; use download_file")
+        tags = data.count(b"<") - data.count(b"</")
+        if strings:
+            self.strings_markup += tags
+            over = self.strings_markup > _XLSX_STRINGS_MARKUP_CAP
+        else:
+            self.markup += tags
+            over = self.markup > _XLSX_MARKUP_CAP
+        if over:
+            raise _OutOfBudget("spreadsheet is too large to extract; use download_file")
 
-    def operation(self, count: int = 1) -> None:
-        self.operations += count
-        if self.operations > _PDF_OPERATION_CAP:
-            raise ExtractError("PDF is too complex to extract; use download_file")
+    def stop(self, exc: ExtractError) -> None:
+        """Note that an allowance ran out, so the text so far is all there will be."""
+        self.truncated = True
+        self.reason = self.reason or str(exc)
+
+    def result(self, text: str, char_limit: int) -> "Extracted":
+        """The text read so far. With none and an allowance spent, refuse instead."""
+        if self.truncated and not text.strip():
+            raise ExtractError(
+                self.reason or "document is too complex to extract; use download_file"
+            )
+        return Extracted(text, self.truncated or len(text) > char_limit)
 
 
 def document_kind(mime_type: str, name: str) -> str | None:
@@ -170,26 +239,33 @@ def document_kind(mime_type: str, name: str) -> str | None:
     return None
 
 
-def extract_text(data: bytes, kind: str, *, char_limit: int) -> str:
-    """Extract plain text. May run slightly past `char_limit`; the caller truncates."""
+def extract(data: bytes, kind: str, *, char_limit: int) -> Extracted:
+    """Extract plain text in this process. The text may run one character past
+    `char_limit` (the caller truncates); `truncated` says whether anything was left out."""
     if char_limit < 1:
         raise ExtractError("character limit is too small")
     kind = _sniff_kind(kind, data)
     if kind == "pdf":
-        text = _pdf(data, char_limit)
+        result = _pdf(data, char_limit)
     elif kind == "docx":
-        text = _docx(data, char_limit)
+        result = _docx(data, char_limit)
     elif kind == "pptx":
-        text = _pptx(data, char_limit)
+        result = _pptx(data, char_limit)
     elif kind == "xlsx":
-        text = _xlsx(data, char_limit)
+        result = _xlsx(data, char_limit)
     elif kind == "rtf":
-        text = _rtf(data, char_limit)
+        result = _rtf(data, char_limit)
     elif kind == "doc":
-        text = _doc(data, char_limit)
+        result = _doc(data, char_limit)
     else:
         raise ExtractError(f"no text extractor for {kind}")
-    return text.replace("\x00", "")[: char_limit + 1]
+    text = result.text.replace("\x00", "")
+    return Extracted(text[: char_limit + 1], result.truncated or len(text) > char_limit)
+
+
+def extract_text(data: bytes, kind: str, *, char_limit: int) -> str:
+    """Extract plain text. May run slightly past `char_limit`; the caller truncates."""
+    return extract(data, kind, char_limit=char_limit).text
 
 
 def _extension(name: str) -> str:
@@ -225,6 +301,14 @@ def _clip(parts: list[str], limit: int) -> str:
         out.append(part)
         size += len(part)
     return "".join(out)
+
+
+def _add_block(blocks: list[str], text: str, budget: _Budget, *, counted: bool = False) -> None:
+    """Keep a non-empty section and count it (unless its characters were `counted` as
+    they were read) with the newline `_clip` puts before it."""
+    if text:
+        budget.add_chars((0 if counted else len(text)) + (1 if blocks else 0))
+        blocks.append(text)
 
 
 # Reading a zip member can fail past the directory check: a bad CRC, a broken deflate
@@ -272,7 +356,8 @@ def _xml_events(archive: zipfile.ZipFile, name: str, budget: _Budget) -> Iterato
         try:
             for event, node in xml_iterparse(source, events=("start", "end")):
                 if event == "start":
-                    budget.node()
+                    # Attributes are parsed too: one element can carry a million.
+                    budget.node(1 + len(node.attrib))
                     stack.append(node)
                     if len(stack) > _XML_DEPTH_CAP:
                         raise ExtractError("document is too complex to extract; use download_file")
@@ -294,40 +379,57 @@ def _part_text(archive: zipfile.ZipFile, name: str, ns: str, budget: _Budget) ->
     """The paragraphs of one part, a line each, in document order.
 
     A paragraph nested inside another (a text box in a Word paragraph) gets its own
-    line after its parent's; its text is not repeated in the parent's line.
+    line after its parent's; its text is not repeated in the parent's line. Characters
+    are counted here (the part's own newlines too) but not the part as a block; the
+    caller counts that once it knows the part has text. If the work allowance runs out,
+    the paragraphs read so far are returned and the budget is marked truncated.
     """
     paragraph_tag, text_tag = _local("p", ns), _local("t", ns)
     break_tag, tab_tag = _local("br", ns), _local("tab", ns)
     lines: list[list[str]] = []
     open_lines: list[list[str]] = []
-    for event, node in _xml_events(archive, name, budget):
-        tag = node.tag
-        if event == "start":
-            if tag == paragraph_tag:
-                line: list[str] = []
-                lines.append(line)
-                open_lines.append(line)
-                budget.add_chars(1)  # the newline before it
-            elif open_lines and tag == tab_tag:
-                open_lines[-1].append("\t")
-                budget.add_chars(1)
-            elif open_lines and tag == break_tag:
-                open_lines[-1].append("\n")
-                budget.add_chars(1)
-        elif tag == paragraph_tag:
-            if open_lines:
-                open_lines.pop()
-        elif tag == text_tag and open_lines:
-            text = node.text
-            if text:
-                open_lines[-1].append(text)
-                budget.add_chars(len(text))
-        if budget.full:
-            break
+    try:
+        for event, node in _xml_events(archive, name, budget):
+            tag = node.tag
+            if event == "start":
+                if tag == paragraph_tag:
+                    if lines:
+                        budget.add_chars(1)  # the newline before it
+                    line: list[str] = []
+                    lines.append(line)
+                    open_lines.append(line)
+                elif open_lines and tag == tab_tag:
+                    open_lines[-1].append("\t")
+                    budget.add_chars(1)
+                elif open_lines and tag == break_tag:
+                    open_lines[-1].append("\n")
+                    budget.add_chars(1)
+            elif tag == paragraph_tag:
+                if open_lines:
+                    open_lines.pop()
+            elif tag == text_tag and open_lines:
+                text = node.text
+                if text:
+                    open_lines[-1].append(text)
+                    budget.add_chars(len(text))
+            if budget.full:
+                break
+    except _OutOfBudget as exc:
+        budget.stop(exc)
     return "\n".join("".join(line) for line in lines)
 
 
-def _docx(data: bytes, char_limit: int) -> str:
+def _part_blocks(archive: zipfile.ZipFile, parts: list[str], ns: str, budget: _Budget) -> str:
+    blocks: list[str] = []
+    for name in parts:
+        if budget.full or budget.truncated:
+            break
+        budget.part()
+        _add_block(blocks, _part_text(archive, name, ns, budget), budget, counted=True)
+    return _clip(blocks, budget.char_goal)
+
+
+def _docx(data: bytes, char_limit: int) -> Extracted:
     archive = _open_zip(data)
     budget = _Budget(char_limit)
     try:
@@ -338,37 +440,20 @@ def _docx(data: bytes, char_limit: int) -> str:
         parts += sorted(
             name for name in names if name.lower().startswith(("word/header", "word/footer"))
         )
-        blocks: list[str] = []
-        for name in parts:
-            if budget.full:
-                break
-            if name not in names:
-                continue
-            budget.part()
-            text = _part_text(archive, name, _W, budget)
-            if text:
-                blocks.append(text)
-        return _clip(blocks, char_limit + 1)
+        parts = [name for name in parts if name in names]
+        return budget.result(_part_blocks(archive, parts, _W, budget), char_limit)
     finally:
         archive.close()
 
 
-def _pptx(data: bytes, char_limit: int) -> str:
+def _pptx(data: bytes, char_limit: int) -> Extracted:
     archive = _open_zip(data)
     budget = _Budget(char_limit)
     try:
         slides = _slide_names(archive, budget)
         if not slides:
             raise ExtractError("PowerPoint file has no slides")
-        blocks: list[str] = []
-        for name in slides:
-            if budget.full:
-                break
-            budget.part()
-            text = _part_text(archive, name, _A, budget)
-            if text:
-                blocks.append(text)
-        return _clip(blocks, char_limit + 1)
+        return budget.result(_part_blocks(archive, slides, _A, budget), char_limit)
     finally:
         archive.close()
 
@@ -414,8 +499,10 @@ def _slide_names(archive: zipfile.ZipFile, budget: _Budget) -> list[str]:
     )
 
 
-def _xlsx(data: bytes, char_limit: int) -> str:
-    return _clip([text for _, text in xlsx_tabs(data, char_limit)], char_limit + 1)
+def _xlsx(data: bytes, char_limit: int) -> Extracted:
+    tabs, truncated = read_xlsx_tabs(data, char_limit)
+    text = _clip([text for _, text in tabs], char_limit + 1)
+    return Extracted(text, truncated or len(text) > char_limit)
 
 
 def xlsx_tabs(data: bytes, char_limit: int) -> list[tuple[str, str]]:
@@ -425,6 +512,11 @@ def xlsx_tabs(data: bytes, char_limit: int) -> list[tuple[str, str]]:
     `# <title>` line. Callers that need to know which tab a cut landed in use the titles
     here rather than searching the text, where a cell can also start with `# `.
     """
+    return read_xlsx_tabs(data, char_limit)[0]
+
+
+def read_xlsx_tabs(data: bytes, char_limit: int) -> tuple[list[tuple[str, str]], bool]:
+    """xlsx_tabs, and whether text was left out (the limit, or a work allowance ran out)."""
     if char_limit < 1:
         raise ExtractError("character limit is too small")
     _sniff_kind("xlsx", data)  # refuses a legacy binary workbook
@@ -438,13 +530,35 @@ def xlsx_tabs(data: bytes, char_limit: int) -> list[tuple[str, str]]:
     except Exception as exc:
         raise ExtractError("could not read spreadsheet") from exc
     try:
-        return _workbook_tabs(workbook, budget)
+        tabs = _workbook_tabs(workbook, budget)
     except ExtractError:
         raise
     except Exception as exc:
         raise ExtractError("could not read spreadsheet") from exc
     finally:
         workbook.close()
+    if budget.truncated and not tabs:
+        raise ExtractError(budget.reason)
+    return tabs, budget.truncated or budget.full
+
+
+def _join_cells(cells: list[str], room: int) -> tuple[str, bool]:
+    """Cells joined by tabs, cut to `room` characters before they are joined (one shared
+    string can be repeated in every cell of a row), and whether anything was cut."""
+    out: list[str] = []
+    size = 0
+    for index, cell in enumerate(cells):
+        if index:
+            if size >= room:
+                return "".join(out), True
+            out.append("\t")
+            size += 1
+        if size + len(cell) > room:
+            out.append(cell[: max(room - size, 0)])
+            return "".join(out), True
+        out.append(cell)
+        size += len(cell)
+    return "".join(out), False
 
 
 def _workbook_tabs(workbook, budget: _Budget) -> list[tuple[str, str]]:
@@ -455,23 +569,30 @@ def _workbook_tabs(workbook, budget: _Budget) -> list[tuple[str, str]]:
         rows: list[str] = []
         if multi:
             rows.append(f"# {sheet.title}")
-            budget.add_chars(len(rows[-1]) + 1)
-        for row in sheet.iter_rows(values_only=True):
-            # Every row is work, even one with no cells, and rows openpyxl fills in for
-            # a gap in the row numbers are rows too.
-            budget.cell(len(row) + 1)
-            cells = ["" if cell is None else str(cell) for cell in row]
-            while cells and cells[-1] == "":
-                cells.pop()
-            if not cells:
-                continue
-            rows.append("\t".join(cells))
-            budget.add_chars(len(rows[-1]) + 1)
-            if budget.full:
-                break
+            budget.add_chars(len(rows[-1]) + (1 if tabs else 0))
+        try:
+            for row in sheet.iter_rows(values_only=True):
+                # Every row is work, even one with no cells, and rows openpyxl fills in
+                # for a gap in the row numbers are rows too.
+                budget.cell(len(row) + 1)
+                cells = ["" if cell is None else str(cell) for cell in row]
+                while cells and cells[-1] == "":
+                    cells.pop()
+                if not cells:
+                    continue
+                # The newline before the row: after the title, an earlier row or tab.
+                newline = 1 if rows or tabs else 0
+                # A cut row fills the room, so the budget is full after it.
+                line, _ = _join_cells(cells, budget.room - newline)
+                rows.append(line)
+                budget.add_chars(len(line) + newline)
+                if budget.full:
+                    break
+        except _OutOfBudget as exc:
+            budget.stop(exc)
         if rows:
             tabs.append((str(sheet.title), "\n".join(rows).replace("\x00", "")))
-        if budget.full:
+        if budget.full or budget.truncated:
             break
     return tabs
 
@@ -479,13 +600,14 @@ def _workbook_tabs(workbook, budget: _Budget) -> list[tuple[str, str]]:
 class _MeteredReader:
     """A zip member stream that counts the XML tags read through it."""
 
-    def __init__(self, source, budget: _Budget) -> None:
+    def __init__(self, source, budget: _Budget, strings: bool = False) -> None:
         self._source = source
         self._budget = budget
+        self._strings = strings
 
     def read(self, size: int = -1) -> bytes:
         data = self._source.read(size)
-        self._budget.xml_bytes(data)
+        self._budget.xml_bytes(data, strings=self._strings)
         return data
 
     def close(self) -> None:
@@ -505,19 +627,25 @@ class _MeteredZip:
     """The workbook's zip as openpyxl sees it: every member it reads is metered.
 
     openpyxl parses the XML itself, so the element count comes from the raw bytes as
-    they are read, before parsing, and covers every part it touches.
+    they are read, before parsing, and covers every part it touches. The shared-string
+    table is counted against its own allowance, and named styles are left out of the
+    stylesheet (see `_XLSX_NAMED_STYLES`).
     """
 
     def __init__(self, archive: zipfile.ZipFile, budget: _Budget) -> None:
         self._archive = archive
         self._budget = budget
+        self.reading_strings = False
 
     def open(self, name, *args, **kwargs) -> _MeteredReader:
-        return _MeteredReader(self._archive.open(name, *args, **kwargs), self._budget)
+        source = self._archive.open(name, *args, **kwargs)
+        return _MeteredReader(source, self._budget, strings=self.reading_strings)
 
     def read(self, name, *args, **kwargs) -> bytes:
         data = self._archive.read(name, *args, **kwargs)
         self._budget.xml_bytes(data)
+        if name == "xl/styles.xml":  # the path openpyxl reads styles from
+            data = _XLSX_NAMED_STYLES.sub(b"", data)
         return data
 
     def __getattr__(self, name: str):
@@ -536,6 +664,13 @@ def _load_workbook(data: bytes, budget: _Budget):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
             self.archive = _MeteredZip(self.archive, budget)
+
+        def read_strings(self) -> None:
+            self.archive.reading_strings = True
+            try:
+                super().read_strings()
+            finally:
+                self.archive.reading_strings = False
 
         def read_worksheets(self) -> None:
             self.parser.sheets = _unique_sheets(self.parser)
@@ -562,29 +697,33 @@ def _unique_sheets(parser) -> list:
     return kept
 
 
-def _pdf(data: bytes, char_limit: int) -> str:
+class _PdfStop(BaseException):
+    """Ends PDF extraction from inside pypdf, which catches any Exception raised while it
+    reads a form XObject and carries on. Never escapes `_pdf`."""
+
+
+# Operators that show text, and where their string operand is.
+_PDF_TEXT_OPERAND = {b"Tj": 0, b"'": 0, b'"': 2}
+
+
+def _pdf(data: bytes, char_limit: int) -> Extracted:
     from pypdf import PdfReader, apply_configuration
 
     budget = _Budget(char_limit)
-    deadline = time.monotonic() + _PDF_SECONDS
-    form_cost: dict[str, int] = {}
-    nested_form_cost = 0
-
-    def count_operation(operator: bytes = b"", operands: object = None, *_args: object) -> None:
-        cost = 1
-        if operator == b"Do" and isinstance(operands, list) and operands:
-            # pypdf parses a form again each time it is drawn and does not let an error
-            # raised inside one stop the page, so pay for the form before it is parsed.
-            cost += form_cost.get(str(operands[0]), nested_form_cost)
-        budget.operation(cost)
-        if time.monotonic() > deadline:
-            raise ExtractError("PDF is too complex to extract; use download_file")
-
-    # pypdf's own limits are per stream and per page; tighten the ones a small file can
-    # multiply: how often a page may draw forms, and how big one content stream may be.
+    # pypdf's own limits are per stream and per page. Tighten the ones a small file can
+    # multiply: how often a page may draw forms, how much one stream may decode to and
+    # how many tokens one content stream may hold. Never run an external decoder.
     with apply_configuration(
         xform_maximum_invocations_per_extraction=_PDF_FORM_CAP,
-        stream_parsing_work_maximum_count=_PDF_OPERATION_CAP,
+        stream_parsing_work_maximum_count=_PDF_STREAM_TOKENS,
+        zlib_maximum_output_length=_PDF_STREAM_BYTES,
+        zlib_maximum_recovery_input_length=_PDF_RECOVERY_BYTES,
+        lzw_maximum_output_length=_PDF_STREAM_BYTES,
+        run_length_maximum_output_length=_PDF_STREAM_BYTES,
+        array_based_stream_maximum_output_length=_PDF_STREAM_BYTES,
+        brotli_maximum_output_length=_PDF_STREAM_BYTES,
+        jbig2_maximum_output_length=_PDF_STREAM_BYTES,
+        jbig2dec_binary=None,
     ):
         try:
             reader = PdfReader(io.BytesIO(data))
@@ -597,75 +736,292 @@ def _pdf(data: bytes, char_limit: int) -> str:
                 raise ExtractError("PDF is password-protected") from exc
             if unlocked == 0:
                 raise ExtractError("PDF is password-protected")
+        pages = _PdfPages(budget, time.monotonic() + _PDF_SECONDS).read(reader)
+    return budget.result(_clip(pages, char_limit + 1), char_limit)
+
+
+class _PdfPages:
+    """Reads a PDF's pages within one budget.
+
+    Before pypdf does work the operator count cannot see, it is charged here: building
+    a page's or form's fonts (pypdf builds every font a resource dictionary names, used
+    or not) and parsing a form each time it is drawn. Text-showing operators have their
+    strings cut so that, at the most a font can expand a byte, the page cannot produce
+    much more than the characters still wanted. A page pypdf cannot read is skipped;
+    running out of work or time ends the file with the text so far, marked truncated.
+    """
+
+    def __init__(self, budget: _Budget, deadline: float) -> None:
+        self.budget = budget
+        self.deadline = deadline
+        self.operation_cap = max(_PDF_OPERATION_CAP, _PDF_OPERATIONS_PER_CHAR * budget.char_goal)
+        # Per stream or font object: (the object, kept so its id is not reused, its cost).
+        self.costs: dict[int, tuple[object, int]] = {}
+        self.expansions: dict[int, int] = {}
+        self.resource_expansions: dict[int, tuple[object, int]] = {}
+        # The most characters one string byte may become, for the page and each form
+        # being read (pypdf reads a form with only the form's own fonts).
+        self.expansion: list[int] = [1]
+        self.page_chars = 0
+        self.pending = 0
+        self.pieces: list[str] = []
+
+    def read(self, reader) -> list[str]:
         pages: list[str] = []
         seen: set[tuple[int, int]] = set()
         try:
-            for page in reader.pages:
-                if budget.full:
+            for index, page in enumerate(reader.pages):
+                if self.budget.full:
                     break
-                if len(pages) >= _PDF_PAGE_CAP:
-                    raise ExtractError("PDF has too many pages to extract; use download_file")
+                if index >= _PDF_PAGE_CAP:
+                    self.budget.stop(ExtractError("PDF has too many pages to extract"))
+                    break
                 ref = page.indirect_reference
                 if ref is not None:
                     key = (ref.idnum, ref.generation)
                     if key in seen:  # one page object listed again in the page tree
                         continue
                     seen.add(key)
-                form_cost, nested_form_cost = _pdf_form_costs(page)
-                count_operation()  # a page costs something even with no content
-                text = page.extract_text(visitor_operand_before=count_operation) or ""
-                pages.append(text)
-                budget.add_chars(len(text) + 1)
-        except ExtractError:
+                _add_block(pages, self.page_text(page), self.budget)
+        except _PdfStop:
+            _add_block(pages, "".join(self.pieces), self.budget)
+            self.budget.stop(ExtractError("PDF is too complex to extract; use download_file"))
+        except Exception as exc:  # the page tree itself is broken past this point
+            if not pages:
+                raise ExtractError("could not read PDF") from exc
+            self.budget.stop(ExtractError("could not read PDF"))
+        return pages
+
+    def page_text(self, page) -> str:
+        self.page_chars = 0
+        self.pending = 0
+        self.pieces = []
+        self.charge(1)  # a page costs something even with no content
+        draws = 0
+        try:
+            self.expansion = [self.resource_cost(_pdf_resources(page))]
+            original = page.extract_xform_text
+
+            def xform_text(xform, *args, **kwargs):
+                nonlocal draws
+                draws += 1
+                if draws >= _PDF_FORM_CAP:  # pypdf skips any form drawn after this one
+                    self.budget.stop(ExtractError("PDF is too complex to extract"))
+                self.charge(self.stream_cost(xform))
+                self.expansion.append(self.resource_cost(_pdf_resources(xform)))
+                try:
+                    return original(xform, *args, **kwargs)
+                finally:
+                    self.expansion.pop()
+
+            # pypdf reads a drawn form through this method of the page.
+            page.extract_xform_text = xform_text
+            text = page.extract_text(visitor_operand_before=self.operator, visitor_text=self.text)
+            return text or ""
+        except _PdfStop:
             raise
         except Exception as exc:
-            raise ExtractError("could not read PDF") from exc
-    return _clip(pages, char_limit + 1)
+            # A page over one of pypdf's limits, or broken: the rest can still be read.
+            from pypdf.errors import LimitReachedError
 
+            if isinstance(exc, LimitReachedError):
+                self.budget.stop(ExtractError("PDF is too complex to extract; use download_file"))
+            else:
+                self.budget.stop(ExtractError("could not read PDF"))
+            return ""
 
-def _pdf_form_costs(page) -> tuple[dict[str, int], int]:
-    """What drawing each of the page's forms costs, by resource name, and the most any
-    form reachable from the page costs (for a `Do` inside a form, whose resources differ).
-    """
+    def charge(self, cost: int) -> None:
+        self.budget.operations += cost
+        if self.budget.operations > self.operation_cap or time.monotonic() > self.deadline:
+            raise _PdfStop
 
-    def forms_of(resources) -> dict[str, object]:
+    def operator(self, operator: bytes, operands: list, *_args: object) -> None:
+        self.charge(1)
+        if operator == b"TJ":
+            if operands and isinstance(operands[0], list):
+                items = operands[0]
+                for index, item in enumerate(items):
+                    if _is_pdf_string(item):
+                        items[index] = self.fit(item)
+        elif operator in _PDF_TEXT_OPERAND:
+            index = _PDF_TEXT_OPERAND[operator]
+            if len(operands) > index and _is_pdf_string(operands[index]):
+                operands[index] = self.fit(operands[index])
+
+    def text(self, text: str, *_args: object) -> None:
+        if text:
+            self.page_chars += len(text)
+            self.pending = max(self.pending - len(text), 0)
+            self.pieces.append(text)
+
+    def fit(self, value):
+        """The string, cut so the text it may become fits what is still wanted."""
+        expansion = self.expansion[-1]
+        room = self.budget.room - self.page_chars + _PDF_TEXT_SLACK - self.pending
+        cost = len(value) * expansion
+        if cost <= room:
+            self.pending += cost
+            return value
+        keep = max(room, 0) // expansion
+        self.pending += keep * expansion
+        self.budget.truncated = True
+        self.budget.reason = self.budget.reason or "PDF text was cut"
+        return _cut_pdf_string(value, keep)
+
+    def resource_cost(self, resources) -> int:
+        """Charge for the fonts pypdf will build from `resources`; their expansion."""
+        fonts = _pdf_entry(resources, "/Font")
+        if not isinstance(fonts, dict):
+            return 1
+        cached = self.resource_expansions.get(id(fonts))
+        expansion = 1
+        for value in list(fonts.values()):
+            font = _pdf_object(value)
+            if not isinstance(font, dict):
+                continue
+            self.charge(1 + self.font_cost(font))
+            if cached is None:
+                expansion = max(expansion, self.font_expansion(font))
+        if cached is not None:
+            return cached[1]
+        self.resource_expansions[id(fonts)] = (fonts, expansion)
+        return expansion
+
+    def font_cost(self, font: dict) -> int:
+        """What pypdf's building of the font costs, from the size of its tables."""
+        known = self.costs.get(id(font))
+        if known is not None:
+            return known[1]
+        cost = _PDF_FONT_COST
         try:
-            xobjects = resources.get_object().get("/XObject")
-            if xobjects is None:
-                return {}
-            found = {}
-            for name, value in xobjects.get_object().items():
-                stream = value.get_object()
-                if stream.get("/Subtype") == "/Form":
-                    found[str(name)] = stream
-            return found
-        except AttributeError:
-            return {}
+            to_unicode = _pdf_object(font.get("/ToUnicode"))
+            if isinstance(to_unicode, dict):
+                cost += _pdf_stream_size(to_unicode) // _PDF_CMAP_BYTES_PER_OPERATION
+            items = _pdf_items(font.get("/Widths"))
+            encoding = _pdf_object(font.get("/Encoding"))
+            if isinstance(encoding, dict):
+                items += _pdf_items(encoding.get("/Differences"))
+            descendants = _pdf_object(font.get("/DescendantFonts"))
+            if isinstance(descendants, list):
+                for descendant in descendants[:4]:
+                    descendant = _pdf_object(descendant)
+                    if isinstance(descendant, dict):
+                        items += _pdf_items(descendant.get("/W"))
+            cost += items // _PDF_ARRAY_ITEMS_PER_OPERATION
+        except Exception:
+            cost = _PDF_FONT_COST  # pypdf will fail on it too, then skip the font or the page
+        self.costs[id(font)] = (font, cost)
+        return cost
 
-    def cost(stream) -> int:
-        return len(stream.get_data()) // _PDF_BYTES_PER_OPERATION
+    def font_expansion(self, font: dict) -> int:
+        """The most characters pypdf may turn one string byte into with this font: an
+        encoding entry may name a glyph, and a ToUnicode entry may map each character
+        of that to up to 256 more."""
+        known = self.expansions.get(id(font))
+        if known is not None:
+            return known
+        expansion = 1
+        try:
+            from pypdf.generic._font import Font
 
-    resources = page.get("/Resources")
-    if resources is None:
-        return {}, 0
-    direct = forms_of(resources)
-    costs = {name: cost(stream) for name, stream in list(direct.items())[:_PDF_FORM_SCAN_CAP]}
-    most = max(costs.values(), default=0)
-    pending = list(direct.values())
-    visited = {id(stream) for stream in pending}
-    while pending and len(visited) <= _PDF_FORM_SCAN_CAP:
-        stream = pending.pop()
-        most = max(most, cost(stream))
-        inner = stream.get("/Resources")
-        if inner is None:
-            continue
-        for child in forms_of(inner).values():
-            if id(child) not in visited:
-                visited.add(id(child))
-                pending.append(child)
-    if len(visited) > _PDF_FORM_SCAN_CAP:
-        raise ExtractError("PDF is too complex to extract; use download_file")
-    return costs, most
+            built = Font.from_font_resource(font)
+            encoding = built.encoding
+            by_byte = 1
+            if isinstance(encoding, dict):
+                by_byte = max((len(v) for v in encoding.values() if isinstance(v, str)), default=1)
+            by_char = max(
+                (len(v) for v in built.character_map.values() if isinstance(v, str)), default=1
+            )
+            expansion = max(by_byte, 1) * max(by_char, 1)
+        except Exception:
+            expansion = 1  # pypdf skips a font it cannot build, or fails the page
+        self.expansions[id(font)] = expansion
+        self.costs.setdefault(id(font), (font, _PDF_FONT_COST))
+        return expansion
+
+    def stream_cost(self, stream) -> int:
+        """What parsing a form's content stream costs, from its decoded size."""
+        known = self.costs.get(id(stream))
+        if known is not None:
+            return known[1]
+        cost = 1 + _pdf_stream_size(stream) // _PDF_BYTES_PER_OPERATION
+        self.costs[id(stream)] = (stream, cost)
+        return cost
+
+
+def _pdf_object(value):
+    try:
+        return value.get_object() if value is not None else None
+    except Exception:
+        return None
+
+
+def _pdf_resources(obj):
+    """The /Resources pypdf reads text with, inherited from the page tree as it does."""
+    try:
+        return obj.get_inherited("/Resources", None)
+    except Exception:
+        return None
+
+
+def _pdf_entry(dictionary, key: str):
+    dictionary = _pdf_object(dictionary)
+    if not isinstance(dictionary, dict):
+        return None
+    return _pdf_object(dictionary.get(key))
+
+
+def _pdf_items(array) -> int:
+    """Entries in an array, counting one level of nested arrays (as in a /W array)."""
+    array = _pdf_object(array)
+    if not isinstance(array, list):
+        return 0
+    return len(array) + sum(len(item) for item in array if isinstance(item, list))
+
+
+def _pdf_stream_size(stream) -> int:
+    """How many bytes a stream decodes to, at most `_PDF_STREAM_BYTES`.
+
+    A Flate stream (nearly all of them) is inflated from its raw bytes into a buffer
+    that is dropped at once; pypdf caches what it decodes, so asking it would keep
+    every stream looked at in memory. Other filters are left to pypdf, under its caps.
+    """
+    raw = getattr(stream, "_data", None)
+    if not isinstance(raw, bytes):
+        return 0
+    filters = _pdf_object(stream.get("/Filter"))
+    if isinstance(filters, list):
+        filters = [_pdf_object(item) for item in filters]
+    else:
+        filters = [] if filters is None else [filters]
+    if not filters:
+        return min(len(raw), _PDF_STREAM_BYTES)
+    if getattr(stream, "decoded_self", None) is None and filters in (["/FlateDecode"], ["/Fl"]):
+        try:
+            inflater = zlib.decompressobj()
+            return len(inflater.decompress(raw, _PDF_STREAM_BYTES))
+        except zlib.error:
+            return min(len(raw), _PDF_STREAM_BYTES)
+    try:
+        return min(len(stream.get_data()), _PDF_STREAM_BYTES)
+    except Exception:
+        return 0
+
+
+def _is_pdf_string(value) -> bool:
+    from pypdf.generic import NameObject
+
+    return isinstance(value, (str, bytes)) and not isinstance(value, NameObject)
+
+
+def _cut_pdf_string(value, keep: int):
+    from pypdf.generic import ByteStringObject, TextStringObject
+
+    if isinstance(value, ByteStringObject):
+        return ByteStringObject(bytes(value[:keep]))
+    if isinstance(value, TextStringObject):
+        return TextStringObject(str(value[:keep]))
+    return value[:keep]
 
 
 # RTF is read with our own linear scanner, using striprtf's tables. striprtf's
@@ -677,36 +1033,49 @@ _RTF_TOKEN = re.compile(
 )
 
 
-def _rtf(data: bytes, char_limit: int) -> str:
+def _rtf(data: bytes, char_limit: int) -> Extracted:
+    budget = _Budget(char_limit)
     try:
-        return _rtf_text(data, char_limit)
+        text = _rtf_text(data, char_limit, budget)
     except ExtractError:
         raise
     except Exception as exc:
         raise ExtractError("could not read RTF") from exc
+    return budget.result(text, char_limit)
 
 
-def _rtf_text(data: bytes, char_limit: int) -> str:
+# striprtf turns a hyperlink field into its shown text followed by the quoted target in
+# parentheses, `text("url")`. Field instructions are kept to do the same, up to this
+# many characters for the whole file.
+_RTF_FIELD_INSTRUCTION_CAP = 65_536
+_RTF_HYPERLINK = re.compile(r'HYPERLINK\s(".*")', re.IGNORECASE | re.DOTALL)
+
+
+def _rtf_text(data: bytes, char_limit: int, budget: _Budget) -> str:
     """Plain text of an RTF document, following striprtf's rules, in one pass.
 
     Text runs are one token, so a long run of picture hex data is cheap. `\\binN` data is
-    skipped. Stops once past `char_limit`.
+    skipped. Stops once past `char_limit`, or with the text so far when the token
+    allowance runs out.
     """
     from striprtf.striprtf import charset_map, destinations, specialchars
 
-    budget = _Budget(char_limit)
+    token_cap = max(_RTF_TOKEN_CAP, _RTF_TOKENS_PER_CHAR * char_limit)
     encoding = "cp1252"
     fonts: dict[bytes, str] = {}
-    stack: list[tuple[int, bool, bool, bytes | None, bool]] = []
+    stack: list[tuple[int, bool, bool, bytes | None, bool, bool]] = []
     ucskip = 1
     curskip = 0
-    ignorable = suppress = in_fonttbl = False
+    ignorable = suppress = in_fonttbl = in_fldinst = False
     current_font: bytes | None = None
     font_entry: bytes | None = None
     hexes = bytearray()
     out: list[str] = []
     depth = 0
     in_document = False
+    # Open \\field groups: (the depth of the group, its instruction text so far).
+    fields: list[tuple[int, list[str]]] = []
+    instruction_room = _RTF_FIELD_INSTRUCTION_CAP
 
     def emit(text: str) -> None:
         if text:
@@ -730,7 +1099,11 @@ def _rtf_text(data: bytes, char_limit: int) -> str:
             pos += 1
             continue
         pos = match.end()
-        budget.node(cap=_RTF_TOKEN_CAP)
+        try:
+            budget.node(cap=token_cap)
+        except _OutOfBudget as exc:
+            budget.stop(exc)
+            break
         word, arg, hexpair, char, brace, run = match.groups()
         if hexes and hexpair is None:
             decode_hexes()
@@ -739,14 +1112,19 @@ def _rtf_text(data: bytes, char_limit: int) -> str:
             if brace == b"{":
                 depth += 1
                 in_document = True
-                stack.append((ucskip, ignorable, suppress, current_font, in_fonttbl))
+                stack.append((ucskip, ignorable, suppress, current_font, in_fonttbl, in_fldinst))
             else:
                 depth -= 1
                 if stack:
-                    ucskip, ignorable, suppress, current_font, in_fonttbl = stack.pop()
+                    state = stack.pop()
+                    ucskip, ignorable, suppress, current_font, in_fonttbl, in_fldinst = state
                 else:
                     ucskip = 0
                     ignorable = True
+                while fields and fields[-1][0] > depth:  # a field group closed
+                    link = _RTF_HYPERLINK.search("".join(fields.pop()[1]))
+                    if link and not ignorable and not suppress:
+                        emit(f"({link.group(1)})")
                 if in_document and depth <= 0:
                     break  # anything after the document group is discarded, as Word does
         elif char:
@@ -763,6 +1141,10 @@ def _rtf_text(data: bytes, char_limit: int) -> str:
             if name == "bin" and arg:
                 pos = min(end, pos + max(int(arg), 0))  # raw binary data, never text
                 continue
+            if name == "field":
+                fields.append((depth, []))
+            elif name == "fldinst" and fields:
+                in_fldinst = True  # a destination: kept only to find a hyperlink target
             if name == "fonttbl":
                 in_fonttbl = True  # a destination, so ignorable: only fonts are read in it
             elif in_fonttbl:
@@ -811,14 +1193,17 @@ def _rtf_text(data: bytes, char_limit: int) -> str:
                 skipped = min(curskip, len(run))
                 curskip -= skipped
                 run = run[skipped:]
+            if run and in_fldinst and fields and instruction_room > 0:
+                fields[-1][1].append(run[:instruction_room].decode("latin-1"))
+                instruction_room -= min(len(run), instruction_room)
             if run and not ignorable and not suppress:
                 emit(run.decode("latin-1"))
     if hexes:
         decode_hexes()
-    return "".join(out)[: char_limit + 1]
+    return "".join(out)
 
 
-def _doc(data: bytes, char_limit: int) -> str:
+def _doc(data: bytes, char_limit: int) -> Extracted:
     import olefile
 
     if not data.startswith(_OLE_MAGIC):
@@ -847,7 +1232,7 @@ def _doc(data: bytes, char_limit: int) -> str:
     text = _doc_text(word, table, char_limit)
     if not _mostly_text(text):
         raise ExtractError("could not extract readable text from Word .doc")
-    return text[: char_limit + 1]
+    return Extracted(text, len(text) > char_limit)
 
 
 def _doc_text(word: bytes, table: bytes, char_limit: int) -> str:

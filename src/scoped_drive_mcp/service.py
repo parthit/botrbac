@@ -23,7 +23,8 @@ from .drive_client import (
     DriveExportTooLargeError,
     DriveNotFoundError,
 )
-from .extract import ExtractError, document_kind, extract_text, xlsx_tabs
+from .extract import Extracted, ExtractError, document_kind, extract, read_xlsx_tabs
+from .extract_worker import extract_isolated, xlsx_tabs_isolated
 from .scope import (
     FileRef,
     InvalidInputError,
@@ -203,6 +204,9 @@ class DriveService:
         self.guard = guard
         self.max_bytes = settings.max_bytes
         self.max_chars = settings.max_chars
+        # Read Office and PDF files in a resource-limited child process (extract_worker).
+        self.extract_isolation = settings.extract_isolation
+        self.extract_memory_mb = settings.extract_memory_mb
         # For the paired-person write service: who is writing (stamped on what they write).
         self.writer = writer
         # Called after every check of a write has passed and right before the Drive call
@@ -425,7 +429,7 @@ class DriveService:
         if data is None:
             return None
         try:
-            tabs = xlsx_tabs(data, self.max_chars)
+            tabs, partial = self._workbook_tabs(data)
         except Exception as exc:  # never log cell contents, only the failure's type
             logger.info(
                 "sheet %s workbook read failed (%s); reading its first tab",
@@ -448,6 +452,11 @@ class DriveService:
             text = text[: self.max_chars]
             result["truncated"] = True
             result["note"] = f"text cut off in tab {cut_in!r}; later tabs are not shown"
+        elif partial:
+            result["truncated"] = True
+            result["note"] = (
+                "the workbook is too large or complex to read whole; later rows are missing"
+            )
         result["content"] = text  # xlsx_tabs already strips NUL characters
         return result
 
@@ -484,7 +493,7 @@ class DriveService:
             data = data[: self.max_bytes]
             result["truncated"] = True
         try:
-            text = extract_text(data, kind, char_limit=self.max_chars)
+            extracted = self._extract(data, kind)
         except ExtractError as exc:
             logger.info("text extraction failed for %s: %s", kind, exc)
             if source_truncated:
@@ -499,6 +508,7 @@ class DriveService:
             logger.exception("text extraction failed for %s", kind)
             result["note"] = "text could not be extracted. Use download_file for the bytes."
             return result
+        text = extracted.text
         if not text.strip():
             result["note"] = (
                 "no extractable text (the file may be a scan or image-only). "
@@ -508,9 +518,29 @@ class DriveService:
         if len(text) > self.max_chars:
             text = text[: self.max_chars]
             result["truncated"] = True
+        elif extracted.truncated:
+            result["truncated"] = True
+            result["note"] = (
+                "the file is too large or complex to read whole; only the start of its text "
+                "is shown. Use download_file for the bytes."
+            )
         result["content"] = text
         result["extracted_as"] = "text/plain"
         return result
+
+    def _extract(self, data: bytes, kind: str) -> Extracted:
+        if self.extract_isolation:
+            return extract_isolated(
+                data, kind, char_limit=self.max_chars, memory_mb=self.extract_memory_mb
+            )
+        return extract(data, kind, char_limit=self.max_chars)
+
+    def _workbook_tabs(self, data: bytes) -> tuple[list[tuple[str, str]], bool]:
+        if self.extract_isolation:
+            return xlsx_tabs_isolated(
+                data, char_limit=self.max_chars, memory_mb=self.extract_memory_mb
+            )
+        return read_xlsx_tabs(data, self.max_chars)
 
     def download_file(self, file_id: str) -> dict[str, Any]:
         """Raw bytes for a file inside the share. Google Workspace files have no media body."""
