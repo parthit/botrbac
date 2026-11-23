@@ -46,7 +46,7 @@ either tool stops early. Text output is also capped by `MAX_CHARS`. Shortcuts ar
 
 There are deliberately **no** tools to move files, share files, change permissions or permanently delete.
 A client only sees the tools its role allows (`tools/list` is filtered), and calls to anything else are refused.
-Items you granted directly can't be renamed or trashed by Grok (a directly granted *file* can still have its
+Items you granted directly can't be renamed or trashed by an assistant (a directly granted *file* can still have its
 content edited by an editor token); things inside a granted folder can.
 
 When a tool is refused because the item isn't shared (not because of the role), the result is an error like:
@@ -56,5 +56,5 @@ When a tool is refused because the item isn't shared (not because of the role), 
  "file_id": "…", "message": "This item has not been shared with you. Show the user this approval link …"}
 ```
 
-Grok shows you the link; after you approve, it retries (or calls `check_access_request`). An app with 50
+The assistant shows you the link; after you approve, it retries (or calls `check_access_request`). An app with 50
 requests already waiting gets `too_many_requests` instead, with no link, until you answer some.

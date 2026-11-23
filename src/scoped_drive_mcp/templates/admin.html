@@ -28,6 +28,7 @@
       {% else %}
       <span class="pill"><span aria-hidden="true">–</span> Not connected</span>
       {% endif %}
+      {% if person.legacy %}<div class="muted">Old full-Drive connection stored (not used)</div>{% endif %}
     </td>
   </tr>
   {% endfor %}
@@ -39,6 +40,18 @@
   <p>When someone signs in with Google, their address shows up here. Their files do not.</p>
 </div>
 {% endif %}
+<section class="card">
+  <h2>Old full-Drive connections</h2>
+  {% if legacy %}
+  <p>{{ legacy }} {{ "person has" if legacy == 1 else "people have" }} an older Google Drive connection that could reach their whole Drive. Bot RBAC no longer uses these, but they are still stored. Revoke them so they are deleted here and ended at Google. Each person reconnects with access to only the files they pick.</p>
+  <form method="post" action="/admin/revoke-legacy-drive" data-confirm="Revoke every old full-Drive connection? Those people will need to reconnect Google Drive and pick their files again.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="danger" type="submit">Revoke old connections</button>
+  </form>
+  {% else %}
+  <p>None stored. Every Google Drive connection is limited to the files people pick.</p>
+  {% endif %}
+</section>
 {% if signing %}
 <section class="card">
   <h2>Signed records</h2>

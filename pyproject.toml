@@ -1,7 +1,7 @@
 [project]
 name = "scoped-drive-mcp"
 version = "0.1.0"
-description = "MCP server that gives Grok role-based access to a single Google Drive folder"
+description = "MCP server that gives AI assistants only the Google Drive files you allow"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

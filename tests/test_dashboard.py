@@ -215,10 +215,24 @@ def test_drive_scope_required(c, oauth) -> None:
     assert r.status_code == 400 and "Drive access was not granted" in r.text
 
 
-def test_full_drive_scope_is_accepted(c, oauth) -> None:
-    oauth.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
+def test_full_drive_scope_is_refused_and_revoked(c, oauth, p2_app, monkeypatch) -> None:
+    from dataclasses import replace
+
+    # Google answers with more than was asked (e.g. an older grant folded in).
+    real = oauth.exchange_code
+
+    def wider(code):
+        tokens = real(code)
+        if not tokens.refresh_token:
+            return tokens
+        return replace(tokens, scopes=tokens.scopes | {"https://www.googleapis.com/auth/drive"})
+
+    monkeypatch.setattr(oauth, "exchange_code", wider)
     r = login(c)
-    assert r.status_code == 303
+    assert r.status_code == 400 and "more access than Bot RBAC asks for" in r.text
+    assert oauth.revoked
+    assert p2_app.state.dashboard.vault.owner() is None
+    assert p2_app.state.dashboard.vault.legacy_owner() is None
 
 
 def test_login_hint_is_only_the_visitors(c, oauth) -> None:

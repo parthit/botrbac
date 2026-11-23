@@ -1,18 +1,23 @@
 # Contributing
 
-scoped-drive-mcp is an MCP server that sits between Grok Bot and Google Drive. The owner signs in and ticks the files and folders the bot may use. Everything else stays out of reach.
+Bot RBAC is an MCP server that sits between AI assistants and Google Drive. A person signs in, ticks the
+files and folders an assistant may use, and everything else stays out of reach.
 
 ## Set up locally
 
+You need [uv](https://docs.astral.sh/uv/). It installs Python 3.12 for you.
+
 ```bash
 uv sync
-cp .env.example .env
-uv run --env-file .env uvicorn api.index:app --reload
+uv run pytest -q          # no network or Google account needed
 ```
+
+To run the server with the dashboard you also need a Google OAuth client. See
+[Run it on your computer](docs/self-hosting.md#run-it-on-your-computer).
 
 Fill in `.env` on your own machine. It is git-ignored. Do not commit secrets, tokens, client JSON, or `.env`.
 
-## Tests
+## Checks
 
 ```bash
 uv run pytest
@@ -20,30 +25,26 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The suite uses an in-memory fake Drive. No network is required.
+CI runs these on every pull request and on `main` (`.github/workflows/ci.yml`). Run ruff through `uv run`,
+not a globally installed copy: CI uses the version locked in `uv.lock`.
 
-CI runs these three on every pull request and on `main` (`.github/workflows/ci.yml`).
-Run ruff through `uv run`, not a globally installed copy: CI uses the version locked in
-`uv.lock`, and other versions format some lines differently.
-
-After you change dependencies, regenerate the Vercel requirements file:
+After you change dependencies, regenerate the Vercel requirements file and commit it with the change:
 
 ```bash
 uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
 ```
 
-Commit that updated `requirements.txt` with the dependency change.
-
 ## Pull requests
 
-Branch from `main`. In the pull request, describe what changed and why.
+Branch from `main`. Describe what changed and why. Add a test for behaviour changes.
 
-Keep the existing scope checks, roles, and security behavior intact unless the pull request is explicitly about that.
+Keep the existing allowlist checks, roles and security behaviour intact unless the pull request is
+explicitly about that.
 
 ## Security
 
-Do not open a public issue for a vulnerability that would expose Drive contents or tokens. Contact the repo owner through GitHub.
+Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+By contributing you agree your contribution is licensed under the [MIT License](LICENSE).

@@ -17,10 +17,26 @@ from typing import Any, Protocol
 
 from .config import Settings
 
-# The signed-in account's Drive. The server allowlist, not this scope, decides
-# what an assistant can open. A stored token that only has drive.file cannot see
-# files this app did not create or the user did not pick, so those people sign in again.
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+# Per-file access: Google lets this app open only files the person picked in the Google
+# Picker and files the app created. Google enforces that, so a leaked token or a bug in
+# this server cannot reach the rest of the Drive. The allowlist narrows it further.
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+# The whole Drive. Never requested, never stored, never used. A token that carries it is
+# refused at connect, treated as not connected if one is still stored, and revoked.
+FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DRIVE_SCOPE = DRIVE_FILE_SCOPE
+
+
+def scopes_acceptable(scopes: str | None) -> bool:
+    """True for a stored or granted scope list this server may use: drive.file, no full Drive.
+
+    A record with no scope list predates the stamp and could be a full-Drive token, so it
+    is not acceptable either.
+    """
+    granted = set(str(scopes or "").split())
+    return DRIVE_FILE_SCOPE in granted and FULL_DRIVE_SCOPE not in granted
+
+
 TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint, not a secret
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -144,24 +160,36 @@ class CredentialsProvider(Protocol):
 
 
 def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
-    """Build user credentials without pinning a scope on refresh.
+    """Credentials whose every access token is limited to `drive.file`, as Google confirms.
 
-    Google binds a refresh token to the scopes granted when it was issued. Sending
-    a different `scope` on refresh would reject a token that still has only
-    `drive.file`. Omitting `scopes` keeps whichever grant that token already has.
-    New sign-ins request `DRIVE_SCOPE` (full Drive) in the authorization URL.
+    Each refresh asks Google for `drive.file` only, so even an older refresh token that
+    carries the full Drive scope is used only for per-file access. After each refresh the
+    scopes Google says it granted are checked: if they include full Drive, or Google did
+    not say, the refresh fails and no Drive call is made.
     """
+    from google.auth import exceptions
     from google.oauth2.credentials import Credentials
+
+    class PickedFilesCredentials(Credentials):
+        def refresh(self, request: Any) -> None:
+            self._granted_scopes = None
+            super().refresh(request)
+            granted = " ".join(self.granted_scopes or ())
+            if not scopes_acceptable(granted):
+                self.token = None
+                raise exceptions.RefreshError(
+                    "Google returned a token wider than drive.file; refusing to use it"
+                )
 
     assert settings.google_oauth_client_id is not None
     assert settings.google_oauth_client_secret is not None
-    return Credentials(
+    return PickedFilesCredentials(
         token=None,
         refresh_token=refresh_token,
         client_id=settings.google_oauth_client_id.get_secret_value(),
         client_secret=settings.google_oauth_client_secret.get_secret_value(),
         token_uri=TOKEN_URI,
-        scopes=None,
+        scopes=[DRIVE_FILE_SCOPE],
     )
 
 

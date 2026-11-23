@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from scoped_drive_mcp.auth import current_actor
 from scoped_drive_mcp.config import Settings
+from scoped_drive_mcp.drive_client import DRIVE_FILE_SCOPE as DRIVE_FILE
 from scoped_drive_mcp.drive_client import BotNotConnectedError, LazyBotDriveClient
 from scoped_drive_mcp.store import (
     REDIS_IMPORT_FLAG,
@@ -61,7 +62,11 @@ def test_phase2_env(monkeypatch) -> None:
         "ENCRYPTION_KEY",
         "UPSTASH_REDIS_REST_URL",
         "UPSTASH_REDIS_REST_TOKEN",
+        "GOOGLE_PICKER_API_KEY",
+        "GOOGLE_CLOUD_PROJECT_NUMBER",
     ]
+    # The picker is listed, but its absence does not take the dashboard down.
+    assert "GOOGLE_PICKER_API_KEY" not in s.dashboard_missing()
 
 
 @pytest.mark.parametrize(
@@ -160,7 +165,7 @@ def test_redis_store_calls(monkeypatch) -> None:
 def test_token_vault_encrypts() -> None:
     kv = PrefixedStore(MemoryStore())
     vault = TokenVault(kv, ENCRYPTION_KEY)
-    vault.set_owner(VAULT_TOKEN, "owner@example.com")
+    vault.set_owner(VAULT_TOKEN, "owner@example.com", "openid email " + DRIVE_FILE)
     raw = kv.get("vault:owner_refresh_token")
     assert raw and VAULT_TOKEN not in raw and "owner@example.com" not in raw
     assert vault.owner()["t"] == VAULT_TOKEN
@@ -392,7 +397,7 @@ def test_postgres_url_is_not_in_repr() -> None:
     store = build_store(settings)
     assert store.kind == "postgres"
     assert "secret-token" not in repr(store)
-    assert settings.missing_settings() == []
+    assert settings.missing_settings() == ["GOOGLE_PICKER_API_KEY", "GOOGLE_CLOUD_PROJECT_NUMBER"]
 
 
 def test_make_secrets_script(capsys) -> None:

@@ -54,7 +54,6 @@ from .bridge import MailboxError
 from .config import Settings
 from .connections import CONNECTIONS, Connection, get_connection
 from .drive_client import (
-    DRIVE_SCOPE,
     FOLDER_MIME,
     SHORTCUT_MIME,
     DriveNotFoundError,
@@ -287,34 +286,53 @@ class DashboardContext:
         rows = []
         for conn in CONNECTIONS.values():
             connected = self.drive_connected() if conn.key == "google_drive" else False
-            # A stored token without the full scope (old drive.file, or no scope stamp)
-            # still works for what it covers, but has to be upgraded by connecting again.
-            needs_upgrade = connected and conn.key == "google_drive" and self.reconsent_needed()
+            # An older full-Drive (or unstamped) token is no longer used: the person is
+            # not connected until they reconnect, which revokes it first.
+            needs_upgrade = not connected and conn.key == "google_drive" and self.reconsent_needed()
             rows.append(
                 {"connection": conn, "connected": connected, "needs_upgrade": needs_upgrade}
             )
         return rows
 
     def disconnect_drive(self) -> str | None:
-        """Forget this person's Drive token. Returns the token so Google can revoke it."""
-        record = self.vault.owner() if self.vault.enabled else None
+        """Forget this person's Drive token, current or old. Returns it so Google can
+        revoke it."""
+        if not self.vault.enabled:
+            self.vault.clear_owner()
+            return None
+        record = self.vault.owner() or self.vault.legacy_owner()
         token = record.get("t") if record else None
         self.vault.clear_owner()
         return token
 
-    def reconsent_needed(self) -> bool:
-        """True when the saved sign-in cannot see the whole Drive.
+    def revoke_legacy_drive(self, revoke: Callable[[str], bool]) -> bool | None:
+        """Revoke an old full-Drive (or unstamped) token at Google, then delete it here.
 
-        A missing scope stamp, or a token that only has drive.file, has to sign in
-        again. A token that already includes full Drive does not.
+        None when there is none. False when Google did not confirm: the token is kept so
+        a later reconnect or the admin action can try again (it is never used meanwhile).
+        A current drive.file token is left alone."""
+        if not self.vault.enabled:
+            return None
+        record = self.vault.legacy_owner()
+        if not record:
+            return None
+        if not revoke(record["t"]):
+            return False
+        # Only delete what was revoked: a reconnect may have stored a new token since.
+        current = self.vault.legacy_owner()
+        if current and current.get("t") == record["t"]:
+            self.vault.clear_owner()
+        return True
+
+    def reconsent_needed(self) -> bool:
+        """True when an old sign-in is stored that this server no longer uses.
+
+        That is a full-Drive token, or one saved before scopes were recorded. It is not
+        used for anything; the person reconnects with per-file access, which revokes it.
         """
         if not self.vault.enabled:
             return False
-        record = self.vault.owner()
-        if not record or not record.get("t"):
-            return False
-        scopes = set(str(record.get("scopes") or "").split())
-        return DRIVE_SCOPE not in scopes
+        return self.vault.legacy_owner() is not None
 
 
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -1010,6 +1028,24 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     {"label": "Back to Overview", "href": "/"},
                 ],
             )
+        if any(scope in tokens.scopes for scope in connection.forbidden_scopes):
+            # Wider than this app asks for. Never stored. Revoking it ends this app's grant
+            # for that account, which is the point: Google should not keep it either.
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            await blocking(ctx.disconnect_drive)
+            ctx.forget_drive(email)
+            audit_owner("connect", "deny", reason="scope_too_wide")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="Google gave more access than Bot RBAC asks for",
+                message=(
+                    "Bot RBAC only uses access to the files you pick, so that connection "
+                    "was refused and revoked. Remove Bot RBAC at "
+                    "myaccount.google.com/permissions, then choose Connect again."
+                ),
+            )
         if connection.required_scope not in tokens.scopes:
             await refuse_token()
             return render(
@@ -1018,7 +1054,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 400,
                 message=(
                     f"{connection.name} access was not granted. Choose Connect again and "
-                    f"allow access to your Drive."
+                    f"allow access to the files you pick."
                 ),
             )
         if not tokens.refresh_token:
@@ -1082,6 +1118,26 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if limited is not None:
             return limited
         request.session["oauth_next"] = safe_next(form.get("next"))
+        if connection.key == "google_drive":
+            # An old full-Drive token is revoked before Google's consent screen. Revoking
+            # ends this app's whole grant for the account, so doing it after the new
+            # consent would also kill the new per-file token.
+            revoked = await blocking(ctx.revoke_legacy_drive, oauth.revoke)
+            if revoked is False:
+                audit_owner("revoke_legacy_drive", "deny", reason="google_unreachable")
+                return render(
+                    request,
+                    "error.html",
+                    503,
+                    title="Couldn’t end your old connection",
+                    message=(
+                        "Google didn’t confirm that your old Drive connection was ended, so "
+                        "nothing was changed. Try Reconnect again in a minute."
+                    ),
+                )
+            if revoked:
+                ctx.forget_drive(current_actor.get() or None)
+                audit_owner("revoke_legacy_drive")
         return start_oauth(request, "connect", current_actor.get() or None, connection)
 
     async def connect_remove(request: Request, form: dict[str, str]) -> Response:
@@ -1089,18 +1145,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if connection is None:
             return render(request, "error.html", 404, message="Unknown connection.")
         email = current_actor.get()
+        # An old full-Drive token is kept until Google confirms it is revoked, so a failed
+        # revoke can be retried. It is never used meanwhile.
+        legacy = await blocking(ctx.revoke_legacy_drive, oauth.revoke)
+        if legacy is False:
+            ctx.forget_drive(email)
+            flash(
+                request,
+                "error",
+                "Google didn\u2019t confirm that your old Drive connection was ended, so it "
+                "is kept (and still unused). Choose Disconnect again in a minute.",
+            )
+            return RedirectResponse("/settings#services", status_code=303)
+        # A current per-file token is removed here at once, as asked, then revoked.
         token = await blocking(ctx.disconnect_drive)
+        confirmed = True
         if token:
             # Google's revoke also ends this app's sign-in grant. Step 1 holds no token,
             # so the dashboard session is unaffected.
-            await blocking(oauth.revoke, token)
+            confirmed = await blocking(oauth.revoke, token)
         ctx.forget_drive(email)
         audit_owner("disconnect", connection=connection.key)
-        flash(
-            request,
-            "ok",
-            f"{connection.name} is disconnected. Assistants can no longer reach it.",
-        )
+        if confirmed:
+            flash(
+                request,
+                "ok",
+                f"{connection.name} is disconnected. Assistants can no longer reach it.",
+            )
+        else:
+            flash(
+                request,
+                "error",
+                f"{connection.name} is disconnected here, but Google didn\u2019t confirm it "
+                "ended the permission. Remove Bot RBAC at myaccount.google.com/permissions "
+                "to be sure.",
+            )
         return RedirectResponse("/connect", status_code=303)
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
@@ -1889,11 +1968,34 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     found[entry.id] = cover[1]
             return found
 
+        def unopened() -> set[str]:
+            # Google opens a file to this app only once it is picked (drive.file). An
+            # entry from an older connection stays on the list but can't be opened until
+            # it is picked again. Bounded: one lookup per entry.
+            found: set[str] = set()
+            if not data["drive_connected"]:
+                return found
+            try:
+                drive = ctx.owner_drive()
+            except Exception:
+                return found
+            for entry in rows[:COVER_CHECK_LIMIT]:
+                try:
+                    drive.get_file(entry.id, fields="id")
+                except DriveNotFoundError:
+                    found.add(entry.id)
+                except Exception:
+                    return found
+            return found
+
         covered = await blocking(overlaps)
+        needs_pick = await blocking(unopened)
         return render(
             request,
             "access.html",
             covered=covered,
+            needs_pick=needs_pick,
+            picker_ready=settings.picker_configured,
             rows=rows,
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
@@ -2085,9 +2187,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request_names[req.id] = str(label)
         unknown = [i for i in item_ids(records) if i not in names][:ACTIVITY_LOOKUPS]
         if unknown and ctx.drive_connected():
-            # Under a limited (drive.file) sign-in Google also answers 404 for real files
-            # this app never opened, so a 404 proves nothing: don't call them missing.
-            limited = ctx.reconsent_needed()
+            # Under drive.file Google also answers 404 for real files this app never
+            # opened, so a 404 proves nothing: don't call them missing.
+            limited = True
             try:
                 drive = ctx.owner_drive()
                 for item in unknown:
@@ -2159,7 +2261,60 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         signing = None
         if isinstance(ctx.store, SignedStore):
             signing = {"required": ctx.store.require}
-        return render(request, "admin.html", people=people, signing=signing)
+        legacy = sum(1 for person in people if person["legacy"])
+        return render(request, "admin.html", people=people, signing=signing, legacy=legacy)
+
+    async def admin_revoke_legacy(request: Request, form: dict[str, str]) -> Response:
+        """Revoke and delete every stored full-Drive (or unstamped) token, for everyone.
+
+        Those tokens are already never used. This removes them from the store and asks
+        Google to end them, so a copy of the store cannot be used to reach anyone's Drive.
+        Each person reconnects with per-file access when they next visit."""
+        if session_user(request) != settings.owner_email or ctx.directory is None:
+            return render(request, "error.html", 404, message="Page not found.")
+
+        def run() -> tuple[int, int]:
+            assert ctx.directory is not None
+            done = failed = 0
+            for person in ctx.directory.known_users():
+                vault = ctx.directory.vault_for(person)
+                record = vault.legacy_owner()
+                if not record:
+                    continue
+                try:
+                    ok = oauth.revoke(record["t"])
+                except Exception:
+                    logger.exception("revoking an old Drive connection failed")
+                    ok = False
+                if not ok:
+                    # Kept so the next run can try again. It is never used meanwhile.
+                    failed += 1
+                    continue
+                current = vault.legacy_owner()
+                if current and current.get("t") == record["t"]:
+                    vault.clear_owner()
+                ctx.forget_drive(person)
+                done += 1
+            return done, failed
+
+        done, failed = await blocking(run)
+        audit_owner("revoke_legacy_drive", count=str(done), failed=str(failed))
+        if failed:
+            flash(
+                request,
+                "error",
+                f"Revoked {done}. Google didn’t confirm {failed}; those are kept (and still "
+                "unused). Run this again.",
+            )
+        else:
+            flash(
+                request,
+                "ok",
+                f"Revoked {done} old full-Drive connection{'' if done == 1 else 's'}."
+                if done
+                else "No old full-Drive connections are stored.",
+            )
+        return RedirectResponse("/admin", status_code=303)
 
     async def admin_sign_records(request: Request, form: dict[str, str]) -> Response:
         """Sign the allowlist, app and pairing records saved before records were signed."""
@@ -2228,6 +2383,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "email": person,
                     "created_at": earliest[1] if earliest else None,
                     "grants": grants,
+                    "legacy": ctx.directory.vault_for(person).legacy_owner() is not None,
                 }
             )
         return rows
@@ -2787,6 +2943,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", safely(admin_page), methods=["GET"]),
         Route("/admin/sign-records", csrf_protected(admin_sign_records), methods=["POST"]),
+        Route("/admin/revoke-legacy-drive", csrf_protected(admin_revoke_legacy), methods=["POST"]),
         Route("/oauth/authorize", safely(oauth_authorize), methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),

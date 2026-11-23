@@ -94,19 +94,20 @@ def test_each_grok_bot_sees_only_that_users_files(world, memstore, oauth) -> Non
     assert admin_read["structuredContent"]["content"] == "memo beta"
     admin_denied = _mcp(admin, admin_token, "read_file", file_id=EVE_DOC)
     assert admin_denied["isError"] is True
-    # Eve's file is not in the admin's Drive: nothing the admin could approve, so no
-    # request is filed in the admin's queue.
-    assert admin_denied["structuredContent"]["error"] == "not_found"
+    # Eve's file is not in the admin's Drive. Under drive.file that looks the same as an
+    # unpicked file, so a request is filed, but it carries nothing of Eve's.
+    assert admin_denied["structuredContent"]["error"] == "access_required"
     assert admin_denied["structuredContent"]["file_id"] == EVE_DOC
-    assert "request_id" not in admin_denied["structuredContent"]
+    assert "eve only text" not in json.dumps(admin_denied)
 
     eve_read = _mcp(eve, eve_token, "read_file", file_id=EVE_DOC)
     assert eve_read["isError"] is False
     assert eve_read["structuredContent"]["content"] == "eve only text"
     eve_denied = _mcp(eve, eve_token, "read_file", file_id="loose-doc")
     assert eve_denied["isError"] is True
-    assert eve_denied["structuredContent"]["error"] == "not_found"
+    assert eve_denied["structuredContent"]["error"] == "access_required"
     assert eve_denied["structuredContent"]["file_id"] == "loose-doc"
+    assert "memo beta" not in json.dumps(eve_denied)
 
     allow = unsealed(memstore.hgetall(KEY_PREFIX + "allowlist"))
     eve_allow = unsealed(memstore.hgetall(KEY_PREFIX + f"u:{EVE}:allowlist"))
@@ -143,7 +144,7 @@ def test_each_person_uses_their_own_sign_in(world, memstore, oauth) -> None:
     carol_token = _grok(carol, "Grok Carol")
     assert _mcp(eve, eve_token, "read_file", file_id=EVE_DOC)["isError"] is False
     denied = _mcp(carol, carol_token, "read_file", file_id=EVE_DOC)
-    assert denied["structuredContent"]["error"] == "not_found"
+    assert denied["structuredContent"]["error"] == "access_required"
     assert "eve only text" not in json.dumps(denied)
 
 
@@ -236,3 +237,53 @@ def test_scope_cache_is_partitioned_by_actor() -> None:
     finally:
         current_actor.reset(second)
     assert set(guard.allowed()) == {"shared-file"}
+
+
+def test_admin_revokes_every_old_full_drive_connection(world, memstore, oauth) -> None:
+    """Old full-Drive tokens are never used; the admin can delete and revoke all of them."""
+    app = _app(world, memstore, oauth)
+    admin, eve = client(app), client(app)
+    assert login(admin).status_code == 303
+    assert login(eve, "eve-code").status_code == 303
+    directory = app.state.dashboard.directory
+    full = "openid email https://www.googleapis.com/auth/drive"
+    directory.vault_for(EVE).set_owner("rt-eve-old", EVE, full)
+    app.state.dashboard.forget_drive(EVE)
+
+    page = admin.get("/admin").text
+    assert "Old full-Drive connection stored" in page and "Revoke old connections" in page
+    # Nobody but the admin can run it.
+    assert post(eve, "/admin/revoke-legacy-drive").status_code == 404
+    assert directory.vault_for(EVE).legacy_owner() is not None
+
+    oauth.revoked.clear()
+    assert post(admin, "/admin/revoke-legacy-drive").status_code == 303
+    assert oauth.revoked == ["rt-eve-old"]
+    assert directory.vault_for(EVE).legacy_owner() is None
+    # The admin's own current per-file connection is untouched.
+    assert directory.vault_for(OWNER_EMAIL).owner() is not None
+    assert "None stored" in admin.get("/admin").text
+
+
+def test_admin_revoke_keeps_tokens_google_did_not_confirm(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    admin = client(app)
+    assert login(admin).status_code == 303
+    directory = app.state.dashboard.directory
+    full = "openid email https://www.googleapis.com/auth/drive"
+    directory.vault_for(EVE).set_owner("rt-eve-old", EVE, full)
+    directory.vault_for(CAROL).set_owner("rt-carol-old", CAROL, full)
+    directory.remember_user(EVE)
+    directory.remember_user(CAROL)
+    oauth.revoke_fails = True
+    r = post(admin, "/admin/revoke-legacy-drive")
+    assert r.status_code == 303
+    # Both attempted (one failure does not stop the rest), neither deleted.
+    assert {"rt-eve-old", "rt-carol-old"} <= set(oauth.revoked)
+    assert directory.vault_for(EVE).legacy_owner() is not None
+    assert directory.vault_for(CAROL).legacy_owner() is not None
+    assert "didn’t confirm 2" in admin.get("/admin").text
+    oauth.revoke_fails = False
+    post(admin, "/admin/revoke-legacy-drive")
+    assert directory.vault_for(EVE).legacy_owner() is None
+    assert directory.vault_for(CAROL).legacy_owner() is None

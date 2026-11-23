@@ -1,6 +1,6 @@
 """Settings loaded from environment variables only (no credential files on disk).
 
-Only malformed values (and a missing API_TOKENS) make the settings fail to load. Settings the
+Only malformed values make the settings fail to load. Settings the
 dashboard or the bot connection need are optional at load time; `missing_settings()` reports
 which ones are absent so the signed-in admin overview can list them (names only, never values).
 The public /health route stays a liveness check and does not repeat that list.
@@ -83,7 +83,9 @@ class Settings(BaseSettings):
     # Optional since phase 2: the bot can be connected from the dashboard instead.
     google_oauth_refresh_token: SecretStr | None = None
 
-    api_tokens: Annotated[list[TokenEntry], NoDecode]
+    # Optional legacy bearer tokens for the admin (xAI API, scripts). Assistants that
+    # connect with OAuth do not need them.
+    api_tokens: Annotated[list[TokenEntry], NoDecode] = Field(default_factory=list)
 
     owner_email: str | None = None
     bot_email: str | None = None
@@ -285,8 +287,10 @@ class Settings(BaseSettings):
     @field_validator("api_tokens", mode="before")
     @classmethod
     def _parse_tokens(cls, value: object) -> object:
+        if value is None:
+            return []
         if isinstance(value, str):
-            return parse_api_tokens(value)
+            return parse_api_tokens(value) if value.strip() else []
         return value
 
     # ---- derived ---------------------------------------------------------
@@ -347,6 +351,9 @@ class Settings(BaseSettings):
             ("ENCRYPTION_KEY", _secret_set(self.encryption_key)),
             ("UPSTASH_REDIS_REST_URL", self.redis_rest_url is not None),
             ("UPSTASH_REDIS_REST_TOKEN", _secret_set(self.redis_rest_token)),
+            # Drive access is per file, and Google's file picker is how files are added.
+            ("GOOGLE_PICKER_API_KEY", self.google_picker_api_key is not None),
+            ("GOOGLE_CLOUD_PROJECT_NUMBER", self.google_cloud_project_number is not None),
         ]
         missing = [name for name, ok in checks if not ok]
         if self.postgres_configured:
@@ -362,8 +369,12 @@ class Settings(BaseSettings):
         return self
 
     def dashboard_missing(self) -> list[str]:
-        """Settings the web dashboard cannot run without (Redis may fall back to memory)."""
-        return [m for m in self.missing_settings() if not m.startswith("UPSTASH_")]
+        """Settings the web dashboard cannot run without (Redis may fall back to memory).
+
+        The picker settings are listed as missing but do not stop the dashboard: sign-in,
+        Settings and Disconnect still have to work while they are being set up."""
+        optional = ("UPSTASH_", "GOOGLE_PICKER_", "GOOGLE_CLOUD_PROJECT_NUMBER")
+        return [m for m in self.missing_settings() if not m.startswith(optional)]
 
     @property
     def secure_cookies(self) -> bool:

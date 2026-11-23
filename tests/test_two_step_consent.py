@@ -131,38 +131,53 @@ def test_disconnect_drops_the_token_and_keeps_the_session(signed_in, oauth, p2_a
     assert signed_in.get("/files").headers["location"].startswith("/connect")
 
 
-def test_narrow_token_can_be_upgraded_from_connect(signed_in, oauth, p2_app) -> None:
-    connect_drive(signed_in)
+FULL = "openid email https://www.googleapis.com/auth/drive"
+
+
+def _plant_old_full_drive_token(p2_app) -> str:
     vault = p2_app.state.dashboard.vault
-    record = vault.owner()
-    narrow = "openid email https://www.googleapis.com/auth/drive.file"
-    vault.set_owner(record["t"], record["email"], narrow)
+    vault.set_owner("rt-old-full", OWNER_EMAIL, FULL)
+    p2_app.state.dashboard.forget_drive(OWNER_EMAIL)
+    return "rt-old-full"
+
+
+def test_old_full_drive_token_is_revoked_before_reconnecting(signed_in, oauth, p2_app) -> None:
+    old = _plant_old_full_drive_token(p2_app)
+    vault = p2_app.state.dashboard.vault
     page = signed_in.get("/settings").text
     assert "Reconnect Google Drive" in page
     assert 'action="/connect/google_drive"' in page
-    assert "Disconnect" in page
-    # The existing token stays until the upgrade succeeds.
+    oauth.revoked.clear()
     r = connect_drive(signed_in)
     assert r.status_code == 303
-    assert DRIVE_SCOPE in vault.owner()["scopes"].split()
+    # Revoked first (before Google's screen), so the new grant is not revoked with it.
+    assert oauth.revoked == [old]
+    assert vault.legacy_owner() is None
+    assert vault.owner()["scopes"].split() == sorted(["openid", "email", DRIVE_SCOPE])
+    assert "https://www.googleapis.com/auth/drive" not in vault.owner()["scopes"].split()
     page = signed_in.get("/settings").text
     assert "Reconnect Google Drive" not in page
-    assert 'action="/connect/google_drive"' not in page
 
 
-def test_declined_upgrade_does_not_revoke_the_stored_grant(signed_in, oauth, p2_app) -> None:
-    connect_drive(signed_in)
+def test_declined_reconnect_leaves_no_old_token(signed_in, oauth, p2_app) -> None:
+    old = _plant_old_full_drive_token(p2_app)
     vault = p2_app.state.dashboard.vault
-    record = vault.owner()
-    narrow = "openid email https://www.googleapis.com/auth/drive.file"
-    vault.set_owner(record["t"], record["email"], narrow)
     oauth.revoked.clear()
-    oauth.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive.file"})
+    oauth.scopes = frozenset({"openid", "email"})
     r = connect_drive(signed_in)
     assert r.status_code == 400
-    assert oauth.revoked == []
-    assert vault.owner()["t"] == record["t"]
-    assert vault.owner()["scopes"] == narrow
+    assert old in oauth.revoked
+    assert vault.owner() is None and vault.legacy_owner() is None
+
+
+def test_disconnect_revokes_an_old_full_drive_token(signed_in, oauth, p2_app) -> None:
+    old = _plant_old_full_drive_token(p2_app)
+    token = csrf(signed_in, "/settings")
+    oauth.revoked.clear()
+    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    assert r.status_code == 303
+    assert oauth.revoked == [old]
+    assert p2_app.state.dashboard.vault.legacy_owner() is None
 
 
 def test_wrong_account_connect_keeps_that_accounts_own_grant(c, oauth, p2_app) -> None:
@@ -187,3 +202,49 @@ def test_assistant_consent_waits_for_a_drive_connection(signed_in) -> None:
     connect_drive(signed_in)
     page = signed_in.get("/oauth/authorize", params=params)
     assert page.status_code == 200 and "Allow" in page.text
+
+
+def test_old_connection_shows_reconnect_with_explanation(signed_in, oauth, p2_app) -> None:
+    connect_drive(signed_in)
+    _plant_old_full_drive_token(p2_app)
+    page = signed_in.get("/settings").text
+    card = page[page.index('id="connection-google_drive"') :].split("</article>", 1)[0]
+    assert "Not connected" in card and 'id="old-connection"' in card
+    assert ">Reconnect Google Drive</button>" in card
+    assert "only the specific Google Drive files you use with this app" in card
+
+
+def test_old_token_is_kept_when_google_does_not_confirm_the_revoke(
+    signed_in, oauth, p2_app
+) -> None:
+    old = _plant_old_full_drive_token(p2_app)
+    oauth.revoke_fails = True
+    r = signed_in.post("/connect/google_drive", data={"csrf": csrf(signed_in, "/settings")})
+    assert r.status_code == 503 and "nothing was changed" in r.text
+    vault = p2_app.state.dashboard.vault
+    # Still stored so it can be revoked later, and still never used.
+    assert vault.legacy_owner()["t"] == old and vault.owner() is None
+    oauth.revoke_fails = False
+    assert connect_drive(signed_in).status_code == 303
+    assert vault.legacy_owner() is None and vault.owner() is not None
+
+
+def test_disconnect_keeps_an_old_token_google_did_not_revoke(signed_in, oauth, p2_app) -> None:
+    old = _plant_old_full_drive_token(p2_app)
+    oauth.revoke_fails = True
+    token = csrf(signed_in, "/settings")
+    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    assert r.status_code == 303
+    vault = p2_app.state.dashboard.vault
+    assert vault.legacy_owner()["t"] == old and vault.owner() is None
+    assert "Choose Disconnect again" in signed_in.get("/settings").text
+
+
+def test_disconnect_says_so_when_google_does_not_confirm(signed_in, oauth, p2_app) -> None:
+    connect_drive(signed_in)
+    oauth.revoke_fails = True
+    token = csrf(signed_in, "/settings")
+    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    assert r.status_code == 303
+    assert p2_app.state.dashboard.vault.owner() is None
+    assert "myaccount.google.com/permissions" in signed_in.get("/connect").text

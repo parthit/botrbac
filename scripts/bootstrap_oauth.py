@@ -18,7 +18,7 @@ from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint
 

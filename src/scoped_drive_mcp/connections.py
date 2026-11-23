@@ -10,7 +10,7 @@ change.
 
 from dataclasses import dataclass
 
-from .drive_client import DRIVE_SCOPE
+from .drive_client import DRIVE_FILE_SCOPE, FULL_DRIVE_SCOPE
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,8 @@ class Connection:
     """Scopes requested in addition to the sign-in scopes."""
     required_scope: str
     """A token without this scope is refused and not stored."""
+    forbidden_scopes: tuple[str, ...]
+    """A token that carries any of these is refused, revoked and not stored."""
     summary: str
     """One line on what connecting allows."""
     disclosure: str
@@ -35,14 +37,15 @@ GOOGLE_DRIVE = Connection(
     key="google_drive",
     name="Google Drive",
     provider="google",
-    scopes=(DRIVE_SCOPE,),
-    required_scope=DRIVE_SCOPE,
-    summary="Files and folders in your Google Drive.",
+    scopes=(DRIVE_FILE_SCOPE,),
+    required_scope=DRIVE_FILE_SCOPE,
+    forbidden_scopes=(FULL_DRIVE_SCOPE,),
+    summary="Only the Google Drive files and folders you pick.",
     disclosure=(
-        "Google will ask you to let Bot RBAC see, edit, create, and delete your Google "
-        "Drive files. That is the whole Drive, so you can browse it here and approve "
-        "requests. An assistant still reaches only the files and folders you allow, "
-        "and every call is checked against that list."
+        "Google will ask you to let Bot RBAC see, edit, create, and delete only the "
+        "specific Google Drive files you use with this app. That means files you pick in "
+        "Google's file picker and files the app creates. Google keeps the rest of your "
+        "Drive closed to Bot RBAC. An assistant still reaches only the items you allow."
     ),
 )
 
