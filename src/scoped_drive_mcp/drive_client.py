@@ -208,7 +208,14 @@ def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
             # Refresh a private copy and check it before anything changes here: these
             # credentials are shared by every thread of a GoogleDriveClient, so a new
             # token must never be visible on them until its scopes have passed.
+            stale = self.token
             with self._refresh_lock:
+                if self.token is not None and self.token != stale and self.valid:
+                    # Another thread refreshed while this one waited (parallel Drive
+                    # lookups all see the same expired token). That token passed the
+                    # scope check below, so use it instead of asking Google again. A
+                    # refresh after a 401 still goes ahead: its token has not changed.
+                    return
                 trial = Credentials(
                     token=None,
                     refresh_token=self.refresh_token,
