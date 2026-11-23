@@ -43,6 +43,12 @@
   the store. Anyone with `ENCRYPTION_KEY` *and* store access could use it, so keep both private. Because the
   token only carries `drive.file`, a leaked one reaches only the files that person picked, not their Drive.
   The operator is in the same position: they can reach picked files, never the rest of the Drive.
+- **One key, one job.** `ENCRYPTION_KEY` itself encrypts only stored Drive sign-ins. Mailbox text and the
+  parked sign-in code each use their own key derived from it, so someone who can write to the store cannot
+  get the mailbox to decrypt a Drive sign-in, or to produce one the vault accepts. Mail saved before this
+  is still read for its 14 days, except a body that turns out to be a vault record. A wake-up's sender key
+  (`WEBHOOK_KEK`) is sealed for the slot it was saved in, so a record copied to another person's or app's
+  slot does not open. A key saved before that is sealed again for its slot the next time it is read.
 - **Parent ids:** tool results only list parent folders that are themselves shared (or inside something shared),
   so an assistant never learns the ids of your other folders.
 - **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a

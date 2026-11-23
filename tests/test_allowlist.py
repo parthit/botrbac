@@ -264,3 +264,21 @@ def test_multi_parent_rule(drive, clock) -> None:
     assert guard.is_in_scope("multi-parent")
     guard = ScopeGuard(drive, None, allowlist=lambda: {"sub-a-deep": FOLDER_MIME}, clock=clock)
     assert not guard.is_in_scope("multi-parent")
+
+
+def test_approving_a_shortcut_shows_what_it_points_to(world, owner, grants) -> None:
+    # A shortcut can carry any name. Approving it allows its target, so the approval
+    # option names the target (here a folder), not the shortcut.
+    world.add(
+        "sc-notes",
+        "notes.txt",
+        "application/vnd.google-apps.shortcut",
+        ["owner-root"],
+        shortcut_target="proj",
+    )
+    req, _ = grants.requests.create(
+        tool="read_file", token_name="app", reason="r", file_id="sc-notes"
+    )
+    first = grants.approval_options(req)[0]
+    assert (first.id, first.name, first.mime_type) == ("proj", "Projects", FOLDER_MIME)
+    assert grants.approve(req, "proj").id == "proj"

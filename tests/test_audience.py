@@ -359,3 +359,21 @@ def test_change_opens_one_items_panel_without_js(three) -> None:
     opened = owner.get("/sharing?tab=by-me&edit=loose-doc").text
     assert 'id="edit-loose-doc">' in opened
     assert 'id="edit-loose-two" hidden' in opened
+
+
+def test_unpairing_does_not_put_back_an_item_removed_at_the_same_moment() -> None:
+    # The owner stops sharing an item just as an unpair is taking a person off it. The
+    # unpair must not write the entry it read a moment earlier back onto the list.
+    from scoped_drive_mcp.store import AllowEntry
+
+    class RemovedMidway(MemoryStore):
+        def hget(self, key, field):
+            raw = super().hget(key, field)
+            self.hdel(key, field)  # "Stop sharing" lands right after the read
+            return raw
+
+    store = RemovedMidway()
+    ext = Allowlist(store, EXTERNAL_ALLOWLIST_KEY)
+    ext.add(AllowEntry("doc", "Doc", "text/plain", None, audience=(EVE, CAROL)))
+    assert ext.forget_person(EVE) == []
+    assert MemoryStore.hget(store, EXTERNAL_ALLOWLIST_KEY, "doc") is None

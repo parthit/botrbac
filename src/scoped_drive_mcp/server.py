@@ -421,10 +421,19 @@ def create_mcp(
     @mcp.tool(annotations=READ_ONLY)
     @guarded("get_webhook")
     async def get_webhook() -> dict[str, Any]:
-        """Show this app's own wake-up webhook, if one was saved. Does not return the sender key.
+        """Show whether this app has a wake-up webhook saved. Does not return its URL or key.
         Do not ask the human to paste a URL or key. Use the watch_mailbox prompt and create
         a scheduled check_messages routine instead."""
-        return await _run(run_mail, box.get_webhook)
+
+        def shown(email: str) -> dict[str, Any]:
+            # The routine URL and the key's last characters are for the human, on the
+            # dashboard. An assistant only needs to know whether a wake-up is set.
+            out = box.get_webhook(email)
+            out.pop("url", None)
+            out.pop("secret_hint", None)
+            return out
+
+        return await _run(run_mail, shown)
 
     @mcp.tool(annotations=WRITE)
     @guarded("set_webhook")

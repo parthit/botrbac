@@ -36,7 +36,7 @@ from starlette.routing import Route
 from .auth import Principal, hash_token
 from .config import Role
 from .ratelimit import allow, ip_identity
-from .store import KeyValueStore, utc_now
+from .store import KeyValueStore, purpose_fernet, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -503,9 +503,9 @@ class McpOAuth:
         # redirect URL parked between Allow and the redirect, which carries the code.
         self._fernet = None
         if encryption_key:
-            from cryptography.fernet import Fernet
-
-            self._fernet = Fernet(encryption_key.strip().encode())
+            # Its own key, derived from ENCRYPTION_KEY (which the Drive sign-in vault
+            # uses), so nothing else that encrypts or decrypts can open this.
+            self._fernet = purpose_fernet(encryption_key, "oauth redirect")
         else:
             logger.warning(
                 "ENCRYPTION_KEY is not set: a sign-in code waiting for its redirect is "
