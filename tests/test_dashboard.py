@@ -808,3 +808,12 @@ def test_referrer_policy_sends_only_the_origin_to_other_sites(owner_c) -> None:
     policy = owner_c.get("/files").headers["referrer-policy"]
     assert policy == "strict-origin-when-cross-origin"
     assert policy in _FORM_POST_KEEPS_ORIGIN
+
+
+def test_files_tab_says_where_files_come_from(owner_c) -> None:
+    """The first Files tab lists what was chosen from Google Drive, not the whole Drive,
+    and choosing a file is not the same as allowing it."""
+    page = unescape(owner_c.get("/files").text)
+    tabs = page[page.index('<nav class="tabs" aria-label="Files">') :].split("</nav>", 1)[0]
+    assert ">From Google Drive</a>" in tabs and "All files" not in tabs
+    assert "doesn’t give any assistant access" in page
