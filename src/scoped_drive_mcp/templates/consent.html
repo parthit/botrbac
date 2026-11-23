@@ -5,6 +5,10 @@
   <p class="eye">Connect an assistant</p>
   {% if platform.local %}
   <h1>Allow a program on this computer?</h1>
+  <p class="flash error" id="consent-local" role="alert"><b>This sends access to a program on this computer</b>
+    (<code>{{ platform.host }}</code>), not to Claude, ChatGPT or another assistant’s website. Any program
+    running on your computer could be the one listening there. Only allow this if you started it yourself
+    and know what it is.</p>
   {% else %}
   <h1>Allow {{ platform.label }}?</h1>
   {% endif %}
@@ -16,12 +20,6 @@
       <button type="submit">Use a different account</button>
     </form>
   </div>
-  {% if platform.local %}
-  <p class="flash error" id="consent-local" role="alert"><b>This sends access to a program on this computer</b>
-    (<code>{{ platform.host }}</code>), not to Claude, ChatGPT or another assistant’s website. Any program
-    running on your computer could be the one listening there. Only allow this if you started it yourself
-    and know what it is.</p>
-  {% endif %}
   <div class="consent-check">
     <p id="consent-origin"><b>Only allow this if you just started connecting from {{ platform.label }} yourself.</b>
       If you did not, choose Deny.</p>
