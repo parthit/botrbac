@@ -1145,18 +1145,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if connection is None:
             return render(request, "error.html", 404, message="Unknown connection.")
         email = current_actor.get()
+        # An old full-Drive token is kept until Google confirms it is revoked, so a failed
+        # revoke can be retried. It is never used meanwhile.
+        legacy = await blocking(ctx.revoke_legacy_drive, oauth.revoke)
+        if legacy is False:
+            ctx.forget_drive(email)
+            flash(
+                request,
+                "error",
+                "Google didn\u2019t confirm that your old Drive connection was ended, so it "
+                "is kept (and still unused). Choose Disconnect again in a minute.",
+            )
+            return RedirectResponse("/settings#services", status_code=303)
+        # A current per-file token is removed here at once, as asked, then revoked.
         token = await blocking(ctx.disconnect_drive)
+        confirmed = True
         if token:
             # Google's revoke also ends this app's sign-in grant. Step 1 holds no token,
             # so the dashboard session is unaffected.
-            await blocking(oauth.revoke, token)
+            confirmed = await blocking(oauth.revoke, token)
         ctx.forget_drive(email)
         audit_owner("disconnect", connection=connection.key)
-        flash(
-            request,
-            "ok",
-            f"{connection.name} is disconnected. Assistants can no longer reach it.",
-        )
+        if confirmed:
+            flash(
+                request,
+                "ok",
+                f"{connection.name} is disconnected. Assistants can no longer reach it.",
+            )
+        else:
+            flash(
+                request,
+                "error",
+                f"{connection.name} is disconnected here, but Google didn\u2019t confirm it "
+                "ended the permission. Remove Bot RBAC at myaccount.google.com/permissions "
+                "to be sure.",
+            )
         return RedirectResponse("/connect", status_code=303)
 
     async def logout(request: Request, form: dict[str, str]) -> Response:

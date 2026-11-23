@@ -227,3 +227,24 @@ def test_old_token_is_kept_when_google_does_not_confirm_the_revoke(
     oauth.revoke_fails = False
     assert connect_drive(signed_in).status_code == 303
     assert vault.legacy_owner() is None and vault.owner() is not None
+
+
+def test_disconnect_keeps_an_old_token_google_did_not_revoke(signed_in, oauth, p2_app) -> None:
+    old = _plant_old_full_drive_token(p2_app)
+    oauth.revoke_fails = True
+    token = csrf(signed_in, "/settings")
+    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    assert r.status_code == 303
+    vault = p2_app.state.dashboard.vault
+    assert vault.legacy_owner()["t"] == old and vault.owner() is None
+    assert "Choose Disconnect again" in signed_in.get("/settings").text
+
+
+def test_disconnect_says_so_when_google_does_not_confirm(signed_in, oauth, p2_app) -> None:
+    connect_drive(signed_in)
+    oauth.revoke_fails = True
+    token = csrf(signed_in, "/settings")
+    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    assert r.status_code == 303
+    assert p2_app.state.dashboard.vault.owner() is None
+    assert "myaccount.google.com/permissions" in signed_in.get("/connect").text
