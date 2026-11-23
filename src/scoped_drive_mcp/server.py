@@ -869,6 +869,9 @@ def build_app(
             routed, ext_write_guard, settings, writer=lambda: current_guest.get()
         ),
         charge_write=lambda guest: actor_kv.incr(f"guestwrites:{guest}", 3600),
+        # Read as the owner: what the owner's own assistants were given (plus the admin's
+        # ROOT_FOLDER_ID). A paired person may not rename or overwrite those.
+        owner_protected=lambda: set(guard.allowed()),
     )
     # The human side of the same shares: the dashboard's "Shared with me" page. Each
     # source runs through the same guest checks as the MCP tools above.

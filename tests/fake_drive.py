@@ -36,6 +36,8 @@ class FakeFile:
     shortcut_target: str | None = None
     description: str | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # Private to the app that set them: other Drive editors cannot see or change these.
+    app_properties: dict[str, str] = field(default_factory=dict)
     # Bytes Drive returns for files.export in a given format; others get `content`.
     exports: dict[str, bytes | Exception] = field(default_factory=dict)
 
@@ -59,6 +61,8 @@ class FakeFile:
             full["description"] = self.description
         if self.properties:
             full["properties"] = dict(self.properties)
+        if self.app_properties:
+            full["appProperties"] = dict(self.app_properties)
         wanted = {f.strip() for f in fields.split(",")}
         return {k: v for k, v in full.items() if k in wanted}
 
@@ -293,6 +297,7 @@ class FakeDrive:
         )
         f.description = metadata.get("description")
         f.properties = dict(metadata.get("properties") or {})
+        f.app_properties = dict(metadata.get("appProperties") or {})
         return f.as_api(fields)
 
     def create_permission(self, file_id: str, email: str, role: str) -> str:
@@ -325,13 +330,13 @@ class FakeDrive:
             f.name = metadata["name"]
         if metadata.get("trashed"):
             f.trashed = True
-        if "properties" in metadata:
+        for meta_key, stored in (("properties", f.properties), ("appProperties", f.app_properties)):
             # Like Drive: a property set to null is deleted.
-            for key, value in (metadata["properties"] or {}).items():
+            for key, value in (metadata.get(meta_key) or {}).items():
                 if value is None:
-                    f.properties.pop(key, None)
+                    stored.pop(key, None)
                 else:
-                    f.properties[key] = value
+                    stored[key] = value
         if content is not None:
             f.content = content
         return f.as_api(fields)

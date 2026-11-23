@@ -21,7 +21,9 @@ Rules:
   capped in depth and total lookups.
 - Allowlisted items are in scope for reads and (if folders) as parents for creates,
   but callers pass `allow_root=False` for rename/trash so Grok cannot rename or
-  trash something the owner granted.
+  trash something the owner granted. Trash also refuses a folder that is an ancestor
+  of an allowlisted item (`assert_not_above_allowed`), since trashing a folder trashes
+  what is inside it.
 - Shortcuts are ordinary files here: the guard never follows `shortcutDetails`.
 - Search never forwards user-written Drive queries: the user text is escaped and
   placed into a fixed template restricted to folders in scope, and every result is
@@ -49,6 +51,7 @@ _INDIVIDUAL_SEARCH_MAX_PAGES = 10
 REF_FIELDS = "id,parents,trashed,mimeType"
 NOT_IN_SCOPE = "file not found or not shared with the assistant"
 PROTECTED = "items the owner granted directly cannot be renamed or trashed"
+HOLDS_PROTECTED = "this folder holds an item the owner granted directly, so it cannot be trashed"
 
 
 class ForbiddenError(Exception):
@@ -348,6 +351,58 @@ class ScopeGuard:
         if not self._reaches_allowed(ref, allowed):
             raise OutOfScopeError(file_id)
         return ref
+
+    def assert_not_above_allowed(self, folder_id: str) -> None:
+        """Refuse when `folder_id` is an ancestor of an allowlisted item (trash guard).
+
+        Trashing a folder trashes everything below it, so a folder that holds an item the
+        owner granted directly is protected like that item. Each allowlisted item's parent
+        chain is walked up (the item fetched fresh, its ancestors through the folder
+        cache), with the same depth and lookup caps as the scope walk. A walk that hits a
+        cap refuses (fails closed). A parent the signed-in account cannot see ends that
+        chain, as it does in the scope walk: nothing above it can be known."""
+        validate_drive_id(folder_id)
+        allowed = self.allowed()
+        if folder_id in allowed:
+            raise ForbiddenError(PROTECTED)
+        # Folders whose whole ancestry is known not to contain folder_id.
+        cleared: set[str] = set()
+        for item_id in allowed:
+            ref = self._fetch(item_id)
+            if ref is None or ref.trashed or ref.id != item_id:
+                continue
+            if self._chain_may_reach(ref, folder_id, cleared):
+                raise ForbiddenError(HOLDS_PROTECTED)
+
+    def _chain_may_reach(self, ref: FileRef, target: str, cleared: set[str]) -> bool:
+        """True if walking up from `ref` reaches `target`, or the walk hit a cap."""
+        visited = {ref.id}
+        frontier = list(ref.parents)
+        lookups = 0
+        for _depth in range(self.max_depth):
+            if not frontier:
+                cleared.update(visited)
+                return False
+            next_frontier: list[str] = []
+            for parent_id in frontier:
+                if parent_id == target:
+                    return True
+                if parent_id in visited or parent_id in cleared:
+                    continue
+                visited.add(parent_id)
+                lookups += 1
+                if lookups > self.max_lookups:
+                    return True
+                parent = self._ancestor(parent_id)
+                # Trashed folders are walked through: what is above them still counts.
+                if parent is None or parent.id != parent_id:
+                    continue
+                next_frontier.extend(parent.parents)
+            frontier = next_frontier
+        if frontier:
+            return True
+        cleared.update(visited)
+        return False
 
     def is_in_scope(self, file_id: str, *, ref: FileRef | None = None) -> bool:
         try:
