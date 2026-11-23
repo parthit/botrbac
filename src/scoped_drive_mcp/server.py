@@ -9,6 +9,8 @@ between requests, so a per-request manager behaves identically and does not
 depend on lifespan at all.
 """
 
+import hashlib
+import hmac
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -929,6 +931,15 @@ def build_app(
             loopback_callback=settings.oauth_loopback_callback,
             strict=isinstance(kv, SignedStore) and kv.require,
             encryption_key=enc_key,
+            # Client ids are signed, not stored. Derived, so the session key is never used
+            # for two things.
+            client_key=hmac.new(
+                settings.session_secret.get_secret_value().encode(),
+                b"botrbac oauth client id v1",
+                hashlib.sha256,
+            ).digest()
+            if settings.session_secret
+            else None,
         )
         if base_url and not settings.dashboard_missing()
         else None

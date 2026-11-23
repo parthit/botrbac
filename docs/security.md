@@ -86,13 +86,12 @@
   names the app by the service its redirect belongs to; the name the app registered with is shown only as
   a secondary line, because any app can choose any name. `http://localhost:8787/callback` and
   `http://127.0.0.1:8787/callback` are accepted only when `OAUTH_LOOPBACK_CALLBACK=1`, and the consent
-  page then warns that access goes to a program on this computer. Anyone can register a client, so a
-  client that never gets a token is removed after a day. At most 20 such clients are kept per address
-  (IPv6 per /64), the address's own oldest making room, and at most 5000 in all, the oldest making
-  room only once they are 15 minutes old so a person on the consent page is never cut off. If the cap
-  is full of younger ones, registering answers 429 until room frees up. An approval whose code is never
-  exchanged is removed once the code has expired (5 minutes), and only a client that got a token is
-  kept for good.
+  page then warns that access goes to a program on this computer. Registering stores nothing: the client id
+  is the registration itself (its name and redirect addresses), signed with a key derived from
+  `SESSION_SECRET`, so a flood of registrations fills nothing and can't push out anyone's
+  connection in progress. Changing `SESSION_SECRET` makes assistants register again (connections
+  already made keep working). An approval whose code is never exchanged is removed once the code has
+  expired (5 minutes).
   This server's own `/oauth/done` page is accepted only when `OAUTH_TEST_CALLBACK=1` (local testing). Leave
   it off in production: a code sent there lands in front of the person who clicked Allow.
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has

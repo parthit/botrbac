@@ -6,7 +6,6 @@
 4. The consent page names the app by where the approval goes; loopback is opt-in.
 """
 
-import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -18,7 +17,18 @@ from scoped_drive_mcp.mcp_oauth import CLIENTS_KEY, GRANTS_KEY, OAuthClientRecor
 from scoped_drive_mcp.server import build_app
 from tests.conftest import OWNER_EMAIL, TOKENS, make_settings
 from tests.dash import MCP_HEADERS, client, login
-from tests.test_mcp_oauth import GROK, INIT, _approved, _refresh, exchange, register
+from tests.test_mcp_oauth import (
+    GROK,
+    INIT,
+    _approved,
+    _refresh,
+    auth_params,
+    code_from,
+    exchange,
+    post,
+    posted_redirect,
+    register,
+)
 
 LOOPBACK = "http://127.0.0.1:8787/callback"
 CLAUDE = "https://claude.ai/api/mcp/auth_callback"
@@ -148,18 +158,11 @@ def test_bad_tokens_from_one_ipv6_64_share_one_count(world, memstore, oauth, beh
     assert _mcp(c, "bad-3", "2001:db8:5:6::3").status_code == 429
 
 
-# ---- 3. abandoned registrations and approvals are removed ----
+# ---- 3. registering stores nothing; abandoned approvals are removed ----
 
 
 def _ago(seconds: int) -> str:
     return (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat(timespec="seconds")
-
-
-def _backdate_client(server, client_id: str, seconds: int) -> None:
-    store = server.store
-    record = json.loads(store.hget(CLIENTS_KEY, client_id))
-    record["created_at"] = _ago(seconds)
-    store.hset(CLIENTS_KEY, client_id, json.dumps(record))
 
 
 def _backdate_grant(server, grant_id: str, seconds: int) -> None:
@@ -169,49 +172,67 @@ def _backdate_grant(server, grant_id: str, seconds: int) -> None:
     store.hset(GRANTS_KEY, grant_id, grant.to_json())
 
 
-def test_clients_never_approved_are_removed_after_a_day(world, memstore, oauth) -> None:
+def test_registering_stores_nothing_so_a_flood_cannot_block_anyone(
+    world, memstore, oauth, monkeypatch
+) -> None:
     app = _app(world, memstore, oauth)
     server = app.state.dashboard.mcp_oauth
     c = client(app)
     assert login(c).status_code == 303
-    stale = register(c, GROK).json()["client_id"]
-    fresh = register(c, GROK).json()["client_id"]
-    used = register(c, GROK).json()["client_id"]
-    code, verifier = _approved(c, used)
-    assert exchange(c, used, code, verifier, GROK).status_code == 200
-    # The approval is noted on the client itself.
-    assert server.client(used).granted is True
-    day = mcp_oauth_module.UNUSED_CLIENT_TTL
-    for client_id in (stale, fresh, used):
-        _backdate_client(server, client_id, day + 60 if client_id != fresh else 60)
-
-    assert register(c, GROK).status_code == 201
-    assert server.client(stale) is None
-    assert server.client(fresh) is not None
-    assert server.client(used) is not None
+    waiting = register(c, GROK).json()["client_id"]
+    # Someone opens the consent page for it ...
+    verifier, params = auth_params(waiting, GROK)
+    assert c.get("/oauth/authorize", params=params).status_code == 200
+    # ... while a flood of registrations arrives. None of them is stored.
+    for _ in range(200):
+        assert register(c, GROK).status_code == 201
+    assert server.store.hgetall(CLIENTS_KEY) == {}
+    # The first person is never cut off.
+    code = code_from(posted_redirect(c, post(c, "/oauth/authorize", decision="allow")))
+    assert exchange(c, waiting, code, verifier, GROK).status_code == 200
 
 
-def test_unapproved_clients_are_capped(world, memstore, oauth, monkeypatch) -> None:
-    monkeypatch.setattr(mcp_oauth_module, "MAX_UNUSED_CLIENTS", 3)
+def test_a_tampered_or_foreign_client_id_is_refused(world, memstore, oauth) -> None:
     app = _app(world, memstore, oauth)
     server = app.state.dashboard.mcp_oauth
     c = client(app)
+    client_id = register(c, GROK).json()["client_id"]
+    assert server.client(client_id).redirect_uris == [GROK]
+    body, mac = client_id[len(mcp_oauth_module.CLIENT_ID_PREFIX) :].split(".")
+    # Claim a different redirect with the old signature.
+    forged_body = server._sign_client("Grok Bot", [CLAUDE], "x")[3:].split(".")[0]
+    for bad in (
+        f"c1.{forged_body}.{mac}",
+        f"c1.{body}.{'A' * len(mac)}",
+        f"c1.{body}",
+        "c1.",
+        "c1." + "A" * 3000,
+    ):
+        assert server.client(bad) is None, bad
+    # An id signed by another deployment's key is refused too.
+    other = mcp_oauth_module.McpOAuth(
+        server.store, server.base_url, OWNER_EMAIL, client_key=b"k" * 32
+    )
+    assert server.client(other._sign_client("Grok Bot", [GROK], "x")) is None
+    verifier, params = auth_params(f"c1.{forged_body}.{mac}", CLAUDE)
     assert login(c).status_code == 303
-    used = register(c, GROK).json()["client_id"]
-    code, verifier = _approved(c, used)
-    assert exchange(c, used, code, verifier, GROK).status_code == 200
-    ids = []
-    gap = mcp_oauth_module.MIN_EVICT_AGE
-    for age in (5 * gap, 4 * gap, 3 * gap, 2 * gap, gap):
-        ids.append(register(c, GROK).json()["client_id"])
-        _backdate_client(server, ids[-1], age + 60)
-    newest = register(c, GROK).json()["client_id"]
-    stored = server.store.hgetall(CLIENTS_KEY)
-    unused = [cid for cid, raw in stored.items() if not OAuthClientRecord.from_json(raw).granted]
-    assert len(unused) == 3
-    # The oldest made room. A client in use is never one of them.
-    assert set(unused) == {ids[3], ids[4], newest}
-    assert server.client(used) is not None
+    assert c.get("/oauth/authorize", params=params).status_code == 400
+
+
+def test_a_client_registered_before_ids_were_signed_still_works(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    legacy = OAuthClientRecord(
+        client_id="legacy-client-id-123",
+        client_name="Grok Bot",
+        redirect_uris=[GROK],
+        created_at=_ago(86400 * 60),
+    )
+    server.store.hset(CLIENTS_KEY, legacy.client_id, legacy.to_json())
+    c = client(app)
+    assert login(c).status_code == 303
+    code, verifier = _approved(c, legacy.client_id)
+    assert exchange(c, legacy.client_id, code, verifier, GROK).status_code == 200
 
 
 def test_approval_whose_code_was_never_exchanged_is_removed(world, memstore, oauth) -> None:
@@ -228,100 +249,20 @@ def test_approval_whose_code_was_never_exchanged_is_removed(world, memstore, oau
     assert exchange(c, finished_client, code, verifier, GROK).status_code == 200
     finished = next(g for g in server.store.hgetall(GRANTS_KEY) if g != abandoned)
 
-    # Still inside the code's lifetime: kept.
+    # Still inside the code's lifetime: the next approval keeps it.
     _backdate_grant(server, abandoned, 60)
-    assert register(c, GROK).status_code == 201
+    _approved(c, register(c, GROK).json()["client_id"])
     assert abandoned in server.store.hgetall(GRANTS_KEY)
 
     old = mcp_oauth_module.CODE_TTL + 120
     _backdate_grant(server, abandoned, old)
     _backdate_grant(server, finished, old)
-    assert register(c, GROK).status_code == 201
+    _approved(c, register(c, GROK).json()["client_id"])
     grants = server.store.hgetall(GRANTS_KEY)
     assert abandoned not in grants
     assert server.store.get(f"oauth:role:{abandoned}") is None
     # A connection that got its tokens is untouched.
     assert finished in grants
-
-
-def test_a_client_on_the_consent_page_is_not_evicted(world, memstore, oauth, monkeypatch) -> None:
-    """A full cap of young clients refuses new registrations instead of evicting one that
-    someone may be approving right now."""
-    monkeypatch.setattr(mcp_oauth_module, "MAX_UNUSED_CLIENTS", 3)
-    app = _app(world, memstore, oauth)
-    server = app.state.dashboard.mcp_oauth
-    c = client(app)
-    assert login(c).status_code == 303
-    waiting = register(c, GROK).json()["client_id"]
-    # The person opens the consent page for it...
-    from tests.test_mcp_oauth import auth_params, code_from, post, posted_redirect
-
-    verifier, params = auth_params(waiting, GROK)
-    assert c.get("/oauth/authorize", params=params).status_code == 200
-    # ...while someone else registers past the cap.
-    assert register(c, GROK).status_code == 201
-    assert register(c, GROK).status_code == 201
-    refused = register(c, GROK)
-    assert refused.status_code == 429
-    assert server.client(waiting) is not None
-    # Allow still works and the app gets its tokens.
-    code = code_from(posted_redirect(c, post(c, "/oauth/authorize", decision="allow")))
-    assert exchange(c, waiting, code, verifier, GROK).status_code == 200
-
-
-def _register_from(c, ip: str):
-    payload = {
-        "client_name": "Grok Bot",
-        "redirect_uris": [GROK],
-        "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-    }
-    return c.post("/oauth/register", json=payload, headers={"X-Forwarded-For": ip})
-
-
-def test_one_address_cannot_push_out_anothers_clients(
-    world, memstore, oauth, monkeypatch, behind_proxy
-) -> None:
-    monkeypatch.setattr(mcp_oauth_module, "MAX_UNUSED_PER_SOURCE", 3)
-    app = _app(world, memstore, oauth)
-    server = app.state.dashboard.mcp_oauth
-    c = client(app)
-    victim = _register_from(c, "198.51.100.7").json()["client_id"]
-    flood = [_register_from(c, "203.0.113.9").json()["client_id"] for _ in range(10)]
-    assert server.client(victim) is not None
-    kept = [cid for cid in flood if server.client(cid) is not None]
-    # The flooding address keeps only a few of its own, always including the newest.
-    assert len(kept) == 3 and flood[-1] in kept
-
-
-def test_approving_without_exchanging_does_not_keep_a_client(world, memstore, oauth) -> None:
-    app = _app(world, memstore, oauth)
-    server = app.state.dashboard.mcp_oauth
-    c = client(app)
-    assert login(c).status_code == 303
-    client_id = register(c, GROK).json()["client_id"]
-    _approved(c, client_id)
-    assert server.client(client_id).granted is False
-    _backdate_client(server, client_id, mcp_oauth_module.UNUSED_CLIENT_TTL + 60)
-    (grant_id,) = server.store.hgetall(GRANTS_KEY)
-    _backdate_grant(server, grant_id, mcp_oauth_module.CODE_TTL + 120)
-    assert register(c, GROK).status_code == 201
-    assert server.client(client_id) is None
-
-
-def test_clients_saved_before_the_granted_field_are_kept(world, memstore, oauth) -> None:
-    app = _app(world, memstore, oauth)
-    server = app.state.dashboard.mcp_oauth
-    c = client(app)
-    legacy = register(c, GROK).json()["client_id"]
-    record = json.loads(server.store.hget(CLIENTS_KEY, legacy))
-    record.pop("granted")
-    record.pop("source", None)
-    record["created_at"] = _ago(mcp_oauth_module.UNUSED_CLIENT_TTL * 30)
-    server.store.hset(CLIENTS_KEY, legacy, json.dumps(record))
-    assert register(c, GROK).status_code == 201
-    assert server.client(legacy) is not None
 
 
 # ---- 4. the consent page names the app by its redirect; loopback is opt-in ----
@@ -368,3 +309,25 @@ def test_loopback_consent_warns_it_is_a_local_program(world, memstore, oauth) ->
     assert "This sends access to a program on this computer" in page.text
     assert "127.0.0.1:8787" in page.text
     assert "Allow Claude?" not in page.text
+
+
+def test_a_connected_app_keeps_refreshing_after_the_client_key_changes(
+    world, memstore, oauth
+) -> None:
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    c = client(app)
+    assert login(c).status_code == 303
+    client_id = register(c, GROK).json()["client_id"]
+    code, verifier = _approved(c, client_id)
+    tokens = exchange(c, client_id, code, verifier, GROK).json()
+    # SESSION_SECRET rotated: this id no longer decodes ...
+    server._client_key = b"rotated" * 5
+    assert server.client(client_id) is None
+    # ... but the connection already made keeps refreshing.
+    refreshed = _refresh(c, client_id, tokens["refresh_token"])
+    assert refreshed.status_code == 200, refreshed.text
+    # Another client's id is still refused, and the token is kept for its own client.
+    other = register(c, GROK).json()["client_id"]
+    assert _refresh(c, other, refreshed.json()["refresh_token"]).status_code != 200
+    assert _refresh(c, client_id, refreshed.json()["refresh_token"]).status_code == 200
