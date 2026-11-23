@@ -101,7 +101,12 @@ class DriveClient(Protocol):
     def get_file(self, file_id: str, fields: str) -> dict[str, Any]: ...
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]: ...
 
     def export(self, file_id: str, mime_type: str) -> bytes: ...
@@ -261,7 +266,12 @@ class GoogleDriveClient:
             raise
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
         from googleapiclient.errors import HttpError
 
@@ -278,6 +288,8 @@ class GoogleDriveClient:
             "includeItemsFromAllDrives": True,
             "supportsAllDrives": True,
         }
+        if order_by:
+            common["orderBy"] = order_by
 
         def run(extra: dict[str, Any]) -> dict[str, Any]:
             return self._execute(files.list(**common, **extra))
@@ -452,9 +464,14 @@ class LazyBotDriveClient:
         return self._inner().get_file(file_id, fields)
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
-        return self._inner().list_files(q, fields, page_size, page_token)
+        return self._inner().list_files(q, fields, page_size, page_token, order_by)
 
     def export(self, file_id: str, mime_type: str) -> bytes:
         return self._inner().export(file_id, mime_type)
@@ -540,9 +557,14 @@ class RoutingDriveClient:
         return self._client().get_file(file_id, fields)
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
-        return self._client().list_files(q, fields, page_size, page_token)
+        return self._client().list_files(q, fields, page_size, page_token, order_by)
 
     def export(self, file_id: str, mime_type: str) -> bytes:
         return self._client().export(file_id, mime_type)

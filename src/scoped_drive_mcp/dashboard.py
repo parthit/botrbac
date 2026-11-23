@@ -1342,11 +1342,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 # picked files can sit anywhere in the Drive, not just in My Drive's top
                 # level. So the top of Files lists everything the app can open: the
                 # picked items and the files it created, each with Allow and Share.
+                # That "everything" is bounded by the OAuth scope, which is always
+                # drive.file: a wider token is refused at connect and on every refresh.
                 query = "trashed=false"
             else:
                 query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
-                query, fields=LIST_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
+                query,
+                fields=LIST_FIELDS,
+                page_size=BROWSE_PAGE_SIZE,
+                page_token=page_token,
+                # Folders first, then by name, across every page (not just within one).
+                order_by="folder,name",
             )
             items = resp.get("files", [])
             # Drive's parents filter can echo a file that merely mentions the folder.

@@ -169,6 +169,7 @@ def compile_query(q: str):
 class FakeDrive:
     files: dict[str, FakeFile] = field(default_factory=dict)
     queries: list[str] = field(default_factory=list)
+    orders: list[str | None] = field(default_factory=list)
     get_calls: list[str] = field(default_factory=list)
     ignore_parent_filter: bool = False
     page_size_cap: int = 1000
@@ -211,6 +212,7 @@ class FakeDrive:
             roots=self.roots,
             _ids=self._ids,
             default_owner=self.default_owner,
+            orders=self.orders,
         )
 
     def share(self, file_id: str, email: str, role: str = "writer") -> str:
@@ -248,14 +250,22 @@ class FakeDrive:
         return self._get(file_id).as_api(fields)
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
         self.queries.append(q)
+        self.orders.append(order_by)
         if self.ignore_parent_filter:
             pred = compile_query(re.sub(r" and \((?:'[^']*' in parents(?: or )?)+\)", "", q))
         else:
             pred = compile_query(q)
         matches = [f for f in self.files.values() if pred(f) and self.visible(f)]
+        if order_by == "folder,name":
+            matches.sort(key=lambda f: (f.mime_type != FOLDER_MIME, f.name.lower()))
         start = int(page_token or 0)
         size = min(page_size, self.page_size_cap)
         page = matches[start : start + size]

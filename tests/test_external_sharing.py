@@ -437,3 +437,11 @@ def test_files_top_lists_every_opened_item_with_share(people, world) -> None:
     assert "notes.txt" in page
     row = page[page.index("notes.txt") :].split("</tr>", 1)[0]
     assert 'action="/sharing/add"' in row
+    # Sorted by Google across pages: folders first, then names.
+    assert world.orders[-1] == "folder,name"
+    # A trashed item stays out, even though it was opened to the app.
+    world.files["loose-two"].trashed = True
+    assert "Second memo" not in owner.get("/files").text
+    # Inside a folder, only that folder's own items are listed.
+    inside = owner.get("/files?folder=proj").text
+    assert "notes.txt" in inside and "Loose memo" not in inside
