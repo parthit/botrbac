@@ -849,7 +849,7 @@ def test_isolated_child_gets_no_secrets_and_sets_its_limits(
     command = extract_worker._child_command(300)
     assert command[:3] == [sys.executable, "-I", "-B"]
     package_parent = str(Path(extract_worker.__file__).resolve().parent.parent)
-    assert json.loads(command[5])[0] == package_parent
+    assert json.loads(command[command.index("-c") + 2])[0] == package_parent
     probe = (
         "import json, resource, sys; sys.argv[1:] = ['[]', '300', '7'];"
         f"sys.path.insert(0, {package_parent!r});"
@@ -909,3 +909,267 @@ def test_read_file_reads_a_pdf_in_the_child_process(drive, service) -> None:
     result = service.read_file("plain-pdf")
     assert result["content"] == "from the child"
     assert result["truncated"] is False
+
+
+# ---- review of the child process and the PDF budget ----
+
+
+def _ligature_pdf(pages: int, chars_per_page: int, *, ligature: bool = True) -> bytes:
+    """Pages of plain ASCII text in a font whose ToUnicode map, like a LaTeX font's, also
+    maps one glyph to "ffi", so pypdf may turn a byte into 3 characters."""
+    cmap = (
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"1 begincodespacerange <00> <FF> endcodespacerange\n"
+        b"1 beginbfrange <20> <7E> <0020> endbfrange\n"
+        b"1 beginbfchar <0E> <006600660069> endbfchar\n"
+        b"endcmap CMapName currentdict /CMap defineresource pop end end"
+    )
+    line = b"The quick brown fox jumps over the lazy dog again "  # 50 characters
+    content = b"BT /F1 10 Tf 20 780 Td "
+    content += b"".join(b"(" + line + b") Tj T* " for _ in range(chars_per_page // 50)) + b"ET"
+    to_unicode = b" /ToUnicode %d 0 R" % (4 + 2 * pages) if ligature else b""
+    return _pdf_with_pages(
+        [content] * pages,
+        b"<< /Font << /F1 %d 0 R >> >>" % (3 + 2 * pages),
+        [
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica" + to_unicode + b" >>",
+            _stream(cmap),
+        ],
+    )
+
+
+@pytest.mark.parametrize(("pages", "per_page"), [(1, 40_000), (30, 3300)])
+def test_pdf_ligature_font_text_under_the_limit_is_not_cut(pages: int, per_page: int) -> None:
+    """A font that may turn a byte into "ffi" was charged 3 characters per byte even when
+    it made 1: a 40 000-character page came back as 34 699, marked truncated."""
+    plain = extract(_ligature_pdf(pages, per_page, ligature=False), "pdf", char_limit=100_000)
+    result = extract(_ligature_pdf(pages, per_page), "pdf", char_limit=100_000)
+    assert result == plain
+    assert result.truncated is False
+    assert len(result.text) == len(plain.text) > (pages * per_page) * 0.98
+
+
+def test_pdf_ligature_font_text_over_the_limit_is_still_cut() -> None:
+    result = extract(_ligature_pdf(1, 120_000), "pdf", char_limit=100_000)
+    assert result.truncated
+    assert len(result.text) == 100_001
+
+
+def _shared_operand_pdf(pages: int, tokens: int) -> bytes:
+    """Pages whose content streams hold `tokens` numbers and no operator: a few KB
+    each, which pypdf parses whole before any operator is seen."""
+    content = b"BT /F1 12 Tf 10 10 Td (x) Tj ET " + b"0 " * tokens
+    return _pdf_with_pages([content] * pages, b"<< /Font << /F1 3 0 R >> >>", [_FONT])
+
+
+def test_pdf_deadline_is_checked_while_a_page_is_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each page took about a second to parse, all of it past the deadline."""
+    from scoped_drive_mcp import extract as extract_module
+
+    data = _shared_operand_pdf(3, 900_000)
+    monkeypatch.setattr(extract_module, "_PDF_SECONDS", 0.2)
+    with _Timer() as timer, pytest.raises(ExtractError, match="too complex"):
+        extract(data, "pdf", char_limit=100_000)
+    assert timer.seconds < 0.45
+
+
+def test_pdf_parse_clock_counts_like_pypdf_outside_extraction() -> None:
+    from pypdf.generic import _data_structures
+
+    extract(minimal_pdf("swap in the clocked budget"), "pdf", char_limit=100)
+    budget = _data_structures.StreamParsingBudget(remaining_budget=10)
+    budget.remaining_budget -= 3
+    assert budget.remaining_budget == 7
+
+
+def _replying_child(text: str = "ok", delay: float = 0.0) -> str:
+    reply = json.dumps({"text": text, "truncated": False})
+    return f"import sys, time; sys.stdin.read(); time.sleep({delay}); print({reply!r})"
+
+
+def test_one_caller_runs_one_child_and_others_are_not_held_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four slow files from one caller held both slots, and a harmless file from anyone
+    else waited 22 s (or failed at 25 s)."""
+    import threading
+
+    from scoped_drive_mcp import extract_worker
+
+    monkeypatch.setattr(extract_worker, "WAIT_SECONDS", 0.3)
+    _fake_child(monkeypatch, _replying_child(delay=1.5))
+    outcomes: list[str] = []
+
+    def slow_read() -> None:
+        try:
+            outcomes.append(extract_isolated(b"x", "pdf", char_limit=10, caller="user:a").text)
+        except ExtractError as exc:
+            outcomes.append(str(exc))
+
+    threads = [threading.Thread(target=slow_read) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.1)
+    _fake_child(monkeypatch, _replying_child("harmless"))
+    with _Timer() as timer:
+        assert extract_isolated(b"x", "pdf", char_limit=10, caller="user:b").text == "harmless"
+    assert timer.seconds < 1.0
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == sorted(["ok"] + [extract_worker._OWN_BUSY] * 2)
+
+
+def test_a_full_server_says_busy_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from scoped_drive_mcp import extract_worker
+
+    monkeypatch.setattr(extract_worker, "WAIT_SECONDS", 0.3)
+    _fake_child(monkeypatch, _replying_child(delay=1.5))
+    threads = [
+        threading.Thread(
+            target=extract_isolated, args=(b"x", "pdf"), kwargs={"char_limit": 10, "caller": who}
+        )
+        for who in ("user:a", "user:b")
+    ]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.1)
+    with _Timer() as timer, pytest.raises(extract_worker.ExtractBusy, match="busy"):
+        extract_isolated(b"x", "pdf", char_limit=10, caller="user:c")
+    assert timer.seconds < 0.6
+    for thread in threads:
+        thread.join()
+
+
+def test_a_child_started_late_still_gets_its_whole_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait for a slot came out of the child's time: a slot freed just before the
+    wait ran out left the next file almost none, and it was reported as too slow."""
+    import threading
+
+    from scoped_drive_mcp import extract_worker
+
+    monkeypatch.setattr(extract_worker, "MAX_CHILDREN", 1)
+    monkeypatch.setattr(extract_worker, "WAIT_SECONDS", 1.0)
+    _fake_child(monkeypatch, _replying_child(delay=0.8))
+    first = threading.Thread(
+        target=extract_isolated, args=(b"x", "pdf"), kwargs={"char_limit": 10, "caller": "user:a"}
+    )
+    first.start()
+    time.sleep(0.05)
+    result = extract_isolated(b"x", "pdf", char_limit=10, caller="user:b", timeout=1.2)
+    assert result.text == "ok"
+    first.join()
+
+
+def test_the_caller_is_the_person_or_token_of_the_call() -> None:
+    from scoped_drive_mcp.auth import Principal, current_actor, current_principal
+    from scoped_drive_mcp.config import Role
+    from scoped_drive_mcp.extract_worker import current_caller
+
+    assert current_caller() is None
+    token = current_principal.set(Principal("bot", next(iter(Role))))
+    try:
+        assert current_caller() == "token:bot"
+    finally:
+        current_principal.reset(token)
+    token = current_principal.set(Principal("grant", next(iter(Role)), email="a@example.com"))
+    try:
+        assert current_caller() == "user:a@example.com"
+    finally:
+        current_principal.reset(token)
+    token = current_actor.set("b@example.com")
+    try:
+        assert current_caller() == "user:b@example.com"
+    finally:
+        current_actor.reset(token)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import scoped_drive_mcp_missing_module",
+        "import sys; sys.stdin.read()",
+    ],
+)
+def test_a_child_that_cannot_start_is_a_logged_setup_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, code: str
+) -> None:
+    """Every failure without a reply read as "too large or complex", so a broken
+    deployment looked like a run of hard files."""
+    _fake_child(monkeypatch, code)
+    with caplog.at_level("ERROR"), pytest.raises(ExtractError, match="not working on this server"):
+        extract_isolated(minimal_pdf("x"), "pdf", char_limit=100)
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["import sys; sys.stdin.read(); raise MemoryError", "import os; os.kill(os.getpid(), 9)"],
+)
+def test_a_child_out_of_memory_or_killed_is_the_files_doing(
+    monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    _fake_child(monkeypatch, code)
+    with pytest.raises(ExtractError, match="too large or complex"):
+        extract_isolated(minimal_pdf("x"), "pdf", char_limit=100)
+
+
+def test_relative_import_paths_reach_the_child_made_absolute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from scoped_drive_mcp import extract_worker
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", [*sys.path, "vendored", ""])
+    paths = extract_worker._import_paths()
+    assert str(tmp_path / "vendored") in paths
+    assert "" not in paths and "vendored" not in paths
+    assert all(Path(entry).is_absolute() for entry in paths)
+
+
+def test_children_read_bytecode_compiled_once_and_write_none(tmp_path: Path) -> None:
+    """The host ships no .pyc files and the child writes none, so every file paid to
+    compile pypdf and openpyxl from source."""
+    from scoped_drive_mcp import extract_worker
+
+    folder = tmp_path / "pycache"
+    folder.mkdir()
+    extract_worker._compile_into(str(folder))
+    compiled = {path.name.split(".")[0] for path in folder.rglob("*.pyc")}
+    assert {"_page", "excel", "extract"} <= compiled
+    before = sorted(folder.rglob("*"))
+    extract_worker._warm_bytecode()  # makes the process's own folder
+    command = extract_worker._child_command(300)
+    assert command[3:5] == ["-X", f"pycache_prefix={extract_worker._bytecode_dir}"]
+    assert extract_worker._bytecode_dir is not None
+    assert Path(extract_worker._bytecode_dir).stat().st_mode & 0o077 == 0
+    assert extract_isolated(minimal_pdf("still reads"), "pdf", char_limit=100).text
+    assert sorted(folder.rglob("*")) == before
+
+
+def test_clean_text_joins_surrogate_pairs_and_replaces_lone_halves() -> None:
+    from scoped_drive_mcp.extract import clean_text
+
+    assert clean_text("plain") == "plain"
+    assert clean_text("a😀b") == "a\U0001f600b"
+    assert clean_text("a\ud800b\udfff") == "a�b�"
+
+
+def test_isolated_reply_with_a_surrogate_is_cleaned(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_child(monkeypatch, _replying_child("x\ud800y"))
+    assert extract_isolated(b"x", "pdf", char_limit=10).text == "x�y"
+
+
+def test_read_file_returns_rtf_with_unicode_escapes_that_are_surrogates(drive, service) -> None:
+    """RTF's \\u-10240? is a lone surrogate; read_file then failed whole with
+    "surrogates not allowed" when the reply was encoded."""
+    from tests.conftest import ROOT
+
+    rtf = rb"{\rtf1\ansi lone \u-10240? pair \u-10179?\u-8704? end\par}"
+    drive.add("rtf-surrogate", "notes.rtf", "application/rtf", [ROOT], rtf)
+    result = service.read_file("rtf-surrogate")
+    assert result["content"] == "lone \ufffd pair \U0001f600 end\n"
+    json.dumps(result, ensure_ascii=False).encode("utf-8")

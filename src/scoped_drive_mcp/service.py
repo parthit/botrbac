@@ -24,7 +24,7 @@ from .drive_client import (
     DriveNotFoundError,
 )
 from .extract import Extracted, ExtractError, document_kind, extract, read_xlsx_tabs
-from .extract_worker import extract_isolated, xlsx_tabs_isolated
+from .extract_worker import ExtractBusy, extract_isolated, xlsx_tabs_isolated
 from .scope import (
     FileRef,
     InvalidInputError,
@@ -494,6 +494,11 @@ class DriveService:
             result["truncated"] = True
         try:
             extracted = self._extract(data, kind)
+        except ExtractBusy as exc:
+            # Nothing is wrong with the file; reading it again shortly should work.
+            logger.info("text extraction of a %s waited too long for a slot", kind)
+            result["note"] = str(exc)
+            return result
         except ExtractError as exc:
             logger.info("text extraction failed for %s: %s", kind, exc)
             if source_truncated:

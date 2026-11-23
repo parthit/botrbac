@@ -22,6 +22,7 @@ import codecs
 import io
 import re
 import struct
+import threading
 import time
 import zipfile
 import zlib
@@ -86,8 +87,18 @@ _PDF_PAGE_CAP = 5000
 _PDF_FORM_CAP = 1000
 # How far estimated text may run past the character limit before strings are cut.
 _PDF_TEXT_SLACK = 4096
-# Backstop for PDF work the operator count cannot see, such as font and image decoding.
-_PDF_SECONDS = 10.0
+# A font's expansion is the most characters one byte may become, but most bytes become
+# one: a ToUnicode map with a ligature (fi, ffi) makes it 3 for a whole LaTeX page. Up to
+# this expansion, a string is let through as long as its worst case fits this many times
+# the room left, so text is only cut once it is really over the limit; a font that
+# expands more is cut at this many times the room.
+_PDF_EXPANSION_ALLOWED = 4
+# Backstop for PDF work the operator count cannot see, such as font and image decoding
+# and parsing operands. It is checked between operators and, while pypdf parses a
+# content stream, every few thousand tokens, so a page cannot run much past it.
+_PDF_SECONDS = 8.0
+# Tokens pypdf parses between two looks at the clock.
+_PDF_TOKENS_PER_CLOCK_CHECK = 4096
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -259,8 +270,20 @@ def extract(data: bytes, kind: str, *, char_limit: int) -> Extracted:
         result = _doc(data, char_limit)
     else:
         raise ExtractError(f"no text extractor for {kind}")
-    text = result.text.replace("\x00", "")
+    text = clean_text(result.text.replace("\x00", ""))
     return Extracted(text[: char_limit + 1], result.truncated or len(text) > char_limit)
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def clean_text(text: str) -> str:
+    """`text` with no surrogate code points, which cannot be encoded as UTF-8 (and so
+    could not be sent back). A pair, as RTF's \\u and some PDF fonts write a character
+    past U+FFFF, becomes that character; a lone half becomes U+FFFD."""
+    if text.isascii() or _SURROGATE.search(text) is None:
+        return text
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
 
 def extract_text(data: bytes, kind: str, *, char_limit: int) -> str:
@@ -539,6 +562,7 @@ def read_xlsx_tabs(data: bytes, char_limit: int) -> tuple[list[tuple[str, str]],
         workbook.close()
     if budget.truncated and not tabs:
         raise ExtractError(budget.reason)
+    tabs = [(clean_text(title), clean_text(text)) for title, text in tabs]
     return tabs, budget.truncated or budget.full
 
 
@@ -736,8 +760,60 @@ def _pdf(data: bytes, char_limit: int) -> Extracted:
                 raise ExtractError("PDF is password-protected") from exc
             if unlocked == 0:
                 raise ExtractError("PDF is password-protected")
-        pages = _PdfPages(budget, time.monotonic() + _PDF_SECONDS).read(reader)
+        deadline = time.monotonic() + _PDF_SECONDS
+        _watch_parsing()
+        _parse_deadline.value = deadline
+        try:
+            pages = _PdfPages(budget, deadline).read(reader)
+        finally:
+            _parse_deadline.value = None
     return budget.result(_clip(pages, char_limit + 1), char_limit)
+
+
+# The PDF deadline of the extraction running in this thread, for pypdf's parser.
+_parse_deadline = threading.local()
+_watch_lock = threading.Lock()
+
+
+def _watch_parsing() -> None:
+    """Have pypdf's content-stream parser look at this thread's PDF deadline.
+
+    pypdf parses a page's whole content stream (up to `_PDF_STREAM_TOKENS` tokens)
+    before the first operator reaches `_PdfPages`, so a page of operands alone ran up to
+    a second past the deadline, every page. The parser counts each token against a
+    `StreamParsingBudget` it makes per stream; this swaps in one that also checks the
+    clock every few thousand tokens. Outside `_pdf` (no deadline set in the thread) it
+    counts exactly as pypdf's does. If pypdf stops making the budget this way, nothing
+    is swapped and only the checks between operators remain.
+    """
+    try:
+        from pypdf.generic import _data_structures
+        from pypdf.generic._utils import StreamParsingBudget
+    except ImportError:
+        return
+    with _watch_lock:
+        current = getattr(_data_structures, "StreamParsingBudget", None)
+        if current is not StreamParsingBudget:
+            return  # already swapped, or pypdf changed
+
+        class _ClockedBudget(StreamParsingBudget):
+            def __init__(self, remaining_budget: int) -> None:
+                self._deadline = getattr(_parse_deadline, "value", None)
+                self._left = remaining_budget
+
+            @property  # type: ignore[override]
+            def remaining_budget(self) -> int:
+                return self._left
+
+            @remaining_budget.setter
+            def remaining_budget(self, value: int) -> None:
+                step = _PDF_TOKENS_PER_CLOCK_CHECK
+                crossed = value // step != self._left // step
+                self._left = value
+                if crossed and self._deadline is not None and time.monotonic() > self._deadline:
+                    raise _PdfStop
+
+        _data_structures.StreamParsingBudget = _ClockedBudget
 
 
 class _PdfPages:
@@ -747,8 +823,11 @@ class _PdfPages:
     a page's or form's fonts (pypdf builds every font a resource dictionary names, used
     or not) and parsing a form each time it is drawn. Text-showing operators have their
     strings cut so that, at the most a font can expand a byte, the page cannot produce
-    much more than the characters still wanted. A page pypdf cannot read is skipped;
-    running out of work or time ends the file with the text so far, marked truncated.
+    much more than `_PDF_EXPANSION_ALLOWED` times the characters still wanted; what
+    pypdf reports replaces the estimate as it goes, so a string is only cut once the
+    real text is over the limit (or the font expands more than that). A page pypdf
+    cannot read is skipped; running out of work or time ends the file with the text so
+    far, marked truncated.
     """
 
     def __init__(self, budget: _Budget, deadline: float) -> None:
@@ -763,7 +842,10 @@ class _PdfPages:
         # being read (pypdf reads a form with only the form's own fonts).
         self.expansion: list[int] = [1]
         self.page_chars = 0
+        # Estimated characters of the strings fitted but not yet reported through
+        # `text`, and of those fitted for the operator pypdf is processing now.
         self.pending = 0
+        self.operator_pending = 0
         self.pieces: list[str] = []
 
     def read(self, reader) -> list[str]:
@@ -795,6 +877,7 @@ class _PdfPages:
     def page_text(self, page) -> str:
         self.page_chars = 0
         self.pending = 0
+        self.operator_pending = 0
         self.pieces = []
         self.charge(1)  # a page costs something even with no content
         draws = 0
@@ -837,6 +920,7 @@ class _PdfPages:
 
     def operator(self, operator: bytes, operands: list, *_args: object) -> None:
         self.charge(1)
+        self.operator_pending = 0
         if operator == b"TJ":
             if operands and isinstance(operands[0], list):
                 items = operands[0]
@@ -849,21 +933,29 @@ class _PdfPages:
                 operands[index] = self.fit(operands[index])
 
     def text(self, text: str, *_args: object) -> None:
+        """pypdf reports the text it collected: everything from the strings fitted so
+        far, except perhaps some of the operator in progress (a `'` reports the line
+        before its own string). The estimate for the rest is replaced by the real count,
+        so a font that may expand a byte (a ligature such as "ffi") but mostly does not
+        cuts nothing short of the limit."""
         if text:
             self.page_chars += len(text)
-            self.pending = max(self.pending - len(text), 0)
             self.pieces.append(text)
+        self.pending = self.operator_pending
 
     def fit(self, value):
         """The string, cut so the text it may become fits what is still wanted."""
         expansion = self.expansion[-1]
-        room = self.budget.room - self.page_chars + _PDF_TEXT_SLACK - self.pending
+        allowed = min(expansion, _PDF_EXPANSION_ALLOWED)
+        room = (self.budget.room - self.page_chars + _PDF_TEXT_SLACK) * allowed - self.pending
         cost = len(value) * expansion
         if cost <= room:
             self.pending += cost
+            self.operator_pending += cost
             return value
         keep = max(room, 0) // expansion
         self.pending += keep * expansion
+        self.operator_pending += keep * expansion
         self.budget.truncated = True
         self.budget.reason = self.budget.reason or "PDF text was cut"
         return _cut_pdf_string(value, keep)
