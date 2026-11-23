@@ -22,6 +22,7 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
+import anyio
 import anyio.to_thread
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -225,12 +227,19 @@ class DashboardContext:
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
+    # actor -> (refresh token, My Drive's folder id). The id never changes for an account,
+    # so Files asks Drive once per connection instead of on every page load.
+    _owner_roots: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
 
     def _admin_actor(self) -> bool:
         actor = current_actor.get()
         return not actor or actor == self.settings.owner_email
 
     def owner_drive(self) -> OwnerDriveClient:
+        return self.owner_drive_and_token()[0]
+
+    def owner_drive_and_token(self) -> tuple[OwnerDriveClient, str]:
+        """The signed-in person's Drive client and the refresh token it was built from."""
         record = self.vault.owner()
         if not record or not record.get("t"):
             raise OwnerNotConnectedError
@@ -239,7 +248,23 @@ class DashboardContext:
         cached = self._owner_clients.get(actor)
         if cached is None or cached[0] != token:
             self._owner_clients[actor] = (token, self.owner_drive_factory(token))
-        return self._owner_clients[actor][1]
+        return self._owner_clients[actor][1], token
+
+    def owner_root_id(self, drive: OwnerDriveClient, token: str) -> str | None:
+        """My Drive's folder id for the signed-in person, or None while drive.file cannot
+        open it yet (not cached then, so it shows up once the app may open My Drive).
+        Pass what owner_drive_and_token() returned. The cache is keyed by the token, so a
+        new connection (reconsent, another account) looks it up again."""
+        actor = current_actor.get() or ""
+        cached = self._owner_roots.get(actor)
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        try:
+            root_id = str(drive.get_file("root", fields="id")["id"])
+        except DriveNotFoundError:
+            return None
+        self._owner_roots[actor] = (token, root_id)
+        return root_id
 
     def grants(self) -> GrantService:
         return GrantService(
@@ -358,6 +383,29 @@ class DashboardContext:
 
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+
+
+# Drive lookups a page makes side by side (the Allowed tab's folder checks). One pool for
+# the process, so its threads and their Drive connections are reused between requests.
+DRIVE_LOOKUP_WORKERS = 8
+_drive_pool = ThreadPoolExecutor(DRIVE_LOOKUP_WORKERS, thread_name_prefix="drive-lookup")
+
+
+def fetch_parents(drive: Any, ids: list[str]) -> dict[str, dict[str, Any] | None | Exception]:
+    """files.get("id,parents") for each id, in parallel. None for not found, else the
+    error a lookup raised, so one failure does not lose the other answers."""
+
+    def one(fid: str) -> dict[str, Any] | None | Exception:
+        try:
+            return drive.get_file(fid, fields="id,parents")
+        except DriveNotFoundError:
+            return None
+        except Exception as exc:
+            return exc
+
+    if len(ids) == 1:
+        return {ids[0]: one(ids[0])}
+    return dict(zip(ids, _drive_pool.map(one, ids), strict=True))
 
 
 WAKE_HOME = "/settings#assistants"
@@ -666,27 +714,40 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     app_origin = origin_of(settings.app_base_url)
 
     async def remember_pending(request: Request) -> None:
-        """One waiting-request count for this page, off the event loop. The nav reads it."""
-        try:
-            request.state.pending_count = await blocking(ctx.requests.pending_count)
-        except Exception:
-            logger.exception("pending request count failed")
-            request.state.pending_count = 0
-        try:
-            request.state.reconsent = await blocking(ctx.reconsent_needed)
-        except Exception:
-            logger.exception("reconsent check failed")
-            request.state.reconsent = False
-        # Mailbox nav badge: pairings waiting on this person's approval.
+        """The nav badges for this page, off the event loop. The three lookups are
+        independent store reads, so they run side by side rather than one after another."""
         actor = current_actor.get()
+        request.state.pending_count = 0
+        request.state.reconsent = False
         request.state.mailbox_count = 0
-        if ctx.mailbox is not None and actor:
+
+        async def pending() -> None:
+            try:
+                request.state.pending_count = await blocking(ctx.requests.pending_count)
+            except Exception:
+                logger.exception("pending request count failed")
+
+        async def reconsent() -> None:
+            try:
+                request.state.reconsent = await blocking(ctx.reconsent_needed)
+            except Exception:
+                logger.exception("reconsent check failed")
+
+        async def mailbox() -> None:
+            # Mailbox nav badge: pairings waiting on this person's approval.
+            if ctx.mailbox is None or not actor:
+                return
             try:
                 request.state.mailbox_count = await blocking(
                     ctx.mailbox.needs_approval_count, actor
                 )
             except Exception:
                 logger.exception("mailbox approval count failed")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(pending)
+            tg.start_soon(reconsent)
+            tg.start_soon(mailbox)
 
     def session_user(request: Request) -> str | None:
         """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
@@ -1301,15 +1362,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return {"mailbox_summary": mailbox, "shared_summary": shared}
 
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
-        drive = ctx.owner_drive()
+        drive, token = ctx.owner_drive_and_token()
         # drive.file cannot files.get("root") until the app has opened My Drive.
         # The alias still works in a parents query, which is enough to list files
         # this app created or the user picked.
-        root_id: str | None
-        try:
-            root_id = str(drive.get_file("root", fields="id")["id"])
-        except DriveNotFoundError:
-            root_id = None
+        root_id = ctx.owner_root_id(drive, token)
         entries = ctx.allowlist.entries()
         shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
@@ -1335,9 +1392,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 folder_id = root_id or "root"
             else:
                 folder_id = validate_drive_id(folder, "folder")
-            if folder_id == "root":
+            if folder_id == "root" or folder_id == root_id:
+                # My Drive itself: its name and place are known, so no lookup.
                 current = {
-                    "id": "root",
+                    "id": folder_id,
                     "name": "My Drive",
                     "mimeType": FOLDER_MIME,
                     "parents": [],
@@ -1998,44 +2056,43 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
 
-        def overlaps() -> dict[str, str]:
-            # An entry inside another allowed folder: removing it alone changes nothing,
-            # so the list says so. Bounded, since each check walks up the folder tree.
-            found: dict[str, str] = {}
-            if not data["drive_connected"] or len(rows) < 2:
-                return found
-            grants = ctx.grants()
-            for entry in rows[:COVER_CHECK_LIMIT]:
-                try:
-                    cover = grants.covering_entry(entry.id)
-                except Exception:
-                    return found
-                if cover and cover[0] != entry.id:
-                    found[entry.id] = cover[1]
-            return found
-
-        def unopened() -> set[str]:
-            # Google opens a file to this app only once it is picked (drive.file). An
-            # entry from an older connection stays on the list but can't be opened until
-            # it is picked again. Bounded: one lookup per entry.
-            found: set[str] = set()
-            if not data["drive_connected"]:
-                return found
+        def entry_status() -> tuple[dict[str, str], set[str]]:
+            # covered: an entry inside another allowed folder. Removing it alone changes
+            # nothing, so the list says so. needs_pick: Google opens a file to this app
+            # only once it is picked (drive.file); an entry from an older connection
+            # stays on the list but can't be opened until it is picked again.
+            # One pass for both, with each level of folder lookups run in parallel.
+            # Bounded, since each check walks up the folder tree.
+            if not data["drive_connected"] or not rows:
+                return {}, set()
             try:
                 drive = ctx.owner_drive()
             except Exception:
-                return found
-            for entry in rows[:COVER_CHECK_LIMIT]:
-                try:
-                    drive.get_file(entry.id, fields="id")
-                except DriveNotFoundError:
-                    found.add(entry.id)
-                except Exception:
-                    return found
-            return found
+                return {}, set()
+            ids = [entry.id for entry in rows[:COVER_CHECK_LIMIT]]
+            failed = [0]
 
-        covered = await blocking(overlaps)
-        needs_pick = await blocking(unopened)
+            def fetch(batch: list[str]) -> dict[str, dict[str, Any] | None | Exception]:
+                found = fetch_parents(drive, batch)
+                failed[0] += sum(isinstance(v, Exception) for v in found.values())
+                return found
+
+            try:
+                covers, not_found = ctx.grants().entry_status(ids, fetch)
+            except Exception:
+                logger.exception("allowed list status check failed")
+                return {}, set()
+            if failed[0]:
+                # Those items get no note rather than a guess. Logged so a burst of rate
+                # limits or Drive errors shows up instead of quietly hiding the notes.
+                logger.warning("allowed list status check: %d Drive lookups failed", failed[0])
+            if len(rows) < 2:
+                # One entry can't be inside another. The walk above still ran, because
+                # it also finds the entries Drive no longer opens (needs_pick).
+                covers = {}
+            return {fid: c[1] for fid, c in covers.items() if c[0] != fid}, not_found
+
+        covered, needs_pick = await blocking(entry_status)
         return render(
             request,
             "access.html",

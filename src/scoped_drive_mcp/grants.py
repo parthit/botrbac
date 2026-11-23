@@ -310,6 +310,66 @@ class GrantService:
             frontier = next_frontier
         return None
 
+    def entry_status(
+        self,
+        file_ids: list[str],
+        fetch_many: Callable[[list[str]], dict[str, dict[str, Any] | None | Exception]],
+    ) -> tuple[dict[str, tuple[str, str]], set[str]]:
+        """covering_entry for many ids at once, plus which ids Drive no longer opens.
+
+        Same walk as covering_entry (every parent chain, nearest live entry, the same
+        bounds), but the list is read once and the walks advance level by level together,
+        so each level is one `fetch_many` call (the caller can run those lookups in
+        parallel) and a folder shared by several walks is looked up once.
+
+        `fetch_many` maps each id to its metadata ("id,parents"), None when Drive says
+        not found, or the exception it raised. Returns ({id: (cover id, cover name)},
+        {ids not found}). An id whose own lookup failed gets neither answer.
+        """
+        entries = {fid: e for fid, e in self.allowlist.entries().items() if _live(e)}
+        metas: dict[str, dict[str, Any] | None | Exception] = {}
+
+        def fetch(ids: set[str]) -> None:
+            missing = [i for i in ids if i not in metas]
+            if missing:
+                metas.update(fetch_many(missing))
+
+        fetch(set(file_ids))
+        not_found = {fid for fid in file_ids if metas.get(fid) is None}
+        covers: dict[str, tuple[str, str]] = {}
+        # One walk per id: (seen, frontier). A walk leaves the dict when it ends.
+        walks = {fid: ({fid}, [fid]) for fid in file_ids}
+        for _ in range(MAX_COVER_DEPTH):
+            if not walks:
+                break
+            # This level's folders, in one batch (the first level is already fetched).
+            fetch({node for _, frontier in walks.values() for node in frontier})
+            next_walks: dict[str, tuple[set[str], list[str]]] = {}
+            for fid, (seen, frontier) in walks.items():
+                next_frontier: list[str] = []
+                found: tuple[str, str] | None = None
+                for node in frontier:
+                    meta = metas.get(node)
+                    if not isinstance(meta, dict):
+                        continue
+                    for parent in meta.get("parents") or []:
+                        pid = str(parent)
+                        if pid in seen:
+                            continue
+                        seen.add(pid)
+                        if pid in entries:
+                            found = (pid, entries[pid].name or pid)
+                            break
+                        next_frontier.append(pid)
+                    if found:
+                        break
+                if found:
+                    covers[fid] = found
+                elif next_frontier and len(seen) <= MAX_COVER_NODES:
+                    next_walks[fid] = (seen, next_frontier)
+            walks = next_walks
+        return covers, not_found
+
     # ---- access request decisions --------------------------------------
 
     def approval_options(self, req: AccessRequest) -> list[ApprovalOption]:
