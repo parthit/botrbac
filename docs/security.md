@@ -157,6 +157,13 @@
   editor of the file can't remove the "untrusted" flag your assistants see or change whose name is shown.
   Marks written by older versions in the public `properties` are still read, but they can only mark a
   file untrusted, never clear that.
+- **Reading files is bounded.** Text extraction runs under one work budget per file, shared by every
+  part of it: at most 1000 parts (slides, sheets, headers), 500k XML elements nested at most 256 deep, 2M
+  spreadsheet cells and rows (empty rows count), 250k PDF content operators (a form is charged each time
+  it is drawn), 5000 PDF pages and 1M RTF tokens, with a 10-second limit on PDF work. A part listed more
+  than once is read once, and extraction stops as soon as it has `MAX_CHARS` characters. A file over any
+  limit fails with an error that points to `download_file`. XML is parsed with `defusedxml`, and RTF with
+  a linear scanner instead of regexes that backtrack on crafted input.
 - **Folders.** Picking a folder in Google's file picker may not open every file already inside it to the
   app. Those files are refused (Google answers "not found") until they are picked too. Files the
   assistant creates inside an allowed folder are the app's own, so they stay reachable.
