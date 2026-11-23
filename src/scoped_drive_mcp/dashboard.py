@@ -134,12 +134,13 @@ _env.globals["observability_on"] = observability_on
 SECURITY_HEADERS = [
     (b"x-frame-options", b"DENY"),
     (b"x-content-type-options", b"nosniff"),
-    # `no-referrer` makes browsers send `Origin: null` on HTML form POSTs (Fetch:
-    # non-GET, non-cors). check_csrf treats that as a cross-origin request, so a
-    # signed-in Sign out fails before the session token is compared. `same-origin`
-    # still withholds the referrer from other sites, and a same-origin form POST
-    # carries this app's origin.
-    (b"referrer-policy", b"same-origin"),
+    # Other sites get only this site's origin, never a path (so ids in URLs such as
+    # /requests/<id> stay here), and nothing over a downgrade to http. Google needs
+    # that origin: a Picker API key restricted to this website is checked against the
+    # Referer, and `same-origin` sent none, so Google rejected the key.
+    # `no-referrer` would also break forms: browsers then send `Origin: null` on HTML
+    # form POSTs, which check_csrf rejects (Sign out would fail).
+    (b"referrer-policy", b"strict-origin-when-cross-origin"),
     (b"cache-control", b"no-store"),
     (
         b"content-security-policy",
