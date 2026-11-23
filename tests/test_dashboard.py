@@ -90,7 +90,7 @@ def test_login_page_is_public(c) -> None:
     assert r.status_code == 200 and "Sign in with Google" in r.text
     assert r.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
-    assert "apis.google.com" in r.headers["content-security-policy"]
+    assert "apis.google.com" not in r.headers["content-security-policy"]
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
     # Google requires the data disclosure immediately before the consent button.
     assert r.text.index("files and folders you allow") < r.text.index("Sign in with Google")

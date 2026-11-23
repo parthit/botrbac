@@ -8,7 +8,9 @@ and never looked up here.
 
 Only hashes of authorization codes, access tokens and refresh tokens are stored.
 Redirect URIs are an exact allow list (no open redirects). Issued access tokens
-act with role admin on `/mcp` only, and only on the Drive of the person who approved.
+work on `/mcp` only, only on the Drive of the person who approved, and with the role
+that person chose on the consent page (read only unless they picked more; see
+`DEFAULT_APP_ROLE`). Only a connection approved before apps had roles keeps admin.
 """
 
 import base64
@@ -22,6 +24,7 @@ import secrets
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -43,7 +46,14 @@ ACCESS_TTL = 3600
 REFRESH_TTL = 30 * 24 * 3600
 MAX_ACCESS_TOKENS = 20
 MAX_REDIRECTS = 16
-
+# Registering stores nothing. The client id is the registration itself (its name, redirect
+# addresses and time), signed with a key derived from SESSION_SECRET, so anyone may register
+# as often as they like without filling the store or pushing anyone else's client out.
+CLIENT_ID_PREFIX = "c1."
+MAX_CLIENT_ID = 2048
+# Approvals whose code was never exchanged that one approval may clean up.
+PRUNE_BATCH = 50
+# Clients registered before ids were signed are still read from here.
 CLIENTS_KEY = "oauth:clients"
 GRANTS_KEY = "oauth:grants"
 
@@ -69,10 +79,50 @@ ALLOWED_REDIRECT_URIS = frozenset(
         # ChatGPT apps/connectors, which OpenAI dots also use. ChatGPT sends this stable
         # callback because the metadata below advertises RFC 9207 `iss` support.
         "https://chatgpt.com/connector_platform_oauth_redirect",
+    }
+)
+
+# A program on the approver's own computer listening on port 8787. No supported
+# assistant uses these, and any local program can listen there, so they are accepted only
+# when OAUTH_LOOPBACK_CALLBACK is on.
+LOOPBACK_REDIRECT_URIS = frozenset(
+    {
         "http://localhost:8787/callback",
         "http://127.0.0.1:8787/callback",
     }
 )
+
+# Who a redirect URI belongs to. The consent page names the app by this, because the
+# name an app registers with is whatever it chose to type.
+REDIRECT_PLATFORMS: Mapping[str, str] = {
+    "cursor://anysphere.cursor-mcp/oauth/callback": "Cursor",
+    "https://www.cursor.com/agents/mcp/oauth/callback": "Cursor",
+    "https://www.cursor.com/bot/mcp/oauth/callback": "Cursor",
+    "https://cursor.com/agents/mcp/oauth/callback": "Cursor",
+    "https://cursor.com/bot/mcp/oauth/callback": "Cursor",
+    "https://grok.com/connectors-oauth-exchange-code/": "Grok",
+    "https://muse.ai/api/hatch/oauth/callback": "Muse",
+    "https://agent.meta.ai/api/hatch/oauth/callback": "Muse",
+    "https://platform.muse.ai/oauth/credential-test/callback": "Muse",
+    "https://claude.ai/api/mcp/auth_callback": "Claude",
+    "https://claude.com/api/mcp/auth_callback": "Claude",
+    "https://chatgpt.com/connector_platform_oauth_redirect": "ChatGPT",
+    "http://localhost:8787/callback": "a program on this computer",
+    "http://127.0.0.1:8787/callback": "a program on this computer",
+}
+
+
+@dataclass(frozen=True)
+class RedirectPlatform:
+    """Who receives the approval: the consent page's headline."""
+
+    label: str
+    host: str
+    # The code goes to a program on the approver's own computer, not to a known service.
+    local: bool = False
+    # This server's own /oauth/done page (OAUTH_TEST_CALLBACK).
+    test: bool = False
+
 
 _VERIFIER = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _CHALLENGE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
@@ -91,6 +141,15 @@ AS_PATHS = (
 )
 
 _NO_STORE = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _redirect_tag(uri: str) -> str:
+    """A short, stable name for one allowed redirect address inside a client id."""
+    return hashlib.sha256(uri.encode()).hexdigest()[:10]
 
 
 class RegistrationError(Exception):
@@ -247,13 +306,31 @@ def protected_resource_metadata_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/.well-known/oauth-protected-resource/mcp"
 
 
-def redirect_allowlist(base_url: str, test_callback: bool = False) -> frozenset[str]:
+def redirect_allowlist(
+    base_url: str, test_callback: bool = False, loopback_callback: bool = False
+) -> frozenset[str]:
     """Where an authorization code may be sent. This server's own `/oauth/done` page is
     not one of them unless OAUTH_TEST_CALLBACK is on: a code sent there lands in front of
-    the person who clicked Allow, and anyone who registered the app could ask them for it."""
+    the person who clicked Allow, and anyone who registered the app could ask them for it.
+    The loopback callbacks are not either unless OAUTH_LOOPBACK_CALLBACK is on: whatever
+    program listens on that port gets the access."""
+    allowed = ALLOWED_REDIRECT_URIS
+    if loopback_callback:
+        allowed = allowed | LOOPBACK_REDIRECT_URIS
     if test_callback:
-        return ALLOWED_REDIRECT_URIS | {done_redirect(base_url)}
-    return ALLOWED_REDIRECT_URIS
+        allowed = allowed | {done_redirect(base_url)}
+    return allowed
+
+
+def _timestamp(value: str) -> float | None:
+    """Seconds since the epoch for a stored `utc_now()` value, or None if unreadable."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
 
 
 def pkce_s256(verifier: str) -> str:
@@ -411,9 +488,17 @@ class McpOAuth:
         *,
         rate_limit: tuple[int, int] | None = None,
         test_callback: bool = False,
+        loopback_callback: bool = False,
         strict: bool = False,
         encryption_key: str | None = None,
+        client_key: bytes | None = None,
     ):
+        # Signs client ids. Without one (direct use in tests) each instance makes its own,
+        # so ids only work on the instance that issued them.
+        if client_key is None:
+            logger.warning("no OAuth client key given; client ids last only this process")
+            client_key = secrets.token_bytes(32)
+        self._client_key = client_key
         # Encrypts the one value kept here that is a usable secret as it stands: the
         # redirect URL parked between Allow and the redirect, which carries the code.
         self._fernet = None
@@ -427,6 +512,7 @@ class McpOAuth:
                 "readable in the store for up to two minutes"
             )
         self.test_callback = test_callback
+        self.loopback_callback = loopback_callback
         # REQUIRE_SIGNED_RECORDS is on: a record that is missing is never read as
         # permission, because someone who can write to the store can also delete from it.
         self.strict = strict
@@ -455,7 +541,19 @@ class McpOAuth:
     def redirect_allowed(self, uri: str) -> bool:
         if not uri or any(ch in uri for ch in ("\r", "\n", "\t", " ", "\\")):
             return False
-        return uri in redirect_allowlist(self.base_url, self.test_callback)
+        return uri in redirect_allowlist(self.base_url, self.test_callback, self.loopback_callback)
+
+    def platform(self, uri: str) -> RedirectPlatform:
+        """Who an allowed redirect URI sends the approval to, for the consent page."""
+        parts = urlsplit(uri)
+        host = parts.hostname or uri
+        if uri == done_redirect(self.base_url):
+            return RedirectPlatform("this server's test page", host, test=True)
+        if uri in LOOPBACK_REDIRECT_URIS:
+            return RedirectPlatform(REDIRECT_PLATFORMS[uri], parts.netloc, local=True)
+        if parts.scheme == "cursor":
+            host = "the Cursor app"
+        return RedirectPlatform(REDIRECT_PLATFORMS.get(uri, host), host)
 
     def completion_url_ok(self, url: str) -> bool:
         """True when `url` is an allowlisted redirect plus an optional query string."""
@@ -647,14 +745,14 @@ class McpOAuth:
                 raise RegistrationError("invalid_redirect_uri", "A redirect URL is not allowed.")
             if uri not in cleaned:
                 cleaned.append(uri)
-        client_id = self._new_client_id()
+        name = _clean_name(payload.get("client_name"))
+        created = utc_now()
         record = OAuthClientRecord(
-            client_id=client_id,
-            client_name=_clean_name(payload.get("client_name")),
+            client_id=self._sign_client(name, cleaned, created),
+            client_name=name,
             redirect_uris=cleaned,
-            created_at=utc_now(),
+            created_at=created,
         )
-        self.store.hset(CLIENTS_KEY, client_id, record.to_json())
         return {
             "client_id": record.client_id,
             "client_name": record.client_name,
@@ -665,8 +763,47 @@ class McpOAuth:
             "scope": SCOPE,
         }
 
+    def _known_redirects(self) -> dict[str, str]:
+        """Every redirect address a client id may name, by its short tag. Whether one is
+        allowed right now is checked again at authorize (`redirect_allowed`)."""
+        known = ALLOWED_REDIRECT_URIS | LOOPBACK_REDIRECT_URIS | {done_redirect(self.base_url)}
+        return {_redirect_tag(uri): uri for uri in known}
+
+    def _client_mac(self, body: str) -> str:
+        mac = hmac.new(self._client_key, f"{CLIENT_ID_PREFIX}{body}".encode(), hashlib.sha256)
+        return _b64(mac.digest()[:24])
+
+    def _sign_client(self, name: str, uris: list[str], created: str) -> str:
+        data = {"n": name, "r": [_redirect_tag(uri) for uri in uris], "t": created}
+        body = _b64(json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode())
+        return f"{CLIENT_ID_PREFIX}{body}.{self._client_mac(body)}"
+
+    def _signed_client(self, client_id: str) -> OAuthClientRecord | None:
+        body, _, mac = client_id[len(CLIENT_ID_PREFIX) :].partition(".")
+        if not body or not mac or not _same(mac, self._client_mac(body)):
+            return None
+        try:
+            data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+            tags = data["r"]
+            if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+                return None
+            known = self._known_redirects()
+            return OAuthClientRecord(
+                client_id=client_id,
+                client_name=_clean_name(data.get("n")),
+                redirect_uris=[known[t] for t in tags if t in known],
+                created_at=str(data.get("t") or ""),
+            )
+        except (ValueError, KeyError, TypeError):
+            return None
+
     def client(self, client_id: str | None) -> OAuthClientRecord | None:
-        if not client_id or len(client_id) > 200:
+        if not client_id or len(client_id) > MAX_CLIENT_ID:
+            return None
+        if client_id.startswith(CLIENT_ID_PREFIX):
+            return self._signed_client(client_id)
+        # A client registered before ids were signed.
+        if len(client_id) > 200:
             return None
         raw = self.store.hget(CLIENTS_KEY, client_id)
         if not raw:
@@ -679,12 +816,33 @@ class McpOAuth:
             return None
         return record
 
-    def _new_client_id(self) -> str:
-        for _ in range(3):
-            client_id = secrets.token_urlsafe(32)
-            if self.store.hget(CLIENTS_KEY, client_id) is None:
-                return client_id
-        raise RegistrationError("server_error", "could not allocate a client id", 500)
+    def prune(self, *, now: float | None = None) -> int:
+        """Remove approvals whose code was never exchanged: the code ended after CODE_TTL,
+        so the grant can never get a token. Removed with `revoke`, which also stops an
+        exchange somehow still in flight from putting it back. At most PRUNE_BATCH per
+        call, so clean-up never turns one request into a long one. Returns how many."""
+        current = time.time() if now is None else now
+        removed = 0
+        try:
+            for grant_id, raw in self.store.hgetall(GRANTS_KEY).items():
+                if removed >= PRUNE_BATCH:
+                    break
+                try:
+                    grant = OAuthGrant.from_json(raw)
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if grant.access_hashes or grant.refresh_hash or not grant.code_hash:
+                    continue
+                created = _timestamp(grant.created_at)
+                # A minute past the code's own end, so a slow exchange is never cut short.
+                if created is not None and current - created < CODE_TTL + 60:
+                    continue
+                if self.revoke(grant_id):
+                    removed += 1
+        except Exception:
+            # Clean-up must never stop an approval.
+            logger.warning("OAuth clean-up failed", exc_info=True)
+        return removed
 
     # ---- authorize -------------------------------------------------------
 
@@ -806,6 +964,8 @@ class McpOAuth:
         self.store.set(_role_key(grant.id), role)
         self._save_grant(grant)
         self.store.set(_code_key(digest), payload, ex=CODE_TTL)
+        # Approvals whose app never came back for its code are cleared here.
+        self.prune()
         return _with_query(
             pending.redirect_uri,
             {"code": code, "state": pending.state, "iss": self.base_url},
@@ -878,7 +1038,12 @@ class McpOAuth:
         return self._issue_tokens(grant)
 
     def _refresh(self, form: Mapping[str, str]) -> dict[str, Any]:
-        client = self._require_client(form.get("client_id"))
+        # The grant (signed, stored) names its client, and a public client has no secret,
+        # so matching that id is the whole check. The id is not decoded again, so an app
+        # already connected keeps refreshing after SESSION_SECRET changes.
+        client_id = form.get("client_id") or ""
+        if not client_id or len(client_id) > MAX_CLIENT_ID:
+            raise TokenError("invalid_client", "unknown client", 401)
         token = form.get("refresh_token") or ""
         if not token:
             raise TokenError("invalid_request", "refresh_token is required")
@@ -899,7 +1064,7 @@ class McpOAuth:
         if (
             grant is None
             or not self._may_act(grant.email)
-            or not _same(grant.client_id, client.client_id)
+            or not _same(grant.client_id, client_id)
             or grant.refresh_hash is None
             or not _same(grant.refresh_hash, digest)
         ):
@@ -971,7 +1136,9 @@ class McpOAuth:
     # ---- access tokens and grants ---------------------------------------
 
     def resolve_access(self, token: str) -> Principal | None:
-        """Map an OAuth access token to an admin principal. Not used for API_TOKENS."""
+        """Map an OAuth access token to a principal with the role its owner chose for the
+        app (`role_of`: read only unless they picked more, admin only for an app approved
+        before apps had roles). Not used for API_TOKENS."""
         if not token:
             return None
         digest = hash_token(token)

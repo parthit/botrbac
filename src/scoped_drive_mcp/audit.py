@@ -65,12 +65,24 @@ def audit(
 
 
 def audit_auth_failure(reason: str, path: str) -> None:
-    _emit({"ts": _now(), "event": "auth", "path": path, "decision": "deny", "reason": reason})
+    # The path is whatever the caller asked for; cap it like a tool argument.
+    _emit(
+        {
+            "ts": _now(),
+            "event": "auth",
+            "path": str(path)[:_MAX_ID],
+            "decision": "deny",
+            "reason": str(reason)[:_MAX_REASON],
+        }
+    )
 
 
 def audit_owner(action: str, decision: Decision = "allow", **fields: str | None) -> None:
     """Dashboard actions: sign-in, grant, revoke, request decisions."""
     record: dict[str, Any] = {"ts": _now(), "event": "owner", "action": action}
-    record.update({k: v for k, v in fields.items() if v is not None})
+    # Some fields carry form input (ids, addresses, names); cap each text one.
+    record.update(
+        {k: v[:_MAX_ID] if isinstance(v, str) else v for k, v in fields.items() if v is not None}
+    )
     record["decision"] = decision
     _emit(record)

@@ -502,3 +502,22 @@ def test_no_output_mentions_outside_ids(service: DriveService) -> None:
     ]
     text = str(outputs)
     assert "outside-folder" not in text and "bot-my-drive-root" not in text
+
+
+def test_read_sheet_when_the_server_is_busy_says_so(drive, guard, monkeypatch) -> None:
+    """A busy reader is not a broken workbook: say "try again", don't fall back quietly."""
+    from scoped_drive_mcp import service as service_module
+    from scoped_drive_mcp.extract_worker import ExtractBusy
+
+    service = DriveService(drive, guard, make_settings(max_bytes=100_000))
+    workbook = minimal_xlsx([["Day", "Place"], [1, "Maui"]], sheet="Itinerary")
+    _booking_sheet(drive, **{XLSX_MIME: workbook})
+
+    def busy(*args, **kwargs):
+        raise ExtractBusy("the server is busy reading other files; try again in a few seconds")
+
+    monkeypatch.setattr(service_module, "xlsx_tabs_isolated", busy)
+    monkeypatch.setattr(service_module, "read_xlsx_tabs", busy, raising=False)
+    result = service.read_file("sheet-tabs")
+    assert "busy" in result["note"]
+    assert "content" not in result or not result["content"]

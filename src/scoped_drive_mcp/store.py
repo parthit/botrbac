@@ -444,6 +444,22 @@ _SIGNED_PREFIXES = (
     "bridge:selfclaim:",
 )
 _TENANT_PREFIX = re.compile(r"^u:[^:]+:")
+# A tenant email becomes part of `u:{email}:`, so it may not hold the ':' delimiter (the
+# prefix would end early and `signs()` would read the rest as the record name), nor
+# whitespace, control characters or Redis glob characters.
+_TENANT_EMAIL = re.compile(r"^[^@:\s\x00-\x1f\x7f*?\[\]\\]+@[^@:\s\x00-\x1f\x7f*?\[\]\\]+$")
+
+
+def usable_email(email: object) -> bool:
+    """Whether `email` can name one person's records (see `tenant_prefix`)."""
+    return isinstance(email, str) and bool(_TENANT_EMAIL.fullmatch(email))
+
+
+def tenant_prefix(email: str) -> str:
+    """`u:{email}:` for one person's keys. Refuses an address that could break the prefix."""
+    if not isinstance(email, str) or not _TENANT_EMAIL.fullmatch(email):
+        raise ValueError("not a usable account address")
+    return f"u:{email}:"
 
 
 def signs(key: str) -> bool:
@@ -641,7 +657,9 @@ def sign_existing_records(
         return fields
 
     for email in dict.fromkeys([*people, *([admin_email] if admin_email else [])]):
-        prefix = "" if email == admin_email else f"u:{email}:"
+        if email != admin_email and not _TENANT_EMAIL.fullmatch(email):
+            continue
+        prefix = "" if email == admin_email else tenant_prefix(email)
         sign_hash(prefix + ALLOWLIST_KEY)
         sign_hash(prefix + EXTERNAL_ALLOWLIST_KEY)
         for link_id in sign_hash(f"bridge:user:{email}"):
@@ -687,7 +705,7 @@ class ActorStore:
         actor = current_actor.get()
         if not actor or actor == self.admin_email:
             return key
-        return f"u:{actor}:{key}"
+        return tenant_prefix(actor) + key
 
     def get(self, key: str) -> str | None:
         return self.inner.get(self._key(key))
@@ -743,6 +761,32 @@ class ActorStore:
 
     def set_if_absent(self, key: str, value: str, ex: int) -> bool:
         return bool(self.inner.set_if_absent(self._key(key), value, ex))
+
+
+# A fixed window, like Redis and MemoryStore: the expiry is set when the counter starts
+# (a new row, an expired one, or one that did not hold a number) and kept on later hits,
+# so steady traffic cannot keep pushing the window out.
+_PG_INCR_SQL = """
+INSERT INTO sdm_kv (key, value, expires_at)
+VALUES (%s, '1', NOW() + (%s * INTERVAL '1 second'))
+ON CONFLICT (key) DO UPDATE
+SET value = (
+    CASE
+        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW() THEN 1
+        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.value::bigint + 1
+        ELSE 1
+    END
+)::text,
+expires_at = (
+    CASE
+        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW()
+            THEN EXCLUDED.expires_at
+        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.expires_at
+        ELSE EXCLUDED.expires_at
+    END
+)
+RETURNING value
+"""
 
 
 class PostgresStore:
@@ -1041,24 +1085,7 @@ class PostgresStore:
         """Add one in a single statement. An expired row starts again at 1."""
 
         def bump(conn: Any) -> int:
-            row = conn.execute(
-                """
-                INSERT INTO sdm_kv (key, value, expires_at)
-                VALUES (%s, '1', NOW() + (%s * INTERVAL '1 second'))
-                ON CONFLICT (key) DO UPDATE
-                SET value = (
-                    CASE
-                        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW()
-                            THEN 1
-                        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.value::bigint + 1
-                        ELSE 1
-                    END
-                )::text,
-                expires_at = EXCLUDED.expires_at
-                RETURNING value
-                """,
-                (key, ex),
-            ).fetchone()
+            row = conn.execute(_PG_INCR_SQL, (key, ex)).fetchone()
             return int(row[0])
 
         return int(self._run(bump))
@@ -1541,7 +1568,7 @@ class TenantDirectory:
     def store_for(self, email: str | None) -> KeyValueStore:
         if email is None or email == self.admin_email:
             return self.store
-        return PrefixedStore(self.store, f"u:{email}:")
+        return PrefixedStore(self.store, tenant_prefix(email))
 
     def vault_for(self, email: str | None) -> TokenVault:
         return TokenVault(
