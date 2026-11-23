@@ -84,7 +84,7 @@ from .mcp_oauth import (
     QueryMapping,
 )
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
-from .ratelimit import allow, client_ip
+from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import (
     ACCESS_EDIT,
@@ -96,6 +96,7 @@ from .store import (
     SignedStore,
     TokenVault,
     sign_existing_records,
+    usable_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -827,15 +828,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return RedirectResponse(url, status_code=303)
 
     async def login_rate_limited(request: Request) -> Response | None:
-        ip = client_ip(
-            [(k.encode(), v.encode()) for k, v in request.headers.items()],
-            request.client.host if request.client else "unknown",
-        )
         allowed = await blocking(
             allow,
             ctx.store,
             "login",
-            "ip:" + ip,
+            ip_identity(request.scope),
             settings.login_rate_limit,
             settings.login_rate_window_seconds,
         )
@@ -919,7 +916,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         email = str(info.get("email", "")).strip().lower()
         verified = info.get("email_verified") in (True, "true")
-        if not verified or not settings.sign_in_allowed(email):
+        # An address that cannot name a tenant (one with ':' or control characters) is
+        # refused here, so it gets a clear answer instead of failing inside the store.
+        if not verified or not usable_email(email) or not settings.sign_in_allowed(email):
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             audit_owner("login", "deny", reason="wrong_account")
             return render(

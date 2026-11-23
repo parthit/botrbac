@@ -150,3 +150,45 @@ def test_picker_page_is_strict_when_the_picker_is_not_set_up(p2_app) -> None:
     page = c.get("/files")
     assert page.status_code == 200 and 'id="pick-drive"' not in page.text
     _assert_strict(_policy(page))
+
+
+# ---- an address that cannot name a person's records is refused at sign-in ----
+
+
+def test_sign_in_with_an_unusable_address_is_refused_cleanly(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    oauth.accounts["colon-code"] = ("a:b@example.com", True)
+    c = client(app)
+    r = sign_in(c, "colon-code")
+    assert r.status_code == 403
+    assert "not allowed to use this dashboard" in r.text
+    assert "at:colon-code" in oauth.revoked
+    assert c.get("/settings").status_code == 303
+
+
+# ---- the sign-in rate limit counts an IPv6 /64 as one caller ----
+
+
+def test_login_limit_counts_an_ipv6_64_once(world, memstore, oauth, monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            login_rate_limit=2,
+            login_rate_window_seconds=600,
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    for n in (1, 2):
+        r = c.get("/auth/login", headers={"X-Forwarded-For": f"2001:db8:1:2::{n}"})
+        assert r.status_code == 303
+    blocked = c.get("/auth/login", headers={"X-Forwarded-For": "2001:db8:1:2::ffff"})
+    assert blocked.status_code == 429
+    other = c.get("/auth/login", headers={"X-Forwarded-For": "2001:db8:1:3::1"})
+    assert other.status_code == 303

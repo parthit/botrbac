@@ -54,7 +54,8 @@ SHARED_HANDLING = (
     "Summarize it for your human."
 )
 
-_EMAIL = re.compile(r"^[^@\s]{1,100}@[^@\s]{1,100}$")
+# The same characters a tenant address refuses (store._TENANT_EMAIL), with a length cap.
+_EMAIL = re.compile(r"^[^@:\s\x00-\x1f\x7f*?\[\]\\]{1,100}@[^@:\s\x00-\x1f\x7f*?\[\]\\]{1,100}$")
 
 # DriveService notes and errors name the caller's own-Drive tools. A guest following those
 # would act on their own Drive (and could file an access request there), so guest results

@@ -450,6 +450,11 @@ _TENANT_PREFIX = re.compile(r"^u:[^:]+:")
 _TENANT_EMAIL = re.compile(r"^[^@:\s\x00-\x1f\x7f*?\[\]\\]+@[^@:\s\x00-\x1f\x7f*?\[\]\\]+$")
 
 
+def usable_email(email: object) -> bool:
+    """Whether `email` can name one person's records (see `tenant_prefix`)."""
+    return isinstance(email, str) and bool(_TENANT_EMAIL.fullmatch(email))
+
+
 def tenant_prefix(email: str) -> str:
     """`u:{email}:` for one person's keys. Refuses an address that could break the prefix."""
     if not isinstance(email, str) or not _TENANT_EMAIL.fullmatch(email):

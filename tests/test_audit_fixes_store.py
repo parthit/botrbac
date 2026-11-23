@@ -359,3 +359,14 @@ def test_hash_only_refuses_a_token_on_the_command_line(monkeypatch, capsys) -> N
         module.main()
     assert exc.value.code != 0
     assert hashlib.sha256(b"my-secret-token").hexdigest() not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "email", ["a:b@example.com", "a*@example.com", "a@ex[1].com", "a\x01@x.com"]
+)
+def test_shared_owner_address_refuses_tenant_delimiters(email) -> None:
+    from scoped_drive_mcp.external import SharedAccessError, normalize_email
+
+    with pytest.raises(SharedAccessError):
+        normalize_email(email)
+    assert normalize_email("Pat+x@Mail.Example.com") == "pat+x@mail.example.com"
