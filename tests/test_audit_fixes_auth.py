@@ -331,3 +331,24 @@ def test_a_connected_app_keeps_refreshing_after_the_client_key_changes(
     other = register(c, GROK).json()["client_id"]
     assert _refresh(c, other, refreshed.json()["refresh_token"]).status_code != 200
     assert _refresh(c, client_id, refreshed.json()["refresh_token"]).status_code == 200
+
+
+def test_a_non_ascii_client_id_is_refused_not_a_server_error(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    assert server.client("c1.abc.é") is None
+    c = client(app)
+    assert login(c).status_code == 303
+    verifier, params = auth_params("c1.abc.é", GROK)
+    assert c.get("/oauth/authorize", params=params).status_code == 400
+    r = c.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": "x",
+            "redirect_uri": GROK,
+            "client_id": "c1.abc.é",
+            "code_verifier": verifier,
+        },
+    )
+    assert r.status_code in (400, 401), r.text

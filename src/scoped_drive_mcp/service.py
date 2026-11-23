@@ -430,6 +430,12 @@ class DriveService:
             return None
         try:
             tabs, partial = self._workbook_tabs(data)
+        except ExtractBusy as exc:
+            # Nothing is wrong with the Sheet; reading it again shortly should work, and a
+            # first-tab fallback would hide that.
+            logger.info("sheet %s waited too long for an extraction slot", file_id)
+            result["note"] = str(exc)
+            return result
         except Exception as exc:  # never log cell contents, only the failure's type
             logger.info(
                 "sheet %s workbook read failed (%s); reading its first tab",

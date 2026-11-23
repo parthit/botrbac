@@ -780,7 +780,7 @@ class McpOAuth:
 
     def _signed_client(self, client_id: str) -> OAuthClientRecord | None:
         body, _, mac = client_id[len(CLIENT_ID_PREFIX) :].partition(".")
-        if not body or not mac or not hmac.compare_digest(mac, self._client_mac(body)):
+        if not body or not mac or not _same(mac, self._client_mac(body)):
             return None
         try:
             data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
