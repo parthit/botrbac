@@ -2707,7 +2707,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if ctx.mailbox is not None:
             try:
                 await blocking(ctx.mailbox.relabel_assistant, email, grant_id, shown)
-            except MailboxError:
+            except Exception:  # noqa: BLE001 - the new name is saved either way
                 logging.getLogger(__name__).warning("relabel_pairings_failed", exc_info=True)
         old = before.get(grant_id, "an app")
         if shown != old:

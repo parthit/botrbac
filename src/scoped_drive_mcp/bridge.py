@@ -713,7 +713,7 @@ class Mailbox:
         for link_id in self._user_link_ids(you):
             key = f"bridge:link:{link_id}"
             replace = getattr(self.store, "replace", None)
-            for _ in range(4):
+            for _attempt in range(4):
                 raw = self.store.get(key)
                 try:
                     link = json.loads(raw) if raw else None
@@ -727,7 +727,7 @@ class Mailbox:
                     side
                     for side in ("a", "b")
                     if link.get(f"grant_{side}") == grant_id
-                    and (side == "a" and link.get("email_a") == you or link.get("same_account"))
+                    and ((side == "a" and link.get("email_a") == you) or link.get("same_account"))
                     and link.get(f"label_{side}") != label
                 ]
                 if not sides:
@@ -739,6 +739,9 @@ class Mailbox:
                     continue
                 changed += 1
                 break
+            else:
+                # Lost every race on this record. It keeps the old name until the next rename.
+                logging.getLogger(__name__).warning("relabel_link_gave_up")
         return changed
 
     def get_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:

@@ -1,5 +1,7 @@
 """The owner gives a connected app a name of their own, e.g. Grok Bot that registered as Cursor."""
 
+import json
+
 from scoped_drive_mcp.bridge import Assistant, Mailbox, as_assistant
 from scoped_drive_mcp.humanize import app_names, assistant_label
 from scoped_drive_mcp.mcp_oauth import clean_label, principal_name
@@ -117,3 +119,71 @@ def test_existing_pairings_take_the_new_name() -> None:
     with as_assistant(claude):
         mail = box.list_inbox(OWNER_EMAIL)["messages"]
     assert mail[0]["from_assistant"] == "Grok Bot"
+
+
+class _RacyStore(MemoryStore):
+    """A store whose compare-and-swap loses the first `losses` times, as if a message
+    were being sent on the same pairing at that moment."""
+
+    def __init__(self, losses: int) -> None:
+        super().__init__(clock=lambda: 1_700_000_000.0)
+        self.losses = losses
+        self.tries = 0
+
+    def replace(self, key: str, old: str, new: str) -> bool:
+        self.tries += 1
+        if self.losses > 0 or self.get(key) != old:
+            self.losses -= 1
+            return False
+        self.set(key, new)
+        return True
+
+
+def _box_on(store: MemoryStore) -> Mailbox:
+    return Mailbox(
+        store,
+        base_url="https://drive-test.example.com",
+        clock=store._clock,
+        self_pairing=lambda _email: True,
+    )
+
+
+def _pair(box: Mailbox) -> str:
+    with as_assistant(Assistant("grant-grok", "Cursor")):
+        created = box.request_link(OWNER_EMAIL)
+    with as_assistant(Assistant("grant-claude", "Claude")):
+        box.request_link(OWNER_EMAIL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+    return created["link_id"]
+
+
+def test_a_lost_race_is_retried_and_a_lost_cause_keeps_the_old_name() -> None:
+    store = _RacyStore(losses=2)
+    box = _box_on(store)
+    link_id = _pair(box)
+    assert box.relabel_assistant(OWNER_EMAIL, "grant-grok", "Grok Bot") == 1
+    assert store.tries == 3
+    assert box._link(link_id)["label_a"] == "Grok Bot"
+
+    store.losses = 99
+    assert box.relabel_assistant(OWNER_EMAIL, "grant-grok", "Grok") == 0
+    assert box._link(link_id)["label_a"] == "Grok Bot"
+
+
+def test_another_persons_side_of_a_pairing_is_never_renamed() -> None:
+    store = MemoryStore(clock=lambda: 1_700_000_000.0)
+    box = _box_on(store)
+    # Someone else made this pairing; the owner's assistant joined it as side b.
+    link = {
+        "link_id": "lnk_other",
+        "email_a": "eve@example.com",
+        "grant_a": "grant-eve",
+        "label_a": "Eve's bot",
+        "grant_b": "grant-grok",
+        "label_b": "Cursor",
+        "created_at": "2023-11-14T22:13:20Z",
+    }
+    store.set("bridge:link:lnk_other", json.dumps(link))
+    store.hset(f"bridge:user:{OWNER_EMAIL}", "lnk_other", link["created_at"])
+    assert box.relabel_assistant(OWNER_EMAIL, "grant-grok", "Grok Bot") == 0
+    assert box._link("lnk_other")["label_b"] == "Cursor"
