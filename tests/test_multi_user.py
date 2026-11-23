@@ -263,3 +263,27 @@ def test_admin_revokes_every_old_full_drive_connection(world, memstore, oauth) -
     # The admin's own current per-file connection is untouched.
     assert directory.vault_for(OWNER_EMAIL).owner() is not None
     assert "None stored" in admin.get("/admin").text
+
+
+def test_admin_revoke_keeps_tokens_google_did_not_confirm(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    admin = client(app)
+    assert login(admin).status_code == 303
+    directory = app.state.dashboard.directory
+    full = "openid email https://www.googleapis.com/auth/drive"
+    directory.vault_for(EVE).set_owner("rt-eve-old", EVE, full)
+    directory.vault_for(CAROL).set_owner("rt-carol-old", CAROL, full)
+    directory.remember_user(EVE)
+    directory.remember_user(CAROL)
+    oauth.revoke_fails = True
+    r = post(admin, "/admin/revoke-legacy-drive")
+    assert r.status_code == 303
+    # Both attempted (one failure does not stop the rest), neither deleted.
+    assert {"rt-eve-old", "rt-carol-old"} <= set(oauth.revoked)
+    assert directory.vault_for(EVE).legacy_owner() is not None
+    assert directory.vault_for(CAROL).legacy_owner() is not None
+    assert "didn’t confirm 2" in admin.get("/admin").text
+    oauth.revoke_fails = False
+    post(admin, "/admin/revoke-legacy-drive")
+    assert directory.vault_for(EVE).legacy_owner() is None
+    assert directory.vault_for(CAROL).legacy_owner() is None

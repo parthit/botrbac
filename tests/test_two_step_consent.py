@@ -212,3 +212,18 @@ def test_old_connection_shows_reconnect_with_explanation(signed_in, oauth, p2_ap
     assert "Not connected" in card and 'id="old-connection"' in card
     assert ">Reconnect Google Drive</button>" in card
     assert "only the specific Google Drive files you use with this app" in card
+
+
+def test_old_token_is_kept_when_google_does_not_confirm_the_revoke(
+    signed_in, oauth, p2_app
+) -> None:
+    old = _plant_old_full_drive_token(p2_app)
+    oauth.revoke_fails = True
+    r = signed_in.post("/connect/google_drive", data={"csrf": csrf(signed_in, "/settings")})
+    assert r.status_code == 503 and "nothing was changed" in r.text
+    vault = p2_app.state.dashboard.vault
+    # Still stored so it can be revoked later, and still never used.
+    assert vault.legacy_owner()["t"] == old and vault.owner() is None
+    oauth.revoke_fails = False
+    assert connect_drive(signed_in).status_code == 303
+    assert vault.legacy_owner() is None and vault.owner() is not None

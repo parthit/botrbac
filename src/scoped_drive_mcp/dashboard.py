@@ -305,16 +305,24 @@ class DashboardContext:
         self.vault.clear_owner()
         return token
 
-    def take_legacy_drive(self) -> str | None:
-        """Remove an old full-Drive (or unstamped) token, if one is stored, and return it
-        so Google can revoke it. A current drive.file token is left alone."""
+    def revoke_legacy_drive(self, revoke: Callable[[str], bool]) -> bool | None:
+        """Revoke an old full-Drive (or unstamped) token at Google, then delete it here.
+
+        None when there is none. False when Google did not confirm: the token is kept so
+        a later reconnect or the admin action can try again (it is never used meanwhile).
+        A current drive.file token is left alone."""
         if not self.vault.enabled:
             return None
         record = self.vault.legacy_owner()
         if not record:
             return None
-        self.vault.clear_owner()
-        return record.get("t")
+        if not revoke(record["t"]):
+            return False
+        # Only delete what was revoked: a reconnect may have stored a new token since.
+        current = self.vault.legacy_owner()
+        if current and current.get("t") == record["t"]:
+            self.vault.clear_owner()
+        return True
 
     def reconsent_needed(self) -> bool:
         """True when an old sign-in is stored that this server no longer uses.
@@ -1114,9 +1122,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
             # consent would also kill the new per-file token.
-            legacy = await blocking(ctx.take_legacy_drive)
-            if legacy:
-                await blocking(oauth.revoke, legacy)
+            revoked = await blocking(ctx.revoke_legacy_drive, oauth.revoke)
+            if revoked is False:
+                audit_owner("revoke_legacy_drive", "deny", reason="google_unreachable")
+                return render(
+                    request,
+                    "error.html",
+                    503,
+                    title="Couldn’t end your old connection",
+                    message=(
+                        "Google didn’t confirm that your old Drive connection was ended, so "
+                        "nothing was changed. Try Reconnect again in a minute."
+                    ),
+                )
+            if revoked:
                 ctx.forget_drive(current_actor.get() or None)
                 audit_owner("revoke_legacy_drive")
         return start_oauth(request, "connect", current_actor.get() or None, connection)
@@ -2231,30 +2250,47 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if session_user(request) != settings.owner_email or ctx.directory is None:
             return render(request, "error.html", 404, message="Page not found.")
 
-        def run() -> list[str]:
+        def run() -> tuple[int, int]:
             assert ctx.directory is not None
-            taken: list[str] = []
+            done = failed = 0
             for person in ctx.directory.known_users():
                 vault = ctx.directory.vault_for(person)
                 record = vault.legacy_owner()
                 if not record:
                     continue
-                vault.clear_owner()
-                taken.append(record["t"])
+                try:
+                    ok = oauth.revoke(record["t"])
+                except Exception:
+                    logger.exception("revoking an old Drive connection failed")
+                    ok = False
+                if not ok:
+                    # Kept so the next run can try again. It is never used meanwhile.
+                    failed += 1
+                    continue
+                current = vault.legacy_owner()
+                if current and current.get("t") == record["t"]:
+                    vault.clear_owner()
                 ctx.forget_drive(person)
-            return taken
+                done += 1
+            return done, failed
 
-        taken = await blocking(run)
-        for token in taken:
-            await blocking(oauth.revoke, token)
-        audit_owner("revoke_legacy_drive", count=str(len(taken)))
-        flash(
-            request,
-            "ok",
-            f"Revoked {len(taken)} old full-Drive connection{'' if len(taken) == 1 else 's'}."
-            if taken
-            else "No old full-Drive connections are stored.",
-        )
+        done, failed = await blocking(run)
+        audit_owner("revoke_legacy_drive", count=str(done), failed=str(failed))
+        if failed:
+            flash(
+                request,
+                "error",
+                f"Revoked {done}. Google didn’t confirm {failed}; those are kept (and still "
+                "unused). Run this again.",
+            )
+        else:
+            flash(
+                request,
+                "ok",
+                f"Revoked {done} old full-Drive connection{'' if done == 1 else 's'}."
+                if done
+                else "No old full-Drive connections are stored.",
+            )
         return RedirectResponse("/admin", status_code=303)
 
     async def admin_sign_records(request: Request, form: dict[str, str]) -> Response:

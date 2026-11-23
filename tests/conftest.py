@@ -211,8 +211,9 @@ class FakeOAuth:
         email, verified = self.accounts[access_token.removeprefix("at:")]
         return {"email": email, "email_verified": verified}
 
-    def revoke(self, token: str) -> None:
+    def revoke(self, token: str) -> bool:
         self.revoked.append(token)
+        return not getattr(self, "revoke_fails", False)
 
 
 def build_world() -> FakeDrive:

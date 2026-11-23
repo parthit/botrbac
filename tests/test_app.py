@@ -228,3 +228,19 @@ def test_vercel_with_redis_builds_normally(monkeypatch, drive) -> None:
         redis_rest_url="https://example.upstash.io", redis_rest_token=secrets.token_urlsafe(16)
     )
     assert build_app(settings, drive).state.dashboard.store.kind == "redis"
+
+
+@pytest.mark.anyio
+async def test_no_api_tokens_rejects_every_bearer(world, memstore, oauth) -> None:
+    """With API_TOKENS unset, a made-up bearer is refused, not let through."""
+    app = build_app(
+        make_settings(api_tokens=""),
+        world.as_user("owner@example.com"),
+        store=memstore,
+        oauth=oauth,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://example.vercel.app") as c:
+        for header in ("Bearer anything", "anything", "Bearer "):
+            r = await c.post("/mcp", json=INIT, headers={**MCP_HEADERS, "Authorization": header})
+            assert r.status_code == 401

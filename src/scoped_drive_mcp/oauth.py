@@ -50,7 +50,7 @@ class OAuthClient(Protocol):
     ) -> str: ...
     def exchange_code(self, code: str) -> OAuthTokens: ...
     def userinfo(self, access_token: str) -> dict[str, Any]: ...
-    def revoke(self, token: str) -> None: ...
+    def revoke(self, token: str) -> bool: ...
 
 
 class GoogleOAuthClient:
@@ -140,9 +140,20 @@ class GoogleOAuthClient:
             raise OAuthError("Google did not return the account's email")
         return info
 
-    def revoke(self, token: str) -> None:
-        with contextlib.suppress(httpx.HTTPError):
-            httpx.post(REVOKE_URL, data={"token": token}, timeout=self.timeout)
+    def revoke(self, token: str) -> bool:
+        """Ask Google to end this token's grant. True when Google confirms it is gone:
+        revoked now (200), or already invalid (400 invalid_token). False when Google could
+        not be reached or refused, so a caller can keep the token and try again."""
+        try:
+            resp = httpx.post(REVOKE_URL, data={"token": token}, timeout=self.timeout)
+        except httpx.HTTPError:
+            return False
+        if resp.status_code == 200:
+            return True
+        if resp.status_code == 400:
+            with contextlib.suppress(ValueError):
+                return resp.json().get("error") == "invalid_token"
+        return False
 
 
 PICKER_SCOPE = DRIVE_FILE_SCOPE

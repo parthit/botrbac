@@ -164,3 +164,27 @@ def test_every_refresh_is_checked_against_what_google_granted(monkeypatch, grant
             creds.refresh(None)
         assert creds.token is None
     assert sent["scopes"] == ["https://www.googleapis.com/auth/drive.file"]
+
+
+def test_google_revoke_reports_whether_google_confirmed(monkeypatch) -> None:
+    import httpx
+
+    from scoped_drive_mcp.oauth import GoogleOAuthClient
+
+    client = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
+    answers = iter(
+        [
+            httpx.Response(200),
+            httpx.Response(400, json={"error": "invalid_token"}),
+            httpx.Response(400, json={"error": "invalid_request"}),
+            httpx.Response(503),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: next(answers))
+    assert [client.revoke("t") for _ in range(4)] == [True, True, False, False]
+
+    def down(*a, **k):
+        raise httpx.ConnectError("no route")
+
+    monkeypatch.setattr(httpx, "post", down)
+    assert client.revoke("t") is False
