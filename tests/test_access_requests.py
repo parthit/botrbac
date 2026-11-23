@@ -45,8 +45,10 @@ def test_request_record_contents(c, p2_app) -> None:
     assert req.reason and req.created_at
 
 
-def test_unknown_file_id_files_no_request(c, p2_app) -> None:
-    """An id the person's Drive cannot open has nothing to approve: no dead-end request."""
+def test_unknown_file_id_gets_a_link_that_names_nothing(c, p2_app) -> None:
+    """Under drive.file Google answers "not found" both for a file that does not exist and
+    for one the person has not picked yet, so an unknown id gets an approval link (where
+    the person can pick it). The request carries no name or content for that id."""
     for tool, args in (
         ("get_metadata", {"file_id": "stray-shared"}),  # someone else's file
         ("read_file", {"file_id": "no-such-file-123"}),
@@ -54,15 +56,14 @@ def test_unknown_file_id_files_no_request(c, p2_app) -> None:
         result = mcp_call(c, tool, **args)
         assert result["isError"] is True
         payload = result["structuredContent"]
-        assert payload["error"] == "not_found", tool
-        assert "request_id" not in payload and "approval_url" not in payload
-        assert "search_files" in payload["message"]
+        assert payload["error"] == "access_required", tool
+        req = requests_of(p2_app).get(payload["request_id"])
+        assert req.file_name is None
+        assert "TOP SECRET" not in json.dumps(result)
     asked = mcp_call(
         c, "request_access", description="the budget", reason="r", file_id="no-such-file-123"
     )["structuredContent"]
-    assert asked["status"] == "not_found" and "approval_url" not in asked
-    assert requests_of(p2_app).recent() == []
-    assert c.get("/").text.count('class="count"') == 0
+    assert asked["status"] == "pending" and asked["approval_url"]
 
 
 def test_transient_drive_error_still_files_a_request(c, p2_app, monkeypatch) -> None:
@@ -183,11 +184,12 @@ def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(
     )
     path = f"/requests/{req.id}"
     page = c.get(path).text
-    assert "This file doesn\u2019t exist or you can\u2019t open it" in page
+    assert "Bot RBAC can\u2019t open this file yet" in page
     assert "pick it from Files" in page and "Share just this item" not in page
     assert "Deny" in page
-    # No advice that does not apply: there is no banner, and no picker on this server.
-    assert "Sign in again" not in page and "picker" not in page.lower()
+    # No picker on this server: the page says so instead of showing a dead button.
+    assert "Sign in again" not in page and 'id="pick-drive"' not in page
+    assert "GOOGLE_PICKER_API_KEY" in page
     assert "could not open that file" not in page
     listing = c.get("/requests").text
     assert "Approve or deny" in listing

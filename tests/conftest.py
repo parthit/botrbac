@@ -179,7 +179,7 @@ class FakeOAuth:
             "eve-code": (EVE, True),
             "unverified-owner-code": (OWNER_EMAIL, False),
         }
-        self.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
+        self.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive.file"})
 
     def authorization_url(
         self,

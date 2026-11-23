@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from scoped_drive_mcp.auth import current_actor
 from scoped_drive_mcp.config import Settings
+from scoped_drive_mcp.drive_client import DRIVE_FILE_SCOPE as DRIVE_FILE
 from scoped_drive_mcp.drive_client import BotNotConnectedError, LazyBotDriveClient
 from scoped_drive_mcp.store import (
     REDIS_IMPORT_FLAG,
@@ -160,7 +161,7 @@ def test_redis_store_calls(monkeypatch) -> None:
 def test_token_vault_encrypts() -> None:
     kv = PrefixedStore(MemoryStore())
     vault = TokenVault(kv, ENCRYPTION_KEY)
-    vault.set_owner(VAULT_TOKEN, "owner@example.com")
+    vault.set_owner(VAULT_TOKEN, "owner@example.com", "openid email " + DRIVE_FILE)
     raw = kv.get("vault:owner_refresh_token")
     assert raw and VAULT_TOKEN not in raw and "owner@example.com" not in raw
     assert vault.owner()["t"] == VAULT_TOKEN

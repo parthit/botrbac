@@ -1,5 +1,6 @@
 """Login hint, OAuth scopes, public assets, picker session, pagination, and rate limits."""
 
+import json
 import re
 from html import unescape
 from pathlib import Path
@@ -7,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from scoped_drive_mcp.connections import GOOGLE_DRIVE
 from scoped_drive_mcp.dashboard import browse_href, normalize_page_token
 from scoped_drive_mcp.oauth import GoogleOAuthClient
 from scoped_drive_mcp.server import build_app
@@ -34,23 +36,20 @@ def test_sign_in_url_asks_only_for_identity() -> None:
     assert "login_hint" not in query
 
 
-def test_connect_url_adds_full_drive_scope_incrementally() -> None:
+def test_connect_url_asks_only_for_picked_files() -> None:
     oauth = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
     url = oauth.authorization_url(
         "state-token",
         "owner@example.com",
-        scopes=("openid", "email", "https://www.googleapis.com/auth/drive"),
+        scopes=GOOGLE_DRIVE.scopes,
         offline=True,
     )
     query = parse_qs(urlparse(url).query)
-    assert query["scope"][0].split() == [
-        "openid",
-        "email",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    assert query["scope"][0].split() == ["https://www.googleapis.com/auth/drive.file"]
     assert query["access_type"] == ["offline"]
     assert query["prompt"] == ["consent"]
-    assert query["include_granted_scopes"] == ["true"]
+    # Never fold in an older full-Drive grant.
+    assert query["include_granted_scopes"] == ["false"]
     assert query["login_hint"] == ["owner@example.com"]
     hinted = parse_qs(urlparse(oauth.authorization_url("state-token", "visitor@example.com")).query)
     assert hinted["login_hint"] == ["visitor@example.com"]
@@ -163,20 +162,15 @@ def test_request_page_picker_approves_an_unopened_file(world, memstore, oauth) -
     )
     signed_in = client(app)
     assert login(signed_in).status_code == 303
-    # An older sign-in that only covers files this app opened (drive.file): a file it
-    # cannot see may still exist, so the request is filed and the picker can add it.
-    vault = app.state.dashboard.vault
-    record = vault.owner()
-    vault.set_owner(
-        record["t"], OWNER_EMAIL, "openid email https://www.googleapis.com/auth/drive.file"
-    )
+    # A file this app cannot see may still exist (drive.file), so the request is filed
+    # and the picker can add it.
     denied = mcp_call(signed_in, "get_metadata", file_id="stray-shared")
     request_id = denied["structuredContent"]["request_id"]
     page = signed_in.get(f"/requests/{request_id}")
     assert page.status_code == 200
     assert "Choose the file to approve" in page.text
-    assert "only covers some of your files" in page.text
-    assert "doesn\u2019t exist" not in page.text
+    assert "Google only lets Bot RBAC open files you pick" in page.text
+    assert 'id="file-missing"' not in page.text
     button = re.search(r"<button[^>]*id=\"pick-drive\"[^>]*>", page.text)
     assert button, page.text
     assert f'data-request="{request_id}"' in button.group(0)
@@ -199,25 +193,29 @@ def test_browse_previous_and_next(owner_c, monkeypatch) -> None:
     assert 'aria-disabled="true">Previous' in returned.text
 
 
-def test_narrow_token_shows_reconsent(owner_c, p2_app) -> None:
+def test_old_full_drive_token_is_never_used(owner_c, p2_app) -> None:
     vault = p2_app.state.dashboard.vault
     record = vault.owner()
-    vault.set_owner(
-        record["t"],
-        record["email"],
-        "openid email https://www.googleapis.com/auth/drive.file",
-    )
-    page = owner_c.get("/").text
-    assert 'id="reconsent"' in page
-    assert "Reconnect Google Drive" in page and 'href="/settings#connection-google_drive"' in page
-    vault.set_owner(record["t"], record["email"])
-    assert 'id="reconsent"' in owner_c.get("/").text
-    vault.set_owner(
-        record["t"],
-        record["email"],
-        "openid email https://www.googleapis.com/auth/drive",
-    )
     assert 'id="reconsent"' not in owner_c.get("/").text
+    for old in ("openid email https://www.googleapis.com/auth/drive", None):
+        vault.set_owner(record["t"], record["email"], old)
+        p2_app.state.dashboard.forget_drive(OWNER_EMAIL)
+        assert vault.owner() is None and vault.legacy_owner()["t"] == record["t"]
+        page = owner_c.get("/").text
+        assert 'id="reconsent"' in page
+        assert 'href="/settings#connection-google_drive"' in page
+        # Not connected: Drive pages send the person to reconnect, and tools get nothing.
+        assert owner_c.get("/files").headers["location"].startswith("/connect")
+        listed = mcp_call(owner_c, "list_folder", folder_id="proj")
+        assert listed["isError"] is True
+        assert "project notes alpha" not in json.dumps(listed)
+    # Both scopes together are just as unusable as full Drive alone.
+    vault.set_owner(
+        record["t"],
+        record["email"],
+        "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive",
+    )
+    assert vault.owner() is None
 
 
 def test_picker_session_hidden_until_configured(owner_c) -> None:

@@ -110,10 +110,9 @@ def test_build_credentials_oauth_bot() -> None:
     assert creds.refresh_token == REFRESH_TOKEN
     assert creds.client_id == CLIENT_ID
     assert creds.token_uri == TOKEN_URI
-    # Refresh omits a scope list so a full-Drive token and a leftover
-    # drive.file token both keep working.
-    assert creds.scopes is None
-    assert DRIVE_SCOPE == "https://www.googleapis.com/auth/drive"
+    # Every refresh asks Google for drive.file only, whatever the refresh token holds.
+    assert creds.scopes == ["https://www.googleapis.com/auth/drive.file"]
+    assert DRIVE_SCOPE == "https://www.googleapis.com/auth/drive.file"
 
 
 @pytest.mark.parametrize("raw", [None, "", "  "])
@@ -122,3 +121,46 @@ def test_api_tokens_optional(monkeypatch, raw) -> None:
     if raw is not None:
         monkeypatch.setenv("API_TOKENS", raw)
     assert Settings().api_tokens == []
+
+
+@pytest.mark.parametrize(
+    ("granted", "ok"),
+    [
+        ("https://www.googleapis.com/auth/drive.file", True),
+        ("https://www.googleapis.com/auth/drive", False),
+        (
+            "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive",
+            False,
+        ),
+        (None, False),  # Google did not say what it granted: refuse
+    ],
+)
+def test_every_refresh_is_checked_against_what_google_granted(monkeypatch, granted, ok) -> None:
+    """Even a refresh token that holds full Drive only ever yields drive.file access
+    tokens: the refresh asks for drive.file, and Google's answer is checked."""
+    import datetime
+
+    from google.auth import exceptions
+
+    from scoped_drive_mcp.drive_client import build_credentials
+
+    sent: dict = {}
+
+    def fake_refresh_grant(request, token_uri, refresh_token, client_id, client_secret, **kw):
+        sent["scopes"] = kw.get("scopes")
+        response = {"access_token": "at-1"}
+        if granted is not None:
+            response["scope"] = granted
+        expiry = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        return "at-1", refresh_token, expiry + datetime.timedelta(hours=1), response, None
+
+    monkeypatch.setattr("google.oauth2.reauth.refresh_grant", fake_refresh_grant)
+    creds = build_credentials(make_settings())
+    if ok:
+        creds.refresh(None)
+        assert creds.token == "at-1"
+    else:
+        with pytest.raises(exceptions.RefreshError):
+            creds.refresh(None)
+        assert creds.token is None
+    assert sent["scopes"] == ["https://www.googleapis.com/auth/drive.file"]

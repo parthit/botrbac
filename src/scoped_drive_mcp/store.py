@@ -1281,6 +1281,29 @@ class TokenVault:
         self._put(OWNER_TOKEN_KEY, token, email, scopes)
 
     def owner(self) -> dict[str, str] | None:
+        """The stored Drive sign-in, only if it is limited to drive.file.
+
+        An older record that carries the full Drive scope, or has no scope stamp, is not
+        returned: the person counts as not connected until they reconnect. Use
+        `legacy_owner()` to find such a record so it can be revoked.
+        """
+        from .drive_client import scopes_acceptable
+
+        record = self._owner_any()
+        if record and not scopes_acceptable(record.get("scopes")):
+            return None
+        return record
+
+    def legacy_owner(self) -> dict[str, str] | None:
+        """A stored sign-in this server no longer uses (full Drive or unstamped), if any."""
+        from .drive_client import scopes_acceptable
+
+        record = self._owner_any()
+        if record and record.get("t") and not scopes_acceptable(record.get("scopes")):
+            return record
+        return None
+
+    def _owner_any(self) -> dict[str, str] | None:
         record = self._take(OWNER_TOKEN_KEY)
         want = self.expected() if self.expected is not None else None
         have = record.get("email") if record else None
@@ -1545,7 +1568,9 @@ class TenantDirectory:
         return ActorStore(self.store, self.admin_email)
 
     def has_owner_refresh(self, email: str) -> bool:
-        record = self.vault_for(email).owner()
+        """Any stored Drive sign-in, including an old one that is no longer used."""
+        vault = self.vault_for(email)
+        record = vault.owner() or vault.legacy_owner()
         return bool(record and record.get("t"))
 
     def is_known_user(self, email: str) -> bool:

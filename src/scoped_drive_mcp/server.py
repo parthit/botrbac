@@ -50,7 +50,6 @@ from .dashboard import (
     render_plain,
 )
 from .drive_client import (
-    DRIVE_SCOPE,
     BotNotConnectedError,
     DriveClient,
     GoogleDriveClient,
@@ -884,13 +883,9 @@ def build_app(
         return shares.sharer_of(email, file_id) if email else None
 
     def limited_sign_in() -> bool:
-        # Same rule as the dashboard's reconnect banner: no full-Drive scope stamp.
-        if not vault.enabled:
-            return False
-        record = vault.owner()
-        if not record or not record.get("t"):
-            return False
-        return DRIVE_SCOPE not in str(record.get("scopes") or "").split()
+        # Drive access is per file (drive.file): a file this app cannot see may still
+        # exist, so the approval page offers to pick it.
+        return True
 
     access = (
         AccessService(

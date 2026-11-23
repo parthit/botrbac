@@ -9,6 +9,7 @@ import pytest
 
 from scoped_drive_mcp.bridge import UNTRUSTED_END, preview_untrusted
 from scoped_drive_mcp.config import Settings
+from scoped_drive_mcp.drive_client import DRIVE_FILE_SCOPE as DRIVE_FILE
 from scoped_drive_mcp.external import SHARED_END, SHARED_START, wrap_untrusted
 from scoped_drive_mcp.extract import ExtractError, extract_text, xlsx_tabs
 from scoped_drive_mcp.mcp_oauth import McpOAuth, done_redirect
@@ -162,7 +163,7 @@ def test_a_session_ends_when_its_time_is_up_however_fresh_the_cookie() -> None:
 
 def test_a_drive_sign_in_moved_to_another_account_is_refused() -> None:
     kv = MemoryStore()
-    TokenVault(kv, ENCRYPTION_KEY).set_owner("rt-owner", OWNER_EMAIL)
+    TokenVault(kv, ENCRYPTION_KEY).set_owner("rt-owner", OWNER_EMAIL, DRIVE_FILE)
     assert TokenVault(kv, ENCRYPTION_KEY, expected=lambda: OWNER_EMAIL).owner()["t"] == "rt-owner"
     assert TokenVault(kv, ENCRYPTION_KEY, expected=lambda: EVE).owner() is None
 
