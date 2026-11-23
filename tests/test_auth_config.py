@@ -114,3 +114,11 @@ def test_build_credentials_oauth_bot() -> None:
     # drive.file token both keep working.
     assert creds.scopes is None
     assert DRIVE_SCOPE == "https://www.googleapis.com/auth/drive"
+
+
+@pytest.mark.parametrize("raw", [None, "", "  "])
+def test_api_tokens_optional(monkeypatch, raw) -> None:
+    monkeypatch.delenv("API_TOKENS", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("API_TOKENS", raw)
+    assert Settings().api_tokens == []

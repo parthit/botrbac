@@ -145,6 +145,7 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "do-not-leak-this")
+    monkeypatch.setenv("API_TOKENS", "not-a-valid-entry")
     app = build_app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

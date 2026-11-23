@@ -8,7 +8,7 @@ Local setup, tests and pull requests are in [CONTRIBUTING.md](../CONTRIBUTING.md
 api/index.py                  Vercel entry point (app = build_app())
 vercel.json                   routes everything to api/index.py, maxDuration, bundles templates
 requirements.txt              runtime deps for Vercel (exported from uv.lock)
-scripts/bootstrap_oauth.py    optional: one-time sign-in as yourself → refresh token (phase 1 route)
+scripts/bootstrap_oauth.py    optional: one-time sign-in → refresh token (legacy GOOGLE_OAUTH_REFRESH_TOKEN)
 scripts/make_token.py         generate API tokens + hashes
 scripts/make_secrets.py       generate SESSION_SECRET and ENCRYPTION_KEY
 src/scoped_drive_mcp/
@@ -21,7 +21,7 @@ src/scoped_drive_mcp/
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log
   oauth.py                    Google web OAuth (authorization code) for the dashboard
-  mcp_oauth.py                MCP OAuth 2.1 authorization server (Grok Bot / PKCE)
+  mcp_oauth.py                MCP OAuth 2.1 authorization server (dynamic client registration, PKCE)
   dashboard.py                owner dashboard routes (Starlette)
   templates/                  dashboard HTML (Jinja2)
   auth.py                     bearer-token ASGI middleware for /mcp (API tokens and OAuth access tokens)

@@ -1,6 +1,6 @@
 """Settings loaded from environment variables only (no credential files on disk).
 
-Only malformed values (and a missing API_TOKENS) make the settings fail to load. Settings the
+Only malformed values make the settings fail to load. Settings the
 dashboard or the bot connection need are optional at load time; `missing_settings()` reports
 which ones are absent so the signed-in admin overview can list them (names only, never values).
 The public /health route stays a liveness check and does not repeat that list.
@@ -83,7 +83,9 @@ class Settings(BaseSettings):
     # Optional since phase 2: the bot can be connected from the dashboard instead.
     google_oauth_refresh_token: SecretStr | None = None
 
-    api_tokens: Annotated[list[TokenEntry], NoDecode]
+    # Optional legacy bearer tokens for the admin (xAI API, scripts). Assistants that
+    # connect with OAuth do not need them.
+    api_tokens: Annotated[list[TokenEntry], NoDecode] = Field(default_factory=list)
 
     owner_email: str | None = None
     bot_email: str | None = None
@@ -285,8 +287,10 @@ class Settings(BaseSettings):
     @field_validator("api_tokens", mode="before")
     @classmethod
     def _parse_tokens(cls, value: object) -> object:
+        if value is None:
+            return []
         if isinstance(value, str):
-            return parse_api_tokens(value)
+            return parse_api_tokens(value) if value.strip() else []
         return value
 
     # ---- derived ---------------------------------------------------------
