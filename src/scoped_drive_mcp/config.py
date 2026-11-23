@@ -17,7 +17,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
-_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Each address keys its own store (`u:{email}:`), so ':' and control, whitespace and
+# Redis glob characters are refused (see store.tenant_prefix).
+_EMAIL_CHAR = r"[^@:\s\x00-\x1f\x7f*?\[\]\\]"
+_EMAIL = re.compile(rf"^{_EMAIL_CHAR}+@{_EMAIL_CHAR}+\.{_EMAIL_CHAR}+$")
 _PROJECT_NUMBER = re.compile(r"^[0-9]{6,20}$")
 _LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
