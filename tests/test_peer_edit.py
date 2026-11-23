@@ -81,7 +81,7 @@ def test_an_editable_folder_takes_writes_marked_as_the_writer(setup, world) -> N
     new_id = created["structuredContent"]["id"]
     f = world.files[new_id]
     assert f.parents == ["proj"]
-    assert f.properties["botrbac_writer"] == f"guest:{EVE}"
+    assert f.app_properties["botrbac_writer"] == f"guest:{EVE}"
     assert EVE in (f.description or "")
 
     c, token = eve
@@ -90,7 +90,7 @@ def test_an_editable_folder_takes_writes_marked_as_the_writer(setup, world) -> N
     )
     assert edited["isError"] is False, edited
     assert world.files["proj-notes"].content == b"new"
-    assert world.files["proj-notes"].properties["botrbac_writer"] == f"guest:{EVE}"
+    assert world.files["proj-notes"].app_properties["botrbac_writer"] == f"guest:{EVE}"
     renamed = _mcp(
         c, token, "rename_shared_file", owner=OWNER_EMAIL, file_id="proj-notes", new_name="n2"
     )

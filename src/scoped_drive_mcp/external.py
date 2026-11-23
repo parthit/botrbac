@@ -11,8 +11,11 @@ checked on every call:
 1. Eve and Ada have an active pairing (both approved on /bridge, not revoked).
 2. The item is on Ada's external list, or inside a folder on it. Ada's own-bot list does
    not count, and Eve's role on her own connection does not matter.
-3. The operation is one of the read-only guest operations below. There is no write path:
-   this class only exposes list, read and download.
+3. The operation is one of the guest operations below. Reads are list, read and download.
+   Writes (create, upload, update, rename) go through a separate guard whose only
+   allowlist is what the owner marked editable; they never trash, move or reshare, and
+   never rename or overwrite an item on either of the owner's lists (unless that file
+   itself is marked editable, which allows an update).
 
 The Drive call runs with Ada's sign-in (the actor is switched to Ada for the call only),
 behind a ScopeGuard whose allowlist is Ada's external list and nothing else. A file that is
@@ -25,7 +28,7 @@ is told not to follow, the same idea as mailbox messages.
 
 import logging
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from typing import Any, TypeVar
 
@@ -204,6 +207,7 @@ class ExternalShares:
         first_read: Callable[[str, str, str | None], None] | None = None,
         write_service: DriveService | None = None,
         charge_write: Callable[[str], int] | None = None,
+        owner_protected: Callable[[], Collection[str]] | None = None,
     ):
         # `allowlist` and `service` resolve the current actor on each call, so they read
         # whichever person's external list and Drive `acting_as` selects.
@@ -224,7 +228,24 @@ class ExternalShares:
         # editable for this guest. Without one, guests cannot write at all.
         self.write_service = write_service
         # charge_write(guest) -> writes so far this hour by that guest, on the owner's store.
+        # Charged by the write service once every check passed, right before the Drive
+        # call, so a refused write costs nothing.
         self.charge_write = charge_write
+        if write_service is not None:
+            write_service.before_write = self._charge
+        # owner_protected(), as the owner: the ids the owner's own assistants were given
+        # (their allowlist, and ROOT_FOLDER_ID for the admin). A paired person may write
+        # inside an editable folder that holds them, but not rename or overwrite them.
+        self.owner_protected = owner_protected or (lambda: ())
+
+    def _charge(self) -> None:
+        you = current_guest.get() or ""
+        if self.charge_write is not None and self.charge_write(you) > GUEST_WRITES_PER_HOUR:
+            raise SharedAccessError(
+                "rate_limited",
+                f"At most {GUEST_WRITES_PER_HOUR} changes an hour to one person's share.",
+                retry_after_seconds=3600,
+            )
 
     # ---- owner side ------------------------------------------------------
 
@@ -425,18 +446,9 @@ class ExternalShares:
                 "not_shared", "Writing into what other people share is not available here."
             )
 
-        def run() -> dict[str, Any]:
-            # Charged only once the guest checks passed: a refused write costs nothing.
-            you = current_guest.get() or ""
-            if self.charge_write is not None and self.charge_write(you) > GUEST_WRITES_PER_HOUR:
-                raise SharedAccessError(
-                    "rate_limited",
-                    f"At most {GUEST_WRITES_PER_HOUR} changes an hour to one person's share.",
-                    retry_after_seconds=3600,
-                )
-            return fn(service)
-
-        result = self._as_guest(caller, owner, tool, file_id, run)
+        # The hourly quota is charged by `service` itself (see _charge), after the scope
+        # checks and the checks in `fn` passed: a refused write costs nothing.
+        result = self._as_guest(caller, owner, tool, file_id, lambda: fn(service))
         return {"owner": normalize_email(owner), **result}
 
     def create_doc(
@@ -480,20 +492,26 @@ class ExternalShares:
         )
 
     def update_file(self, caller: str, owner: str, file_id: str, content: str) -> dict[str, Any]:
-        return self._write(
-            caller,
-            owner,
-            "update_shared_file",
-            file_id,
-            lambda s: s.update_file_content(file_id, content),
-        )
+        def update(service: DriveService) -> dict[str, Any]:
+            # A file the owner gave their own assistants keeps its content, also when it
+            # sits inside a folder this person may edit, unless the owner marked that file
+            # itself editable for them on the Sharing list.
+            if file_id in self.owner_protected() and file_id not in self.allowlist.edit_map_for(
+                current_guest.get()
+            ):
+                raise ForbiddenError("an item the owner's own assistants use cannot be changed")
+            return service.update_file_content(file_id, content)
+
+        return self._write(caller, owner, "update_shared_file", file_id, update)
 
     def rename_file(self, caller: str, owner: str, file_id: str, new_name: str) -> dict[str, Any]:
-        def rename(service: Any) -> dict[str, Any]:
-            # An item on the Sharing list keeps the name its owner gave it, also when it
-            # sits inside a folder that person may edit.
+        def rename(service: DriveService) -> dict[str, Any]:
+            # An item on the Sharing list, or on the owner's own assistants' list, keeps the
+            # name its owner gave it, also when it sits inside a folder this person may edit.
             if file_id in self.allowlist.entries():
                 raise ForbiddenError("an item on the Sharing list cannot be renamed")
+            if file_id in self.owner_protected():
+                raise ForbiddenError("an item the owner's own assistants use cannot be renamed")
             return service.rename_file(file_id, new_name)
 
         return self._write(caller, owner, "rename_shared_file", file_id, rename)
