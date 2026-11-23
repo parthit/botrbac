@@ -96,7 +96,7 @@ def test_browse_sends_opaque_page_token(owner_c, monkeypatch) -> None:
     seen: list[str | None] = []
     original = FakeDrive.list_files
 
-    def wrapped(self, q, fields, page_size, page_token=None):
+    def wrapped(self, q, fields, page_size, page_token=None, order_by=None):
         seen.append(page_token)
         return original(self, q, fields, page_size, None)
 

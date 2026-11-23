@@ -27,6 +27,7 @@
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>
 
 {% if not q %}
+{% if is_root %}<p class="muted" id="root-note">These are the files Bot RBAC can open: the ones you picked with <b>Add from Google Drive</b>, and the ones it created. Google keeps the rest of your Drive closed to it. A folder you picked still opens to show what’s inside, so a file can appear both here and in its folder.</p>{% endif %}
 {% if current and not is_root %}<h2 class="folder-title">{{ file_icon("folder") }} {{ crumbs[-1].name }}</h2>{% endif %}
 <p class="crumbs">
   {% for c in crumbs %}
