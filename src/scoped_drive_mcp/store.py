@@ -1302,8 +1302,12 @@ class Allowlist:
                 # It kept changing, or this store cannot swap. Taking the person off
                 # matters more than the race, so write it plainly, as before.
                 logger.warning("unpair: entry kept changing; written without a swap")
-                self.add(updated)
-                changed.append(file_id)
+                # From a fresh read, so what the owner changed meanwhile is kept.
+                latest = self.get(file_id)
+                if latest is not None and not latest.for_everyone and who in latest.audience:  # type: ignore[operator]
+                    rest = tuple(a for a in latest.audience if a != who)  # type: ignore[union-attr]
+                    self.add(replace(latest, audience=rest))
+                    changed.append(file_id)
         return changed
 
 
