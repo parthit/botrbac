@@ -306,3 +306,34 @@ def test_no_wake_fires_for_a_pairing_between_two_people() -> None:
     assert box._wake_targets(OWNER_EMAIL) == []
     legacy_peer_mail(box, link_id, EVE, OWNER_EMAIL, "old")
     assert posts == []
+
+
+def test_a_wake_up_copied_to_another_slot_does_not_fire() -> None:
+    # Someone who can write to the store copies a saved wake-up into another slot. Its
+    # key was sealed for the slot it was saved in, so it does not open anywhere else.
+    posts: list[dict[str, str]] = []
+    box = _box(posts)
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    saved = box.store.get(f"bridge:hook:{OWNER_EMAIL}#{APP}")
+    box.store.set(f"bridge:hook:{EVE}", saved)
+    assert box.test_webhook(EVE, "")["ok"] is False
+    assert posts == []
+    assert box.test_webhook(OWNER_EMAIL, APP)["ok"] is True
+
+
+def test_a_wake_up_saved_before_keys_were_bound_still_fires_and_is_bound() -> None:
+    from scoped_drive_mcp.wake import seal
+
+    posts: list[dict[str, str]] = []
+    box = _box(posts)
+    box.set_webhook(OWNER_EMAIL, URL, sender_key=SECRET, app=APP)
+    slot = f"bridge:hook:{OWNER_EMAIL}#{APP}"
+    old = json.loads(box.store.get(slot))
+    old["ciphertext"], old["nonce"] = seal(SECRET, base64.b64decode(KEK))
+    del old["bound"]
+    box.store.set(slot, json.dumps(old))
+    assert box.test_webhook(OWNER_EMAIL, APP)["ok"] is True
+    assert json.loads(box.store.get(slot))["bound"] is True
+    # Moving it to another app seals it again for that slot.
+    box.move_webhook(OWNER_EMAIL, SENDER.grant_id, APP)
+    assert box.test_webhook(OWNER_EMAIL, SENDER.grant_id)["ok"] is True

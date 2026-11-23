@@ -474,6 +474,23 @@ def signing_key(encryption_key: str) -> bytes:
     ).digest()
 
 
+def purpose_fernet(encryption_key: str, purpose: str) -> Any:
+    """A Fernet made from ENCRYPTION_KEY for one use only (`purpose` names it).
+
+    The Drive sign-in vault uses ENCRYPTION_KEY itself. Everything else that encrypts
+    gets its own derived key, so no other feature can be made to decrypt a vault record,
+    or to produce one, for someone who can write to the store.
+    """
+    from cryptography.fernet import Fernet
+
+    digest = hmac.new(
+        encryption_key.strip().encode(),
+        f"botrbac {purpose} encryption v1".encode(),
+        hashlib.sha256,
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
 def _looks_signed(raw: str) -> bool:
     """`s1.<43 characters>.<value>`. A value from before signing that merely starts with
     `s1.` (an address such as s1.smith@example.com) is not mistaken for a signed one."""
@@ -706,6 +723,16 @@ class ActorStore:
         if not actor or actor == self.admin_email:
             return key
         return tenant_prefix(actor) + key
+
+    def hreplace(self, key: str, field: str, old: str, new: str) -> bool:
+        """Change one hash field from `old` to `new` only if it still says `old`. False
+        when it changed meanwhile, or the store below cannot do that in one step."""
+        # `hreplace` first: on a signing store it checks and signs, `hswap` would not.
+        for name in ("hreplace", "hswap"):
+            swap = getattr(self.inner, name, None)
+            if swap is not None:
+                return bool(swap(self._key(key), field, old, new))
+        return False
 
     def get(self, key: str) -> str | None:
         return self.inner.get(self._key(key))
@@ -1248,12 +1275,39 @@ class Allowlist:
         nobody, and the Sharing page says so."""
         who = person.strip().lower()
         changed: list[str] = []
-        for file_id, entry in self.entries().items():
-            if entry.for_everyone or who not in entry.audience:  # type: ignore[operator]
-                continue
-            rest = tuple(a for a in entry.audience if a != who)  # type: ignore[union-attr]
-            self.add(replace(entry, audience=rest))
-            changed.append(file_id)
+        swap = getattr(self.store, "hreplace", None) or getattr(self.store, "hswap", None)
+        for file_id in list(self.entries()):
+            # Each item is changed only if it still says what was just read. The owner
+            # may stop sharing it, or change who it names, at the same moment: a plain
+            # write here would put the old entry back.
+            for _attempt in range(5):
+                raw = self.store.hget(self.key, file_id)
+                if not raw:
+                    break
+                try:
+                    entry = AllowEntry.from_json(raw)
+                except (ValueError, KeyError, TypeError):
+                    break
+                if entry.for_everyone or who not in entry.audience:  # type: ignore[operator]
+                    break
+                rest = tuple(a for a in entry.audience if a != who)  # type: ignore[union-attr]
+                updated = replace(entry, audience=rest)
+                if swap is None:
+                    self.add(updated)
+                elif not swap(self.key, file_id, raw, updated.to_json()):
+                    continue
+                changed.append(file_id)
+                break
+            else:
+                # It kept changing, or this store cannot swap. Taking the person off
+                # matters more than the race, so write it plainly, as before.
+                logger.warning("unpair: entry kept changing; written without a swap")
+                # From a fresh read, so what the owner changed meanwhile is kept.
+                latest = self.get(file_id)
+                if latest is not None and not latest.for_everyone and who in latest.audience:  # type: ignore[operator]
+                    rest = tuple(a for a in latest.audience if a != who)  # type: ignore[union-attr]
+                    self.add(replace(latest, audience=rest))
+                    changed.append(file_id)
         return changed
 
 

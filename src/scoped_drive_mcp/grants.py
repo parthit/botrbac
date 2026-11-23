@@ -385,7 +385,21 @@ class GrantService:
         options: list[ApprovalOption] = []
         # The item itself is not an option when it is My Drive. Sharing it would
         # give the bot the owner's whole drive; grant() refuses that too.
-        if item_id != root_id:
+        if meta.get("mimeType") == SHORTCUT_MIME:
+            # Approving a shortcut allows what it points to (see grant), which can be a
+            # folder with another name. So the option shows the target, not the shortcut.
+            target_id = (meta.get("shortcutDetails") or {}).get("targetId")
+            target = self.owner_meta(str(target_id)) if target_id else None
+            if target is not None and str(target["id"]) != root_id:
+                options.append(
+                    ApprovalOption(
+                        id=str(target["id"]),
+                        name=str(target.get("name", "")),
+                        mime_type=str(target.get("mimeType", "")),
+                        label="Share what this shortcut points to",
+                    )
+                )
+        elif item_id != root_id:
             options.append(
                 ApprovalOption(
                     id=item_id,

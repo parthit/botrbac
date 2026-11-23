@@ -58,14 +58,34 @@ def decode_kek(value: str | None) -> bytes | None:
     return raw if len(raw) == 32 else None
 
 
-def seal(secret: str, kek: bytes) -> tuple[str, str]:
+def _slot_tag(slot: str | None) -> bytes | None:
+    return f"bridge:hook:{slot}".encode() if slot else None
+
+
+def seal(secret: str, kek: bytes, slot: str | None = None) -> tuple[str, str]:
+    """Encrypt a sender key. With `slot` (whose wake-up it is), it only opens for that
+    slot, so a record copied to another person's or app's slot in the store is useless."""
     nonce = os.urandom(12)
-    ciphertext = AESGCM(kek).encrypt(nonce, secret.encode(), None)
+    ciphertext = AESGCM(kek).encrypt(nonce, secret.encode(), _slot_tag(slot))
     return base64.b64encode(ciphertext).decode(), base64.b64encode(nonce).decode()
 
 
-def open_secret(ciphertext: str, nonce: str, kek: bytes) -> str:
-    return AESGCM(kek).decrypt(base64.b64decode(nonce), base64.b64decode(ciphertext), None).decode()
+def open_secret(ciphertext: str, nonce: str, kek: bytes, slot: str | None = None) -> str:
+    return (
+        AESGCM(kek)
+        .decrypt(base64.b64decode(nonce), base64.b64decode(ciphertext), _slot_tag(slot))
+        .decode()
+    )
+
+
+def record_slot(record: dict[str, Any], slot: str | None) -> str | None:
+    """The slot a saved record's key was sealed for: `slot` once the record says it is
+    bound, None for one saved before keys were bound (opened as it was sealed)."""
+    if not record.get("bound"):
+        return None
+    if not slot:
+        raise ValueError("webhook_slot_unknown")
+    return slot
 
 
 def hint(secret: str) -> str:
@@ -154,13 +174,20 @@ def headers_for(scheme: str, secret: str) -> dict[str, str]:
     return headers
 
 
-def deliver(settings: WakeSettings, record: dict[str, Any], message: dict[str, Any]) -> int:
+def deliver(
+    settings: WakeSettings,
+    record: dict[str, Any],
+    message: dict[str, Any],
+    slot: str | None = None,
+) -> int:
     if not settings.kek:
         raise ValueError("webhook_disabled")
     scheme = str(record.get("scheme") or "bearer")
     host, path, address = approve_url(str(record["url"]), settings.allowlist, settings.lookup)
     check_scheme_target(scheme, host, path)
-    secret = open_secret(str(record["ciphertext"]), str(record["nonce"]), settings.kek)
+    secret = open_secret(
+        str(record["ciphertext"]), str(record["nonce"]), settings.kek, record_slot(record, slot)
+    )
     request = {
         "hostname": host,
         "path": path,

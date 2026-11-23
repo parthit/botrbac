@@ -546,3 +546,83 @@ def test_prefixed_store_incr_expires_and_lrem_removes_every_copy() -> None:
     store.lpush("box", "a")
     assert store.lrem("box", "a") == 2
     assert store.lrange("box", 0, -1) == ["b"]
+
+
+def _vault_and_box() -> tuple[str, Mailbox]:
+    key = Fernet.generate_key().decode()
+    return key, Mailbox(
+        MemoryStore(), base_url="https://drive-test.example.com", encryption_key=key
+    )
+
+
+def test_the_mailbox_cannot_be_used_to_read_a_stored_drive_sign_in() -> None:
+    # Someone who can write to the store swaps a message body for another person's
+    # encrypted Drive sign-in. The mailbox must not decrypt and show it.
+    from scoped_drive_mcp.store import TokenVault
+
+    key, box = _vault_and_box()
+    victim = MemoryStore()
+    TokenVault(victim, key).set_owner("1//victim-token", "victim@example.com", "scopes")
+    stolen = victim.get("vault:owner_refresh_token")
+    link_id = self_pair(box)
+    sent = _send(box, link_id, "hello")
+    record = json.loads(box.store.get(f"bridge:msg:{sent['msg_id']}"))
+    record["body"] = stolen
+    box.store.set(f"bridge:msg:{sent['msg_id']}", json.dumps(record))
+    assert "victim-token" not in json.dumps(_inbox(box))
+
+
+def test_the_mailbox_cannot_be_used_to_write_a_drive_sign_in() -> None:
+    # A message whose text is a vault record is encrypted with the mailbox's own key, so
+    # the vault does not accept it when it is copied into a sign-in slot.
+    from scoped_drive_mcp.store import TokenVault
+
+    key, box = _vault_and_box()
+    link_id = self_pair(box)
+    forged = json.dumps({"t": "1//victim-token", "email": OWNER_EMAIL, "scopes": "x"})
+    sent = _send(box, link_id, forged)
+    sealed = json.loads(box.store.get(f"bridge:msg:{sent['msg_id']}"))["body"]
+    slot = MemoryStore()
+    slot.set("vault:owner_refresh_token", sealed)
+    assert TokenVault(slot, key)._owner_any() is None
+
+
+def test_mail_saved_before_the_mailbox_had_its_own_key_is_still_read() -> None:
+    key, box = _vault_and_box()
+    link_id = self_pair(box)
+    sent = _send(box, link_id, "placeholder")
+    record = json.loads(box.store.get(f"bridge:msg:{sent['msg_id']}"))
+    record["body"] = Fernet(key.encode()).encrypt(b"older note").decode()
+    box.store.set(f"bridge:msg:{sent['msg_id']}", json.dumps(record))
+    assert _inbox(box)["messages"][0]["body"].count("older note") == 1
+
+
+def test_a_right_invite_code_is_refused_once_guesses_are_over_the_limit() -> None:
+    box = _box()
+    created = box.request_link(OWNER_EMAIL)
+    for n in range(20):
+        with pytest.raises(MailboxError) as wrong:
+            box.request_link(EVE, f"WRONG{n:03d}")
+        assert wrong.value.code == "invite_not_found"
+    with pytest.raises(MailboxError) as limited:
+        box.request_link(EVE, created["invite_code"])
+    assert limited.value.code == "rate_limited"
+
+
+def test_get_webhook_does_not_show_the_assistant_its_url_or_key(app) -> None:
+    from scoped_drive_mcp.wake import WakeSettings
+
+    box = app.state.mailbox
+    box.wake = WakeSettings(
+        enabled=True,
+        kek=b"k" * 32,
+        allowlist=("api2.cursor.sh",),
+        lookup=lambda _host: ["8.8.8.8"],
+        poster=lambda _request: 200,
+    )
+    url = "https://api2.cursor.sh/automations/webhook/abc"
+    box.set_webhook(OWNER_EMAIL, url, sender_key="sk_live_key_1234", app="")
+    assert box.get_webhook(OWNER_EMAIL, "")["url"] == url  # the dashboard still sees it
+    shown = mcp_call(client(app), "get_webhook")["structuredContent"]
+    assert shown["configured"] is True
+    assert "url" not in shown and "secret_hint" not in shown
