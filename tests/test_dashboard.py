@@ -800,3 +800,11 @@ def test_shortcut_rows_update_in_place_and_remove_acts_on_the_target(owner_c) ->
         page,
     )
     assert remove and all('value="priv-secret"' in form for form in remove)
+
+
+def test_referrer_policy_sends_only_the_origin_to_other_sites(owner_c) -> None:
+    """Google checks a website-restricted Picker key against the Referer, so other sites
+    must get this site's origin. They must never get a path (request ids live in URLs)."""
+    policy = owner_c.get("/files").headers["referrer-policy"]
+    assert policy == "strict-origin-when-cross-origin"
+    assert policy in _FORM_POST_KEEPS_ORIGIN
