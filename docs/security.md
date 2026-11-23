@@ -87,8 +87,12 @@
   a secondary line, because any app can choose any name. `http://localhost:8787/callback` and
   `http://127.0.0.1:8787/callback` are accepted only when `OAUTH_LOOPBACK_CALLBACK=1`, and the consent
   page then warns that access goes to a program on this computer. Anyone can register a client, so a
-  client nobody approves is removed after a day and at most 1000 such clients are kept (the oldest make
-  room). An approval whose code is never exchanged is removed once the code has expired (5 minutes).
+  client that never gets a token is removed after a day. At most 20 such clients are kept per address
+  (IPv6 per /64), the address's own oldest making room, and at most 5000 in all, the oldest making
+  room only once they are 15 minutes old so a person on the consent page is never cut off. If the cap
+  is full of younger ones, registering answers 429 until room frees up. An approval whose code is never
+  exchanged is removed once the code has expired (5 minutes), and only a client that got a token is
+  kept for good.
   This server's own `/oauth/done` page is accepted only when `OAUTH_TEST_CALLBACK=1` (local testing). Leave
   it off in production: a code sent there lands in front of the person who clicked Allow.
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
@@ -105,8 +109,10 @@
   `X-Forwarded-For`. An address the caller typed into that header is ignored. IPv6 callers are counted
   per /64, and an IPv4-mapped IPv6 address as its IPv4 address. On `/mcp`, each connection (an OAuth app
   or an `API_TOKENS` entry) has its own allowance, which refreshing tokens does not reset. Refused bearers
-  are counted per address, and once an address is over the limit only its refused requests get 429;
-  valid tokens from it keep working. Counters use a fixed window on every store (Redis, Postgres,
+  are counted per address, and once an address is over the limit only its refused bearers get 429
+  (still carrying `error="invalid_token"`, so a client with an expired token refreshes). Valid tokens
+  from it keep working, and a request with no token always gets its 401, so clients can always find
+  where to sign in. Counters use a fixed window on every store (Redis, Postgres,
   memory).
 - **Records that decide access are signed.** Allowlist and Sharing entries, connected apps (their roles,
   tokens and codes) and pairings are stored with a signature made from `ENCRYPTION_KEY`, over the record and
@@ -151,7 +157,7 @@
 - **Paired people's writes.** A paired person's assistant can write only inside items you marked
   editable for them, and only create, upload, update and rename (never trash, move or share). Inside an
   editable folder it can't rename anything on your Sharing list, on your own assistants' Access list or
-  the root folder, and it can't overwrite the content of an item on your Access list unless you marked
+  the root folder, and it can't overwrite the content of an item on either list unless you marked
   that file itself editable. The hourly write limit counts only writes that passed every check. Files it
   wrote or renamed are marked in Drive `appProperties`, which only this app can read or change, so another
   editor of the file can't remove the "untrusted" flag your assistants see or change whose name is shown.

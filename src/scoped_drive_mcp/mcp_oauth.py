@@ -48,9 +48,15 @@ MAX_ACCESS_TOKENS = 20
 MAX_REDIRECTS = 16
 # A registered client that never got an approval is removed after this long.
 UNUSED_CLIENT_TTL = 24 * 3600
-# At most this many registered clients that never got an approval are kept. Registering
-# is open to anyone, so past this the oldest such clients make room for new ones.
-MAX_UNUSED_CLIENTS = 1000
+# At most this many registered clients that never got a token are kept. Registering is
+# open to anyone, so past this the oldest such clients make room for new ones, but only
+# clients older than MIN_EVICT_AGE: a younger one may be someone on the consent page now.
+# With nothing old enough to make room, registering is refused until something is.
+MAX_UNUSED_CLIENTS = 5000
+MIN_EVICT_AGE = 15 * 60
+# One address (IPv4, or IPv6 /64) may hold this many unused clients. Past that its own
+# oldest make room, so a flood from one place cannot push out anyone else's.
+MAX_UNUSED_PER_SOURCE = 20
 # Removals one registration or approval may do on top of making room, so the clean-up
 # never turns one request into a long one.
 PRUNE_BATCH = 50
@@ -144,6 +150,13 @@ AS_PATHS = (
 _NO_STORE = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
 
 
+def _source_tag(source: str | None) -> str:
+    """A short hash of the registering address bucket; the address itself is not kept."""
+    if not source:
+        return ""
+    return hashlib.sha256(source.encode()).hexdigest()[:16]
+
+
 class RegistrationError(Exception):
     def __init__(self, error: str, description: str, status: int = 400):
         super().__init__(description)
@@ -183,9 +196,12 @@ class OAuthClientRecord:
     client_name: str
     redirect_uris: list[str]
     created_at: str
-    # Set once someone approved a connection for this client. A client that never was
-    # is removed after UNUSED_CLIENT_TTL (see McpOAuth.prune).
+    # Set once a connection for this client got its first token. A client that never did
+    # is removed after UNUSED_CLIENT_TTL (see McpOAuth.prune). Records written before
+    # this field existed have no key and are read as granted, so they are kept.
     granted: bool = False
+    # Hash of the address bucket that registered it, for the per-address cap.
+    source: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -201,7 +217,8 @@ class OAuthClientRecord:
             client_name=str(data.get("client_name") or "MCP client"),
             redirect_uris=list(uris),
             created_at=str(data.get("created_at") or ""),
-            granted=bool(data.get("granted", False)),
+            granted=bool(data.get("granted", True)),
+            source=str(data.get("source") or ""),
         )
 
 
@@ -672,7 +689,8 @@ class McpOAuth:
             return limited
         try:
             payload = await _json_object(request)
-            body = await anyio.to_thread.run_sync(self.register, payload)
+            source = ip_identity(request.scope)
+            body = await anyio.to_thread.run_sync(self.register, payload, source)
         except RegistrationError as exc:
             return _oauth_error(exc.error, exc.description, exc.status)
         except Exception:
@@ -705,7 +723,7 @@ class McpOAuth:
 
     # ---- clients ---------------------------------------------------------
 
-    def register(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def register(self, payload: Mapping[str, Any], source: str | None = None) -> dict[str, Any]:
         method = payload.get("token_endpoint_auth_method", "none")
         if method != "none":
             raise RegistrationError(
@@ -740,8 +758,12 @@ class McpOAuth:
             client_name=_clean_name(payload.get("client_name")),
             redirect_uris=cleaned,
             created_at=utc_now(),
+            source=_source_tag(source),
         )
-        self.prune(room_for_client=True)
+        if not self.prune(room_for=record.source):
+            raise RegistrationError(
+                "temporarily_unavailable", "Too many registrations. Try again later.", 429
+            )
         self.store.hset(CLIENTS_KEY, client_id, record.to_json())
         return {
             "client_id": record.client_id,
@@ -768,7 +790,7 @@ class McpOAuth:
         return record
 
     def _mark_client_granted(self, client_id: str) -> None:
-        """Note on the client that it was approved, so it is never pruned as unused.
+        """Note on the client that it got a token, so it is never pruned as unused.
         Best effort: a client that still has a grant is kept either way."""
         try:
             before = self.store.hget(CLIENTS_KEY, client_id)
@@ -786,38 +808,42 @@ class McpOAuth:
         except Exception:
             logger.warning("could not mark an OAuth client as approved", exc_info=True)
 
-    def prune(self, *, room_for_client: bool = False, now: float | None = None) -> int:
-        """Remove what an unfinished connection leaves behind. Returns how many records
-        were removed.
+    def prune(self, *, room_for: str | None = None, now: float | None = None) -> bool:
+        """Remove what an unfinished connection leaves behind.
 
         - An approval whose code was never exchanged: the code ended after CODE_TTL, so
           the grant can never get a token. Removed with `revoke`, which also stops an
           exchange somehow still in flight from putting it back.
-        - A registered client nobody ever approved, after UNUSED_CLIENT_TTL. With
-          `room_for_client`, also the oldest such clients past MAX_UNUSED_CLIENTS - 1, so
-          the one about to be registered fits under the cap.
+        - A registered client that never got a token, after UNUSED_CLIENT_TTL.
 
-        A client that was approved, or still has a grant, is never removed here. The work
-        is bounded by PRUNE_BATCH, plus whatever it takes to stay under the cap."""
+        With `room_for` (the source tag of a client about to be registered), also make room
+        for it: past MAX_UNUSED_PER_SOURCE that source's own oldest unused clients go, and
+        past MAX_UNUSED_CLIENTS the oldest unused clients older than MIN_EVICT_AGE. Returns
+        False only when there is no room and nothing old enough to remove.
+
+        A client that got a token, or still has a grant, is never removed here. The work is
+        bounded by PRUNE_BATCH, plus whatever it takes to make room."""
         current = time.time() if now is None else now
-        removed = 0
         try:
             in_use: set[str] = set()
+            removed = 0
             for grant_id, raw in self.store.hgetall(GRANTS_KEY).items():
                 try:
                     grant = OAuthGrant.from_json(raw)
                 except (ValueError, KeyError, TypeError):
                     continue
-                in_use.add(grant.client_id)
-                if grant.access_hashes or grant.refresh_hash or not grant.code_hash:
-                    continue
+                abandoned = not (grant.access_hashes or grant.refresh_hash) and bool(
+                    grant.code_hash
+                )
                 created = _timestamp(grant.created_at)
                 # A minute past the code's own end, so a slow exchange is never cut short.
                 if created is not None and current - created < CODE_TTL + 60:
-                    continue
-                if removed < PRUNE_BATCH and self.revoke(grant_id):
+                    abandoned = False
+                if abandoned and removed < PRUNE_BATCH and self.revoke(grant_id):
                     removed += 1
-            unused: list[tuple[float, str]] = []
+                    continue
+                in_use.add(grant.client_id)
+            unused: list[tuple[float, str, str]] = []
             for client_id, raw in self.store.hgetall(CLIENTS_KEY).items():
                 if client_id in in_use:
                     continue
@@ -826,19 +852,33 @@ class McpOAuth:
                 except (ValueError, KeyError, TypeError):
                     continue
                 if not record.granted:
-                    # No readable time: from before times were kept, so it counts as old.
-                    unused.append((_timestamp(record.created_at) or 0.0, client_id))
-            # Oldest first, so the stale ones come first and are the first to make room.
+                    # No readable time counts as old.
+                    created = _timestamp(record.created_at) or 0.0
+                    unused.append((created, client_id, record.source))
+            # Oldest first.
             unused.sort()
-            stale = sum(1 for created, _ in unused if current - created >= UNUSED_CLIENT_TTL)
-            over_cap = len(unused) - (MAX_UNUSED_CLIENTS - 1) if room_for_client else 0
-            for _created, client_id in unused[: max(min(stale, PRUNE_BATCH), over_cap)]:
+            doomed: set[str] = set()
+            stale = [c for created, c, _ in unused if current - created >= UNUSED_CLIENT_TTL]
+            doomed.update(stale[:PRUNE_BATCH])
+            if room_for is not None:
+                if room_for:
+                    mine = [c for _, c, src in unused if src == room_for and c not in doomed]
+                    doomed.update(mine[: max(0, len(mine) - (MAX_UNUSED_PER_SOURCE - 1))])
+                left = [(created, c) for created, c, _ in unused if c not in doomed]
+                need = len(left) - (MAX_UNUSED_CLIENTS - 1)
+                if need > 0:
+                    old = [c for created, c in left if current - created >= MIN_EVICT_AGE]
+                    if len(old) < need:
+                        for client_id in doomed:
+                            self.store.hdel(CLIENTS_KEY, client_id)
+                        return False
+                    doomed.update(old[:need])
+            for client_id in doomed:
                 self.store.hdel(CLIENTS_KEY, client_id)
-                removed += 1
         except Exception:
             # Clean-up must never stop a registration or an approval.
             logger.warning("OAuth clean-up failed", exc_info=True)
-        return removed
+        return True
 
     def _new_client_id(self) -> str:
         for _ in range(3):
@@ -967,7 +1007,6 @@ class McpOAuth:
         self.store.set(_role_key(grant.id), role)
         self._save_grant(grant)
         self.store.set(_code_key(digest), payload, ex=CODE_TTL)
-        self._mark_client_granted(pending.client_id)
         # Approvals whose app never came back for its code are cleared here.
         self.prune()
         return _with_query(
@@ -1039,7 +1078,10 @@ class McpOAuth:
             raise
         grant.code_hash = None
         self.store.set(_code_used_key(code_digest), grant.id, ex=CODE_TTL)
-        return self._issue_tokens(grant)
+        issued = self._issue_tokens(grant)
+        # Only a client that got a token is kept for good; approving alone is not enough.
+        self._mark_client_granted(grant.client_id)
+        return issued
 
     def _refresh(self, form: Mapping[str, str]) -> dict[str, Any]:
         client = self._require_client(form.get("client_id"))

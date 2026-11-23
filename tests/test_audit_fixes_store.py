@@ -171,24 +171,21 @@ def test_a_refused_token_is_never_set_on_the_shared_credentials(monkeypatch) -> 
     assert set(creds.granted_scopes) == {"openid", DRIVE_FILE}
 
 
-def test_concurrent_refreshes_never_expose_a_refused_token(monkeypatch) -> None:
+def test_concurrent_refreshes_never_assign_a_refused_token(monkeypatch) -> None:
+    """Several threads refresh the one shared credentials object at once. The spy records
+    every assignment to its `token`, which is the only way another thread could ever see a
+    refused token, so none may carry it."""
     from google.auth import exceptions
 
     from scoped_drive_mcp.drive_client import build_credentials
 
-    observed: list = []
-    creds_box: list = []
-
     def fake_refresh_grant(request, token_uri, refresh_token, client_id, client_secret, **kw):
-        # While Google "answers", another thread looks at the shared object.
-        observed.append(creds_box[0].token)
         expiry = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         response = {"access_token": "at-wide", "scope": f"{DRIVE_FILE} {NEWLY_REFUSED[0]}"}
         return "at-wide", refresh_token, expiry + datetime.timedelta(hours=1), response, None
 
     monkeypatch.setattr("google.oauth2.reauth.refresh_grant", fake_refresh_grant)
     creds = build_credentials(make_settings())
-    creds_box.append(creds)
     seen = _spy_on_token(creds)
     errors: list = []
 
@@ -204,7 +201,8 @@ def test_concurrent_refreshes_never_expose_a_refused_token(monkeypatch) -> None:
     for t in threads:
         t.join()
     assert len(errors) == 4
-    assert "at-wide" not in observed and "at-wide" not in seen
+    assert "at-wide" not in seen
+    assert creds.token is None
 
 
 # ---- 3. Postgres incr keeps a fixed window ----

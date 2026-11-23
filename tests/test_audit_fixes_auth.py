@@ -64,12 +64,17 @@ def test_bad_tokens_from_an_address_do_not_block_a_valid_token_there(
     assert blocked.status_code == 429
     assert blocked.json() == {"error": "rate_limited"}
     assert blocked.headers["retry-after"] == "60"
+    # It still says the token was refused, so a client with an expired one refreshes.
+    assert 'error="invalid_token"' in blocked.headers["www-authenticate"]
     # ... but a valid token from the same address still works.
     assert _mcp(c, TOKENS["viewer"], office).status_code == 200
-    # Bad tokens from there are still refused, and so is a request with no token.
+    # Bad tokens from there are still refused ...
     assert _mcp(c, "made-up-4", office).status_code == 429
-    missing = c.post("/mcp", json=INIT, headers={**MCP_HEADERS, "X-Forwarded-For": office})
-    assert missing.status_code == 429
+    # ... but a request with no token still gets the 401 that tells it where to sign in.
+    for _ in range(3):
+        missing = c.post("/mcp", json=INIT, headers={**MCP_HEADERS, "X-Forwarded-For": office})
+        assert missing.status_code == 401
+        assert "resource_metadata" in missing.headers["www-authenticate"]
     # Another address is not affected.
     assert _mcp(c, "made-up-5", "198.51.100.9").status_code == 401
 
@@ -196,9 +201,10 @@ def test_unapproved_clients_are_capped(world, memstore, oauth, monkeypatch) -> N
     code, verifier = _approved(c, used)
     assert exchange(c, used, code, verifier, GROK).status_code == 200
     ids = []
-    for age in (50, 40, 30, 20, 10):
+    gap = mcp_oauth_module.MIN_EVICT_AGE
+    for age in (5 * gap, 4 * gap, 3 * gap, 2 * gap, gap):
         ids.append(register(c, GROK).json()["client_id"])
-        _backdate_client(server, ids[-1], age)
+        _backdate_client(server, ids[-1], age + 60)
     newest = register(c, GROK).json()["client_id"]
     stored = server.store.hgetall(CLIENTS_KEY)
     unused = [cid for cid, raw in stored.items() if not OAuthClientRecord.from_json(raw).granted]
@@ -236,6 +242,86 @@ def test_approval_whose_code_was_never_exchanged_is_removed(world, memstore, oau
     assert server.store.get(f"oauth:role:{abandoned}") is None
     # A connection that got its tokens is untouched.
     assert finished in grants
+
+
+def test_a_client_on_the_consent_page_is_not_evicted(world, memstore, oauth, monkeypatch) -> None:
+    """A full cap of young clients refuses new registrations instead of evicting one that
+    someone may be approving right now."""
+    monkeypatch.setattr(mcp_oauth_module, "MAX_UNUSED_CLIENTS", 3)
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    c = client(app)
+    assert login(c).status_code == 303
+    waiting = register(c, GROK).json()["client_id"]
+    # The person opens the consent page for it...
+    from tests.test_mcp_oauth import auth_params, code_from, post, posted_redirect
+
+    verifier, params = auth_params(waiting, GROK)
+    assert c.get("/oauth/authorize", params=params).status_code == 200
+    # ...while someone else registers past the cap.
+    assert register(c, GROK).status_code == 201
+    assert register(c, GROK).status_code == 201
+    refused = register(c, GROK)
+    assert refused.status_code == 429
+    assert server.client(waiting) is not None
+    # Allow still works and the app gets its tokens.
+    code = code_from(posted_redirect(c, post(c, "/oauth/authorize", decision="allow")))
+    assert exchange(c, waiting, code, verifier, GROK).status_code == 200
+
+
+def _register_from(c, ip: str):
+    payload = {
+        "client_name": "Grok Bot",
+        "redirect_uris": [GROK],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }
+    return c.post("/oauth/register", json=payload, headers={"X-Forwarded-For": ip})
+
+
+def test_one_address_cannot_push_out_anothers_clients(
+    world, memstore, oauth, monkeypatch, behind_proxy
+) -> None:
+    monkeypatch.setattr(mcp_oauth_module, "MAX_UNUSED_PER_SOURCE", 3)
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    c = client(app)
+    victim = _register_from(c, "198.51.100.7").json()["client_id"]
+    flood = [_register_from(c, "203.0.113.9").json()["client_id"] for _ in range(10)]
+    assert server.client(victim) is not None
+    kept = [cid for cid in flood if server.client(cid) is not None]
+    # The flooding address keeps only a few of its own, always including the newest.
+    assert len(kept) == 3 and flood[-1] in kept
+
+
+def test_approving_without_exchanging_does_not_keep_a_client(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    c = client(app)
+    assert login(c).status_code == 303
+    client_id = register(c, GROK).json()["client_id"]
+    _approved(c, client_id)
+    assert server.client(client_id).granted is False
+    _backdate_client(server, client_id, mcp_oauth_module.UNUSED_CLIENT_TTL + 60)
+    (grant_id,) = server.store.hgetall(GRANTS_KEY)
+    _backdate_grant(server, grant_id, mcp_oauth_module.CODE_TTL + 120)
+    assert register(c, GROK).status_code == 201
+    assert server.client(client_id) is None
+
+
+def test_clients_saved_before_the_granted_field_are_kept(world, memstore, oauth) -> None:
+    app = _app(world, memstore, oauth)
+    server = app.state.dashboard.mcp_oauth
+    c = client(app)
+    legacy = register(c, GROK).json()["client_id"]
+    record = json.loads(server.store.hget(CLIENTS_KEY, legacy))
+    record.pop("granted")
+    record.pop("source", None)
+    record["created_at"] = _ago(mcp_oauth_module.UNUSED_CLIENT_TTL * 30)
+    server.store.hset(CLIENTS_KEY, legacy, json.dumps(record))
+    assert register(c, GROK).status_code == 201
+    assert server.client(legacy) is not None
 
 
 # ---- 4. the consent page names the app by its redirect; loopback is opt-in ----

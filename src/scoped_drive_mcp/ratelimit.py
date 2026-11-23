@@ -180,11 +180,13 @@ class AuthFailureLimitApp:
     """ASGI wrapper around `BearerAuthMiddleware` that limits rejected bearers per address.
 
     A made-up token cannot be told apart from a real one without asking the auth layer,
-    so every request goes through to it. Only an answer of 401 (no token, or a token that
-    is not valid) is counted against the caller's address, and once that address used up
-    its allowance those 401s become 429. A valid token from the same address is never
-    refused by this counter, so someone sending bad tokens from a shared address (an
-    office NAT, a hosted assistant's egress) cannot lock out the others there.
+    so every request goes through to it. Only a 401 for a presented token that was refused
+    is counted against the caller's address, and once that address used up its allowance
+    those 401s become 429 (still carrying the challenge). A request with no token always
+    gets its 401, so clients can always discover how to sign in. A valid token from the
+    same address is never refused by this counter, so someone sending bad tokens from a
+    shared address (an office NAT, a hosted assistant's egress) cannot lock out the
+    others there.
     """
 
     def __init__(self, app: ASGIApp, store: object, *, name: str, limit: int, window: int):
@@ -206,30 +208,41 @@ class AuthFailureLimitApp:
             if swallowing:
                 return
             if message["type"] == "http.response.start" and message["status"] == 401:
-                allowed = await anyio.to_thread.run_sync(
-                    lambda: allow(self.store, self.name, ip, self.limit, self.window)
-                )
-                if not allowed:
-                    swallowing = True
-                    await _too_many(send, self.window)
-                    return
+                challenge = _header(message, b"www-authenticate")
+                # Only a presented token that was refused counts. A request with no token
+                # is how a client discovers where to sign in, and it must keep getting the
+                # 401 that says so, whatever anyone else at this address sends.
+                if b"invalid_token" in challenge:
+                    allowed = await anyio.to_thread.run_sync(
+                        lambda: allow(self.store, self.name, ip, self.limit, self.window)
+                    )
+                    if not allowed:
+                        swallowing = True
+                        # Keep the challenge, so a client whose token simply expired still
+                        # learns it should refresh.
+                        await _too_many(send, self.window, challenge)
+                        return
             await send(message)
 
         await self.app(scope, receive, watch)
 
 
-async def _too_many(send: Send, window: int) -> None:
+def _header(message: Message, name: bytes) -> bytes:
+    for key, value in message.get("headers") or []:
+        if key.lower() == name:
+            return bytes(value)
+    return b""
+
+
+async def _too_many(send: Send, window: int, challenge: bytes = b"") -> None:
     body = b'{"error":"rate_limited"}'
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 429,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-                (b"retry-after", str(window).encode()),
-                (b"cache-control", b"no-store"),
-            ],
-        }
-    )
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+        (b"retry-after", str(window).encode()),
+        (b"cache-control", b"no-store"),
+    ]
+    if challenge:
+        headers.append((b"www-authenticate", challenge))
+    await send({"type": "http.response.start", "status": 429, "headers": headers})
     await send({"type": "http.response.body", "body": body})

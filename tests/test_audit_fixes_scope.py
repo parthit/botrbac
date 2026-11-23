@@ -87,6 +87,19 @@ def test_a_paired_person_cannot_rename_or_overwrite_the_owners_own_items(shared,
     assert world.files["proj-notes"].content == b"ok"
 
 
+def test_a_read_only_sharing_item_inside_an_editable_folder_keeps_its_content(
+    shared, world
+) -> None:
+    owner, (eve, token) = shared
+    # proj-notes is on the Sharing list, read only, inside the editable folder.
+    assert post(owner, "/sharing/add", file_id="proj-notes").status_code == 303
+    updated = _mcp(
+        eve, token, "update_shared_file", owner=OWNER_EMAIL, file_id="proj-notes", content="x"
+    )
+    assert _error(updated)["error"] == "not_shared"
+    assert world.files["proj-notes"].content == b"project notes alpha"
+
+
 # ---- peer marks live in appProperties, which other Drive editors cannot touch ----
 
 

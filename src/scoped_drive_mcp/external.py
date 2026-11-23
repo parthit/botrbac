@@ -494,13 +494,15 @@ class ExternalShares:
 
     def update_file(self, caller: str, owner: str, file_id: str, content: str) -> dict[str, Any]:
         def update(service: DriveService) -> dict[str, Any]:
-            # A file the owner gave their own assistants keeps its content, also when it
-            # sits inside a folder this person may edit, unless the owner marked that file
+            # An item on either of the owner's lists keeps its content, also when it sits
+            # inside a folder this person may edit, unless the owner marked that item
             # itself editable for them on the Sharing list.
-            if file_id in self.owner_protected() and file_id not in self.allowlist.edit_map_for(
-                current_guest.get()
-            ):
-                raise ForbiddenError("an item the owner's own assistants use cannot be changed")
+            editable_here = file_id in self.allowlist.edit_map_for(current_guest.get())
+            if not editable_here:
+                if file_id in self.allowlist.entries():
+                    raise ForbiddenError("an item on the Sharing list cannot be changed")
+                if file_id in self.owner_protected():
+                    raise ForbiddenError("an item the owner's own assistants use cannot be changed")
             return service.update_file_content(file_id, content)
 
         return self._write(caller, owner, "update_shared_file", file_id, update)

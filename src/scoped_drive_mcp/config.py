@@ -139,8 +139,9 @@ class Settings(BaseSettings):
     google_picker_api_key: str | None = None
     google_cloud_project_number: str | None = None
 
-    # Fixed-window counters. Login is per IP. /mcp is per bearer token, or per IP
-    # when the request has no token. High defaults so normal use is unaffected.
+    # Fixed-window counters. Login is per address (IPv6 per /64). /mcp is per connection
+    # (OAuth app or API_TOKENS entry); refused bearers are counted per address. High
+    # defaults so normal use is unaffected.
     login_rate_limit: int = Field(default=30, ge=1, le=10_000)
     login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
     mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)
