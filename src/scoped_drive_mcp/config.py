@@ -17,7 +17,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
-_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Each address keys its own store (`u:{email}:`), so ':' and control, whitespace and
+# Redis glob characters are refused (see store.tenant_prefix).
+_EMAIL_CHAR = r"[^@:\s\x00-\x1f\x7f*?\[\]\\]"
+_EMAIL = re.compile(rf"^{_EMAIL_CHAR}+@{_EMAIL_CHAR}+\.{_EMAIL_CHAR}+$")
 _PROJECT_NUMBER = re.compile(r"^[0-9]{6,20}$")
 _LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
@@ -96,6 +99,10 @@ class Settings(BaseSettings):
     encryption_key: SecretStr | None = None
     # Local testing only: also accept this server's own /oauth/done as an OAuth redirect.
     oauth_test_callback: bool = False
+    # Also accept http://localhost:8787/callback and http://127.0.0.1:8787/callback as
+    # OAuth redirects. No supported assistant uses them, and any program on the approver's
+    # computer could be listening there, so they are off unless you run such a client.
+    oauth_loopback_callback: bool = False
     webhooks_enabled: bool = False
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"
@@ -123,6 +130,11 @@ class Settings(BaseSettings):
 
     max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
+    # Read PDF and Office files in a separate process with hard memory and CPU limits.
+    # Turn off only where the host does not allow starting a process.
+    extract_isolation: bool = True
+    # Address-space limit for that process, in MB.
+    extract_memory_mb: int = Field(default=768, ge=256, le=8192)
     scope_cache_ttl: float = Field(default=60.0, ge=0, le=3600)
     # How long the allowlist is cached per instance; bounds how fast a revoke takes effect.
     allowlist_cache_ttl: float = Field(default=2.0, ge=0, le=10)
@@ -132,8 +144,9 @@ class Settings(BaseSettings):
     google_picker_api_key: str | None = None
     google_cloud_project_number: str | None = None
 
-    # Fixed-window counters. Login is per IP. /mcp is per bearer token, or per IP
-    # when the request has no token. High defaults so normal use is unaffected.
+    # Fixed-window counters. Login is per address (IPv6 per /64). /mcp is per connection
+    # (OAuth app or API_TOKENS entry); refused bearers are counted per address. High
+    # defaults so normal use is unaffected.
     login_rate_limit: int = Field(default=30, ge=1, le=10_000)
     login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
     mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)

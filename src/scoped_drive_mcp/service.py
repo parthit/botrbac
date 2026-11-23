@@ -23,7 +23,8 @@ from .drive_client import (
     DriveExportTooLargeError,
     DriveNotFoundError,
 )
-from .extract import ExtractError, document_kind, extract_text, xlsx_tabs
+from .extract import Extracted, ExtractError, document_kind, extract, read_xlsx_tabs
+from .extract_worker import ExtractBusy, extract_isolated, xlsx_tabs_isolated
 from .scope import (
     FileRef,
     InvalidInputError,
@@ -34,11 +35,29 @@ from .scope import (
 )
 
 META_FIELDS = (
-    "id,name,mimeType,parents,size,createdTime,modifiedTime,webViewLink,trashed,properties"
+    "id,name,mimeType,parents,size,createdTime,modifiedTime,webViewLink,trashed,"
+    "properties,appProperties"
 )
-# Set on files a paired person's assistant writes into a folder shared with them.
+# Set on files a paired person's assistant writes into a folder shared with them. They are
+# written to `appProperties`, which only this app can see or change. Older versions wrote
+# them to `properties`, which anyone who can edit the file can change, so a mark found there
+# is still honoured, but only to flag a file as untrusted, never to clear that flag.
 WRITER_PROPERTY = "botrbac_writer"
 RENAMER_PROPERTY = "botrbac_renamed_by"
+
+
+def peer_mark(meta: dict[str, Any], key: str) -> str | None:
+    """Who a peer mark names: the app's private mark first, else a legacy `properties` one.
+
+    Either one makes the file untrusted. A legacy mark cannot override the private one, so
+    an editor cannot change who a file is attributed to once this app has marked it."""
+    for source in ("appProperties", "properties"):
+        value = (meta.get(source) or {}).get(key)
+        if value:
+            return str(value)
+    return None
+
+
 PUBLIC_META_KEYS = (
     "id",
     "name",
@@ -185,8 +204,18 @@ class DriveService:
         self.guard = guard
         self.max_bytes = settings.max_bytes
         self.max_chars = settings.max_chars
+        # Read Office and PDF files in a resource-limited child process (extract_worker).
+        self.extract_isolation = settings.extract_isolation
+        self.extract_memory_mb = settings.extract_memory_mb
         # For the paired-person write service: who is writing (stamped on what they write).
         self.writer = writer
+        # Called after every check of a write has passed and right before the Drive call
+        # (the paired-person service charges its hourly quota here). It may raise to stop it.
+        self.before_write: Callable[[], None] | None = None
+
+    def _about_to_write(self) -> None:
+        if self.before_write is not None:
+            self.before_write()
 
     def _fetch_meta(self, file_id: str) -> dict[str, Any]:
         validate_drive_id(file_id)
@@ -227,13 +256,13 @@ class DriveService:
         A file a paired person's assistant wrote says so, wherever it is listed: its name
         and content are theirs, so they are untrusted data for whoever reads them."""
         out = public_meta(meta)
-        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        writer = peer_mark(meta, WRITER_PROPERTY)
         if writer:
-            out["written_by"] = str(writer).removeprefix("guest:")
+            out["written_by"] = writer.removeprefix("guest:")
             out["content_trust"] = "untrusted_peer"
-        renamer = (meta.get("properties") or {}).get(RENAMER_PROPERTY)
+        renamer = peer_mark(meta, RENAMER_PROPERTY)
         if renamer:
-            out["renamed_by"] = str(renamer).removeprefix("guest:")
+            out["renamed_by"] = renamer.removeprefix("guest:")
             out["name_trust"] = "untrusted_peer"
         if "parents" not in out:
             return out
@@ -333,12 +362,12 @@ class DriveService:
         meta = self._get_in_scope(file_id)
         mime = meta.get("mimeType", "")
         result: dict[str, Any] = {"file": self._public(meta), "content": None, "truncated": False}
-        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        writer = peer_mark(meta, WRITER_PROPERTY)
         if writer:
             # A paired person's assistant wrote this into a folder you shared: its text is
             # theirs, so it is untrusted data for whoever reads it, you included.
             result["content_trust"] = "untrusted_peer"
-            result["written_by"] = str(writer).removeprefix("guest:")
+            result["written_by"] = writer.removeprefix("guest:")
 
         if mime == FOLDER_MIME:
             raise InvalidInputError("this is a folder; use list_folder")
@@ -400,7 +429,13 @@ class DriveService:
         if data is None:
             return None
         try:
-            tabs = xlsx_tabs(data, self.max_chars)
+            tabs, partial = self._workbook_tabs(data)
+        except ExtractBusy as exc:
+            # Nothing is wrong with the Sheet; reading it again shortly should work, and a
+            # first-tab fallback would hide that.
+            logger.info("sheet %s waited too long for an extraction slot", file_id)
+            result["note"] = str(exc)
+            return result
         except Exception as exc:  # never log cell contents, only the failure's type
             logger.info(
                 "sheet %s workbook read failed (%s); reading its first tab",
@@ -423,6 +458,11 @@ class DriveService:
             text = text[: self.max_chars]
             result["truncated"] = True
             result["note"] = f"text cut off in tab {cut_in!r}; later tabs are not shown"
+        elif partial:
+            result["truncated"] = True
+            result["note"] = (
+                "the workbook is too large or complex to read whole; later rows are missing"
+            )
         result["content"] = text  # xlsx_tabs already strips NUL characters
         return result
 
@@ -459,7 +499,12 @@ class DriveService:
             data = data[: self.max_bytes]
             result["truncated"] = True
         try:
-            text = extract_text(data, kind, char_limit=self.max_chars)
+            extracted = self._extract(data, kind)
+        except ExtractBusy as exc:
+            # Nothing is wrong with the file; reading it again shortly should work.
+            logger.info("text extraction of a %s waited too long for a slot", kind)
+            result["note"] = str(exc)
+            return result
         except ExtractError as exc:
             logger.info("text extraction failed for %s: %s", kind, exc)
             if source_truncated:
@@ -474,6 +519,7 @@ class DriveService:
             logger.exception("text extraction failed for %s", kind)
             result["note"] = "text could not be extracted. Use download_file for the bytes."
             return result
+        text = extracted.text
         if not text.strip():
             result["note"] = (
                 "no extractable text (the file may be a scan or image-only). "
@@ -483,9 +529,29 @@ class DriveService:
         if len(text) > self.max_chars:
             text = text[: self.max_chars]
             result["truncated"] = True
+        elif extracted.truncated:
+            result["truncated"] = True
+            result["note"] = (
+                "the file is too large or complex to read whole; only the start of its text "
+                "is shown. Use download_file for the bytes."
+            )
         result["content"] = text
         result["extracted_as"] = "text/plain"
         return result
+
+    def _extract(self, data: bytes, kind: str) -> Extracted:
+        if self.extract_isolation:
+            return extract_isolated(
+                data, kind, char_limit=self.max_chars, memory_mb=self.extract_memory_mb
+            )
+        return extract(data, kind, char_limit=self.max_chars)
+
+    def _workbook_tabs(self, data: bytes) -> tuple[list[tuple[str, str]], bool]:
+        if self.extract_isolation:
+            return xlsx_tabs_isolated(
+                data, char_limit=self.max_chars, memory_mb=self.extract_memory_mb
+            )
+        return read_xlsx_tabs(data, self.max_chars)
 
     def download_file(self, file_id: str) -> dict[str, Any]:
         """Raw bytes for a file inside the share. Google Workspace files have no media body."""
@@ -532,6 +598,7 @@ class DriveService:
                 )
         parent = self.guard.assert_parent_in_scope(parent_id)
         metadata = {**metadata, "parents": [parent.id], **self._stamp(created=True)}
+        self._about_to_write()
         created = self.drive.create(metadata, content, mime, fields=META_FIELDS)
         ref = FileRef.from_api(created)
         if ref.is_folder:
@@ -545,7 +612,9 @@ class DriveService:
         who = self.writer() if self.writer is not None else None
         if not who:
             return {}
-        stamp: dict[str, Any] = {"properties": {WRITER_PROPERTY: f"guest:{who}"}}
+        # appProperties: only this app can read or change it, so other editors of the file
+        # cannot remove the mark or put someone else's name in it.
+        stamp: dict[str, Any] = {"appProperties": {WRITER_PROPERTY: f"guest:{who}"}}
         if created:
             stamp["description"] = f"Created by {who}'s assistant through Bot RBAC."
         return stamp
@@ -608,6 +677,7 @@ class DriveService:
             upload_mime = mime or "text/plain"
         else:
             raise InvalidInputError("binary files cannot be updated with text content")
+        self._about_to_write()
         updated = self.drive.update(
             file_id, self._stamp() or None, data, upload_mime, fields=META_FIELDS
         )
@@ -621,18 +691,28 @@ class DriveService:
         metadata: dict[str, Any] = {"name": new_name}
         who = self.writer() if self.writer is not None else None
         if who:
-            metadata["properties"] = {RENAMER_PROPERTY: f"guest:{who}"}
-        elif (meta.get("properties") or {}).get(RENAMER_PROPERTY):
-            # The owner's own assistant chose this name, so it is no longer a peer's.
-            # Drive deletes a property that is set to null.
-            metadata["properties"] = {RENAMER_PROPERTY: None}
+            metadata["appProperties"] = {RENAMER_PROPERTY: f"guest:{who}"}
+        else:
+            # The owner's own assistant chose this name, so it is no longer a peer's. Both
+            # the private mark and a legacy one are cleared. Drive deletes a property that
+            # is set to null.
+            for source in ("appProperties", "properties"):
+                if (meta.get(source) or {}).get(RENAMER_PROPERTY):
+                    metadata[source] = {RENAMER_PROPERTY: None}
+        self._about_to_write()
         updated = self.drive.update(file_id, metadata, None, None, fields=META_FIELDS)
         return self._public(updated)
 
     # ---- admin tools -----------------------------------------------------
 
     def trash_file(self, file_id: str) -> dict[str, Any]:
-        self._get_in_scope(file_id, allow_root=False)
+        meta = self._get_in_scope(file_id, allow_root=False)
+        if meta.get("mimeType") == FOLDER_MIME:
+            # Trashing a folder trashes everything in it, including items the owner granted
+            # that sit further down (an allowlisted file inside a subfolder of an
+            # allowlisted folder). Those are protected like the granted items themselves.
+            self.guard.assert_not_above_allowed(file_id)
+        self._about_to_write()
         updated = self.drive.update(file_id, {"trashed": True}, None, None, fields=META_FIELDS)
         self.guard.invalidate(file_id)
         return {**self._public(updated), "trashed": bool(updated.get("trashed", True))}

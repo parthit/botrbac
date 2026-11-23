@@ -9,6 +9,8 @@ between requests, so a per-request manager behaves identically and does not
 depend on lifespan at all.
 """
 
+import hashlib
+import hmac
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -65,7 +67,7 @@ from .flags import EdgeConfigFlags
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .oauth import GoogleOAuthClient, OAuthClient
 from .policy import PayloadToolError, is_allowed, require
-from .ratelimit import RateLimitApp
+from .ratelimit import AuthFailureLimitApp, RateLimitApp
 from .scope import ScopeGuard
 from .service import DriveService
 from .shared_sources import DriveSharedSource, SharedWithMe
@@ -869,6 +871,9 @@ def build_app(
             routed, ext_write_guard, settings, writer=lambda: current_guest.get()
         ),
         charge_write=lambda guest: actor_kv.incr(f"guestwrites:{guest}", 3600),
+        # Read as the owner: what the owner's own assistants were given (plus the admin's
+        # ROOT_FOLDER_ID). A paired person may not rename or overwrite those.
+        owner_protected=lambda: set(guard.allowed()),
     )
     # The human side of the same shares: the dashboard's "Shared with me" page. Each
     # source runs through the same guest checks as the MCP tools above.
@@ -923,8 +928,18 @@ def build_app(
             ),
             rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
             test_callback=settings.oauth_test_callback,
+            loopback_callback=settings.oauth_loopback_callback,
             strict=isinstance(kv, SignedStore) and kv.require,
             encryption_key=enc_key,
+            # Client ids are signed, not stored. Derived, so the session key is never used
+            # for two things.
+            client_key=hmac.new(
+                settings.session_secret.get_secret_value().encode(),
+                b"botrbac oauth client id v1",
+                hashlib.sha256,
+            ).digest()
+            if settings.session_secret
+            else None,
         )
         if base_url and not settings.dashboard_missing()
         else None
@@ -959,9 +974,18 @@ def build_app(
         # Liveness only. Configuration and connection flags stay off this public route.
         return JSONResponse({"status": "ok"})
 
-    mcp_endpoint = RateLimitApp(
+    # Outside auth: bearers that are refused (401) are counted per address, and only
+    # those are turned away once an address keeps failing. Inside auth: every accepted
+    # caller is counted per connection, so a shared address never throttles a valid token.
+    mcp_endpoint = AuthFailureLimitApp(
         BearerAuthMiddleware(
-            StatelessMCPEndpoint(mcp),
+            RateLimitApp(
+                StatelessMCPEndpoint(mcp),
+                kv,
+                name="mcp",
+                limit=settings.mcp_rate_limit,
+                window=settings.mcp_rate_window_seconds,
+            ),
             tokens=settings.api_tokens,
             exempt_paths=(),
             oauth_resolve=None if mcp_oauth is None else mcp_oauth.resolve_access,

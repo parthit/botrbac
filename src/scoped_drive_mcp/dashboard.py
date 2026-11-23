@@ -84,7 +84,7 @@ from .mcp_oauth import (
     QueryMapping,
 )
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
-from .ratelimit import allow, client_ip
+from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import (
     ACCESS_EDIT,
@@ -96,6 +96,7 @@ from .store import (
     SignedStore,
     TokenVault,
     sign_existing_records,
+    usable_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,38 @@ def observability_on() -> bool:
 
 _env.globals["observability_on"] = observability_on
 
+# Every page: scripts and everything else only from this site. Sign-in forms redirect to
+# Google, which form-action checks along the redirect chain. frame-ancestors stays none
+# so this site is not embedded.
+STRICT_CSP = (
+    b"default-src 'self'; "
+    b"script-src 'self'; "
+    b"style-src 'self' 'unsafe-inline'; "
+    b"img-src 'self' data:; "
+    b"connect-src 'self'; "
+    b"frame-src 'none'; "
+    b"worker-src 'self'; "
+    b"form-action 'self' https://accounts.google.com; "
+    b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+)
+# Only pages that can open the Google Picker (PICKER_TEMPLATES): it loads api.js from
+# apis.google.com (that script evaluates code), then opens Drive in a frame.
+PICKER_CSP = (
+    b"default-src 'self'; "
+    b"script-src 'self' https://apis.google.com https://www.gstatic.com 'unsafe-eval'; "
+    b"style-src 'self' 'unsafe-inline'; "
+    b"img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; "
+    b"connect-src 'self' https://www.googleapis.com https://content.googleapis.com; "
+    b"frame-src https://docs.google.com https://drive.google.com https://accounts.google.com "
+    b"https://content.googleapis.com https://*.google.com https://*.googleusercontent.com; "
+    b"worker-src 'self' blob:; "
+    b"form-action 'self' https://accounts.google.com; "
+    b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+)
+# Templates with a picker button (#pick-drive or [data-pick]). They get PICKER_CSP when
+# the picker is configured (render's `picker_ready`); every other response gets STRICT_CSP.
+PICKER_TEMPLATES = frozenset({"browse.html", "access.html", "request.html"})
+
 SECURITY_HEADERS = [
     (b"x-frame-options", b"DENY"),
     (b"x-content-type-options", b"nosniff"),
@@ -142,21 +175,8 @@ SECURITY_HEADERS = [
     # form POSTs, which check_csrf rejects (Sign out would fail).
     (b"referrer-policy", b"strict-origin-when-cross-origin"),
     (b"cache-control", b"no-store"),
-    (
-        b"content-security-policy",
-        # Google Picker loads api.js from apis.google.com (that script evaluates code),
-        # then opens Drive in a frame. frame-ancestors stays none so this site is not embedded.
-        b"default-src 'self'; "
-        b"script-src 'self' https://apis.google.com https://www.gstatic.com 'unsafe-eval'; "
-        b"style-src 'self' 'unsafe-inline'; "
-        b"img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; "
-        b"connect-src 'self' https://www.googleapis.com https://content.googleapis.com; "
-        b"frame-src https://docs.google.com https://drive.google.com https://accounts.google.com "
-        b"https://content.googleapis.com https://*.google.com https://*.googleusercontent.com; "
-        b"worker-src 'self' blob:; "
-        b"form-action 'self' https://accounts.google.com; "
-        b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
-    ),
+    # A response that already carries a policy (a Picker page) keeps it.
+    (b"content-security-policy", STRICT_CSP),
 ]
 
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -524,7 +544,10 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         status_code=status_code,
         **ctx,
     )
-    return HTMLResponse(html, status_code=status_code)
+    response = HTMLResponse(html, status_code=status_code)
+    if template in PICKER_TEMPLATES and ctx.get("picker_ready"):
+        response.headers["content-security-policy"] = PICKER_CSP.decode()
+    return response
 
 
 def render_plain(template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
@@ -805,15 +828,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return RedirectResponse(url, status_code=303)
 
     async def login_rate_limited(request: Request) -> Response | None:
-        ip = client_ip(
-            [(k.encode(), v.encode()) for k, v in request.headers.items()],
-            request.client.host if request.client else "unknown",
-        )
         allowed = await blocking(
             allow,
             ctx.store,
             "login",
-            "ip:" + ip,
+            ip_identity(request.scope),
             settings.login_rate_limit,
             settings.login_rate_window_seconds,
         )
@@ -897,7 +916,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         email = str(info.get("email", "")).strip().lower()
         verified = info.get("email_verified") in (True, "true")
-        if not verified or not settings.sign_in_allowed(email):
+        # An address that cannot name a tenant (one with ':' or control characters) is
+        # refused here, so it gets a clear answer instead of failing inside the store.
+        if not verified or not usable_email(email) or not settings.sign_in_allowed(email):
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             audit_owner("login", "deny", reason="wrong_account")
             return render(
@@ -970,9 +991,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             finally:
                 current_actor.reset(reset)
         next_url = safe_next(request.session.get("oauth_next"))
+        old_sid = request.session.get("sid")
         request.session.clear()
         request.session["owner"] = email
         if ctx.directory is not None:
+            # End the session this browser had before, so a copy of the old cookie
+            # stops working (and a different account's session does not linger).
+            await blocking(ctx.directory.close_session, old_sid)
             request.session["sid"] = await blocking(
                 ctx.directory.open_session, email, SESSION_MAX_AGE
             )
@@ -988,30 +1013,29 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return RedirectResponse(f"/connect?{urlencode({'next': next_url})}", status_code=303)
         return RedirectResponse(next_url, status_code=303)
 
+    async def refuse_token(tokens: Any, email: str) -> None:
+        # Google's revoke ends this app's whole grant for that Google account, which
+        # would also kill a token already stored for it (a reconnect that was
+        # declined, or another person's account). Only revoke when none is stored.
+        if ctx.directory is not None:
+            stored = await blocking(ctx.directory.has_owner_refresh, email)
+        else:
+            stored = True
+        if not stored:
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+
     async def finish_connect(
         request: Request, data: dict[str, Any], tokens: Any, email: str
     ) -> Response:
         """Step 2 done. Store the refresh token for the signed-in person."""
-
-        async def refuse_token() -> None:
-            # Google's revoke ends this app's whole grant for that Google account, which
-            # would also kill a token already stored for it (a reconnect that was
-            # declined, or another person's account). Only revoke when none is stored.
-            if ctx.directory is not None:
-                stored = await blocking(ctx.directory.has_owner_refresh, email)
-            else:
-                stored = True
-            if not stored:
-                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
-
         signed_in = session_user(request)
         connection = get_connection(str(data.get("connection") or ""))
         if not signed_in or connection is None:
-            await refuse_token()
+            await refuse_token(tokens, email)
             return render(request, "error.html", 400, message="Sign in first, then connect.")
         if email != signed_in:
             # The Drive an assistant uses must belong to the person who signed in.
-            await refuse_token()
+            await refuse_token(tokens, email)
             audit_owner("connect", "deny", reason="different_account")
             next_url = safe_next(request.session.get("oauth_next"))
             retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
@@ -1029,7 +1053,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     {"label": "Back to Overview", "href": "/"},
                 ],
             )
-        if any(scope in tokens.scopes for scope in connection.forbidden_scopes):
+        # Everything below reads or changes this person's own stored state. The callback
+        # runs outside owner_only, so set the actor here: unset, the store falls back to
+        # the admin's keys, and a refused connection would wipe the admin's Drive token.
+        reset = current_actor.set(email)
+        try:
+            return await complete_connect(request, tokens, email, connection)
+        finally:
+            current_actor.reset(reset)
+
+    async def complete_connect(
+        request: Request, tokens: Any, email: str, connection: Connection
+    ) -> Response:
+        """The rest of step 2, with `current_actor` already set to `email`."""
+        if connection.scopes_too_wide(tokens.scopes):
             # Wider than this app asks for. Never stored. Revoking it ends this app's grant
             # for that account, which is the point: Google should not keep it either.
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
@@ -1048,7 +1085,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ),
             )
         if connection.required_scope not in tokens.scopes:
-            await refuse_token()
+            await refuse_token(tokens, email)
             return render(
                 request,
                 "error.html",
@@ -1067,14 +1104,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "myaccount.google.com/permissions and try again.",
             )
 
-        reset = current_actor.set(email)
-        try:
-            scope_stamp = " ".join(sorted(tokens.scopes))
-            await blocking(ctx.vault.set_owner, tokens.refresh_token, email, scope_stamp)
-            if ctx.directory is not None:
-                await blocking(ctx.directory.remember_user, email)
-        finally:
-            current_actor.reset(reset)
+        scope_stamp = " ".join(sorted(tokens.scopes))
+        await blocking(ctx.vault.set_owner, tokens.refresh_token, email, scope_stamp)
+        if ctx.directory is not None:
+            await blocking(ctx.directory.remember_user, email)
         ctx.forget_drive(email)
         audit_owner("connect", connection=connection.key)
         next_url = safe_next(request.session.pop("oauth_next", None))
@@ -2474,6 +2507,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request,
                 "consent.html",
                 client_name=pending.client_name,
+                # Named by where the approval goes, which the allow list vouches for, not
+                # by the name the app chose for itself.
+                platform=ctx.mcp_oauth.platform(pending.redirect_uri),
                 scope=SCOPE,
                 requested_scope=pending.requested_scope,
                 return_host=return_host,
