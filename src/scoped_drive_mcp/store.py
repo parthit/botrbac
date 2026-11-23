@@ -1298,6 +1298,12 @@ class Allowlist:
                     continue
                 changed.append(file_id)
                 break
+            else:
+                # It kept changing, or this store cannot swap. Taking the person off
+                # matters more than the race, so write it plainly, as before.
+                logger.warning("unpair: entry kept changing; written without a swap")
+                self.add(updated)
+                changed.append(file_id)
         return changed
 
 

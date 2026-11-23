@@ -997,6 +997,7 @@ class Mailbox:
         bound = {**record, "ciphertext": ciphertext, "nonce": nonce, "bound": True}
         swap = getattr(self.store, "replace", None) or getattr(self.store, "swap", None)
         if swap is None or not swap(f"bridge:hook:{slot}", raw, json.dumps(bound)):
+            logging.getLogger(__name__).warning("wake_key_not_bound_yet")
             return record
         return bound
 

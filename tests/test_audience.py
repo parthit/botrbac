@@ -377,3 +377,16 @@ def test_unpairing_does_not_put_back_an_item_removed_at_the_same_moment() -> Non
     ext.add(AllowEntry("doc", "Doc", "text/plain", None, audience=(EVE, CAROL)))
     assert ext.forget_person(EVE) == []
     assert MemoryStore.hget(store, EXTERNAL_ALLOWLIST_KEY, "doc") is None
+
+
+def test_unpairing_still_takes_the_person_off_when_the_store_cannot_swap() -> None:
+    from scoped_drive_mcp.store import AllowEntry
+
+    class NeverSwaps(MemoryStore):
+        def hswap(self, key, field, old, new):
+            return False
+
+    ext = Allowlist(NeverSwaps(), EXTERNAL_ALLOWLIST_KEY)
+    ext.add(AllowEntry("doc", "Doc", "text/plain", None, audience=(EVE, CAROL)))
+    assert ext.forget_person(EVE) == ["doc"]
+    assert ext.get("doc").audience == (CAROL,)
