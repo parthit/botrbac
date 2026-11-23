@@ -291,3 +291,4 @@ uv run ruff check . && uv run ruff format --check .
 | `WEBHOOKS_ENABLED`, `WEBHOOK_KEK`, `WEBHOOK_HOST_ALLOWLIST` | off | wake-up pings to paired assistants ([sharing.md](sharing.md)) |
 | `VERCEL_OBSERVABILITY` | on | `off` removes Vercel Speed Insights and Web Analytics scripts |
 | `OAUTH_TEST_CALLBACK` | off | `1` accepts this server's own `/oauth/done` as an OAuth redirect, for local testing only |
+| `OAUTH_LOOPBACK_CALLBACK` | off | `1` accepts `http://localhost:8787/callback` and `http://127.0.0.1:8787/callback` as OAuth redirects, for a local MCP client you run yourself |
