@@ -216,6 +216,10 @@ class DashboardContext:
         return not actor or actor == self.settings.owner_email
 
     def owner_drive(self) -> OwnerDriveClient:
+        return self.owner_drive_and_token()[0]
+
+    def owner_drive_and_token(self) -> tuple[OwnerDriveClient, str]:
+        """The signed-in person's Drive client and the refresh token it was built from."""
         record = self.vault.owner()
         if not record or not record.get("t"):
             raise OwnerNotConnectedError
@@ -224,14 +228,14 @@ class DashboardContext:
         cached = self._owner_clients.get(actor)
         if cached is None or cached[0] != token:
             self._owner_clients[actor] = (token, self.owner_drive_factory(token))
-        return self._owner_clients[actor][1]
+        return self._owner_clients[actor][1], token
 
-    def owner_root_id(self, drive: OwnerDriveClient) -> str | None:
+    def owner_root_id(self, drive: OwnerDriveClient, token: str) -> str | None:
         """My Drive's folder id for the signed-in person, or None while drive.file cannot
         open it yet (not cached then, so it shows up once the app may open My Drive).
-        `drive` is what owner_drive() just returned, so its token is the cached one."""
+        Pass what owner_drive_and_token() returned. The cache is keyed by the token, so a
+        new connection (reconsent, another account) looks it up again."""
         actor = current_actor.get() or ""
-        token = self._owner_clients[actor][0]
         cached = self._owner_roots.get(actor)
         if cached is not None and cached[0] == token:
             return cached[1]
@@ -1325,11 +1329,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return {"mailbox_summary": mailbox, "shared_summary": shared}
 
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
-        drive = ctx.owner_drive()
+        drive, token = ctx.owner_drive_and_token()
         # drive.file cannot files.get("root") until the app has opened My Drive.
         # The alias still works in a parents query, which is enough to list files
         # this app created or the user picked.
-        root_id = ctx.owner_root_id(drive)
+        root_id = ctx.owner_root_id(drive, token)
         entries = ctx.allowlist.entries()
         shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
@@ -2033,12 +2037,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             except Exception:
                 return {}, set()
             ids = [entry.id for entry in rows[:COVER_CHECK_LIMIT]]
+            failed = [0]
+
+            def fetch(batch: list[str]) -> dict[str, dict[str, Any] | None | Exception]:
+                found = fetch_parents(drive, batch)
+                failed[0] += sum(isinstance(v, Exception) for v in found.values())
+                return found
+
             try:
-                covers, not_found = ctx.grants().entry_status(ids, partial(fetch_parents, drive))
+                covers, not_found = ctx.grants().entry_status(ids, fetch)
             except Exception:
                 logger.exception("allowed list status check failed")
                 return {}, set()
+            if failed[0]:
+                # Those items get no note rather than a guess. Logged so a burst of rate
+                # limits or Drive errors shows up instead of quietly hiding the notes.
+                logger.warning("allowed list status check: %d Drive lookups failed", failed[0])
             if len(rows) < 2:
+                # One entry can't be inside another. The walk above still ran, because
+                # it also finds the entries Drive no longer opens (needs_pick).
                 covers = {}
             return {fid: c[1] for fid, c in covers.items() if c[0] != fid}, not_found
 

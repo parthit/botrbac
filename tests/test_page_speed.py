@@ -106,3 +106,41 @@ def test_files_asks_for_my_drive_once(p2_app, world, monkeypatch) -> None:
         assert c.get("/files").status_code == 200
     assert [fid for fid, _ in calls].count("root") == 1
     assert "owner-root" not in [fid for fid, _ in calls]
+
+
+def test_files_by_my_drive_id_matches_the_top(p2_app, world, monkeypatch) -> None:
+    c = client(p2_app)
+    login(c)
+    top = c.get("/files")
+    assert top.status_code == 200
+    calls, get_file = _counting(p2_app, world)
+    monkeypatch.setattr(type(world), "get_file", get_file)
+    by_id = c.get("/files?folder=owner-root")
+    assert by_id.status_code == 200
+    # My Drive by its real id: no lookup of the folder itself, and the same breadcrumb.
+    assert "owner-root" not in [fid for fid, _ in calls]
+    assert "My Drive" in by_id.text
+    for name in ("Projects", "Private", "Loose memo"):
+        assert (name in by_id.text) == (name in top.text), name
+
+
+def test_allowed_tab_logs_failed_lookups(p2_app, world, monkeypatch, caplog) -> None:
+    c = client(p2_app)
+    login(c)
+    for fid in ("proj", "proj-notes"):
+        post(c, "/grant", file_id=fid)
+    original = type(world).get_file
+
+    def flaky(self, file_id, fields):
+        if file_id == "proj-notes" and fields == "id,parents":
+            raise RuntimeError("rate limited")
+        return original(self, file_id, fields)
+
+    monkeypatch.setattr(type(world), "get_file", flaky)
+    with caplog.at_level("WARNING", logger="scoped_drive_mcp.dashboard"):
+        page = c.get("/files?tab=allowed")
+    assert page.status_code == 200
+    # No guess for the item whose lookup failed: neither covered nor "needs pick".
+    assert "Also covered by" not in page.text
+    assert 'id="needs-pick"' not in page.text
+    assert any("1 Drive lookups failed" in r.getMessage() for r in caplog.records)
