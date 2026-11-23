@@ -63,7 +63,7 @@ def test_entry_status_failed_lookup_gives_no_answer(world) -> None:
     assert covers == {} and not_found == set()
 
 
-def _counting(app, world):
+def _counting(world):
     calls: list[tuple[str, str]] = []
     original = type(world).get_file
 
@@ -90,7 +90,7 @@ def test_allowed_tab_reads_each_item_once(p2_app, world, monkeypatch) -> None:
     login(c)
     for fid in ("proj-notes", "proj-deep-doc", "loose-doc", "loose-two"):
         post(c, "/grant", file_id=fid)
-    calls, get_file = _counting(p2_app, world)
+    calls, get_file = _counting(world)
     monkeypatch.setattr(type(world), "get_file", get_file)
     assert c.get("/files?tab=allowed").status_code == 200
     ids = [fid for fid, _ in calls]
@@ -100,7 +100,7 @@ def test_allowed_tab_reads_each_item_once(p2_app, world, monkeypatch) -> None:
 def test_files_asks_for_my_drive_once(p2_app, world, monkeypatch) -> None:
     c = client(p2_app)
     login(c)
-    calls, get_file = _counting(p2_app, world)
+    calls, get_file = _counting(world)
     monkeypatch.setattr(type(world), "get_file", get_file)
     for _ in range(3):
         assert c.get("/files").status_code == 200
@@ -113,7 +113,7 @@ def test_files_by_my_drive_id_matches_the_top(p2_app, world, monkeypatch) -> Non
     login(c)
     top = c.get("/files")
     assert top.status_code == 200
-    calls, get_file = _counting(p2_app, world)
+    calls, get_file = _counting(world)
     monkeypatch.setattr(type(world), "get_file", get_file)
     by_id = c.get("/files?folder=owner-root")
     assert by_id.status_code == 200
@@ -144,3 +144,77 @@ def test_allowed_tab_logs_failed_lookups(p2_app, world, monkeypatch, caplog) -> 
     assert "Also covered by" not in page.text
     assert 'id="needs-pick"' not in page.text
     assert any("1 Drive lookups failed" in r.getMessage() for r in caplog.records)
+
+
+def _counting_grant(monkeypatch, delay: float = 0.0) -> list[str]:
+    import datetime
+    import time
+
+    calls: list[str] = []
+
+    def fake_refresh_grant(request, token_uri, refresh_token, client_id, client_secret, **kw):
+        calls.append(refresh_token)
+        time.sleep(delay)
+        expiry = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        token = f"at-{len(calls)}"
+        response = {"access_token": token, "scope": "https://www.googleapis.com/auth/drive.file"}
+        return token, refresh_token, expiry + datetime.timedelta(hours=1), response, None
+
+    monkeypatch.setattr("google.oauth2.reauth.refresh_grant", fake_refresh_grant)
+    return calls
+
+
+def test_parallel_lookups_refresh_an_expired_token_once(monkeypatch) -> None:
+    """The Allowed tab's parallel lookups all find the token missing or expired. One
+    thread asks Google; the others wait and use its (already checked) token."""
+    import threading
+
+    from scoped_drive_mcp.drive_client import oauth_credentials
+    from tests.conftest import make_settings
+
+    calls = _counting_grant(monkeypatch, delay=0.05)
+    creds = oauth_credentials(make_settings(), "rt-owner")
+    start = threading.Barrier(8)
+
+    def lookup() -> None:
+        start.wait()
+        creds.before_request(None, "GET", "https://www.googleapis.com/drive/v3/files", {})
+
+    threads = [threading.Thread(target=lookup) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1
+    assert creds.valid and creds.token == "at-1"
+
+
+def test_refresh_after_a_rejected_token_still_asks_google(monkeypatch) -> None:
+    """A 401 makes the HTTP layer call refresh() on a token that still looks valid. That
+    must not be mistaken for "another thread just refreshed"."""
+    from scoped_drive_mcp.drive_client import oauth_credentials
+    from tests.conftest import make_settings
+
+    calls = _counting_grant(monkeypatch)
+    creds = oauth_credentials(make_settings(), "rt-owner")
+    creds.refresh(None)
+    assert creds.valid and creds.token == "at-1"
+    creds.refresh(None)
+    assert len(calls) == 2 and creds.token == "at-2"
+
+
+def test_entry_status_reads_every_level_it_fetches(world, monkeypatch) -> None:
+    from scoped_drive_mcp import grants as grants_module
+
+    monkeypatch.setattr(grants_module, "MAX_COVER_DEPTH", 1)
+    owner, grants = _grants(world, ["proj-notes"])
+    fetched: list[str] = []
+
+    def fetch(batch):
+        fetched.extend(batch)
+        return fetch_parents(owner, batch)
+
+    # One level allowed: proj-notes itself, then its parent "proj" is read in that level.
+    # Nothing above it may be fetched only to be thrown away.
+    grants.entry_status(["proj-notes"], fetch)
+    assert fetched == ["proj-notes"]

@@ -342,6 +342,8 @@ class GrantService:
         for _ in range(MAX_COVER_DEPTH):
             if not walks:
                 break
+            # This level's folders, in one batch (the first level is already fetched).
+            fetch({node for _, frontier in walks.values() for node in frontier})
             next_walks: dict[str, tuple[set[str], list[str]]] = {}
             for fid, (seen, frontier) in walks.items():
                 next_frontier: list[str] = []
@@ -366,7 +368,6 @@ class GrantService:
                 elif next_frontier and len(seen) <= MAX_COVER_NODES:
                     next_walks[fid] = (seen, next_frontier)
             walks = next_walks
-            fetch({node for _, frontier in walks.values() for node in frontier})
         return covers, not_found
 
     # ---- access request decisions --------------------------------------
