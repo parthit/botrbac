@@ -182,7 +182,9 @@ On the Allow page you choose what the app may do with your ticked items: **Read 
 `viewer` tools), **Read and edit** (`editor`) or **Full** (`admin`, which adds `trash_file`). Settings lists the
 connection under **Assistants**, where you can change that choice (it applies on the app's next call) or
 **Disconnect** it, which stops it immediately. Apps connected before this choice existed keep Full until you
-change them. The dashboard sign-in cookie is not
+change them. Each app is listed under the name it registered with, which may be its host rather than the
+assistant (Grok Bot connects through Cursor, so it shows up as "Cursor"). Use **Rename** on its row to call it
+something else; your other assistants see the new name in their pairings too. The dashboard sign-in cookie is not
 a token for `/mcp`.
 
 ### Connect Muse

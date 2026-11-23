@@ -199,6 +199,10 @@ class GrantView:
     role: str = Role.ADMIN.value
     # Full only because it was connected before apps had roles; the owner never chose it.
     legacy_full: bool = False
+    # The name the app registered with. `client_name` above is what to show: the owner's
+    # own name for the connection when they gave it one, otherwise this.
+    app_name: str = ""
+    renamed: bool = False
 
 
 # What a connected app may do, chosen by the owner on the consent page and changeable
@@ -323,6 +327,17 @@ def _only(params: Any, key: str) -> str | None:
     return values[0]
 
 
+MAX_LABEL = 60
+
+
+def clean_label(value: object) -> str | None:
+    """The owner's name for a connection, or None to go back to the app's own name."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join("".join(ch for ch in value if ch.isprintable()).split())
+    return cleaned[:MAX_LABEL].strip() or None
+
+
 def _principal_name(client_name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", client_name).strip("_.-")[:40]
     if not slug:
@@ -362,6 +377,12 @@ def _chosen_key(grant_id: str) -> str:
 def _pinned_key(grant_id: str) -> str:
     """Set when the role of an app from before roles existed was written down for it."""
     return f"oauth:rolepinned:{grant_id}"
+
+
+def _label_key(grant_id: str) -> str:
+    """The owner's own name for a connection. A side key, like the role, so a token refresh
+    rewriting the grant record never loses it."""
+    return f"oauth:label:{grant_id}"
 
 
 def _seen_key(grant_id: str) -> str:
@@ -974,11 +995,13 @@ class McpOAuth:
         # drop a refresh hash or access hash that was saved in between.
         self._note_use(grant.id)
         return Principal(
+            # From the registered name, which never changes, so the activity log keeps
+            # matching this app after the owner renames it.
             token_name=_principal_name(grant.client_name),
             role=Role(self.role_of(grant)),
             email=grant.email,
             grant_id=grant.id,
-            client_name=grant.client_name,
+            client_name=self.display_name(grant),
         )
 
     def list_grants(self, email: str | None) -> list[GrantView]:
@@ -992,14 +1015,17 @@ class McpOAuth:
                 continue
             # A grant with no tokens is an approval whose code was never redeemed.
             if grant.email == email and (grant.refresh_hash or grant.access_hashes):
+                label = self._label(grant.id)
                 views.append(
                     GrantView(
                         id=grant.id,
-                        client_name=grant.client_name,
+                        client_name=label or grant.client_name,
                         created_at=grant.created_at,
                         last_used=self._displayed_last_used(grant),
                         role=self.role_of(grant),
                         legacy_full=self._legacy_full(grant),
+                        app_name=grant.client_name,
+                        renamed=label is not None,
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -1024,6 +1050,7 @@ class McpOAuth:
         self.store.delete(_seen_key(grant.id))
         self.store.delete(_role_key(grant.id))
         self.store.delete(_chosen_key(grant.id))
+        self.store.delete(_label_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
         if self.on_revoke is not None:
             try:
@@ -1112,6 +1139,28 @@ class McpOAuth:
             # the two side keys cannot bring full access back.
             self._mark_roles(grant)
         return True
+
+    def display_name(self, grant: "OAuthGrant") -> str:
+        """What to call this connection: the owner's name for it, else the app's own."""
+        return self._label(grant.id) or grant.client_name
+
+    def _label(self, grant_id: str) -> str | None:
+        return clean_label(self.store.get(_label_key(grant_id)))
+
+    def set_label(self, grant_id: str, email: str, label: str | None) -> str | None:
+        """The owner names one of their connections. An empty name goes back to the name
+        the app registered with. Returns the name now shown, or None if not theirs."""
+        if _GRANT_ID.fullmatch(grant_id) is None:
+            return None
+        grant = self._grant(grant_id)
+        if grant is None or grant.email != email:
+            return None
+        cleaned = clean_label(label)
+        if cleaned is None or cleaned == grant.client_name:
+            self.store.delete(_label_key(grant.id))
+            return grant.client_name
+        self.store.set(_label_key(grant.id), cleaned)
+        return cleaned
 
     def _note_use(self, grant_id: str) -> None:
         now = utc_now()

@@ -2415,6 +2415,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "id": g.id,
                     "short_id": g.id[-5:],
                     "name": g.client_name,
+                    "app_name": g.app_name or g.client_name,
+                    "renamed": g.renamed,
                     "created_at": g.created_at,
                     "last_used": g.last_used,
                     "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,
@@ -2690,6 +2692,28 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )
 
+    async def oauth_grant_rename(request: Request, form: dict[str, str]) -> Response:
+        """The owner gives one of their connected apps a name of their own ("Grok Bot"
+        instead of the "Cursor" it registered as). Empty goes back to the app's name."""
+        email = str(request.session.get("owner") or "")
+        grant_id = form.get("grant_id") or ""
+        back = f"/settings#app-{grant_id}" if grant_id else "/settings#assistants"
+        if ctx.mcp_oauth is None:
+            return action_done(request, "error", "That app is not connected.", back)
+        before = {g.id: g.client_name for g in await blocking(ctx.mcp_oauth.list_grants, email)}
+        shown = await blocking(ctx.mcp_oauth.set_label, grant_id, email, form.get("name"))
+        if shown is None:
+            return action_done(request, "error", "That app is not connected.", back)
+        if ctx.mailbox is not None:
+            try:
+                await blocking(ctx.mailbox.relabel_assistant, email, grant_id, shown)
+            except Exception:  # noqa: BLE001 - the new name is saved either way
+                logging.getLogger(__name__).warning("relabel_pairings_failed", exc_info=True)
+        old = before.get(grant_id, "an app")
+        if shown != old:
+            audit_owner("oauth_rename", grant=grant_id[-5:], client=old, label=shown)
+        return action_done(request, "ok", f"Saved. It is now called {shown}.", back)
+
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
@@ -2747,6 +2771,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
         Route("/first-reads/clear", csrf_protected(first_reads_clear), methods=["POST"]),
         Route("/oauth/grants/role", csrf_protected(oauth_grant_role), methods=["POST"]),
+        Route("/oauth/grants/rename", csrf_protected(oauth_grant_rename), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
