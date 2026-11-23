@@ -702,6 +702,45 @@ class Mailbox:
             ended += 1
         return ended
 
+    def relabel_assistant(self, email: str, grant_id: str, label: str) -> int:
+        """The owner renamed one of their assistants. Its pairings named it when they were
+        made, so give them the new name too. Mail already sent keeps the old one. Returns
+        how many pairings changed."""
+        you = _email(email)
+        if not grant_id or not label:
+            return 0
+        changed = 0
+        for link_id in self._user_link_ids(you):
+            key = f"bridge:link:{link_id}"
+            replace = getattr(self.store, "replace", None)
+            for _ in range(4):
+                raw = self.store.get(key)
+                try:
+                    link = json.loads(raw) if raw else None
+                except json.JSONDecodeError:
+                    link = None
+                if not isinstance(link, dict) or not link.get("link_id"):
+                    break
+                # Only the side that is this person's: grant_a is always theirs when they
+                # made the link; grant_b is theirs only on a pairing of their own assistants.
+                sides = [
+                    side
+                    for side in ("a", "b")
+                    if link.get(f"grant_{side}") == grant_id
+                    and (side == "a" and link.get("email_a") == you or link.get("same_account"))
+                    and link.get(f"label_{side}") != label
+                ]
+                if not sides:
+                    break
+                updated = json.dumps({**link, **{f"label_{side}": label for side in sides}})
+                if replace is None:
+                    self.store.set(key, updated)
+                elif not replace(key, raw, updated):
+                    continue
+                changed += 1
+                break
+        return changed
+
     def get_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
         """The wake-up hook this caller uses. `app` (dashboard only) picks a slot: "" for
         the account, or an app's grant id. Without it an assistant sees its own slot."""

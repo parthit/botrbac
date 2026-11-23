@@ -56,12 +56,14 @@ def when(value: Any, empty: str = "—", date_only: bool = False) -> Markup:
 
 def app_names(grants: Any) -> dict[str, str]:
     """Activity and requests record an OAuth app as `oauth:<slug>`. Map that back to the
-    name the person saw when they chose Allow."""
+    name the person gave it, or else the name they saw when they chose Allow. The key comes
+    from the registered name, which a rename does not change."""
     names: dict[str, str] = {}
     for grant in grants or []:
         name = str(getattr(grant, "client_name", "") or "").strip()
+        registered = str(getattr(grant, "app_name", "") or "").strip() or name
         if name:
-            names.setdefault(principal_name(name), name)
+            names.setdefault(principal_name(registered), name)
     return names
 
 
@@ -368,6 +370,10 @@ def _owner_row(
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
         "oauth_role": (f"You changed what {client} can do: {role_words}.", _DONE),
+        "oauth_rename": (
+            f"You renamed {client} to {str(record.get('label') or client)}.",
+            _DONE,
+        ),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
     }
     group = "you"
