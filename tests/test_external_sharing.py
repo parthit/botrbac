@@ -423,3 +423,17 @@ def test_sharing_logs_as_sharing_not_as_an_own_assistant_grant(people, memstore)
     assert "share_external" in actions and "unshare_external" in actions
     assert "grant" not in actions and "revoke" not in actions
     assert actions.count("share_external") == 1 and actions.count("unshare_external") == 1
+
+
+def test_files_top_lists_every_opened_item_with_share(people, world) -> None:
+    """Under drive.file, picked files can sit anywhere in the Drive. The top of Files
+    lists every item the app can open, so each one can be allowed or shared, not only
+    those in My Drive's top level."""
+    app, owner, eve, token = people
+    _pair(app, OWNER_EMAIL, EVE)
+    page = owner.get("/files").text
+    assert 'id="root-note"' in page
+    # notes.txt sits inside Projects, not in My Drive's top level.
+    assert "notes.txt" in page
+    row = page[page.index("notes.txt") :].split("</tr>", 1)[0]
+    assert 'action="/sharing/add"' in row

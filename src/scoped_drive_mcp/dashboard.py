@@ -1336,8 +1336,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            if folder_id == "root":
-                query = "'root' in parents and trashed=false"
+            at_top = folder == "root"
+            if at_top:
+                # Google opens a file to this app only once it is picked (drive.file), and
+                # picked files can sit anywhere in the Drive, not just in My Drive's top
+                # level. So the top of Files lists everything the app can open: the
+                # picked items and the files it created, each with Allow and Share.
+                query = "trashed=false"
             else:
                 query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
@@ -1347,7 +1352,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # Drive's parents filter can echo a file that merely mentions the folder.
             # The alias "root" is not the id Drive returns on a file, so it cannot be
             # used for that check.
-            if folder_id != "root":
+            if not at_top and folder_id != "root":
                 items = [i for i in items if folder_id in (i.get("parents") or [])]
             next_token = resp.get("nextPageToken")
         items.sort(key=lambda i: (i.get("mimeType") != FOLDER_MIME, str(i.get("name", "")).lower()))
