@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .drive_client import DRIVE_FILE_SCOPE, FULL_DRIVE_SCOPE, TOKEN_URI
+from .drive_client import DRIVE_FILE_SCOPE, TOKEN_URI, scopes_acceptable
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -189,7 +189,8 @@ def refresh_access_token(
     token = body.get("access_token")
     if not isinstance(token, str) or not token:
         raise OAuthError("Google did not refresh the sign-in")
-    granted = str(body.get("scope") or "").split()
-    if PICKER_SCOPE not in granted or FULL_DRIVE_SCOPE in granted:
+    # drive.file and the sign-in scopes only: anything wider (full Drive, drive.readonly,
+    # cloud-platform, ...) would let page script reach files outside the allowlist.
+    if not scopes_acceptable(str(body.get("scope") or "")):
         raise OAuthError("Google did not give a token limited to picked files")
     return token

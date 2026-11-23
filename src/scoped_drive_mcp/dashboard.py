@@ -1029,7 +1029,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     {"label": "Back to Overview", "href": "/"},
                 ],
             )
-        if any(scope in tokens.scopes for scope in connection.forbidden_scopes):
+        if connection.scopes_too_wide(tokens.scopes):
             # Wider than this app asks for. Never stored. Revoking it ends this app's grant
             # for that account, which is the point: Google should not keep it either.
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)

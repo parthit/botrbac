@@ -8,9 +8,10 @@ entry here, a token slot for it, and the tools that use it; the sign-in step doe
 change.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .drive_client import DRIVE_FILE_SCOPE, FULL_DRIVE_SCOPE
+from .drive_client import ACCEPTABLE_SCOPES, DRIVE_FILE_SCOPE
 
 
 @dataclass(frozen=True)
@@ -25,12 +26,17 @@ class Connection:
     """Scopes requested in addition to the sign-in scopes."""
     required_scope: str
     """A token without this scope is refused and not stored."""
-    forbidden_scopes: tuple[str, ...]
-    """A token that carries any of these is refused, revoked and not stored."""
+    allowed_scopes: frozenset[str]
+    """An allowlist: a token that carries any scope outside it is refused, revoked and
+    not stored. Includes the sign-in scopes, which come back on the same token."""
     summary: str
     """One line on what connecting allows."""
     disclosure: str
     """Shown right before the connect button, as Google's policy asks."""
+
+    def scopes_too_wide(self, granted: Iterable[str]) -> bool:
+        """True when Google granted anything outside `allowed_scopes`."""
+        return not set(granted) <= self.allowed_scopes
 
 
 GOOGLE_DRIVE = Connection(
@@ -39,7 +45,7 @@ GOOGLE_DRIVE = Connection(
     provider="google",
     scopes=(DRIVE_FILE_SCOPE,),
     required_scope=DRIVE_FILE_SCOPE,
-    forbidden_scopes=(FULL_DRIVE_SCOPE,),
+    allowed_scopes=ACCEPTABLE_SCOPES,
     summary="Only the Google Drive files and folders you pick.",
     disclosure=(
         "Google will ask you to let Bot RBAC see, edit, create, and delete only the "
