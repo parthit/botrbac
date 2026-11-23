@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     encryption_key: SecretStr | None = None
     # Local testing only: also accept this server's own /oauth/done as an OAuth redirect.
     oauth_test_callback: bool = False
+    # Also accept http://localhost:8787/callback and http://127.0.0.1:8787/callback as
+    # OAuth redirects. No supported assistant uses them, and any program on the approver's
+    # computer could be listening there, so they are off unless you run such a client.
+    oauth_loopback_callback: bool = False
     webhooks_enabled: bool = False
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"

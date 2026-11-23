@@ -65,7 +65,7 @@ from .flags import EdgeConfigFlags
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .oauth import GoogleOAuthClient, OAuthClient
 from .policy import PayloadToolError, is_allowed, require
-from .ratelimit import RateLimitApp
+from .ratelimit import AuthFailureLimitApp, RateLimitApp
 from .scope import ScopeGuard
 from .service import DriveService
 from .shared_sources import DriveSharedSource, SharedWithMe
@@ -926,6 +926,7 @@ def build_app(
             ),
             rate_limit=(settings.mcp_rate_limit, settings.mcp_rate_window_seconds),
             test_callback=settings.oauth_test_callback,
+            loopback_callback=settings.oauth_loopback_callback,
             strict=isinstance(kv, SignedStore) and kv.require,
             encryption_key=enc_key,
         )
@@ -962,9 +963,18 @@ def build_app(
         # Liveness only. Configuration and connection flags stay off this public route.
         return JSONResponse({"status": "ok"})
 
-    mcp_endpoint = RateLimitApp(
+    # Outside auth: bearers that are refused (401) are counted per address, and only
+    # those are turned away once an address keeps failing. Inside auth: every accepted
+    # caller is counted per connection, so a shared address never throttles a valid token.
+    mcp_endpoint = AuthFailureLimitApp(
         BearerAuthMiddleware(
-            StatelessMCPEndpoint(mcp),
+            RateLimitApp(
+                StatelessMCPEndpoint(mcp),
+                kv,
+                name="mcp",
+                limit=settings.mcp_rate_limit,
+                window=settings.mcp_rate_window_seconds,
+            ),
             tokens=settings.api_tokens,
             exempt_paths=(),
             oauth_resolve=None if mcp_oauth is None else mcp_oauth.resolve_access,

@@ -2496,6 +2496,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request,
                 "consent.html",
                 client_name=pending.client_name,
+                # Named by where the approval goes, which the allow list vouches for, not
+                # by the name the app chose for itself.
+                platform=ctx.mcp_oauth.platform(pending.redirect_uri),
                 scope=SCOPE,
                 requested_scope=pending.requested_scope,
                 return_host=return_host,
