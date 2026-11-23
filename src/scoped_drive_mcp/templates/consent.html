@@ -1,43 +1,50 @@
 {% extends "base.html" %}
 {% block title %}Allow access{% endblock %}
 {% block content %}
-<div class="card" style="max-width:640px">
+<div class="card consent">
+  <p class="eye">Connect an assistant</p>
   {% if platform.local %}
   <h1>Allow a program on this computer?</h1>
+  {% else %}
+  <h1>Allow {{ platform.label }}?</h1>
+  {% endif %}
+  <div class="consent-account">
+    <p id="consent-account">Signed in as <b>{{ owner }}</b>.</p>
+    <form class="switch-account" method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ switch_next }}">
+      <button type="submit">Use a different account</button>
+    </form>
+  </div>
+  {% if platform.local %}
   <p class="flash error" id="consent-local" role="alert"><b>This sends access to a program on this computer</b>
     (<code>{{ platform.host }}</code>), not to Claude, ChatGPT or another assistant’s website. Any program
     running on your computer could be the one listening there. Only allow this if you started it yourself
     and know what it is.</p>
-  {% else %}
-  <h1>Allow {{ platform.label }}?</h1>
   {% endif %}
-  <p id="consent-app">The app calls itself “{{ client_name }}”. <span class="muted">Any app can choose that
-    name; this server does not check it. Access goes to <b>{{ platform.host }}</b>.</span></p>
-  <p id="consent-origin"><b>Only allow this if you just started connecting from {{ platform.label }} yourself.</b>
-    If you did not, choose Deny.</p>
-  <p id="consent-account">Signed in as <b>{{ owner }}</b>.</p>
-  <form class="switch-account" method="post" action="/logout">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="next" value="{{ switch_next }}">
-    <button type="submit">Use a different account</button>
-  </form>
-  <p><b>{{ platform.label[:1] | upper }}{{ platform.label[1:] }}</b> wants to act as {{ owner }} on this server. If you allow it, it can:</p>
-  <ul>
-    <li><b>Use the items on your Access list,</b> as far as you choose below. Anything not on that list is
+  <div class="consent-check">
+    <p id="consent-origin"><b>Only allow this if you just started connecting from {{ platform.label }} yourself.</b>
+      If you did not, choose Deny.</p>
+    <p id="consent-app" class="small">The app calls itself “{{ client_name }}”. <span class="muted">Any app can choose that
+      name; this server does not check it. Access goes to <b>{{ platform.host }}</b>.</span></p>
+  </div>
+
+  <h2>What it can do</h2>
+  <p class="muted"><b>{{ platform.label[:1] | upper }}{{ platform.label[1:] }}</b> wants to act as {{ owner }} on this server. If you allow it, it can:</p>
+  <ul class="consent-can">
+    <li><b>Use the items on your Access list,</b> as far as you choose below. <span class="muted">Anything not on that list is
       refused by this server, even though your connected Drive is visible to it. It can never change who a
-      file is shared with, or permanently delete a file.</li>
+      file is shared with, or permanently delete a file.</span></li>
     {% if mailbox_on %}
     <li><b>Use your Mailbox</b> with your other assistants: send and read short messages between your own
-      apps. Another person’s assistant can never message it. It can also start or join a pairing; nothing
-      turns on until it is approved on the Sharing page.</li>
+      apps. <span class="muted">Another person’s assistant can never message it. It can also start or join a pairing; nothing
+      turns on until it is approved on the Sharing page.</span></li>
     {% endif %}
     {% if shared_on %}
-    <li><b>Read what paired people share with you</b> (Shared with me), read-only. Your own
-      Sharing list is what their assistants can read; this does not change it.</li>
+    <li><b>Read what paired people share with you</b> (Shared with me), read-only. <span class="muted">Your own
+      Sharing list is what their assistants can read; this does not change it.</span></li>
     {% endif %}
   </ul>
-  <p>After you choose, you go back to <b>{{ return_host }}</b>.</p>
-  <p class="muted">You can change what it may do, or disconnect it, later in Settings.</p>
   {% if requested_scope and requested_scope != scope %}
   <details>
     <summary>Technical details</summary>
@@ -47,17 +54,24 @@
   <form method="post" action="/oauth/authorize">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
-    <fieldset class="stack" id="consent-role">
-      <legend><b>What may {{ platform.label }} do with your Access list?</b></legend>
-      <label><input type="radio" name="role" value="viewer" checked> <b>Read only</b> <span class="muted">— search, list, read and download. Recommended.</span></label>
-      <label><input type="radio" name="role" value="editor"> <b>Read and edit</b> <span class="muted">— also create, edit and rename.</span></label>
-      <label><input type="radio" name="role" value="admin"> <b>Full</b> <span class="muted">— also move items to Drive trash (recoverable for 30 days).</span></label>
-      <p class="muted small">You can change this later in Settings.</p>
+    <fieldset class="roles" id="consent-role">
+      <legend>What may {{ platform.label }} do with your Access list?</legend>
+      <label class="role"><input type="radio" name="role" value="viewer" checked>
+        <span><b>Read only</b> <span class="role-tag">Recommended</span>
+          <span class="muted">Search, list, read and download.</span></span></label>
+      <label class="role"><input type="radio" name="role" value="editor">
+        <span><b>Read and edit</b>
+          <span class="muted">Also create, edit and rename.</span></span></label>
+      <label class="role"><input type="radio" name="role" value="admin">
+        <span><b>Full</b>
+          <span class="muted">Also move items to Drive trash (recoverable for 30 days).</span></span></label>
     </fieldset>
     <div class="actions">
       <button class="primary" type="submit" name="decision" value="allow">Allow</button>
       <button class="danger" type="submit" name="decision" value="deny">Deny</button>
     </div>
+    <p class="muted small consent-after">After you choose, you go back to <b>{{ return_host }}</b>.
+      You can change what it may do, or disconnect it, later in Settings.</p>
   </form>
 </div>
 {% endblock %}
