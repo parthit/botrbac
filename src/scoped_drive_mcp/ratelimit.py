@@ -6,12 +6,16 @@ limiter outage must not take down sign-in or `/mcp`.
 """
 
 import hashlib
+import ipaddress
 import logging
 import os
 import time
+from collections.abc import Callable
 
 import anyio.to_thread
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from .auth import current_principal
 
 logger = logging.getLogger(__name__)
 
@@ -73,32 +77,49 @@ def client_ip(headers: list[tuple[bytes, bytes]], fallback: str) -> str:
     return (fallback or "unknown")[:80]
 
 
+def address_bucket(address: str) -> str:
+    """The rate-limit bucket for one address. An IPv6 caller usually holds a whole /64
+    and can pick a new address from it for every request, so IPv6 is counted per /64. An
+    IPv4-mapped IPv6 address counts as the IPv4 address it carries. Anything that is not
+    an address (a test client's "testclient", "unknown") is used as it is."""
+    try:
+        parsed = ipaddress.ip_address(address.strip().strip("[]"))
+    except ValueError:
+        return address
+    if isinstance(parsed, ipaddress.IPv6Address):
+        if parsed.ipv4_mapped is not None:
+            return str(parsed.ipv4_mapped)
+        network = ipaddress.IPv6Network((int(parsed) >> 64 << 64, 64))
+        return str(network)
+    return str(parsed)
+
+
 def ip_identity(scope: Scope) -> str:
     host = "unknown"
     client = scope.get("client")
     if client:
         host = str(client[0])
-    return "ip:" + client_ip(list(scope.get("headers") or []), host)
+    return "ip:" + address_bucket(client_ip(list(scope.get("headers") or []), host))
 
 
-def _identity_from_scope(scope: Scope) -> str:
-    headers = list(scope.get("headers") or [])
-    token = ""
-    for key, value in headers:
-        if key.lower() == b"authorization":
-            raw = value.decode("latin-1", "replace").strip()
-            parts = raw.split(None, 1)
-            token = parts[-1].strip() if parts else ""
-            break
-    if token:
-        digest = hashlib.sha256(token.encode()).hexdigest()[:24]
-        return f"t:{digest}"
-    return ip_identity(scope)
+def principal_identity(_scope: Scope) -> str | None:
+    """The caller `BearerAuthMiddleware` resolved, for a limiter placed inside it.
+
+    Keyed on what stays the same while an app keeps working: its connection (OAuth grant
+    id) or its `API_TOKENS` name. A raw bearer would not do: every OAuth refresh hands
+    out a new access token, and each would start with a fresh allowance."""
+    principal = current_principal.get()
+    if principal is None:
+        return None
+    if principal.grant_id:
+        return "g:" + principal.grant_id
+    digest = hashlib.sha256(principal.token_name.encode()).hexdigest()[:24]
+    return "k:" + digest
 
 
 def _key(name: str, ident: str, window: int, now: float | None = None) -> str:
     bucket = int((now if now is not None else time.time()) // window)
-    safe = "".join(ch for ch in ident if ch.isalnum() or ch in ":-_@.")[:80] or "anon"
+    safe = "".join(ch for ch in ident if ch.isalnum() or ch in ":-_@./")[:80] or "anon"
     return f"rl:{name}:{safe}:{bucket}"
 
 
@@ -114,29 +135,62 @@ def allow(
     return int(count) <= limit
 
 
-def over(store: object, name: str, ident: str, limit: int, window: int) -> bool:
-    """True when this identity already used up its window. Reads only; fails open."""
-    try:
-        count = store.get(_key(name, ident, window))  # type: ignore[attr-defined]
-        return count is not None and int(count) >= limit
-    except Exception:
-        logger.warning("rate limit store failed for %s", name)
-        return False
-
-
 class RateLimitApp:
-    """ASGI wrapper. Over-limit requests get 429 JSON and never reach the inner app.
+    """ASGI wrapper that counts requests per caller. Over-limit requests get 429 JSON and
+    never reach the inner app.
 
-    Requests are counted per bearer token, so one busy assistant does not throttle
-    others behind the same address. A made-up token would get a fresh bucket each
-    time, so requests the inner app answers with 401 are also counted per address,
-    and an address that keeps failing is refused before the inner app runs.
+    Placed inside `BearerAuthMiddleware`, so it counts callers whose bearer was already
+    accepted, per connection (`principal_identity`): one busy assistant does not throttle
+    others behind the same address, and refreshing tokens does not reset the count.
+    Callers with no resolved identity are counted per address.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        store: object,
+        *,
+        name: str,
+        limit: int,
+        window: int,
+        identify: Callable[[Scope], str | None] = principal_identity,
+    ):
+        self.app = app
+        self.store = store
+        self.name = name
+        self.limit = limit
+        self.window = window
+        self.identify = identify
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        ident = self.identify(scope) or ip_identity(scope)
+        allowed = await anyio.to_thread.run_sync(
+            lambda: allow(self.store, self.name, ident, self.limit, self.window)
+        )
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+        await _too_many(send, self.window)
+
+
+class AuthFailureLimitApp:
+    """ASGI wrapper around `BearerAuthMiddleware` that limits rejected bearers per address.
+
+    A made-up token cannot be told apart from a real one without asking the auth layer,
+    so every request goes through to it. Only an answer of 401 (no token, or a token that
+    is not valid) is counted against the caller's address, and once that address used up
+    its allowance those 401s become 429. A valid token from the same address is never
+    refused by this counter, so someone sending bad tokens from a shared address (an
+    office NAT, a hosted assistant's egress) cannot lock out the others there.
     """
 
     def __init__(self, app: ASGIApp, store: object, *, name: str, limit: int, window: int):
         self.app = app
         self.store = store
-        self.name = name
+        self.name = f"{name}-401"
         self.limit = limit
         self.window = window
 
@@ -144,42 +198,38 @@ class RateLimitApp:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        ident = _identity_from_scope(scope)
         ip = ip_identity(scope)
-        failures = f"{self.name}-401"
+        swallowing = False
 
-        def check() -> bool:
-            if over(self.store, failures, ip, self.limit, self.window):
-                return False
-            return allow(self.store, self.name, ident, self.limit, self.window)
-
-        if await anyio.to_thread.run_sync(check):
-            rejected = False
-
-            async def watch(message: Message) -> None:
-                nonlocal rejected
-                if message["type"] == "http.response.start" and message["status"] == 401:
-                    rejected = True
-                await send(message)
-
-            await self.app(scope, receive, watch)
-            # A request with no token already counts against the address above.
-            if rejected and ident != ip:
-                await anyio.to_thread.run_sync(
-                    lambda: allow(self.store, failures, ip, self.limit, self.window)
+        async def watch(message: Message) -> None:
+            nonlocal swallowing
+            if swallowing:
+                return
+            if message["type"] == "http.response.start" and message["status"] == 401:
+                allowed = await anyio.to_thread.run_sync(
+                    lambda: allow(self.store, self.name, ip, self.limit, self.window)
                 )
-            return
-        body = b'{"error":"rate_limited"}'
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 429,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                    (b"retry-after", str(self.window).encode()),
-                    (b"cache-control", b"no-store"),
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
+                if not allowed:
+                    swallowing = True
+                    await _too_many(send, self.window)
+                    return
+            await send(message)
+
+        await self.app(scope, receive, watch)
+
+
+async def _too_many(send: Send, window: int) -> None:
+    body = b'{"error":"rate_limited"}'
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", str(window).encode()),
+                (b"cache-control", b"no-store"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
