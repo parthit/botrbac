@@ -1198,7 +1198,7 @@ def build_app(
         sharer_of=shares.sharer_of,
         notion=notion,
         drops=drop_box,
-        terminal=TerminalFeature(),
+        terminal=TerminalFeature(kv),
     )
     dashboard = build_dashboard(ctx)
 

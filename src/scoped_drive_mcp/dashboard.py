@@ -105,6 +105,7 @@ from .store import (
     sign_existing_records,
     usable_email,
 )
+from .terminal.feature import Kit as TerminalKit
 
 logger = logging.getLogger(__name__)
 
@@ -3589,7 +3590,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         *legal_routes(),
-        *(ctx.terminal.page_routes(owner_only, render) if ctx.terminal else []),
+        *(
+            ctx.terminal.page_routes(TerminalKit(owner_only, csrf_protected, render, flash))
+            if ctx.terminal
+            else []
+        ),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     app = Starlette(
