@@ -308,7 +308,9 @@ Policies are signed with Ed25519 (a key derived from `ENCRYPTION_KEY`; `src/botr
 public key comes with the tokens and is pinned in the login file; once pinned, a cached policy that does
 not verify blocks every tool, and the offline grace is measured from the signed `issued_at` (allowing a day
 of clock difference) as well as the local fetch time. A replayed older signed policy is still accepted
-until its own grace runs out. Changing `ENCRYPTION_KEY` changes the key: terminals block until their next
+until its own grace runs out. A cached policy with a signature but no pinned key blocks;
+removing both the pinned key and the signature makes it look unsigned, which only the protected-files
+check below and `botrbac doctor` stand against. Changing `ENCRYPTION_KEY` changes the key: terminals block until their next
 token refresh (at most an hour, when online) brings the new one. Whatever the role, the CLI refuses tool calls that would change Claude Code's settings files,
 `~/.claude.json` or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
 (`src/botrbac_cli/protect.py`; text and resolved paths, so a path built at run time gets past it). A missing
