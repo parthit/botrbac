@@ -1267,4 +1267,12 @@ header { view-transition-name: site-header; }
   inset: 0 !important;
   margin: auto !important;
 }
-.safari-note { font-size: 14px; margin: 4px 0 16px; }
+.safari-note {
+  font-size: 14px;
+  margin: 4px 0 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--accent-wash);
+  color: var(--ink);
+}
