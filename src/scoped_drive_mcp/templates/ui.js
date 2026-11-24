@@ -541,7 +541,7 @@
   // Safari (desktop, and every iOS browser since they all use WebKit) blocks Google's
   // cookies in the picker's frame while cross-site tracking prevention is on.
   var ua = navigator.userAgent;
-  var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/.test(ua);
+  var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg(?!iOS)|OPR|Android/.test(ua);
   // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
   var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   if (webkitOnly) {
