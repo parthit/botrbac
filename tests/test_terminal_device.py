@@ -228,3 +228,50 @@ def test_device_page_escapes_what_the_terminal_sent(world, memstore, oauth) -> N
     started = c.post("/api/terminal/device", json={"hostname": "<script>x</script>"}).json()
     page = c.get("/device", params={"code": started["user_code"]}).text
     assert "<script>x</script>" not in page and "&lt;script&gt;" in page
+
+
+def test_a_poll_cannot_undo_an_approval() -> None:
+    clock = FakeClock()
+    t = _terminals(clock)
+    started = t.start({})
+    code = started["user_code"]
+    # A poll reads the pending record, then the person approves, then the poll writes.
+    with pytest.raises(DeviceError):
+        t.poll(started["device_code"])
+    terminal = t.approve(ME, code, "full", "x")
+    clock.advance(POLL_INTERVAL)
+    issued = t.poll(started["device_code"])
+    assert t.resolve(issued["access_token"]).id == terminal.id
+
+
+def test_one_decision_per_code() -> None:
+    t = _terminals()
+    started = t.start({})
+    code = started["user_code"]
+    digest = hashlib.sha256(started["device_code"].encode()).hexdigest()
+    t.store.set_if_absent(f"term:usercode:{code}:claim", "1", ex=60)  # a racing approval
+    assert t.approve(ME, code, "full", "x") is None
+    assert t.for_person(ME) == []  # no orphaned terminal
+    assert t.store.get(f"term:device:{digest}:decision") is None
+
+
+def test_poll_has_a_second_of_slack() -> None:
+    clock = FakeClock()
+    t = _terminals(clock)
+    started = t.start({})
+    with pytest.raises(DeviceError):
+        t.poll(started["device_code"])
+    clock.advance(POLL_INTERVAL - 0.5)
+    with pytest.raises(DeviceError) as exc:
+        t.poll(started["device_code"])
+    assert exc.value.code == "authorization_pending"
+
+
+def test_terminal_check_ins_do_not_undo_role_changes() -> None:
+    t = _terminals()
+    started = t.start({})
+    terminal = t.approve(ME, started["user_code"], "full", "x")
+    t.update(ME, terminal.id, role_id="none")
+    t.touch(terminal.id, last_seen=5.0, queued=3, role_id="full")  # role_id is ignored
+    after = t.get(terminal.id)
+    assert after.role_id == "none" and after.last_seen == 5.0 and after.queued == 3
