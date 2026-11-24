@@ -40,6 +40,8 @@ def cmd_login(args: argparse.Namespace) -> int:
             return 0
         if result == "slow_down":
             interval += 5
+        elif result == "rate_limited":
+            time.sleep(60)
         elif result != "authorization_pending":
             print(f"Login did not complete: {result}", file=sys.stderr)
             return 1

@@ -15,6 +15,7 @@ from .patterns import chain_allows
 
 SESSION_ENV = "BOTRBAC_SESSION"
 REFRESH_AFTER = 300  # seconds before a gateway asks the server again
+CLOCK_SKEW = 300
 
 
 @dataclass
@@ -65,8 +66,13 @@ class Enforcer:
             return None, "no policy yet: run botrbac login"
         policy = cached["policy"]
         days = int(policy.get("role", {}).get("offline_days") or 7)
-        if self.clock() - float(cached.get("fetched_at") or 0) > days * 86400:
+        age = self.clock() - float(cached.get("fetched_at") or 0)
+        if age > days * 86400:
             return None, f"offline for more than {days} days: connect to the internet"
+        if age < -CLOCK_SKEW:
+            # Fetched "in the future": the clock was moved back. Don't let that keep an
+            # old policy alive; check in again.
+            return None, "this computer's clock moved back: connect to the internet"
         return policy, ""
 
     def stale(self) -> bool:

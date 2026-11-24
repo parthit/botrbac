@@ -26,7 +26,15 @@ def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
         try:
             api.send_audit(body)
         except Exception as exc:  # noqa: BLE001 - offline: keep the rows
-            return {"sent": sent, "waiting": queue.waiting(), "error": str(exc) or "offline"}
+            # Still fetch the policy: a role change or a revoked session must reach
+            # this computer even when the audit upload is failing.
+            fresh = policy.refresh(api)
+            return {
+                "sent": sent,
+                "waiting": queue.waiting(),
+                "error": str(exc) or "offline",
+                "policy": bool(fresh),
+            }
         queue.mark_sent([r["event_id"] for r in rows])
         sent += len(rows)
         first = False
