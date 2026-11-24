@@ -54,11 +54,21 @@ BUILTIN: dict[str, Role] = {
     READ_ONLY: Role(
         READ_ONLY,
         "Read-only",
-        ["*/read*", "*/get*", "*/list*", "*/search*"],
+        [
+            "*/read*",
+            "*/get*",
+            "*/list*",
+            "*/search*",
+            "claude-code/Read",
+            "claude-code/Grep",
+            "claude-code/Glob",
+            "claude-code/LS",
+        ],
         builtin=True,
         description=(
-            "Tools whose names start with read, get, list or search. This goes by the "
-            "name only: check what each server's tools really do."
+            "Tools whose names start with read, get, list or search, and Claude Code's "
+            "Read, Grep, Glob and LS. This goes by the name only: check what each "
+            "server's tools really do."
         ),
     ),
     FULL: Role(FULL, "Full access", ["*"], builtin=True, description="Every tool."),

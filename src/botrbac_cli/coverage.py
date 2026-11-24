@@ -160,8 +160,8 @@ def wrap(config: AgentConfig, dry_run: bool = False) -> dict[str, Any]:
     }
     if dry_run:
         return result
-    result["backup"] = _backup(config.path)
-    _write_atomic(config.path, json.dumps(data, indent=2) + "\n")
+    result["backup"] = backup_file(config.path)
+    write_atomic(config.path, json.dumps(data, indent=2) + "\n")
     cfg = state.read_json("config.json", {}) or {}
     cfg["servers"] = upstreams
     state.write_json("config.json", cfg, private=True)
@@ -205,15 +205,15 @@ def _wrap_codex(config: AgentConfig, dry_run: bool) -> dict[str, Any]:
             f"args = [{args}]\n"
         )
         before = config.path.read_text() if config.path.exists() else ""
-        result["backup"] = _backup(config.path)
-        _write_atomic(config.path, before + block)
+        result["backup"] = backup_file(config.path)
+        write_atomic(config.path, before + block)
     cfg = state.read_json("config.json", {}) or {}
     cfg["servers"] = upstreams
     state.write_json("config.json", cfg, private=True)
     return result
 
 
-def _backup(path: Path) -> str | None:
+def backup_file(path: Path) -> str | None:
     """A copy of the file before it changes, readable by this user only (it can hold
     the servers' keys)."""
     if not path.exists():
@@ -224,7 +224,7 @@ def _backup(path: Path) -> str | None:
     return str(backup)
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str) -> None:
     """Replace the file in one step, keeping its permissions, so an agent that reads or
     writes it at the same moment never sees half a file. A symlink (a dotfile manager's)
     stays a symlink: the file it points to is the one replaced."""
