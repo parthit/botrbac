@@ -85,7 +85,9 @@ from .mcp_oauth import (
     McpOAuth,
     QueryMapping,
 )
+from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
+from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import (
@@ -134,6 +136,10 @@ def observability_on() -> bool:
 
 _env.globals["observability_on"] = observability_on
 
+# Connect Notion posts a form that redirects to Notion's consent screen, which may pass
+# through Notion's sign-in. form-action is checked along that redirect chain.
+NOTION_FORM_HOSTS = b"https://api.notion.com https://www.notion.so https://app.notion.com"
+
 # Every page: scripts and everything else only from this site. Sign-in forms redirect to
 # Google, which form-action checks along the redirect chain. frame-ancestors stays none
 # so this site is not embedded.
@@ -145,7 +151,7 @@ STRICT_CSP = (
     b"connect-src 'self'; "
     b"frame-src 'none'; "
     b"worker-src 'self'; "
-    b"form-action 'self' https://accounts.google.com; "
+    b"form-action 'self' https://accounts.google.com " + NOTION_FORM_HOSTS + b"; "
     b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 )
 # Only pages that can open the Google Picker (PICKER_TEMPLATES): it loads api.js from
@@ -224,6 +230,8 @@ class DashboardContext:
     sharer_of: Callable[[str, str], str | None] | None = None
     # The first read by each paired person's assistant, shown on Overview.
     first_reads: Any = None
+    # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
+    notion: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -327,16 +335,37 @@ class DashboardContext:
         record = self.vault.owner()
         return bool(record and record.get("t"))
 
+    def notion_record(self) -> dict[str, str] | None:
+        """This person's stored Notion connection, when Notion is offered here."""
+        if self.notion is None or not self.vault.enabled:
+            return None
+        return self.vault.notion()
+
     def connection_rows(self) -> list[dict[str, Any]]:
-        """Each connection and whether this person has finished it."""
+        """Each connection offered here and whether this person has finished it."""
         rows = []
         for conn in CONNECTIONS.values():
-            connected = self.drive_connected() if conn.key == "google_drive" else False
-            # An older full-Drive (or unstamped) token is no longer used: the person is
-            # not connected until they reconnect, which revokes it first.
-            needs_upgrade = not connected and conn.key == "google_drive" and self.reconsent_needed()
+            detail = None
+            if conn.provider == "notion":
+                if self.notion is None:
+                    continue
+                record = self.notion_record()
+                connected = record is not None
+                if record and record.get("workspace_name"):
+                    detail = f"Workspace: {record['workspace_name']}"
+                needs_upgrade = False
+            else:
+                connected = self.drive_connected()
+                # An older full-Drive (or unstamped) token is no longer used: the person
+                # is not connected until they reconnect, which revokes it first.
+                needs_upgrade = not connected and self.reconsent_needed()
             rows.append(
-                {"connection": conn, "connected": connected, "needs_upgrade": needs_upgrade}
+                {
+                    "connection": conn,
+                    "connected": connected,
+                    "needs_upgrade": needs_upgrade,
+                    "detail": detail,
+                }
             )
         return rows
 
@@ -580,6 +609,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         reconsent = getattr(request.state, "reconsent", False)
     ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
+    ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -1187,13 +1217,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except AuthorizeError:
             return None
 
+    def drive_row_connected(rows: list[dict[str, Any]]) -> bool:
+        return any(r["connected"] for r in rows if r["connection"].provider == "google")
+
     async def connect_page(request: Request) -> Response:
         rows = await blocking(ctx.connection_rows)
         next_url = safe_next(request.query_params.get("next"))
         if next_url.startswith("/connect"):
             next_url = "/"
         client_name = await blocking(waiting_client, next_url)
-        if any(r["connected"] for r in rows) and next_url == "/" and not client_name:
+        if drive_row_connected(rows) and next_url == "/" and not client_name:
             # Set up already: the services list lives in Settings now.
             return RedirectResponse("/settings#services", status_code=303)
         return render(
@@ -1202,17 +1235,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             rows=rows,
             next=next_url,
             waiting_client=client_name,
-            drive_connected=any(r["connected"] for r in rows),
+            drive_connected=drive_row_connected(rows),
         )
 
     async def connect_start(request: Request, form: dict[str, str]) -> Response:
         connection = get_connection(request.path_params.get("key"))
         if connection is None:
             return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "notion" and ctx.notion is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
         limited = await login_rate_limited(request)
         if limited is not None:
             return limited
         request.session["oauth_next"] = safe_next(form.get("next"))
+        if connection.provider == "notion":
+            return start_notion(request)
         if connection.key == "google_drive":
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
@@ -1239,6 +1276,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         connection = get_connection(request.path_params.get("key"))
         if connection is None:
             return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "notion":
+            if ctx.notion is None:
+                return render(request, "error.html", 404, message="Unknown connection.")
+            return await notion_disconnect(request)
         email = current_actor.get()
         # An old full-Drive token is kept until Google confirms it is revoked, so a failed
         # revoke can be retried. It is never used meanwhile.
@@ -1276,6 +1317,187 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "to be sure.",
             )
         return RedirectResponse("/connect", status_code=303)
+
+    # ---- Notion (a second connection, its own OAuth) ---------------------------
+
+    def start_notion(request: Request) -> Response:
+        """Send the signed-in person to Notion's consent screen. The state is signed,
+        expires, is tied to this browser (nonce) and names the account it is for."""
+        nonce = secrets.token_urlsafe(24)
+        request.session["notion_nonce"] = nonce
+        state = serializer.dumps(
+            {"flow": "notion", "nonce": nonce, "who": current_actor.get() or ""}
+        )
+        url = ctx.notion.oauth.authorization_url(state)
+        return RedirectResponse(url, status_code=303)
+
+    async def notion_callback(request: Request) -> Response:
+        if ctx.notion is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        params = request.query_params
+        nonce = request.session.pop("notion_nonce", None)
+        request.session.pop("oauth_next", None)
+        retry_actions = [
+            {"label": "Back to Settings", "href": "/settings#services", "primary": True},
+        ]
+        if params.get("error"):
+            cancelled = params.get("error") == "access_denied"
+            return render(
+                request,
+                "error.html",
+                400,
+                title="You didn’t connect Notion" if cancelled else "Notion isn’t connected",
+                message=(
+                    "You cancelled on Notion’s screen, so nothing changed."
+                    if cancelled
+                    else "Notion didn’t finish connecting. Nothing changed."
+                ),
+                actions=retry_actions,
+            )
+        try:
+            data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+        except BadSignature:
+            data = None
+        email = current_actor.get() or ""
+        if (
+            not isinstance(data, dict)
+            or data.get("flow") != "notion"
+            or not nonce
+            or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
+            or str(data.get("who") or "") != email
+        ):
+            audit_owner("notion_connect", "deny", reason="bad_state")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="Notion connection expired",
+                message="That Notion connection didn’t start here, or took too long. Try again.",
+                actions=retry_actions,
+            )
+        code = params.get("code")
+        if not code:
+            return render(request, "error.html", 400, message="Notion did not return a code.")
+        try:
+            tokens = await blocking(ctx.notion.oauth.exchange_code, code)
+        except NotionOAuthError as exc:
+            return render(
+                request,
+                "error.html",
+                502,
+                title="Notion isn’t connected",
+                message=f"Connecting Notion failed: {exc}.",
+                actions=retry_actions,
+            )
+        previous = await blocking(ctx.notion_record)
+        if previous and previous.get("workspace_id") != tokens.workspace_id:
+            # Another workspace: the old list names pages that are not there.
+            await blocking(ctx.notion.clear)
+        await blocking(
+            ctx.vault.set_notion,
+            tokens.access_token,
+            tokens.refresh_token,
+            email,
+            tokens.workspace_id,
+            tokens.workspace_name,
+        )
+        audit_owner("notion_connect", connection="notion")
+        flash(
+            request,
+            "ok",
+            "Notion is connected. Now allow the pages your assistants may read.",
+        )
+        return RedirectResponse("/files?tab=notion", status_code=303)
+
+    async def notion_disconnect(request: Request) -> Response:
+        record = await blocking(ctx.notion_record)
+        await blocking(ctx.vault.clear_notion)
+        # The list belongs to that connection's workspace; a later connection starts empty.
+        await blocking(ctx.notion.clear)
+        confirmed = True
+        # Notion revokes one token per call: the access token, then the refresh token.
+        for key in ("t", "r"):
+            if record and record.get(key):
+                confirmed = await blocking(ctx.notion.oauth.revoke, record[key]) and confirmed
+        audit_owner("notion_disconnect", connection="notion")
+        if confirmed:
+            flash(request, "ok", "Notion is disconnected. Assistants can no longer reach it.")
+        else:
+            flash(
+                request,
+                "error",
+                "Notion is disconnected here, but Notion didn’t confirm it ended the "
+                "connection. In Notion, open Settings → Connections and remove Bot RBAC "
+                "to be sure.",
+            )
+        return RedirectResponse("/settings#services", status_code=303)
+
+    async def notion_files(request: Request) -> Response:
+        """Files → From Notion: what assistants may read, and what Notion shows Bot RBAC."""
+        query = (request.query_params.get("q") or "").strip()[:200]
+
+        def gather() -> dict[str, Any]:
+            record = ctx.notion_record()
+            allowed = sorted(ctx.notion.allowlist.entries().values(), key=lambda e: e.name.lower())
+            out: dict[str, Any] = {
+                "notion_connected": record is not None,
+                "workspace": (record or {}).get("workspace_name") or "",
+                "allowed": allowed,
+                "visible": [],
+                "notion_error": None,
+            }
+            if record is None:
+                return out
+            try:
+                out["visible"] = ctx.notion.visible(query)
+            except PayloadToolError as exc:
+                out["notion_error"] = str(exc.payload.get("message") or "Notion refused.")
+            except NotionApiError:
+                out["notion_error"] = "Notion didn’t answer. Reload the page in a minute."
+            return out
+
+        data = await blocking(gather)
+        return render(
+            request,
+            "notion.html",
+            query=query,
+            next="/files?tab=notion",
+            **data,
+        )
+
+    async def notion_allow(request: Request, form: dict[str, str]) -> Response:
+        if ctx.notion is None:
+            return refused(request, 404, "Notion is not set up on this server.")
+        back = "/files?tab=notion"
+        try:
+            entry = await blocking(ctx.notion.allow, form.get("page_id", ""))
+        except PayloadToolError as exc:
+            return action_done(request, "error", str(exc.payload.get("message")), back)
+        except NotionApiError:
+            return action_done(request, "error", "Notion didn’t answer. Try again.", back)
+        if entry is None:
+            return action_done(
+                request,
+                "error",
+                "Notion doesn’t show Bot RBAC that page. Choose Pick pages in Notion to add it "
+                "there first.",
+                back,
+                changed=False,
+            )
+        audit_owner("notion_allow", page_id=entry.id, name=entry.name)
+        return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
+
+    async def notion_remove(request: Request, form: dict[str, str]) -> Response:
+        if ctx.notion is None:
+            return refused(request, 404, "Notion is not set up on this server.")
+        entry = await blocking(ctx.notion.remove, form.get("page_id", ""))
+        back = "/files?tab=notion"
+        if entry is None:
+            return action_done(request, "ok", "That page was not allowed.", back, changed=False)
+        audit_owner("notion_remove", page_id=entry.id, name=entry.name)
+        return action_done(
+            request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back
+        )
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
@@ -2737,7 +2959,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "settings.html",
             mcp_url=f"{settings.app_base_url}/mcp",
-            drive_connected=any(r["connected"] for r in data["rows"]),
+            drive_connected=drive_row_connected(data["rows"]),
             next="/settings",
             missing=settings.missing_settings(),
             store_kind=getattr(ctx.store, "kind", "custom"),
@@ -2751,6 +2973,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def files_page(request: Request) -> Response:
         request.state.allow_count = len(await blocking(ctx.allowlist.entries))
+        request.state.notion_tab = ctx.notion is not None
+        if request.query_params.get("tab") == "notion" and ctx.notion is not None:
+            # Notion does not need Google Drive, so this tab works without it.
+            return await notion_files(request)
         if request.query_params.get("tab") == "allowed":
             return await access(request)
         return await browse(request)
@@ -3018,6 +3244,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/connect", owner_only(connect_page), methods=["GET"]),
         Route("/connect/{key}", csrf_protected(connect_start), methods=["POST"]),
         Route("/connect/{key}/disconnect", csrf_protected(connect_remove), methods=["POST"]),
+        Route("/connect/notion/callback", owner_only(notion_callback), methods=["GET"]),
+        Route("/notion/allow", csrf_protected(notion_allow), methods=["POST"]),
+        Route("/notion/remove", csrf_protected(notion_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", safely(home), methods=["GET"]),
         Route("/files", owner_only(files_page), methods=["GET"]),

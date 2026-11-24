@@ -74,6 +74,7 @@
       {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
     </div>
     <p class="muted">{{ conn.summary }}</p>
+    {% if row.detail %}<p class="small">{{ row.detail }}</p>{% endif %}
     {% if row.connected %}
     <form class="inline" method="post" action="/connect/{{ conn.key }}/disconnect" data-confirm="Disconnect {{ conn.name }}? Assistants lose access to it immediately." data-confirm-action="Disconnect">
       <input type="hidden" name="csrf" value="{{ csrf }}">

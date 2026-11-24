@@ -289,6 +289,7 @@ uv run ruff check . && uv run ruff format --check .
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | 300 / 60 | `/mcp` calls per token |
 | `REQUIRE_SIGNED_RECORDS` | off | `1` ignores unsigned allowlist, app and pairing records. Turn on after **Sign existing records** on `/admin`. See [security.md](security.md) |
 | `TRUSTED_PROXY_HOPS` | unset | proxies in front of the server that add to `X-Forwarded-For`. Leave unset on Vercel |
+| `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET` | unset | optional Notion connection; both set turns it on ([notion.md](notion.md)) |
 | `EDGE_CONFIG` | unset | Vercel Edge Config connection string; holds the `self_pairing` switch ([sharing.md](sharing.md)) |
 | `WEBHOOKS_ENABLED`, `WEBHOOK_KEK`, `WEBHOOK_HOST_ALLOWLIST` | off | wake-up pings to paired assistants ([sharing.md](sharing.md)) |
 | `VERCEL_OBSERVABILITY` | on | `off` removes Vercel Speed Insights and Web Analytics scripts |

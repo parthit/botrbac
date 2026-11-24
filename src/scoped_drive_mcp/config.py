@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     webhooks_enabled: bool = False
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"
+    # Optional: Notion as a second connection (a public OAuth "developer connection").
+    # Notion is offered on Settings only when both are set.
+    notion_oauth_client_id: SecretStr | None = None
+    notion_oauth_client_secret: SecretStr | None = None
     # Vercel Edge Config connection string (set when an Edge Config is connected to the
     # project). Holds server-side switches such as `self_pairing`; see flags.py.
     edge_config: SecretStr | None = None
@@ -330,6 +334,23 @@ class Settings(BaseSettings):
     def oauth_client_configured(self) -> bool:
         return _secret_set(self.google_oauth_client_id) and _secret_set(
             self.google_oauth_client_secret
+        )
+
+    @property
+    def notion_configured(self) -> bool:
+        """Both Notion OAuth values are set (a placeholder such as REPLACE_WITH_... does
+        not count) and there is a public address for Notion to send people back to."""
+
+        def real(value: SecretStr | None) -> bool:
+            if not _secret_set(value):
+                return False
+            assert value is not None
+            return not value.get_secret_value().strip().upper().startswith("REPLACE")
+
+        return (
+            real(self.notion_oauth_client_id)
+            and real(self.notion_oauth_client_secret)
+            and bool(self.app_base_url)
         )
 
     @property
