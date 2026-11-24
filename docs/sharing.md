@@ -123,11 +123,15 @@ needs nothing on the recipient's Sharing list, and the sender gets no access to 
   `MAX_BYTES`). The name, type and size get the same checks as `upload_file`.
 - **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (48 by
   default, 24 to 168) and then deleted. Every stored piece carries that expiry, so the store deletes it even
-  if nothing else runs. Pieces are encrypted with a key derived from `ENCRYPTION_KEY`. One recipient can have
-  at most 50 unsaved files (50 MB) waiting, and one person can send another at most 20 files an hour.
+  if nothing else runs. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
+  it they are stored unencrypted (still deleted at the end of the hold) and the server logs a warning at
+  startup. One person can send another at most 20 files an hour, counted before the file is stored, so a
+  send that fails to store still counts. One recipient can have about 50 unsaved files (50 MB) waiting:
+  sends that arrive at the same moment can pass that cap together, by at most the hourly limit.
 - **Keeping it:** the recipient sees it under **Sent to you** with **Download**, **Save to Google Drive** and
   **Delete**. Saving copies it into a folder this app makes at the top of their Drive, "Sent to me (Bot RBAC)",
-  and deletes the held copy at once. The folder is added to their **Access** list when it is made, so their
+  and deletes the held copy at once. Saving the same file twice at once (a double-click, or you and your
+  assistant together) saves it once; the second gets `busy`. The folder is added to their **Access** list when it is made, so their
   own assistants can open what they saved; removing it there takes that away. An assistant with an editing
   connection can save too, with `save_drop`, when its human asks.
 - **Write-only for the sender:** `send_file` returns no id. The sender cannot list, read, change or delete what
@@ -141,7 +145,8 @@ needs nothing on the recipient's Sharing list, and the sender gets no access to 
 
 Errors from `send_file`: `not_linked`, `own_drive`, `drops_off`, `inbox_full`, `rate_limited`,
 `invalid_input`. From `read_drop`, `download_drop` and `save_drop`: `not_found` (expired, deleted, or not
-yours) and `saved` (it is in Drive now; use `read_file` with the returned `file_id`).
+yours) and `saved` (it is in Drive now; use `read_file` with the returned `file_id`). From `save_drop`:
+`busy` (a save of that file is already running; try again shortly).
 
 ## Errors
 

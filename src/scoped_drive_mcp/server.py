@@ -1039,6 +1039,11 @@ def build_app(
         encryption_key=enc_key,
         hold_hours=settings.drop_hold_hours,
     )
+    if not enc_key:
+        logger.warning(
+            "ENCRYPTION_KEY is not set: files paired people send are held unencrypted "
+            "until they are saved or expire"
+        )
 
     def caller_email() -> str | None:
         principal = current_principal.get()

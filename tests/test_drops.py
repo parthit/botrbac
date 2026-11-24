@@ -325,3 +325,65 @@ def test_a_large_file_is_held_in_pieces(setup, monkeypatch) -> None:
     [row] = _held(app)
     assert row["parts"] == 4
     assert owner.get(f"/drops/{row['id']}/download").content == PDF_BYTES
+
+
+def test_a_save_marks_the_row_before_deleting_the_held_copy(setup, monkeypatch) -> None:
+    """If deleting the pieces fails after the Drive copy exists, the list still says it
+    was saved (the pieces expire on their own), and a retry does not save it twice."""
+    app, owner, eve, _carol = setup
+    _send(eve)
+    [row] = _held(app)
+    box = app.state.drops
+
+    def broken(_row) -> None:
+        raise RuntimeError("store hiccup")
+
+    monkeypatch.setattr(box, "_drop_parts", broken)
+    with acting_as(OWNER_EMAIL), pytest.raises(RuntimeError):
+        box.save(row["id"])
+    [after] = _held(app)
+    assert after["saved_file_id"]
+    monkeypatch.undo()
+    retry = mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])
+    assert _error(retry)["error"] == "saved"
+
+
+def test_two_saves_at_once_make_one_copy(setup, world) -> None:
+    app, owner, eve, _carol = setup
+    _send(eve)
+    [row] = _held(app)
+    box = app.state.drops
+    # A save already holds the lock: a second one is refused, nothing is written.
+    with acting_as(OWNER_EMAIL):
+        assert box.store.set_if_absent(f"drops:saving:{row['id']}", "1", ex=60)
+    busy = mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])
+    assert _error(busy)["error"] == "busy"
+    assert _drop_folders(world) == []
+    with acting_as(OWNER_EMAIL):
+        box.store.delete(f"drops:saving:{row['id']}")
+    assert mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])["isError"] is False
+    second = mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])
+    assert _error(second)["error"] == "saved"
+    [folder] = _drop_folders(world)
+    assert len([f for f in world.files.values() if f.parents == [folder]]) == 1
+
+
+def test_a_strange_drop_id_never_reaches_the_store(setup) -> None:
+    _app_, owner, _eve, _carol = setup
+    bad = mcp_call(owner, "save_drop", role="editor", drop_id="x:" * 100)
+    assert _error(bad)["error"] == "not_found"
+
+
+def test_without_an_encryption_key_the_server_warns(memstore, caplog) -> None:
+    import logging
+
+    from scoped_drive_mcp.server import build_app
+    from tests.conftest import make_settings
+
+    with caplog.at_level(logging.WARNING, logger="scoped_drive_mcp.server"):
+        build_app(make_settings(encryption_key=None), store=memstore)
+    assert any("held unencrypted" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="scoped_drive_mcp.server"):
+        build_app(make_settings(), store=memstore)
+    assert not any("held unencrypted" in r.getMessage() for r in caplog.records)

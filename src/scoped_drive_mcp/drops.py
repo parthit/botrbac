@@ -16,10 +16,12 @@ runs again.
 * Only between people with an active pairing (both approved), checked on every send.
   Ada can turn drops off for one person on the People page; the pairing stays on.
 * Name, type and size go through the same checks as `upload_file`. At most
-  `DROPS_PER_HOUR` files from one person to another an hour, and at most `MAX_HELD` drops
-  and `MAX_HELD_BYTES` held for one person at a time.
+  `DROPS_PER_HOUR` files from one person to another an hour, and about `MAX_HELD` drops
+  and `MAX_HELD_BYTES` held for one person at a time (sends at the same moment can pass
+  that cap together, by at most the hourly limit).
 * The bytes are stored in pieces (`CHUNK_BYTES`), encrypted with a key derived from
-  ENCRYPTION_KEY when it is set.
+  ENCRYPTION_KEY when it is set. Without it they are stored as plain base64 (still deleted
+  at the end of the hold), and the server logs a warning at startup.
 * Ada's own assistants see drops (`list_drops`, `read_drop`, `download_drop`) marked
   `untrusted_peer`: the name and contents are Eve's. A saved copy is stamped with Eve as
   its writer, so it keeps that mark wherever Ada's assistants see it in Drive.
@@ -28,6 +30,7 @@ runs again.
 import base64
 import json
 import logging
+import re
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -59,6 +62,11 @@ DROPS_INDEX_KEY = "drops:index"
 DROP_PART_PREFIX = "drops:part:"
 DROPS_OFF_KEY = "drops:off"
 DROPS_SENT_PREFIX = "drops:sent:"
+DROP_SAVING_PREFIX = "drops:saving:"
+# Longest a save may hold its lock (a crashed save frees it after this).
+SAVE_LOCK_SECONDS = 120
+# What secrets.token_urlsafe(16) makes.
+_DROP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 DROP_FOLDER_NAME = "Sent to me (Bot RBAC)"
 DROP_HOLD_HOURS = 48
@@ -289,6 +297,22 @@ class DropBox:
     def save(self, drop_id: str) -> dict[str, Any]:
         """Copy a held drop into the current actor's Drive and delete the held copy."""
         me = current_actor.get() or ""
+        # One save at a time per drop: a double-click, or the person and their assistant
+        # at once, must not put two copies in Drive.
+        if not isinstance(drop_id, str) or not _DROP_ID.fullmatch(drop_id):
+            raise SharedAccessError("not_found", "No such file.")
+        lock = f"{DROP_SAVING_PREFIX}{drop_id}"
+        if not self.store.set_if_absent(lock, "1", ex=SAVE_LOCK_SECONDS):
+            raise SharedAccessError(
+                "busy", "That file is being saved right now. Reload in a moment."
+            )
+        try:
+            return self._save(me, drop_id)
+        finally:
+            self.store.delete(lock)
+
+    def _save(self, me: str, drop_id: str) -> dict[str, Any]:
+        # Read under the lock, so a save that just finished is seen ("saved").
         row, data = self.download(drop_id)
         sender = str(row.get("from") or "")
         try:
@@ -308,9 +332,11 @@ class DropBox:
             raise SharedAccessError(
                 "drive_unavailable", "Connect Google Drive first, then save again."
             ) from None
-        self._drop_parts(row)
+        # Mark it saved before deleting the held pieces. If the pieces are not deleted,
+        # they expire on their own; the other order could lose track of the Drive copy.
         saved = {**row, "saved_file_id": created["id"], "parts": 0}
         self.store.hset(DROPS_INDEX_KEY, row["id"], json.dumps(saved, separators=(",", ":")))
+        self._drop_parts(row)
         principal = current_principal.get()
         who = _caller_who() if principal else {"token_name": None, "role": None}
         audit(tool="save_drop", decision="allow", reason="ok", file_id=created["id"], **who)
@@ -435,7 +461,12 @@ class DropBox:
 
     def _refusal(self, you: str, them: str, size: int) -> SharedAccessError | None:
         """Why a file from `you` cannot be held for `them` (the current actor) now, or
-        None. A refused file is not counted against the hourly limit."""
+        None. A file refused here as `drops_off` or `inbox_full` is not counted against
+        the hourly limit. Every other attempt is counted before it is stored, including one
+        whose storing then fails, so the limit stays firm when sends arrive together.
+
+        The held-files cap is a read then a write, so sends that arrive at the same moment
+        can pass it together; the hourly limit bounds how far over it can go."""
         if self.is_off_for(you):
             return SharedAccessError("drops_off", f"{them} is not accepting files from you now.")
         held = [r for r in self.received(MAX_LIST) if not r.get("saved_file_id")]
