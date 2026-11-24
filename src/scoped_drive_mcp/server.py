@@ -89,6 +89,7 @@ from .store import (
     ActivityLog,
     Allowlist,
     FirstReads,
+    HiddenFiles,
     KeyValueStore,
     MemoryStore,
     PrefixedStore,
@@ -879,6 +880,7 @@ def build_app(
     requests = AccessRequests(actor_kv, on_create=note_request_owner)
     activity = ActivityLog(actor_kv)
     first_reads = FirstReads(actor_kv)
+    hidden_files = HiddenFiles(actor_kv)
     audit_module.set_sinks([activity])
 
     def stored_owner_token() -> str | None:
@@ -1183,6 +1185,7 @@ def build_app(
         requests=requests,
         activity=activity,
         first_reads=first_reads,
+        hidden=hidden_files,
         oauth=oauth,
         owner_drive_factory=owner_drive_factory or _owner_factory(settings),
         bot_drive=drive_client,

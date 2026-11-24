@@ -296,7 +296,7 @@
       var ok = document.createElement("button");
       ok.type = "button";
       var submit = form.querySelector("button[type=submit], button:not([type])");
-      ok.className = submit && submit.classList.contains("danger") ? "danger" : "primary";
+      ok.className = form.hasAttribute("data-confirm-danger") || (submit && submit.classList.contains("danger")) ? "danger" : "primary";
       ok.textContent = form.getAttribute("data-confirm-action") ||
         (submit ? (submit.childNodes[0] && submit.childNodes[0].textContent || "").trim() : "") || "Confirm";
       row.appendChild(cancel);
@@ -923,5 +923,139 @@
         link.textContent = label;
         link.removeAttribute("aria-busy");
       });
+  });
+})();
+
+// Tick several items and act on them together (Files › Allowed, Files › From Google Drive,
+// Sharing › Shared by me; markup in _batch.html). Without JavaScript the bar is a plain
+// form that is always shown. Here it appears once something is ticked, each button counts
+// the ticked items it would change, and anything that takes access away asks first.
+(function () {
+  var forms = document.querySelectorAll("form[data-batch]");
+  if (!forms.length) return;
+
+  function items(n) { return n + (n === 1 ? " item" : " items"); }
+
+  Array.prototype.forEach.call(forms, function (form) {
+    var id = form.id;
+    var all = document.querySelector('[data-batch-all="' + id + '"]');
+    var count = form.querySelector("[data-batch-count]");
+    var clear = form.querySelector("[data-batch-clear]");
+    var buttons = form.querySelectorAll("button[name=action]");
+    function boxes() { return document.querySelectorAll('input[name=file_id][form="' + id + '"]'); }
+    function ticked() { return Array.prototype.filter.call(boxes(), function (b) { return b.checked; }); }
+    function applies(button, box) {
+      var needs = button.getAttribute("data-batch-needs");
+      if (!needs) return true;
+      var row = box.closest("[data-row]");
+      return !!(row && row.matches(needs));
+    }
+
+    function update() {
+      var on = ticked();
+      var total = boxes().length;
+      form.hidden = on.length === 0;
+      if (count) count.textContent = items(on.length) + " selected";
+      if (clear) clear.hidden = on.length === 0;
+      if (all) {
+        all.checked = on.length > 0 && on.length === total;
+        all.indeterminate = on.length > 0 && on.length < total;
+      }
+      Array.prototype.forEach.call(boxes(), function (b) {
+        var row = b.closest("[data-row]");
+        if (row) row.classList.toggle("ticked", b.checked);
+      });
+      Array.prototype.forEach.call(buttons, function (button) {
+        var n = on.filter(function (b) { return applies(button, b); }).length;
+        var label = button.querySelector("[data-batch-n]");
+        if (label) label.textContent = n ? " " + n : "";
+        button.disabled = n === 0;
+      });
+    }
+
+    if (all) {
+      all.hidden = false;
+      all.addEventListener("change", function () {
+        Array.prototype.forEach.call(boxes(), function (b) { b.checked = all.checked; });
+        update();
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-batch-reveal]"), function (el) {
+      if (el.querySelector('[data-batch-all="' + id + '"]')) el.hidden = false;
+    });
+    document.addEventListener("change", function (event) {
+      var t = event.target;
+      if (t && t.name === "file_id" && t.getAttribute("form") === id) update();
+    });
+    if (clear) {
+      clear.addEventListener("click", function () {
+        Array.prototype.forEach.call(boxes(), function (b) { b.checked = false; });
+        update();
+        var first = boxes()[0];
+        if (first) first.focus();
+      });
+    }
+
+    form.addEventListener("submit", function (event) {
+      var button = event.submitter;
+      if (!button || button.name !== "action") return;
+      event.preventDefault();
+      var chosen = ticked().filter(function (b) { return applies(button, b); });
+      if (!chosen.length) return;
+      var ask = button.getAttribute("data-batch-ask");
+      var go = function () {
+        // Only the items this action applies to are sent; the others stay ticked.
+        ticked().forEach(function (b) { if (chosen.indexOf(b) === -1) b.disabled = true; });
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "action";
+        hidden.value = button.value;
+        form.appendChild(hidden);
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+        form.submit();
+      };
+      if (!ask || !window.__askConfirm) { go(); return; }
+      var names = chosen.map(function (b) { return "“" + b.getAttribute("data-name") + "”"; });
+      var list = names.length > 6 ? names.slice(0, 5).join(", ") + " and " + (names.length - 5) + " more" : names.join(", ");
+      var message = ask.replace("{n}", items(chosen.length)) + " " + list + ".";
+      var note = button.getAttribute("data-batch-note");
+      if (note) message += " " + note;
+      // An item inside a folder that stays on the list is still reachable. Say so, unless
+      // that folder is being removed in the same go.
+      var warn = button.getAttribute("data-batch-warn");
+      if (warn) {
+        var attr = warn === "shared" ? "data-shared-by" : "data-covered-by";
+        var going = chosen.map(function (b) { return b.getAttribute("data-name"); });
+        var still = chosen.filter(function (b) {
+          var folder = b.getAttribute(attr);
+          return folder && going.indexOf(folder) === -1;
+        });
+        if (still.length === 1) {
+          var f = still[0].getAttribute(attr);
+          message += " “" + still[0].getAttribute("data-name") + "” will still be " +
+            (warn === "shared" ? "readable" : "available") + " because “" + f + "” " +
+            (warn === "shared" ? "stays shared" : "stays allowed") + ". Include “" + f +
+            "” too to cut it off.";
+        } else if (still.length > 1) {
+          message += " " + still.length + " of these will still be " +
+            (warn === "shared" ? "readable through folders that stay shared." : "available through folders that stay allowed.");
+        }
+      }
+      form.setAttribute("data-confirm", message);
+      form.setAttribute("data-confirm-action", button.textContent.replace(/\s+/g, " ").trim());
+      form.toggleAttribute("data-confirm-danger", button.classList.contains("danger"));
+      var answer = window.__askConfirm(form);
+      // The dialog has read these already. Left on the form, confirm.js would see
+      // data-confirm on this same submit event and ask a second time.
+      ["data-confirm", "data-confirm-action", "data-confirm-danger"].forEach(function (a) { form.removeAttribute(a); });
+      answer.then(function (yes) { if (yes) go(); else button.focus(); });
+    });
+
+    // Back from the next page: the browser may restore ticks and disabled boxes.
+    window.addEventListener("pageshow", function () {
+      Array.prototype.forEach.call(boxes(), function (b) { b.disabled = false; });
+      update();
+    });
+    update();
   });
 })();

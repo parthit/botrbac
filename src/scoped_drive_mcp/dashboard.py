@@ -258,6 +258,8 @@ class DashboardContext:
     sharer_of: Callable[[str, str], str | None] | None = None
     # The first read by each paired person's assistant, shown on Overview.
     first_reads: Any = None
+    # Items removed from Bot RBAC on Files (store.HiddenFiles). None keeps every item listed.
+    hidden: Any = None
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
@@ -470,6 +472,10 @@ def fetch_parents(drive: Any, ids: list[str]) -> dict[str, dict[str, Any] | None
 WAKE_HOME = "/settings#assistants"
 LIST_FIELDS = OWNER_FIELDS + ",modifiedTime"
 COVER_CHECK_LIMIT = 25
+# The action bar on Files and Sharing. Each item is one Drive lookup at most, run in turn,
+# so a batch stays well inside one function call.
+BATCH_ACTIONS = ("allow", "remove", "share", "unshare", "forget")
+BATCH_LIMIT = 50
 # How each app role is named on the consent page and in Settings.
 ROLE_LABELS = {
     "viewer": "Read only",
@@ -1760,9 +1766,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         # answer applies. Search results come from anywhere, so each works out its own.
         folder_cover = (covered_id, covered_by) if covered_by and covered_id else None
         folder_share = (shared_id, shared_by) if shared_by and shared_id else None
+        # Removed from Bot RBAC: left out of My Drive's list and search, the two places a
+        # picked item shows up on its own. Inside a folder everything is still listed.
+        hidden = ctx.hidden.ids() if ctx.hidden is not None and (q or folder == "root") else set()
+        hidden_count = sum(1 for item in items if str(item["id"]) in hidden)
         rows = []
         for item in items:
             iid = str(item["id"])
+            if iid in hidden:
+                continue
             mime = str(item.get("mimeType", ""))
             is_shortcut = mime == SHORTCUT_MIME
             path: str | None = None
@@ -1847,6 +1859,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             ),
             "next_token": next_token,
             "more_matches": more_matches,
+            "hidden_count": hidden_count,
             "drive_error": False,
         }
 
@@ -1957,6 +1970,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             entry = await blocking(ctx.grants().grant, file_id)
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
+        await unhide(file_id, entry.id)
         what = f"\u201c{entry.name}\u201d"
         if entry.id != file_id:
             what += ", the shortcut\u2019s target,"
@@ -2002,6 +2016,145 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "the assistant can still use it through that folder."
             )
         return action_done(request, "ok", message, next_url, extra=await allow_count_extra(request))
+
+    async def unhide(*file_ids: str) -> None:
+        """Picking or allowing an item again brings it back onto Files."""
+        if ctx.hidden is not None:
+            for fid in set(file_ids):
+                await blocking(ctx.hidden.unhide, fid)
+
+    def plural(n: int, one: str = "item", many: str = "items") -> str:
+        return f"{n} {one if n == 1 else many}"
+
+    async def files_batch(request: Request, form: dict[str, str]) -> Response:
+        """One action on several ticked items: the action bar on Files and Sharing.
+
+        Each item goes through the same GrantService call as its own row button, so the
+        allowlist checks, audit records and cache invalidation are unchanged. An item the
+        action does not apply to (Remove on an item that is not allowed) is skipped.
+        """
+        action = form.get("action") or ""
+        next_url = safe_next(form.get("next") or "/files")
+        if action not in BATCH_ACTIONS:
+            return action_done(request, "error", "Choose what to do with the items.", next_url)
+        raw = (await request.form()).getlist("file_id")
+        ids = list(dict.fromkeys(validate_drive_id(str(v)) for v in raw))
+        if not ids:
+            return action_done(request, "error", "Tick at least one item first.", next_url)
+        if len(ids) > BATCH_LIMIT:
+            return action_done(
+                request, "error", f"Choose at most {BATCH_LIMIT} items at a time.", next_url
+            )
+        if action in ("share", "unshare") and ctx.ext_allowlist is None:
+            return action_done(request, "error", "Sharing is not set up on this server.", next_url)
+        own = ctx.grants()
+        ext = ctx.ext_grants() if ctx.ext_allowlist is not None else None
+
+        def run() -> tuple[int, list[str], list[str]]:
+            done = 0
+            errors: list[str] = []
+            names: list[str] = []
+            for fid in ids:
+                try:
+                    if action == "allow":
+                        entry = own.grant(fid)
+                        names.append(entry.name)
+                        if ctx.hidden is not None:
+                            ctx.hidden.unhide(fid)
+                            ctx.hidden.unhide(entry.id)
+                    elif action == "share":
+                        assert ext is not None
+                        names.append(ext.grant(fid).name)
+                    elif action == "remove":
+                        entry = ctx.allowlist.get(fid)
+                        if entry is None:
+                            continue
+                        names.append(entry.name)
+                        own.revoke(fid)
+                    elif action == "unshare":
+                        assert ext is not None and ctx.ext_allowlist is not None
+                        entry = ctx.ext_allowlist.get(fid)
+                        if entry is None:
+                            continue
+                        names.append(entry.name)
+                        ext.revoke(fid)
+                    else:  # forget: off both lists, then off this list
+                        mine = ctx.allowlist.get(fid)
+                        theirs = ctx.ext_allowlist.get(fid) if ctx.ext_allowlist else None
+                        named = (mine or theirs).name if (mine or theirs) else ""
+                        if named:
+                            names.append(named)
+                        if mine is not None:
+                            own.revoke(fid)
+                        shared = ctx.ext_allowlist
+                        if ext is not None and shared is not None and shared.get(fid) is not None:
+                            ext.revoke(fid)
+                        if ctx.hidden is not None:
+                            ctx.hidden.hide(fid)
+                    done += 1
+                except GrantError as exc:
+                    errors.append(str(exc))
+            return done, errors, names
+
+        done, errors, names = await blocking(run)
+        if action == "remove":
+            # Same check as one row's Remove, bounded: an allowed folder above an item
+            # still includes it, so the message must not say the item is unreachable.
+            root = ctx.visible_root_folder_id()
+            extra = {root: "the folder set on the server"} if root else None
+            still = []
+            for fid in ids[:COVER_CHECK_LIMIT]:
+                if ctx.allowlist.get(fid) is None:
+                    cover = await still_covered(own, fid, extra)
+                    if cover:
+                        still.append(cover)
+        elif action == "unshare" and ext is not None:
+            still = []
+            for fid in ids[:COVER_CHECK_LIMIT]:
+                cover = await still_covered(ext, fid)
+                if cover:
+                    still.append(cover)
+        else:
+            still = []
+        what = f"\u201c{names[0]}\u201d" if done == 1 and names else plural(done)
+        message = {
+            "allow": f"Allowed {what} for your assistants.",
+            "remove": f"Removed {what}. Your assistants can no longer use "
+            f"{'it' if done == 1 else 'them'}.",
+            "share": f"Shared {what} with the assistants of people you are paired with.",
+            "unshare": f"Stopped sharing {what}. Paired people\u2019s assistants can no longer "
+            f"read {'it' if done == 1 else 'them'}.",
+            "forget": f"Removed {what} from Bot RBAC. No assistant can open "
+            f"{'it' if done == 1 else 'them'}. Google still lists Bot RBAC as able to open "
+            f"{'it' if done == 1 else 'them'} until you remove the app in your Google Account.",
+        }[action]
+        if still:
+            folders = ", ".join(f"\u201c{c}\u201d" for c in dict.fromkeys(still))
+            if action == "remove":
+                message = (
+                    f"Removed {what}, but your assistants can still use "
+                    f"{plural(len(still), 'one', 'some')} of them through {folders}, "
+                    "which stays allowed."
+                    if done > 1
+                    else f"Removed {what}, but your assistants can still use it because "
+                    f"{folders} is allowed."
+                )
+            else:
+                message += f" Still readable through {folders}, which stays shared."
+        if errors:
+            first = errors[0].replace("allowlist", "list")
+            failed = plural(len(errors))
+            if done:
+                message += f" {failed} could not be changed: {first}"
+            else:
+                return action_done(
+                    request, "error", f"{failed} could not be changed: {first}", next_url
+                )
+        if done == 0:
+            return action_done(
+                request, "error", "None of the ticked items needed that change.", next_url
+            )
+        return action_done(request, "ok", message, next_url)
 
     async def allow_count_extra(request: Request) -> dict[str, int] | None:
         """The new number for the Allowed tab, so ui.js can update it without a reload."""
@@ -3538,6 +3691,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/picker/session", owner_only(picker_session), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
+        Route("/files/batch", csrf_protected(files_batch), methods=["POST"]),
         Route("/access", moved("/files", tab="allowed"), methods=["GET"]),
         Route("/sharing", owner_only(sharing_hub), methods=["GET"]),
         Route("/settings", owner_only(settings_page), methods=["GET"]),

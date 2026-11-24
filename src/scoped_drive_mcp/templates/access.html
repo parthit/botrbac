@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% from "_tabs.html" import files_tabs %}
+{% from "_batch.html" import batch_bar, batch_check, batch_all with context %}
 {% block title %}Allowed files{% endblock %}
 {% block content %}
 <h1>Files</h1>
 {{ files_tabs('allowed', allow_count, notion_tab) }}
-<p class="muted lead">Your assistants can use these files and folders. An allowed folder includes everything inside it. Remove takes an item off the list.</p>
+<p class="muted lead">Your assistants can use these files and folders. An allowed folder includes everything inside it. Remove takes an item off the list. Tick several to remove them together.</p>
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so the assistant cannot reach your files. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
@@ -12,12 +13,22 @@
 <div class="warn" role="status" id="needs-pick">Google hasn’t opened {{ needs_pick | length }} of these {{ "item" if needs_pick | length == 1 else "items" }} to Bot RBAC yet, so assistants can’t use {{ "it" if needs_pick | length == 1 else "them" }}. Bot RBAC only gets the files you pick in Google’s file picker. Choose <b>Pick again</b> on each one marked below.</div>
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
 {% endif %}
+{% if rows %}
+{% call batch_bar("batch-allowed", "/files?tab=allowed", "Remove several") %}
+  <button class="danger" type="submit" name="action" value="remove"
+    data-batch-ask="Remove {n} from your assistants?"
+    data-batch-note="New calls stop at once. Anything already sent is not recalled. Removing a folder removes everything inside it."
+    data-batch-warn="allowed">Remove<span data-batch-n></span></button>
+{% endcall %}
+<label class="batch-all-row" data-batch-reveal hidden>{{ batch_all("batch-allowed") }} Select all</label>
+{% endif %}
 {% if rows or root_folder_id %}
 <table class="cards" data-list>
-  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>How</th><th>Action</th></tr></thead>
+  <thead><tr><th class="pick"><span class="sr-only">Select</span></th><th>Name</th><th>Type</th><th>Added</th><th>How</th><th>Action</th></tr></thead>
   <tbody>
   {% if root_folder_id %}
   <tr>
+    <td class="pick"></td>
     <td data-label="Name"><code>{{ root_folder_id }}</code></td>
     <td data-label="Type">Folder</td>
     <td data-label="Added" class="muted">—</td>
@@ -27,6 +38,7 @@
   {% endif %}
   {% for e in rows %}
   <tr data-row>
+    <td class="pick">{{ batch_check("batch-allowed", e.id, e.name or e.id, covered.get(e.id)) }}</td>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}<a href="https://drive.google.com/open?id={{ e.id | urlencode }}" target="_blank" rel="noopener noreferrer">{{ e.name or e.id }}</a>{% endif %}
       {% if covered.get(e.id) %}<div class="muted small">Also covered by “{{ covered[e.id] }}”. Removing only this entry changes nothing.</div>{% endif %}
       {% if e.id in needs_pick %}<div class="small" data-needs-pick><span class="pill bad"><span aria-hidden="true">!</span> Not opened yet</span>

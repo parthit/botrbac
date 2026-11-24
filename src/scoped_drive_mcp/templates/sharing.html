@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_tabs.html" import sharing_tabs %}
+{% from "_batch.html" import batch_bar, batch_check, batch_all with context %}
 {% block title %}Shared by me{% endblock %}
 {% block content %}
 <h1>Sharing</h1>
@@ -22,12 +23,21 @@
 {#- One row per item; Change opens a full-width panel in the row below. The panel is a
     link target so it also opens without JS (?edit=<id>); ui.js toggles it in place. -#}
 {% set editing = request.query_params.get("edit") if request else None %}
+{% call batch_bar("batch-shared", "/sharing?tab=by-me", "Stop sharing several") %}
+  <button class="danger" type="submit" name="action" value="unshare"
+    data-batch-ask="Stop sharing {n} with paired people?"
+    data-batch-note="Their assistants can no longer read these. Anything already read is not recalled. What your own assistants can use doesn’t change: that is on Files › Allowed."
+    data-batch-warn="shared">Stop sharing<span data-batch-n></span></button>
+{% endcall %}
+<label class="batch-all-row" data-batch-reveal hidden>{{ batch_all("batch-shared") }} Select all</label>
 <table class="cards sharing-table" data-list>
-  <thead><tr><th>Name</th><th>Type</th><th>Who can see it</th><th>Shared</th><th>Action</th></tr></thead>
+  <thead><tr><th class="pick"><span class="sr-only">Select</span></th><th>Name</th><th>Type</th><th>Who can see it</th><th>Shared</th><th>Action</th></tr></thead>
   <tbody>
   {% for e in rows %}
   {% set open = peers and editing == e.id %}
   <tr data-row>
+    {%- set cover = covers.get(e.id) %}
+    <td class="pick">{{ batch_check("batch-shared", e.id, e.name or e.id, shared_by=(cover.name or cover.id) if cover else None) }}</td>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
     <td data-label="Who can see it">
@@ -54,7 +64,7 @@
   </tr>
   {% if peers %}
   <tr class="edit-row" id="edit-{{ e.id }}"{% if not open %} hidden{% endif %}>
-    <td colspan="5">
+    <td colspan="6">
       <div class="edit-panel">
         <h3>Who can see “{{ e.name or e.id }}”</h3>
           <form class="stack" method="post" action="/sharing/audience">
