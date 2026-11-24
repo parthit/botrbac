@@ -177,13 +177,18 @@ class DropBox:
 
     @property
     def direct(self) -> bool:
-        """Browsers upload to and download from Blob directly. Needs ENCRYPTION_KEY too:
-        each file's key is kept encrypted with it."""
-        return self.signer is not None and self.blob is not None and self.blob.can_wrap
+        """Browsers upload to and download from Blob directly. Needs ENCRYPTION_KEY too
+        (each file's key is kept encrypted with it), and a signer that names the one
+        store host pages may reach."""
+        return (
+            self.blob is not None
+            and self.blob.can_wrap
+            and bool(getattr(self.signer, "store_host", None))
+        )
 
     @property
     def store_host(self) -> str | None:
-        """The one Blob host pages download from, when the signer knows it."""
+        """The one Blob host pages download from, when transfers are direct."""
         return getattr(self.signer, "store_host", None) if self.direct else None
 
     def _signer(self) -> BlobSigner | None:

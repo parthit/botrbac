@@ -63,7 +63,7 @@ from .drive_client import (
     LazyBotDriveClient,
     OwnerDriveClient,
 )
-from .drop_storage import BLOB_API_HOST, BLOB_API_PATH, PIECE_BYTES, STORE_HOST_SUFFIX
+from .drop_storage import BLOB_API_HOST, BLOB_API_PATH, PIECE_BYTES
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
 from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
@@ -179,11 +179,9 @@ _CONNECT_SELF = b"connect-src 'self'; "
 assert _CONNECT_SELF in STRICT_CSP, "STRICT_CSP lost its connect-src 'self'"
 
 
-def direct_drop_csp(store_host: str | None) -> str:
-    """`store_host` is the connected store's host. Without one (only a signer passed in
-    by a test has none) any private store host is allowed."""
-    store = store_host or "*" + STORE_HOST_SUFFIX
-    connect = f"https://{BLOB_API_HOST}{BLOB_API_PATH} https://{store}".encode()
+def direct_drop_csp(store_host: str) -> str:
+    """`store_host` is the connected store's own host: no other store is allowed."""
+    connect = f"https://{BLOB_API_HOST}{BLOB_API_PATH} https://{store_host}".encode()
     return STRICT_CSP.replace(_CONNECT_SELF, b"connect-src 'self' " + connect + b"; ").decode()
 
 
@@ -657,8 +655,8 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     response = HTMLResponse(html, status_code=status_code)
     if template in PICKER_TEMPLATES and ctx.get("picker_ready"):
         response.headers["content-security-policy"] = PICKER_CSP.decode()
-    elif template == "shared.html" and ctx.get("drops_direct"):
-        response.headers["content-security-policy"] = direct_drop_csp(ctx.get("drops_store_host"))
+    elif template == "shared.html" and ctx.get("drops_store_host"):
+        response.headers["content-security-policy"] = direct_drop_csp(ctx["drops_store_host"])
     return response
 
 

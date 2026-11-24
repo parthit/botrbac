@@ -860,8 +860,10 @@
   }
 
   // One piece: ask this app where to fetch it (a short-lived Blob URL and the key that
-  // opens it, or its own route), then fetch it. A Blob URL that cannot be reached, or a
-  // browser that cannot decrypt, falls back to the app's route, which decrypts.
+  // opens it, or its own route), then fetch it. A Blob URL that cannot be reached, a
+  // piece that does not open (cut short on the way, say), or a browser that cannot
+  // decrypt falls back to the app's route, which reads the piece from Blob itself and
+  // decrypts it; a piece that was really changed does not open there either.
   function fetchPiece(id, n) {
     var own = "/drops/" + id + "/piece/" + n;
     var get = function (url, direct) {
@@ -876,7 +878,9 @@
         return get(where.url, true).then(
           function (stored) {
             if (!where.key) return stored;
-            return importKey(where.key).then(function (k) { return unseal(k, where.path, stored); });
+            return importKey(where.key)
+              .then(function (k) { return unseal(k, where.path, stored); })
+              .catch(function () { return get(own, false); });
           },
           function (err) {
             if (err instanceof TypeError) return get(own, false);

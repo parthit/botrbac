@@ -215,7 +215,8 @@ class VercelBlobApi:
 # sealed with the row's own key, which is in the row as `key`, itself encrypted.
 ENC_CLIENT = "client"
 # Rows an earlier version wrote: pieces uploaded straight to Blob with no encryption here.
-# Read only, until the last of them expires (DROP_HOLD_HOURS); nothing writes this now.
+# Read only, until the last of them expires (DROP_HOLD_HOURS, 168 at most); nothing writes
+# this now. Remove it, and every branch on it, any time after 2026-12-08.
 BLOB_AT_REST = "blob-at-rest"
 # Bytes sealing adds to a piece: the 0x01 mark, a 12-byte nonce and the 16-byte tag.
 SEAL_OVERHEAD = 1 + 12 + 16
@@ -540,7 +541,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class BlobSigner(Protocol):
     """Presigned Blob URLs, one pathname each (tests pass a fake). `store_host` is the
-    one host its read URLs point at, when known: the page may connect only there."""
+    one host its read URLs point at: the page may connect only there, and a signer
+    without one is not used."""
 
     store_host: str | None
 

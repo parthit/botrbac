@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class FakeSigner:
     """Hands out fake presigned URLs; `fail` makes every call raise."""
 
-    store_host: str | None = None
+    store_host: str | None = "store.private.blob.vercel-storage.com"
 
     def __init__(self) -> None:
         self.puts: list[tuple[str, int, int, int]] = []
@@ -308,13 +308,16 @@ def test_the_page_allows_blob_hosts_only_when_direct(setup, world, memstore, oau
     _app_, _owner, eve = setup
     r = eve.get("/sharing?tab=with-me")
     csp = r.headers["content-security-policy"]
-    blob_hosts = "https://vercel.com/api/blob/ https://*.private.blob.vercel-storage.com"
+    # The Blob upload path and this deployment's one store host, never every store.
+    blob_hosts = "https://vercel.com/api/blob/ https://store.private.blob.vercel-storage.com"
     assert f"connect-src 'self' {blob_hosts};" in csp
-    # With the store known, only that one store's host.
-    _app_.state.drops.signer.store_host = "store.private.blob.vercel-storage.com"
-    csp = eve.get("/sharing?tab=with-me").headers["content-security-policy"]
-    assert "https://vercel.com/api/blob/ https://store.private.blob.vercel-storage.com;" in csp
     assert "*.private" not in csp
+    # A signer that cannot name its store is not used at all.
+    _app_.state.drops.signer.store_host = None
+    assert _app_.state.drops.direct is False
+    page = eve.get("/sharing?tab=with-me")
+    assert "blob" not in page.headers["content-security-policy"]
+    assert "direct" not in _start(eve, 8)[1].json()
     # Every other page keeps the strict policy.
     assert "vercel.com" not in eve.get("/").headers.get("content-security-policy", "")
 
@@ -557,7 +560,12 @@ def test_the_store_host_comes_from_the_connected_store(monkeypatch) -> None:
     assert "rest" not in blob_store_host()
     monkeypatch.setenv("BLOB_STORE_ID", "store_OtherStore9")
     assert blob_store_host() == "otherstore9.private.blob.vercel-storage.com"
+    monkeypatch.setenv("BLOB_STORE_ID", "PlainId7")
+    assert blob_store_host() == "plainid7.private.blob.vercel-storage.com"
     monkeypatch.delenv("BLOB_STORE_ID")
+    # More `_` in the part after the id changes nothing.
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", _fake_blob_token("Id9") + "_more_parts")
+    assert blob_store_host() == "id9.private.blob.vercel-storage.com"
     for odd in ("vercel_blob_rw_onlythree", "nonsense", "a_b_c_bad.host/x_secret", "a_b_c__d"):
         monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", odd)
         assert blob_store_host() is None, odd
