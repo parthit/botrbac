@@ -11,14 +11,29 @@ from .queue import SEND_BATCH, AuditQueue
 PERMANENT = frozenset({400, 413, 422})
 
 
+class _Budget:
+    """At most this many requests per sync while narrowing down a refusal, so a server
+    that refuses everything costs a handful of requests, not one per row."""
+
+    def __init__(self, requests: int = 24):
+        self.left = requests
+
+    def spend(self) -> None:
+        if self.left <= 0:
+            raise ApiError(503, "too_many_refusals")  # temporary: keep every row
+        self.left -= 1
+
+
 def _send(
-    api: Any, rows: list[dict[str, Any]], meta: dict[str, Any]
+    api: Any, rows: list[dict[str, Any]], meta: dict[str, Any], budget: _Budget | None = None
 ) -> tuple[list[str], list[str]]:
-    """(sent ids, rejected ids). A permanent refusal is narrowed down by sending halves,
+    """(sent ids, refused ids). A permanent refusal is narrowed down by sending halves,
     so one bad row (or a batch that is only too large) never costs the good rows; the
     tools/unguarded report is dropped first in case it is what was refused. Temporary
     errors are raised to the caller, which keeps every row for the next sync."""
+    budget = budget or _Budget()
     ids = [r["event_id"] for r in rows]
+    budget.spend()
     try:
         api.send_audit({"rows": rows, **meta})
         return ids, []
@@ -26,13 +41,20 @@ def _send(
         if exc.status not in PERMANENT:
             raise
     if "tools" in meta or "unguarded" in meta:
-        return _send(api, rows, {k: v for k, v in meta.items() if k == "queued"})
-    if len(rows) == 1:
+        print(
+            "botrbac: the server refused this computer's tool report; sending rows without it",
+            file=sys.stderr,
+        )
+        return _send(api, rows, {k: v for k, v in meta.items() if k == "queued"}, budget)
+    if len(rows) <= 1:
+        # One row refused on its own (or nothing to narrow down): set it aside. A single
+        # waiting row can't tell a bad row from a bad server, but it is kept and can be
+        # sent again with --retry-rejected.
         return [], ids
     half = len(rows) // 2
-    sent_a, rejected_a = _send(api, rows[:half], meta)
-    sent_b, rejected_b = _send(api, rows[half:], meta)
-    return sent_a + sent_b, rejected_a + rejected_b
+    sent_a, refused_a = _send(api, rows[:half], meta, budget)
+    sent_b, refused_b = _send(api, rows[half:], meta, budget)
+    return sent_a + sent_b, refused_a + refused_b
 
 
 def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:

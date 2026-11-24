@@ -349,3 +349,41 @@ def test_temporary_errors_keep_the_rows() -> None:
     queue = AuditQueue()
     queue.add(decision="allow", tool="github/get_issue")
     assert sync(Down(), queue)["waiting"] == 1
+
+
+def test_refused_empty_report_does_not_loop() -> None:
+    from botrbac_cli.api import ApiError
+
+    calls = []
+
+    class Refuses:
+        def send_audit(self, body):
+            calls.append(body)
+            raise ApiError(400, "invalid_request")
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    state.note_seen(tools=["github/get_issue"])
+    result = sync(Refuses(), AuditQueue())  # nothing queued, only the tool report
+    assert len(calls) == 2 and result["waiting"] == 0
+
+
+def test_a_server_refusing_everything_costs_few_requests() -> None:
+    from botrbac_cli.api import ApiError
+
+    calls = []
+
+    class Refuses:
+        def send_audit(self, body):
+            calls.append(len(body["rows"]))
+            raise ApiError(422, "x")
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    queue = AuditQueue()
+    for i in range(300):
+        queue.add(decision="allow", tool=f"github/t{i}")
+    result = sync(Refuses(), queue)
+    assert len(calls) <= 24 and result["waiting"] == 300 and queue.rejected() == 0
