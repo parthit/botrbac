@@ -288,6 +288,8 @@ def test_normalize_notion_id_accepts_ids_and_urls() -> None:
     assert normalize_notion_id(plain) == dashed
     assert normalize_notion_id(dashed.upper()) == dashed
     assert normalize_notion_id(f"https://www.notion.so/acme/Team-wiki-{plain}?pvs=4") == dashed
+    # Notion's newer link format (June 2026), with a dashed id.
+    assert normalize_notion_id(f"https://app.notion.com/p/{dashed}") == dashed
     assert normalize_notion_id("not an id") is None
     assert normalize_notion_id(None) is None
 
@@ -549,3 +551,69 @@ def test_a_refresh_spent_by_another_call_uses_the_stored_token(allowed, notion, 
     out = result(allowed, "notion_read_page", page_id=TOP)["structuredContent"]
     assert "welcome to the wiki" in out["content"]
     assert calls["n"] == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (200, {"request_id": "r"}, True),
+        (400, {"object": "error", "status": 400, "code": "invalid_grant"}, True),
+        (400, {"object": "error", "status": 400, "code": "invalid_request"}, False),
+        (401, {"object": "error", "status": 401, "code": "invalid_client"}, False),
+        (500, {"object": "error", "status": 500, "code": "internal_server_error"}, False),
+    ],
+)
+def test_revoke_reads_notions_answer(monkeypatch, status, body, expected) -> None:
+    """Per Notion's reference: 401 is invalid_client (nothing revoked), and 400
+    invalid_grant means the token is already invalid."""
+    import httpx
+
+    from scoped_drive_mcp.notion_client import NotionOAuth
+
+    def fake_post(url, **kwargs):
+        assert url == "https://api.notion.com/v1/oauth/revoke"
+        assert kwargs["json"] == {"token": "tok"}
+        assert kwargs["headers"]["Authorization"].startswith("Basic ")
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert NotionOAuth("id", "secret", "https://x/cb").revoke("tok") is expected
+
+
+def test_token_exchange_sends_what_notion_documents(monkeypatch) -> None:
+    import base64
+
+    import httpx
+
+    from scoped_drive_mcp.notion_client import NotionOAuth
+
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen.update(url=url, **kwargs)
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "ntn_a",
+                "refresh_token": "nrt_r",
+                "bot_id": "b",
+                "workspace_id": "w",
+                "workspace_name": "Acme",
+                "owner": {"type": "user"},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    tokens = NotionOAuth("cid", "csec", "https://x/cb").exchange_code("c0de")
+    assert seen["url"] == "https://api.notion.com/v1/oauth/token"
+    assert seen["json"] == {
+        "grant_type": "authorization_code",
+        "code": "c0de",
+        "redirect_uri": "https://x/cb",
+    }
+    assert seen["headers"]["Authorization"] == "Basic " + base64.b64encode(b"cid:csec").decode()
+    assert (tokens.access_token, tokens.refresh_token, tokens.workspace_name) == (
+        "ntn_a",
+        "nrt_r",
+        "Acme",
+    )

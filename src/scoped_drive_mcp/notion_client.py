@@ -149,9 +149,9 @@ class NotionOAuth:
         return self._token_call({"grant_type": "refresh_token", "refresh_token": refresh_token})
 
     def revoke(self, token: str) -> bool:
-        """Ask Notion to end this token. True when Notion confirms (or says the token is
-        already invalid). False when Notion could not be reached or refused, so the caller
-        can tell the person to remove the connection in Notion themselves."""
+        """Ask Notion to end this token (one token per call). True when Notion confirms, or
+        says the token is already invalid. False when Notion could not be reached or
+        refused, so the caller can tell the person to remove the connection in Notion."""
         try:
             resp = httpx.post(
                 REVOKE_URL,
@@ -165,7 +165,14 @@ class NotionOAuth:
             )
         except httpx.HTTPError:
             return False
-        return resp.status_code in (200, 401)
+        if resp.status_code == 200:
+            return True
+        # 400 invalid_grant: the token is already invalid, so it is gone either way.
+        # 401 is invalid_client (wrong client id or secret): nothing was revoked.
+        if resp.status_code == 400:
+            with contextlib.suppress(ValueError, AttributeError):
+                return resp.json().get("code") == "invalid_grant"
+        return False
 
 
 class NotionApi(Protocol):
