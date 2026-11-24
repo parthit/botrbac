@@ -324,7 +324,7 @@ which tools run, not which files a tool such as Claude Code's Read can open.
 role in force has any, the hook reads the command and blocks it unless every program in it is allowed; a
 command it cannot follow (command or process substitution, backticks, `eval`, `sh -c`/`bash -c`, subshells,
 shell control flow such as `if`/`for`/`while`, a variable as the program, unbalanced quotes) is blocked, and
-only program names are logged. Wrappers such as `sudo`, `env` and `xargs` must be allowed themselves as well
+only program names are logged. Wrappers such as `sudo`, `env`, `xargs`, `nice` and `stdbuf` must be allowed themselves as well
 as the program they run. This too
 protects against the agent, not the machine's owner, and it goes by name: a file called `gh` anywhere counts
 as `gh`, and a program that starts others (`make`, `npm run`, `find -exec`, `timeout`, `git` aliases, a

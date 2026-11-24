@@ -219,3 +219,29 @@ def test_other_agents_shell_tools() -> None:
 
 def test_shell_call_without_a_command_is_blocked_when_programs_are_limited() -> None:
     assert not check("claude-code", "", "Bash", False)[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["gh;>f rm -rf x", "gh&&>f rm x", "gh |>f rm", "gh;<f rm", "gh||>>f rm", "gh&>f;rm"],
+)
+def test_operators_stuck_together_still_show_the_next_program(command) -> None:
+    from botrbac_cli.shellcmd import programs
+
+    assert "rm" in programs(command)
+
+
+def test_launchers_are_wrappers() -> None:
+    from botrbac_cli.shellcmd import programs
+
+    assert programs("nice -n 5 gh pr list") == ["nice", "gh"]
+    assert programs("stdbuf -oL rm x") == ["stdbuf", "rm"]
+    assert programs("setsid -f rm x") == ["setsid", "rm"]
+    assert programs("ionice -c 3 rm x") == ["ionice", "rm"]
+
+
+@pytest.mark.parametrize("command", ["2>f rm x", "gh; 2>f rm x", "gh|&2>f<f rm x"])
+def test_a_file_descriptor_before_a_redirect_is_not_the_program(command) -> None:
+    from botrbac_cli.shellcmd import programs
+
+    assert "rm" in programs(command)

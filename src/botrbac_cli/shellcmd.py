@@ -24,7 +24,10 @@ SHELL_TOOLS: dict[str, frozenset[str]] = {
 
 # Programs that run the next word as the program: `sudo gh`, `env X=1 gh`, `xargs gh`.
 # Both must be allowed: `sudo gh` needs cmd/sudo and cmd/gh.
-WRAPPERS = frozenset({"sudo", "env", "time", "nohup", "xargs", "command", "exec"})
+WRAPPERS = frozenset(
+    {"sudo", "env", "time", "nohup", "xargs", "command", "exec", "nice", "ionice", "setsid",
+     "stdbuf"}
+)  # fmt: skip
 # Each wrapper's options: (short flags taking a value, short flags without one, long
 # options taking a value, long options without one). An option not listed here makes
 # the command unreadable (blocked): `sudo -u gh rm` must not read `gh` as the program.
@@ -53,6 +56,10 @@ _WRAPPER_OPTIONS: dict[str, tuple[str, str, frozenset[str], frozenset[str]]] = {
     "nohup": ("", "", frozenset(), frozenset()),
     "command": ("", "pvV", frozenset(), frozenset()),
     "exec": ("a", "cl", frozenset(), frozenset()),
+    "nice": ("n", "", frozenset({"adjustment"}), frozenset()),
+    "ionice": ("cn", "t", frozenset({"class", "classdata"}), frozenset({"ignore"})),
+    "setsid": ("", "cfw", frozenset(), frozenset({"ctty", "fork", "wait"})),
+    "stdbuf": ("ioe", "", frozenset({"input", "output", "error"}), frozenset()),
 }  # fmt: skip
 
 
@@ -89,7 +96,10 @@ KEYWORDS = frozenset(
 )  # fmt: skip
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "ash"})
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_SEPARATOR_CHARS = set(";&|\n")
+# One shell operator. shlex hands back a run of operator characters as one token
+# (`;>` in `gh;>f rm`), so the run is split into these, longest first, as bash does.
+_OPERATOR = re.compile(r"&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||;;&|;;|;&|&&|\|\||\|&|[;&|\n<>()]")
+_SEPARATORS = frozenset({";;&", ";;", ";&", "&&", "||", "|&", ";", "&", "|", "\n"})
 _PROGRAM = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 MAX_COMMAND = 100_000
 # Never followed: they run text that is only known when the shell runs it.
@@ -163,6 +173,13 @@ def _tokens(command: str) -> list[tuple[str, bool]]:
     return out
 
 
+def _operators(run: str) -> list[str]:
+    ops = _OPERATOR.findall(run)
+    if "".join(ops) != run:
+        raise CommandError("botrbac could not read this command")
+    return ops
+
+
 def programs(command: str) -> list[str]:
     """Every program the command line starts, in order, without repeats."""
     if len(command) > MAX_COMMAND:
@@ -176,19 +193,25 @@ def programs(command: str) -> list[str]:
     in_wrapper: str | None = None  # the wrapper whose options come next
     wrapper_skip = 0  # option values still to skip
     shell_running: str | None = None
-    for word, is_op in _tokens(command):
+    tokens = _tokens(command)
+    for index, (word, is_op) in enumerate(tokens):
+        if not is_op and word.isdigit() and index + 1 < len(tokens):
+            after, after_op = tokens[index + 1]
+            if after_op and after[:1] in "<>":
+                # `2>f rm`: a file descriptor number, not a program. (Read this way even
+                # when spaced, `2 >f rm`, which can only make the check stricter.)
+                continue
         if is_op:
-            if "(" in word or ")" in word:
-                raise CommandError("botrbac does not check commands in ( … ) subshells")
-            if "<" in word or ">" in word:
-                skip_next = True
-                continue
-            if set(word) <= _SEPARATOR_CHARS:
-                expect_program, in_wrapper, shell_running = True, None, None
-                wrapper_skip = 0
-                skip_next = False
-                continue
-            raise CommandError("botrbac could not read this command")
+            for op in _operators(word):
+                if op in ("(", ")"):
+                    raise CommandError("botrbac does not check commands in ( … ) subshells")
+                if op in _SEPARATORS:
+                    expect_program, in_wrapper, shell_running = True, None, None
+                    wrapper_skip = 0
+                    skip_next = False
+                else:
+                    skip_next = True  # a redirect: the next word is a file name
+            continue
         if skip_next:
             skip_next = False
             continue

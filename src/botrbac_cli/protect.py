@@ -13,6 +13,7 @@ It guards against the agent, not the person who owns the computer.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,9 @@ READ_TOOLS = frozenset(
      "list_directory", "search_file_content", "glob"}
 )  # fmt: skip
 _READ_PREFIXES = ("read", "get", "list", "search", "find", "view", "glob", "grep", "stat")
+# A name that starts like a read but also says it writes (`get_and_write`) is not one.
+_WRITE_WORDS = ("write", "edit", "update", "create", "delete", "remove", "move", "rename",
+                "set", "put", "save", "patch", "append", "replace")  # fmt: skip
 
 
 def _variants(path: Path) -> set[str]:
@@ -78,7 +82,9 @@ def _targets() -> tuple[list[Path], Path]:
 def _paths(texts: list[str]) -> list[Path]:
     """The real files that arguments (and the words of a command) point to, through
     symlinks and `..`, for the ones that exist or could."""
-    words = [w.strip("'\"<>;|&()") for t in texts if len(t) <= 4096 for w in t.split()]
+    short = [t for t in texts if len(t) <= 4096]
+    # Each whole argument (a path with spaces) and each word of it (a command's paths).
+    words = short + [w.strip("'\"<>;|&()") for t in short for w in t.split()]
     return [p for p in (_resolved(w) for w in words[:200]) if p is not None]
 
 
@@ -110,7 +116,13 @@ def _strings(value: Any, depth: int = 0) -> list[str]:
 
 def is_read_only(tool: str) -> bool:
     name = tool.rsplit("/", 1)[-1].rsplit("__", 1)[-1]
-    return name in READ_TOOLS or name.lower().startswith(_READ_PREFIXES)
+    if name in READ_TOOLS:
+        return True
+    lower = name.lower()
+    words = re.split(r"[_\-.]+|(?<=[a-z])(?=[A-Z])", name)
+    return lower.startswith(_READ_PREFIXES) and not any(
+        w.lower().startswith(_WRITE_WORDS) for w in words[1:]
+    )
 
 
 def refusal(tool: str, arguments: Any) -> str | None:
@@ -126,11 +138,13 @@ def refusal(tool: str, arguments: Any) -> str | None:
         return "it names botrbac's login file, which holds its tokens"
     if is_read_only(tool):
         return None
-    if any(m in t for t in texts for m in protected) or any(
-        _within(p, t) for p in paths for t in targets
-    ):
+    found = next((m for t in texts for m in sorted(protected) if m in t), None)
+    if found is None:
+        found = next((str(p) for p in paths for t in targets if _within(p, t)), None)
+    if found is not None:
         return (
-            "it would touch a file Bot RBAC depends on (Claude Code's settings, "
-            "~/.claude.json or botrbac's own folder). Ask the person to make that change"
+            f"it mentions {found!r}, which Bot RBAC protects (Claude Code's settings, "
+            "~/.claude.json, botrbac's own folder, or switching hooks off). Ask the person "
+            "to make that change"
         )
     return None

@@ -66,7 +66,8 @@ class Enforcer:
             return None, "no policy yet: run botrbac login"
         policy = cached["policy"]
         pinned = (state.read_json("credentials.json", {}) or {}).get("policy_key")
-        if pinned and not signing.verify(pinned, policy):
+        # A signed policy with no key to check it against means the key was removed.
+        if (pinned or policy.get("signature")) and not signing.verify(pinned or "", policy):
             return None, (
                 "botrbac's saved role was changed on this computer, so every tool is "
                 "blocked: run botrbac sync"

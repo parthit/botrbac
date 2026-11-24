@@ -265,3 +265,41 @@ def test_switching_hooks_off_is_refused(command) -> None:
 
 def test_other_credentials_files_can_be_read() -> None:
     assert check("claude-code", _call("Read", file_path="app/credentials.json"), None, False)[0]
+
+
+def test_removing_the_pinned_key_does_not_switch_signing_off() -> None:
+    body = _pin_signed_policy()
+    body["role"]["patterns"] = ["*"]
+    state.write_json("policy.json", {"policy": body, "fetched_at": time.time()})
+    state.write_json("credentials.json", {})
+    assert not check("claude-code", _call("Read", file_path="notes.txt"), None, False)[0]
+
+
+def test_a_new_server_key_replaces_the_pinned_one() -> None:
+    from botrbac_cli.api import Api
+
+    api = Api("https://example.test")
+    base = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+    api._save({**base, "policy_key": "OLD"})
+    api._save({**base, "policy_key": "NEW"})
+    assert state.read_json("credentials.json", {})["policy_key"] == "NEW"
+
+
+def test_read_looking_names_that_write_are_not_read_only() -> None:
+    from botrbac_cli.protect import is_read_only
+
+    assert not is_read_only("fs/get_and_write")
+    assert not is_read_only("fs/getAndWrite")
+    assert is_read_only("fs/read_file") and is_read_only("fs/list_directory")
+
+
+def test_refusal_says_what_matched_and_follows_paths_with_spaces(home) -> None:
+    settings = home / "home" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{}")
+    odd = home / "my files"
+    odd.mkdir()
+    (odd / "x.json").symlink_to(settings)
+    why = refusal("claude-code/Write", {"file_path": str(odd / "x.json")})
+    assert why and "settings.json" in why
+    assert "disableallhooks" in refusal("claude-code/Bash", {"command": "echo disableAllHooks"})
