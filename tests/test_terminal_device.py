@@ -249,10 +249,9 @@ def test_one_decision_per_code() -> None:
     started = t.start({})
     code = started["user_code"]
     digest = hashlib.sha256(started["device_code"].encode()).hexdigest()
-    t.store.set_if_absent(f"term:usercode:{code}:claim", "1", ex=60)  # a racing approval
+    t.store.set_if_absent(f"term:device:{digest}:decision", "{}", ex=60)  # a racing decision
     assert t.approve(ME, code, "full", "x") is None
     assert t.for_person(ME) == []  # no orphaned terminal
-    assert t.store.get(f"term:device:{digest}:decision") is None
 
 
 def test_poll_has_a_second_of_slack() -> None:
@@ -295,7 +294,8 @@ def test_an_edit_racing_a_disconnect_does_not_bring_the_terminal_back() -> None:
 def test_a_lost_approval_leaves_nothing_listed() -> None:
     t = _terminals()
     started = t.start({})
-    t.store.set_if_absent(f"term:usercode:{started['user_code']}:claim", "1", ex=60)
+    digest = hashlib.sha256(started["device_code"].encode()).hexdigest()
+    t.store.set_if_absent(f"term:device:{digest}:decision", "{}", ex=60)
     assert t.approve(ME, started["user_code"], "full", "x") is None
     assert t.store.hgetall(f"term:terminals:{ME}") == {}
 
@@ -308,3 +308,12 @@ def test_device_lookups_are_throttled(world, memstore, oauth, monkeypatch) -> No
     dash.login(c)
     c.get("/device?code=BCDF-GHJK")
     assert "Too many codes" in c.get("/device?code=BCDF-GHJK").text
+
+
+def test_touch_after_disconnect_writes_nothing() -> None:
+    t = _terminals()
+    started = t.start({})
+    terminal = t.approve(ME, started["user_code"], "full", "x")
+    t.revoke(ME, terminal.id)
+    t.touch(terminal.id, last_seen=1.0)
+    assert t.store.get(f"term:terminal:{terminal.id}:seen") is None
