@@ -109,7 +109,8 @@ class TerminalFeature:
                 kit.flash(
                     request,
                     "ok",
-                    "Role deleted. Terminals that used it now have no tools until you give them a role.",
+                    "Role deleted. Terminals that used it now have no tools until you give "
+                    "them a role.",
                 )
             else:
                 kit.flash(request, "error", "That role cannot be deleted.")
