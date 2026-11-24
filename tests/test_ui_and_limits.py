@@ -331,3 +331,41 @@ def test_allowed_item_google_has_not_opened_offers_pick_again(world, memstore, o
     button = re.search(r"<button[^>]*data-pick[^>]*>", page)
     assert button and f'data-query="{hidden.name}"' in button.group(0)
     assert page.count("data-needs-pick") == 1
+
+
+@pytest.mark.parametrize("picker", [True, False])
+def test_safari_picker_note_only_with_the_picker(world, memstore, oauth, picker) -> None:
+    # Safari blocks Google's cookies in the picker frame; the note says which setting to
+    # change. It belongs next to a picker button, so it is only there when one is.
+    keys = (
+        {
+            "google_picker_api_key": "AIzaSyTestKeyValue",
+            "google_cloud_project_number": "123456789012",
+        }
+        if picker
+        else {}
+    )
+    app = build_app(
+        make_settings(root_folder_id=None, allowlist_cache_ttl=0, **keys),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    signed_in = client(app)
+    assert login(signed_in).status_code == 303
+    denied = mcp_call(signed_in, "get_metadata", file_id="stray-shared")
+    request_id = denied["structuredContent"]["request_id"]
+    for path in ("/files", f"/requests/{request_id}"):
+        page = signed_in.get(path)
+        assert page.status_code == 200
+        assert ("data-safari-note" in page.text) is picker, path
+        if picker:
+            note = re.search(r"<p[^>]*data-safari-note[^>]*>", page.text).group(0)
+            assert "hidden" in note  # ui.js reveals it in Safari only
+
+
+def test_safari_note_check_counts_every_ios_browser() -> None:
+    script = (Path(__file__).parents[1] / "src/scoped_drive_mcp/templates/ui.js").read_text()
+    # Edge on iOS (EdgiOS) runs on WebKit and hits the same cookie block as Safari.
+    assert "Edg(?!iOS)" in script

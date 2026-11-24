@@ -538,6 +538,21 @@
   if (!pickButtons.length) return;
   var pick = pickButtons[0];
 
+  // Safari (desktop, and every iOS browser since they all use WebKit) blocks Google's
+  // cookies in the picker's frame while cross-site tracking prevention is on.
+  var ua = navigator.userAgent;
+  var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg(?!iOS)|OPR|Android/.test(ua);
+  // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
+  var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  if (webkitOnly) {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
+      var mac = note.querySelector("[data-safari-mac]");
+      var touch = note.querySelector("[data-safari-ios]");
+      if (ios && mac && touch) { mac.hidden = true; touch.hidden = false; }
+      note.hidden = false;
+    });
+  }
+
   function loadPicker() {
     return new Promise(function (resolve, reject) {
       if (window.google && google.picker) { resolve(); return; }
