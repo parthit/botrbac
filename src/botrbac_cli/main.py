@@ -8,6 +8,7 @@ import socket
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import __version__, policy, state
@@ -121,6 +122,114 @@ def cmd_gateway(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---- sessions and coverage -------------------------------------------------------
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .session import SessionError, run
+
+    api = _api(args) if state.read_json("credentials.json") else None
+    try:
+        return run(args.role, args.command_line, args.agent, api)
+    except SessionError as exc:
+        print(f"botrbac: {exc}", file=sys.stderr)
+        return 2
+
+
+def cmd_shell_init(args: argparse.Namespace) -> int:
+    from .shell import DEFAULT_AGENTS, script
+
+    shell = args.shell or os.path.basename(os.environ.get("SHELL", "bash"))
+    agents = [a for a in (args.agents or ",".join(DEFAULT_AGENTS)).split(",") if a]
+    try:
+        print(script("fish" if shell == "fish" else "posix", agents), end="")
+    except ValueError as exc:
+        print(f"botrbac: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_wrap(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .coverage import AgentConfig, known_configs, wrap
+
+    kind = "codex" if args.agent == "codex" else "json"
+    if args.file:
+        targets = [AgentConfig(args.agent, Path(args.file).expanduser(), kind)]
+    else:
+        targets = [c for c in known_configs() if c.agent == args.agent and c.path.exists()]
+        if args.agent == "claude-code":
+            # The project's .mcp.json; with --user, ~/.claude.json (user and per-project).
+            wanted = ".claude.json" if args.user else ".mcp.json"
+            targets = [c for c in targets if c.path.name == wanted] or (
+                [] if args.user else [AgentConfig("claude-code", Path.cwd() / ".mcp.json", "json")]
+            )
+    if not targets:
+        print(f"No {args.agent} config found. Give one with --file PATH.", file=sys.stderr)
+        return 1
+    for target in targets:
+        try:
+            result = wrap(target, dry_run=args.dry_run)
+        except (OSError, ValueError) as exc:
+            print(f"botrbac: {exc}", file=sys.stderr)
+            return 1
+        verb = "Would move" if args.dry_run else "Moved"
+        print(f"{result['file']}:")
+        for old, new in result["moved"]:
+            print(f"  {verb} {old} behind botrbac (as {new})")
+        for name in result["kept"]:
+            print(f"  Left {name} as it is (botrbac cannot run it): it stays unguarded")
+        for name in result.get("assumed_http") or []:
+            print(f"  {name} has a url and no type: treated as streamable HTTP. If it is an")
+            print("    old SSE server it will fail behind botrbac; restore it from the backup.")
+        if result.get("name_taken"):
+            print(
+                "  [mcp_servers.botrbac] is one of your own servers, so the gateway was not "
+                "added. Rename that table, then run this again."
+            )
+        for table in result.get("delete_tables") or []:
+            print(f"  Now delete {table} from that file so Codex only uses botrbac")
+        if result["backup"]:
+            print(f"  Backup: {result['backup']}")
+    return 0
+
+
+def _wrap_hint(config: Any) -> str:
+    if config.agent == "claude-code" and config.path.name == ".claude.json":
+        return "botrbac wrap claude-code --user"
+    if config.path.parent.resolve() == Path.cwd().resolve() or config.agent == "codex":
+        return f"botrbac wrap {config.agent}"
+    return f"botrbac wrap {config.agent} --file {config.path}"
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from .coverage import unguarded
+
+    problems = 0
+    creds = state.read_json("credentials.json")
+    cached = policy.load_cached()
+    print(("✓ logged in to " + creds.get("server", "?")) if creds else "✗ not logged in")
+    problems += 0 if creds else 1
+    if cached:
+        days = int(cached["policy"].get("role", {}).get("offline_days") or 7)
+        age = (time.time() - float(cached.get("fetched_at") or 0)) / 86400
+        ok = age <= days
+        print(f"{'✓' if ok else '✗'} policy is {age:.1f} days old (grace {days} days)")
+        problems += 0 if ok else 1
+    else:
+        print("✗ no policy cached: every tool is blocked")
+        problems += 1
+    servers = load_servers()
+    print(f"✓ {len(servers)} server(s) behind the gateway" if servers else "! no servers yet")
+    found = unguarded()
+    for config, name in found:
+        print(f"✗ {config.agent}: {name} in {config.path} is not behind botrbac")
+        print(f"    fix: {_wrap_hint(config)}")
+    state.note_seen(unguarded=sorted({name for _, name in found}))
+    return 1 if problems or found else 0
+
+
 # ---- upstream servers ------------------------------------------------------------
 
 
@@ -185,6 +294,25 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gateway", help="run the MCP gateway (what your agent starts)")
     p.add_argument("--agent", help="name to record for the agent (default: from the client)")
     p.set_defaults(fn=cmd_gateway)
+    p = sub.add_parser("run", help="run an agent with a narrower role: run --role X -- claude")
+    p.add_argument("--role", required=True, help="a role's name or id from the website")
+    p.add_argument("--agent", help="name to record (default: the program's name)")
+    p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("shell-init", help="shell functions for `claude --botrbac --role X`")
+    p.add_argument("--shell", choices=["bash", "zsh", "fish"])
+    p.add_argument("--agents", help="comma-separated commands to wrap")
+    p.set_defaults(fn=cmd_shell_init)
+    p = sub.add_parser("wrap", help="move an agent's MCP servers behind botrbac")
+    p.add_argument("agent", choices=["claude-code", "cursor", "gemini", "codex", "other"])
+    p.add_argument("--file", help="the agent's MCP config file (JSON with mcpServers)")
+    p.add_argument(
+        "--user", action="store_true", help="claude-code: ~/.claude.json instead of ./.mcp.json"
+    )
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_wrap)
+    sub.add_parser("doctor", help="check login, policy and unguarded servers").set_defaults(
+        fn=cmd_doctor
+    )
     p = sub.add_parser(
         "servers",
         help="MCP servers the gateway sits in front of",
