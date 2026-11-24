@@ -9,6 +9,8 @@ import httpx
 
 from . import __version__, state
 
+# What `botrbac login` connects to without --server or BOTRBAC_SERVER.
+DEFAULT_SERVER = "https://botrbac.com"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 TIMEOUT = 10.0
 

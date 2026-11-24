@@ -14,11 +14,9 @@ from typing import Any
 import httpx
 
 from . import __version__, policy, state
-from .api import Api, ApiError, NotLoggedIn
+from .api import DEFAULT_SERVER, Api, ApiError, NotLoggedIn
 from .patterns import COMMAND_SERVER, normalize_server
 from .queue import AuditQueue
-
-DEFAULT_SERVER = "https://botrbac.com"
 
 
 def _api(args: argparse.Namespace) -> Api:
@@ -211,6 +209,33 @@ def cmd_wrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_add_gateway(args: argparse.Namespace) -> int:
+    from .coverage import GATEWAY_FILES, AgentConfig, add_gateway
+
+    relative, kind = GATEWAY_FILES[args.agent]
+    path = Path(args.file).expanduser() if args.file else Path.home() / relative
+    try:
+        result = add_gateway(AgentConfig(args.agent, path, kind), dry_run=args.dry_run)
+    except (OSError, ValueError) as exc:
+        print(f"botrbac: {exc}", file=sys.stderr)
+        return 1
+    if result.get("name_taken"):
+        print(
+            f"botrbac: {path} already has a server called botrbac that is not the gateway. "
+            "Rename it, then run this again.",
+            file=sys.stderr,
+        )
+        return 1
+    if not result["changed"]:
+        print(f"Already set up: {path}")
+        return 0
+    verb = "Would add" if args.dry_run else "Added"
+    print(f"{verb} botrbac gateway to {path}. Other servers were not changed.")
+    if result["backup"]:
+        print(f"Backup: {result['backup']}")
+    return 0
+
+
 def _wrap_hint(config: Any) -> str:
     if config.agent == "claude-code" and config.path.name == ".claude.json":
         return "botrbac wrap claude-code --user"
@@ -363,6 +388,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_wrap)
+    p = sub.add_parser(
+        "add-gateway", help="add botrbac gateway to an agent's MCP config (other servers kept)"
+    )
+    p.add_argument("--agent", required=True, choices=["cursor", "codex", "gemini"])
+    p.add_argument("--file", help="the config file (default: the agent's file in your home)")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_add_gateway)
     sub.add_parser("doctor", help="check login, policy and unguarded servers").set_defaults(
         fn=cmd_doctor
     )

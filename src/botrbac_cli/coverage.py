@@ -213,6 +213,59 @@ def _wrap_codex(config: AgentConfig, dry_run: bool) -> dict[str, Any]:
     return result
 
 
+# `botrbac add-gateway --agent X`: the user-wide config file it edits.
+GATEWAY_FILES = {
+    "cursor": (Path(".cursor") / "mcp.json", "json"),
+    "gemini": (Path(".gemini") / "settings.json", "json"),
+    "codex": (Path(".codex") / "config.toml", "codex"),
+}
+
+
+def add_gateway(config: AgentConfig, dry_run: bool = False) -> dict[str, Any]:
+    """Add the `botrbac` gateway entry to one agent config and change nothing else.
+
+    Running it again changes nothing. An entry called `botrbac` that is not the gateway is
+    left alone and reported (`name_taken`). The file is backed up before it changes."""
+    result: dict[str, Any] = {"file": str(config.path), "changed": False, "backup": None}
+    existing = servers_in(config) if config.path.exists() else {}
+    if GATEWAY_NAME in existing:
+        if is_gateway(existing[GATEWAY_NAME]):
+            return result
+        result["name_taken"] = True
+        return result
+    entry = gateway_entry(config.agent)
+    if config.kind == "codex":
+        before = config.path.read_text() if config.path.exists() else ""
+        if before.strip():
+            try:
+                tomllib.loads(before)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError(f"{config.path} is not valid TOML; it was left as it is") from exc
+        args = ", ".join(json.dumps(a) for a in entry["args"])
+        sep = "" if not before or before.endswith("\n") else "\n"
+        text = (
+            f"{before}{sep}\n[mcp_servers.{GATEWAY_NAME}]\n"
+            f"command = {json.dumps(entry['command'])}\nargs = [{args}]\n"
+        )
+    else:
+        try:
+            data = json.loads(config.path.read_text() or "{}") if config.path.exists() else {}
+        except ValueError as exc:
+            raise ValueError(f"{config.path} is not valid JSON; it was left as it is") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+            raise ValueError(
+                f"{config.path} has a shape botrbac does not know; it was left as it is"
+            )
+        data.setdefault("mcpServers", {})[GATEWAY_NAME] = entry
+        text = json.dumps(data, indent=2) + "\n"
+    result["changed"] = True
+    if dry_run:
+        return result
+    result["backup"] = backup_file(config.path)
+    write_atomic(config.path, text)
+    return result
+
+
 def backup_file(path: Path) -> str | None:
     """A copy of the file before it changes, readable by this user only (it can hold
     the servers' keys)."""
