@@ -112,9 +112,11 @@ class Terminals:
         """Record approve or refuse, once per code: two people (or two tabs) deciding at
         the same moment can't both win. The device record itself is never rewritten, so
         a poll in flight can't undo the decision."""
-        if not self.store.set_if_absent(f"term:usercode:{code}:claim", "1", ex=DEVICE_TTL):
+        # The decision itself is the claim (SET NX), so there is no moment between
+        # claiming and deciding in which a crash could leave the code stuck.
+        key = f"term:device:{digest}:decision"
+        if not self.store.set_if_absent(key, json.dumps(decision), ex=DEVICE_TTL):
             return False
-        self.store.set(f"term:device:{digest}:decision", json.dumps(decision), ex=DEVICE_TTL)
         self.store.delete(f"term:usercode:{code}")
         return True
 
@@ -266,6 +268,8 @@ class Terminals:
         the record the person edits, so a terminal checking in can never undo a role
         change or a rename made on the website at the same moment."""
         allowed = {k: v for k, v in seen.items() if k in ("last_seen", "queued", "unguarded")}
+        if self.store.get(f"term:terminal:{terminal_id}") is None:
+            return  # disconnected meanwhile: write nothing
         raw = self.store.get(f"term:terminal:{terminal_id}:seen")
         current = json.loads(raw) if raw else {}
         current.update(allowed)
