@@ -1,5 +1,7 @@
 """Terminal, phase 3: device-code login, terminal tokens and the Terminals page."""
 
+import hashlib
+
 import pytest
 
 from scoped_drive_mcp.store import MemoryStore
@@ -50,10 +52,12 @@ def test_flow_pending_slow_down_approve_once() -> None:
     assert exc.value.code == "expired_token"
 
 
-def test_unknown_role_becomes_read_only_and_deny() -> None:
+def test_unknown_role_is_refused_and_deny() -> None:
     t = _terminals()
     started = t.start({})
-    assert t.approve(ME, started["user_code"], "r_nope", "x").role_id == "read-only"
+    with pytest.raises(ValueError, match="Pick one of your roles"):
+        t.approve(ME, started["user_code"], "r_nope", "x")
+    assert t.pending(started["user_code"]) is not None  # still waiting
     other = t.start({})
     assert t.deny(other["user_code"])
     with pytest.raises(DeviceError) as exc:
@@ -78,6 +82,41 @@ def test_refresh_rotates_and_revoke_ends_everything() -> None:
     assert t.resolve(second["access_token"]) is None
     assert t.refresh(second["refresh_token"]) is None
     assert t.for_person(ME) == []
+
+
+def test_signed_out_person_cannot_approve() -> None:
+    t = _terminals(signed_in=lambda e: False)
+    started = t.start({})
+    assert t.approve(ME, started["user_code"], "full", "x") is None
+
+
+def test_approval_and_refresh_are_one_use_even_when_raced() -> None:
+    t = _terminals()
+    started = t.start({})
+    t.approve(ME, started["user_code"], "full", "x")
+    key = "term:device:" + hashlib.sha256(started["device_code"].encode()).hexdigest()
+    t.store.set(f"{key}:claimed", "1", ex=60)  # another poll claimed it first
+    with pytest.raises(DeviceError) as exc:
+        t.poll(started["device_code"])
+    assert exc.value.code == "expired_token"
+
+    again = t.start({})
+    t.approve(ME, again["user_code"], "full", "y")
+    issued = t.poll(again["device_code"])
+    digest = hashlib.sha256(issued["refresh_token"].encode()).hexdigest()
+    t.store.set_if_absent(f"term:rt:{digest}:used", "1", ex=60)  # a racing refresh won
+    assert t.refresh(issued["refresh_token"]) is None
+
+
+def test_refresh_does_not_undo_a_role_change() -> None:
+    t = _terminals()
+    started = t.start({})
+    terminal = t.approve(ME, started["user_code"], "full", "x")
+    issued = t.poll(started["device_code"])
+    t.update(ME, terminal.id, role_id="none", name="renamed")
+    assert t.refresh(issued["refresh_token"]) is not None
+    after = t.get(terminal.id)
+    assert after.role_id == "none" and after.name == "renamed"
 
 
 def test_tokens_are_not_interchangeable() -> None:
@@ -160,3 +199,32 @@ def test_terminal_actions(world, memstore, oauth) -> None:
     c.post(f"/terminal/t/{terminal.id}/revoke", data={"csrf": token})
     assert store.get(terminal.id) is None
     assert 'id="no-terminals"' in c.get("/terminal").text
+
+
+def test_rate_limits(world, memstore, oauth, monkeypatch) -> None:
+    from scoped_drive_mcp.terminal import feature
+
+    monkeypatch.setattr(feature, "TOKEN_LIMIT", 2)
+    monkeypatch.setattr(feature, "APPROVE_LIMIT", 1)
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    for _ in range(2):
+        c.post("/api/terminal/token", data={"grant_type": "x"})
+    limited = c.post("/api/terminal/token", data={"grant_type": "x"})
+    assert limited.status_code == 429 and limited.json() == {"error": "rate_limited"}
+    assert limited.headers["retry-after"] == "60"
+    assert c.post("/api/terminal/device", json={}).status_code == 200  # its own bucket
+
+    token = dash.csrf(c, "/device")
+    c.post("/device/deny", data={"csrf": token, "code": "BCDF-GHJK"})
+    r = c.post("/device/deny", data={"csrf": token, "code": "BCDF-GHJK"})
+    assert r.headers["location"] == "/device"
+    assert "Too many codes" in c.get("/device").text
+
+
+def test_device_page_escapes_what_the_terminal_sent(world, memstore, oauth) -> None:
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    started = c.post("/api/terminal/device", json={"hostname": "<script>x</script>"}).json()
+    page = c.get("/device", params={"code": started["user_code"]}).text
+    assert "<script>x</script>" not in page and "&lt;script&gt;" in page

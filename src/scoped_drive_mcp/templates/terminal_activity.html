@@ -29,7 +29,7 @@
     <td>{{ r.terminal }}</td>
     <td>{{ r.agent or "—" }}</td>
     <td>{% if r.decision == 'session' %}started <code>{{ r.program or "a program" }}</code> as <strong>{{ r.role }}</strong>{% else %}<code>{{ r.tool }}</code>{% endif %}
-      {% if r.session_id %}<br><a class="muted" href="/terminal/sessions/{{ r.session_id }}">session …{{ r.session_id[-6:] }}</a>{% endif %}</td>
+      {% if r.session_id %}<br><span class="muted">session …{{ r.session_id[-6:] }}</span>{% endif %}</td>
     <td>{% if r.decision == 'allow' %}<span class="pill ok">allowed</span>{% elif r.decision == 'deny' %}<span class="pill warn">blocked</span> <span class="muted">{{ r.reason }}</span>{% elif r.decision == 'session' %}<span class="pill">session</span>{% else %}<span class="pill">error</span> <span class="muted">{{ r.reason }}</span>{% endif %}</td>
   </tr>
   {% endfor %}
