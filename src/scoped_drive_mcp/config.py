@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     # off for 30 days, so the defaults leave room. Raise them on a paid plan.
     drop_blob_monthly_uploads: int = Field(default=1500, ge=10, le=10_000_000)
     drop_blob_storage_mb: int = Field(default=800, ge=16, le=10_000_000)
+    # Off by default. On: browsers upload held files straight to Vercel Blob and fetch
+    # them from it, with URLs the Node function api/blob-sign.mjs signs. Those files are
+    # then protected only by Blob's own encryption at rest, not by ENCRYPTION_KEY.
+    drop_direct_uploads: bool = False
     # Read PDF and Office files in a separate process with hard memory and CPU limits.
     # Turn off only where the host does not allow starting a process.
     extract_isolation: bool = True

@@ -715,11 +715,19 @@
     }).then(function (response) { return response.ok ? response.json() : fail(response); });
   }
 
-  // An error talking to Blob itself (not a refusal from this app): try the server route.
+  // Blob could not be reached (network or CORS): send through the server route instead.
   function blobError(cause) {
     var err = new Error("The file could not be sent. Try again.");
     err.blob = true;
     err.cause = cause;
+    return err;
+  }
+
+  // Blob refused the signed URL (403: expired, or refused): start the send again, so
+  // the server checks it again and signs new URLs.
+  function refusedError(status) {
+    var err = new Error("The upload link was refused (" + status + "). Try sending the file again.");
+    err.restart = true;
     return err;
   }
 
@@ -757,7 +765,10 @@
                 credentials: "omit",
               });
             }).then(
-              function (response) { if (!response.ok) throw blobError(response.status); },
+              function (response) {
+                if (response.status === 403) throw refusedError(response.status);
+                if (!response.ok) throw blobError(response.status);
+              },
               function (err) { throw blobError(err); }
             );
           }
@@ -791,10 +802,15 @@
       }
       var csrf = form.elements.csrf.value;
       button.disabled = true;
+      var fallback = function (err) {
+        if (err && err.blob) return sendFile(file, csrf, false);
+        throw err;
+      };
       sendFile(file, csrf, true)
         .catch(function (err) {
-          if (err && err.blob) return sendFile(file, csrf, false);
-          throw err;
+          // Once: a second refusal is shown, not retried.
+          if (err && err.restart) return sendFile(file, csrf, true).catch(fallback);
+          return fallback(err);
         })
         .then(function () { window.location.assign("/sharing?tab=with-me"); })
         .catch(function (err) {

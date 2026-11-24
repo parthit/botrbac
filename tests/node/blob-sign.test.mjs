@@ -171,6 +171,30 @@ test("a large body is refused before it is read", async () => {
   assert.equal(res.status, 413);
 });
 
+test("a large body without content-length is cut off while it is read", async () => {
+  const { fake, handle } = handler();
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      sent += 1024;
+      controller.enqueue(new Uint8Array(1024).fill(120));
+      if (sent > 1024 * 1024) controller.close();
+    },
+  });
+  const ts = String(Math.floor(NOW / 1000));
+  const req = new Request("https://example.test/api/blob-sign", {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+    headers: { "x-botrbac-timestamp": ts, "x-botrbac-signature": "0".repeat(64) },
+  });
+  assert.equal(req.headers.get("content-length"), null);
+  const res = await handle(req);
+  assert.equal(res.status, 413);
+  assert.ok(sent < 64 * 1024, `read ${sent} bytes`);
+  assert.equal(fake.calls.issued, 0);
+});
+
 test("a failure from Blob is a 502 and the next request asks for a new token", async () => {
   const fake = fakeBlob();
   let fail = true;

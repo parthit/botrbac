@@ -14,12 +14,13 @@ Two places:
 
 Both encrypt with a key derived from ENCRYPTION_KEY when it is set.
 
-**Direct uploads** (`BlobSigner`): on Vercel, a small Node function (`api/blob-sign.mjs`)
-signs Blob URLs with `@vercel/blob`, which the Python SDK cannot do. Python decides who
-may send or read what and asks the function for one presigned URL per piece; the browser
-moves the bytes to and from Blob itself. Those pieces never pass through this code, so
-they cannot be encrypted with ENCRYPTION_KEY: rows marked `"enc": BLOB_AT_REST` rely on
-Blob's own encryption at rest. Without the signer, uploads go through Python as before.
+**Direct uploads** (`BlobSigner`; only with DROP_DIRECT_UPLOADS, off by default): on
+Vercel, a small Node function (`api/blob-sign.mjs`) signs Blob URLs with `@vercel/blob`,
+which the Python SDK cannot do. Python decides who may send or read what and asks the
+function for one presigned URL per piece; the browser moves the bytes to and from Blob
+itself. Those pieces never pass through this code, so they cannot be encrypted with
+ENCRYPTION_KEY: rows marked `"enc": BLOB_AT_REST` rely on Blob's own encryption at rest.
+Without the signer, uploads go through Python as before.
 """
 
 from __future__ import annotations
@@ -516,7 +517,8 @@ class HttpBlobSigner:
 
 
 def signer_url_from_env(app_base_url: str | None) -> str | None:
-    """Where api/blob-sign.mjs answers, or None when there is no signer.
+    """Where api/blob-sign.mjs answers, or None when there is no signer. Used only when
+    DROP_DIRECT_UPLOADS is on: a URL alone never turns direct transfers on.
 
     BLOB_SIGNER_URL wins ("off" turns direct uploads off). Otherwise only on Vercel: a
     production deployment calls APP_BASE_URL (normally a custom domain, outside

@@ -178,6 +178,8 @@ BLOB_CONNECT = b"https://vercel.com https://*.private.blob.vercel-storage.com"
 DIRECT_DROP_CSP = STRICT_CSP.replace(
     b"connect-src 'self'; ", b"connect-src 'self' " + BLOB_CONNECT + b"; "
 )
+# The replace must have matched, or the page would block its own uploads silently.
+assert DIRECT_DROP_CSP != STRICT_CSP, "STRICT_CSP lost its connect-src 'self'"
 # Templates with a picker button (#pick-drive or [data-pick]). They get PICKER_CSP when
 # the picker is configured (render's `picker_ready`); every other response gets STRICT_CSP.
 PICKER_TEMPLATES = frozenset({"browse.html", "access.html", "request.html"})

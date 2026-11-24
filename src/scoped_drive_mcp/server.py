@@ -1049,9 +1049,13 @@ def build_app(
             held_bytes=settings.drop_blob_storage_mb * 1024 * 1024,
             hold_hours=settings.drop_hold_hours,
         )
-        # The browser moves the bytes to and from Blob itself when api/blob-sign.mjs can
-        # sign URLs (tests pass `blob_signer`).
-        if blob_signer is None:
+        # Only with DROP_DIRECT_UPLOADS: the browser then moves the bytes to and from
+        # Blob itself, with URLs api/blob-sign.mjs signs, and those files rely on Blob's
+        # own encryption instead of ENCRYPTION_KEY. Off, the signer is never called
+        # (tests pass `blob_signer`).
+        if not settings.drop_direct_uploads:
+            blob_signer = None
+        elif blob_signer is None:
             blob_signer = blob_signer_from_env(enc_key, settings.app_base_url)
     else:
         blob_signer = None

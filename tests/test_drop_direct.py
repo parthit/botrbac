@@ -86,15 +86,20 @@ def signer() -> FakeSigner:
     return FakeSigner()
 
 
-@pytest.fixture
-def setup(world, memstore, oauth, blob, signer):
-    app = _app(world, memstore, oauth, blob_api=blob, blob_signer=signer)
+def _paired(app):
     owner, eve = client(app), client(app)
     login(owner)
     login(eve, "eve-code")
     _editor_app(eve, "Grok Eve")
     _pair(app, OWNER_EMAIL, EVE)
     return app, owner, eve
+
+
+@pytest.fixture
+def setup(world, memstore, oauth, blob, signer, monkeypatch):
+    """Direct transfers turned on (DROP_DIRECT_UPLOADS); they are off by default."""
+    monkeypatch.setenv("DROP_DIRECT_UPLOADS", "true")
+    return _paired(_app(world, memstore, oauth, blob_api=blob, blob_signer=signer))
 
 
 def _direct_upload(c, blob: HeadBlob, data: bytes, *, skip: int | None = None) -> tuple:
@@ -265,12 +270,52 @@ def test_the_page_allows_blob_hosts_only_when_direct(setup, world, memstore, oau
     assert "vercel.com" not in eve.get("/").headers.get("content-security-policy", "")
 
 
-def test_without_a_signer_the_page_stays_strict(world, memstore, oauth, blob) -> None:
+def test_without_a_signer_the_page_stays_strict(world, memstore, oauth, blob, monkeypatch) -> None:
+    monkeypatch.setenv("DROP_DIRECT_UPLOADS", "true")
+    for name in ("BLOB_SIGNER_URL", "VERCEL_URL"):
+        monkeypatch.delenv(name, raising=False)
     app = _app(world, memstore, oauth, blob_api=blob)
     c = client(app)
     login(c, "eve-code")
     assert "vercel.com" not in c.get("/sharing?tab=with-me").headers["content-security-policy"]
     assert app.state.drops.direct is False
+
+
+def test_direct_transfers_are_off_by_default(world, memstore, oauth, blob, signer) -> None:
+    """Without DROP_DIRECT_UPLOADS a signer is never called, even one that is there: every
+    piece goes through the app and is encrypted with ENCRYPTION_KEY, as before."""
+    app, owner, eve = _paired(_app(world, memstore, oauth, blob_api=blob, blob_signer=signer))
+    assert app.state.drops.direct is False
+    page = eve.get("/sharing?tab=with-me")
+    assert "vercel.com" not in page.headers["content-security-policy"]
+    assert "data-drop-direct-note" not in page.text
+    token, r = _start(eve, 16)
+    begun = r.json()
+    assert "direct" not in begun
+    base = f"/shared/send/{begun['upload_id']}"
+    for n in range(2):
+        r = eve.post(f"{base}/piece/{n}", data={"csrf": token}, files={"piece": ("p", b"e" * 8)})
+        assert r.status_code == 200, r.text
+    assert eve.post(f"{base}/finish", data={"csrf": token}).json()["ok"] is True
+    [row] = _held(app)
+    assert "enc" not in row
+    assert all(raw[:1] == b"\x01" and b"eeee" not in raw for raw in blob.blobs.values())
+    r = owner.get(f"/drops/{row['id']}/piece/0/url")
+    assert r.json() == {"ok": True, "url": f"/drops/{row['id']}/piece/0"}
+    assert signer.puts == [] and signer.gets == []
+
+
+def test_a_signer_url_alone_does_not_turn_it_on(world, memstore, oauth, blob, monkeypatch) -> None:
+    monkeypatch.setenv("VERCEL_URL", "botrbac-git-x.vercel.app")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_store_secret")
+    app = _app(world, memstore, oauth, blob_api=blob)
+    assert app.state.drops.signer is None
+
+
+def test_the_send_form_says_how_direct_files_are_protected(setup) -> None:
+    _app_, _owner, eve = setup
+    page = " ".join(eve.get("/sharing?tab=with-me").text.split())
+    assert "protected only by Vercel Blob's own encryption" in page
 
 
 def test_only_marked_rows_are_read_raw(blob) -> None:
@@ -402,6 +447,22 @@ def test_presigned_puts_count_against_the_budget_when_issued(setup, signer) -> N
     # Refused before any URL is signed.
     assert "direct" not in r.json() and signer.puts == []
     assert app.state.drops.ttl_days == 2
+
+
+def test_a_refused_charge_releases_the_claims(setup, memstore, monkeypatch) -> None:
+    """allows() passed at admit, but another send took the room before the charge."""
+    app, _owner, eve = setup
+    monkeypatch.setattr(app.state.drops.budget, "reserve", lambda _pieces: False)
+    r = _start(eve, 20)[1]
+    assert r.json()["error"] == "storage_full"
+    assert [k for k in memstore._values if k.endswith(":claim")] == []
+
+
+def test_claims_live_in_the_shared_store(setup, memstore) -> None:
+    """So the check above looks where claims are."""
+    _app_, _owner, eve = setup
+    assert "direct" in _start(eve, 20)[1].json()
+    assert len([k for k in memstore._values if k.endswith(":claim")]) == 3
 
 
 def test_each_signed_put_is_claimed_and_finish_runs_once(setup, blob) -> None:

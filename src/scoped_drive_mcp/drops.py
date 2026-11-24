@@ -726,13 +726,26 @@ class DropBox:
                 "name": name,
                 "mime_type": mime_type,
             }
-            # Presigned PUTs are issued once, here, one per piece; each is an upload no
-            # later check sees, so all of them count against the Blob budget now. (A
-            # send through put_piece counts each piece as it arrives instead.)
             puts = self._presign_puts(row) if direct else None
             if puts is not None:
+                # One signed PUT per piece, claimed as it is issued, like put_piece's
+                # claim; it lasts as long as the URL can be used. Claimed before the
+                # budget is charged, so a refused claim charges nothing.
+                claims = [f"{DROP_UPLOAD_PREFIX}{row['id']}:{n}:claim" for n in range(len(puts))]
+                for i, claim in enumerate(claims):
+                    if not self.store.set_if_absent(claim, "1", ex=DIRECT_PUT_SECONDS):
+                        for taken in claims[:i]:
+                            self.store.delete(taken)
+                        raise SharedAccessError("busy", "Try sending the file again.", to=them)
+                # Charged when issued, not when the pieces arrive: once a URL is out, the
+                # browser can upload with it and nothing here sees that happen, so the
+                # count must already include it. An upload that is started and abandoned
+                # is still charged (the counters are never decremented); that keeps the
+                # count an upper bound on what Blob was asked to store.
                 budget = self._budget(row)
                 if budget is not None and not budget.reserve(len(puts)):
+                    for claim in claims:
+                        self.store.delete(claim)
                     audit(
                         tool=SEND_TOOL,
                         decision="deny",
@@ -741,12 +754,6 @@ class DropBox:
                     )
                     full = self._storage_full()
                     raise SharedAccessError(full.code, full.message, to=them)
-                # One signed PUT per piece, claimed as it is issued, like put_piece's
-                # claim; it lasts as long as the URL can be used.
-                for n in range(len(puts)):
-                    claim = f"{DROP_UPLOAD_PREFIX}{row['id']}:{n}:claim"
-                    if not self.store.set_if_absent(claim, "1", ex=DIRECT_PUT_SECONDS):
-                        raise SharedAccessError("busy", "Try sending the file again.", to=them)
                 row["enc"] = BLOB_AT_REST
             pending = {"size": size, "until": int(self.clock().timestamp()) + UPLOAD_SECONDS}
             self.store.hset(DROPS_PENDING_KEY, row["id"], json.dumps(pending))

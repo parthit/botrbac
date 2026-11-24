@@ -76,6 +76,26 @@ export function parseRequest(body) {
   return { op, pathname, validForSeconds, maxBytes, ttlDays };
 }
 
+/** The body as text, read at most `limit` bytes (null past that, whatever
+ * content-length said). */
+export async function readCapped(request, limit) {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 /** {delegationToken, ...} in base64url JSON, then "."; the store id is in it. */
 function storeIdOf(delegationToken) {
   try {
@@ -112,8 +132,8 @@ export function makeHandler({ blob, env = process.env, now = () => Date.now() })
     if (request.method !== "POST") return reply(405, { error: "method not allowed" });
     const length = Number(request.headers.get("content-length") || "0");
     if (length > MAX_BODY_BYTES) return reply(413, { error: "too large" });
-    const body = await request.text();
-    if (Buffer.byteLength(body) > MAX_BODY_BYTES) return reply(413, { error: "too large" });
+    const body = await readCapped(request, MAX_BODY_BYTES);
+    if (body === null) return reply(413, { error: "too large" });
     const denied = authError(request.headers, body, env.ENCRYPTION_KEY, Math.floor(now() / 1000));
     if (denied === "not configured") return reply(503, { error: denied });
     if (denied) return reply(401, { error: denied });
