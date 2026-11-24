@@ -5,9 +5,13 @@ annotated-types==0.8.0
 anyio==4.16.0
     # via
     #   httpx
+    #   httpx2
     #   mcp
     #   sse-starlette
     #   starlette
+    #   vercel-blob
+    #   vercel-internal-core
+    #   vercel-oidc
 attrs==26.1.0
     # via
     #   jsonschema
@@ -52,9 +56,12 @@ googleapis-common-protos==1.76.0
 h11==0.16.0
     # via
     #   httpcore
+    #   httpcore2
     #   uvicorn
 httpcore==1.0.9
     # via httpx
+httpcore2==2.16.2 ; sys_platform != 'emscripten'
+    # via httpx2
 httplib2==0.32.1
     # via
     #   google-api-python-client
@@ -65,10 +72,18 @@ httpx==0.28.1
     #   upstash-redis
 httpx-sse==0.4.3
     # via mcp
+httpx2==2.16.2
+    # via
+    #   vercel-blob
+    #   vercel-internal-core
+    #   vercel-oidc
+httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
+    # via httpx2
 idna==3.20
     # via
     #   anyio
     #   httpx
+    #   httpx2
     #   requests
 itsdangerous==2.2.0
     # via scoped-drive-mcp
@@ -111,6 +126,7 @@ pydantic==2.14.2
     # via
     #   mcp
     #   pydantic-settings
+    #   vercel-blob
 pydantic-core==2.50.2
     # via pydantic
 pydantic-settings==2.16.2
@@ -154,9 +170,14 @@ starlette==1.10.0
     #   sse-starlette
 striprtf==0.0.35
     # via scoped-drive-mcp
+truststore==0.10.5 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
 typing-extensions==4.16.0
     # via
     #   anyio
+    #   httpx2
     #   mcp
     #   opentelemetry-api
     #   psycopg
@@ -183,3 +204,11 @@ uvicorn==0.54.0
     # via
     #   mcp
     #   scoped-drive-mcp
+vercel-blob==0.6.2
+    # via scoped-drive-mcp
+vercel-headers==0.8.0
+    # via vercel-oidc
+vercel-internal-core==0.3.2
+    # via vercel-blob
+vercel-oidc==0.12.0
+    # via vercel-blob

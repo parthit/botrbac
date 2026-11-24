@@ -59,6 +59,8 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoin
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_APPS_PREFIX = "application/vnd.google-apps."
+# Google's limit for a one-request (multipart) upload; larger ones are resumable.
+SIMPLE_UPLOAD_BYTES = 5 * 1024 * 1024
 
 # `description`, `appProperties` and (legacy) `properties` only carry who wrote a file (a
 # paired person's assistant writing into a folder shared with them); they never move a file
@@ -393,8 +395,12 @@ class GoogleDriveClient:
             return None
         from googleapiclient.http import MediaIoBaseUpload
 
+        # Google takes at most 5 MB in a one-request upload; larger files use a resumable
+        # upload (execute() sends it in one piece and handles the protocol).
         return MediaIoBaseUpload(
-            io.BytesIO(content), mimetype=content_mime or "application/octet-stream"
+            io.BytesIO(content),
+            mimetype=content_mime or "application/octet-stream",
+            resumable=len(content) > SIMPLE_UPLOAD_BYTES,
         )
 
     def create(

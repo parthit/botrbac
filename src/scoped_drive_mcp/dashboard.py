@@ -63,6 +63,7 @@ from .drive_client import (
     LazyBotDriveClient,
     OwnerDriveClient,
 )
+from .drop_storage import PIECE_BYTES
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
 from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
@@ -198,6 +199,9 @@ DROP_UPLOAD_LIMIT = 4_000_000
 DROP_UPLOAD_MB = DROP_UPLOAD_LIMIT // 1_000_000
 # Room for the form's other fields and the multipart framing around the file.
 DROP_FORM_OVERHEAD = 64_000
+# With JavaScript, the page sends a larger file in pieces of this size (drop_storage), one
+# request each, so every request stays under Vercel's 4.5 MB limit.
+DROP_PIECE_LIMIT = PIECE_BYTES
 # Files listed under "Sent to you" on the Shared with me page.
 DROPS_SHOWN = 50
 # Folder lookups one Files page may make to work out search-result paths and
@@ -2200,10 +2204,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "drops_on": ctx.drops is not None,
                 "received": [],
                 "send_limit_mb": DROP_UPLOAD_MB,
+                "send_max_mb": ctx.drops.max_mb if ctx.drops is not None else 0,
+                "send_max_bytes": ctx.drops.max_bytes if ctx.drops is not None else 0,
                 "hold_hours": ctx.drops.hold_hours if ctx.drops is not None else 0,
             }
             if ctx.drops is not None:
-                data["received"] = ctx.drops.received(DROPS_SHOWN)
+                data["received"] = [
+                    {**row, "pieces": ctx.drops.pieces(row)}
+                    for row in ctx.drops.received(DROPS_SHOWN)
+                ]
             return data
 
         data = await blocking(gather)
@@ -2267,6 +2276,86 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         return wrapped
 
+    def drop_json_error(exc: SharedAccessError) -> Response:
+        return JSONResponse({"ok": False, "error": exc.code, "message": exc.message}, 400)
+
+    async def drop_begin(request: Request, form: dict[str, str]) -> Response:
+        """Start sending a file in pieces (ui.js): every check, before any bytes."""
+        if ctx.drops is None:
+            return JSONResponse({"ok": False, "message": "Sending files is not set up."}, 404)
+        email = str(request.session.get("owner") or "")
+        try:
+            size = int(form.get("size") or "")
+        except ValueError:
+            size = -1
+        mime = (form.get("type") or "").split(";")[0].strip() or "application/octet-stream"
+        try:
+            started = await blocking(
+                partial(
+                    ctx.drops.begin,
+                    email,
+                    (form.get("to") or "").strip(),
+                    form.get("name") or "",
+                    mime,
+                    size,
+                    via=VIA_DASHBOARD,
+                )
+            )
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        return JSONResponse({"ok": True, **started})
+
+    async def drop_piece_put(request: Request, form: dict[str, str]) -> Response:
+        """One piece of a file being sent (ui.js)."""
+        if ctx.drops is None:
+            return JSONResponse({"ok": False, "message": "Sending files is not set up."}, 404)
+        email = str(request.session.get("owner") or "")
+        piece = (await request.form()).get("piece")
+        if piece is None or isinstance(piece, str):
+            return JSONResponse({"ok": False, "message": "No file data arrived."}, 400)
+        data = await piece.read(DROP_PIECE_LIMIT + 1)
+        try:
+            n = int(request.path_params["n"])
+        except ValueError:
+            n = -1
+        try:
+            await blocking(ctx.drops.put_piece, email, request.path_params["upload_id"], n, data)
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        return JSONResponse({"ok": True})
+
+    async def drop_finish(request: Request, form: dict[str, str]) -> Response:
+        """All pieces sent: list the file for its recipient (ui.js)."""
+        if ctx.drops is None:
+            return JSONResponse({"ok": False, "message": "Sending files is not set up."}, 404)
+        email = str(request.session.get("owner") or "")
+        try:
+            sent = await blocking(ctx.drops.finish, email, request.path_params["upload_id"])
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        message = f"Sent “{sent['name']}” to {sent['to']}."
+        flash(request, "ok", message)
+        return JSONResponse({"ok": True, "message": message})
+
+    async def drop_piece_get(request: Request) -> Response:
+        """One piece of a held file, for the recipient's browser to join (ui.js). Each
+        response stays under Vercel's 4.5 MB limit."""
+        if ctx.drops is None:
+            return Response(status_code=404)
+        try:
+            n = int(request.path_params["n"])
+        except ValueError:
+            n = -1
+        try:
+            _row, data = await blocking(ctx.drops.piece, request.path_params["drop_id"], n)
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        return Response(
+            data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment", "Cache-Control": "no-store"},
+        )
+
     async def drop_download(request: Request) -> Response:
         """The recipient downloads a held file. Never served inline: it is another
         person's file and this is our origin."""
@@ -2276,6 +2365,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             row, data = await blocking(ctx.drops.download, request.path_params["drop_id"])
         except SharedAccessError as exc:
             flash(request, "error", exc.message)
+            return RedirectResponse("/sharing?tab=with-me", status_code=303)
+        if len(data) > DROP_PIECE_LIMIT and os.environ.get("VERCEL", "").strip():
+            # One response this large is refused on Vercel; ui.js downloads it in pieces.
+            flash(
+                request,
+                "error",
+                "This file is too large to download without JavaScript. Turn JavaScript on, "
+                "or save it to Google Drive and open it there.",
+            )
             return RedirectResponse("/sharing?tab=with-me", status_code=303)
         return Response(
             data,
@@ -3416,8 +3514,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             body_limited(csrf_protected(drop_send), DROP_UPLOAD_LIMIT + DROP_FORM_OVERHEAD),
             methods=["POST"],
         ),
+        Route("/shared/send/start", csrf_protected(drop_begin), methods=["POST"]),
+        Route(
+            "/shared/send/{upload_id}/piece/{n}",
+            body_limited(csrf_protected(drop_piece_put), DROP_PIECE_LIMIT + DROP_FORM_OVERHEAD),
+            methods=["POST"],
+        ),
+        Route("/shared/send/{upload_id}/finish", csrf_protected(drop_finish), methods=["POST"]),
         Route("/drops/allow", csrf_protected(drop_allow), methods=["POST"]),
         Route("/drops/{drop_id}/download", owner_only(drop_download), methods=["GET"]),
+        Route("/drops/{drop_id}/piece/{n}", owner_only(drop_piece_get), methods=["GET"]),
         Route("/drops/{drop_id}/{action}", csrf_protected(drop_act), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),

@@ -670,6 +670,32 @@ class DriveService:
         name, mime_type, data = self.upload_payload(name, mime_type, content_text, content_base64)
         return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
 
+    def upload_bytes(
+        self,
+        name: str,
+        mime_type: str,
+        data: bytes,
+        parent_id: str | None = None,
+        *,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        """upload_file for bytes already here (a file someone sent), with its own size
+        limit: a file sent from the dashboard may be larger than MAX_BYTES."""
+        name, mime_type = self.check_upload_meta(name, mime_type)
+        if len(data) > max_bytes:
+            raise InvalidInputError(f"content is larger than the {max_bytes}-byte limit")
+        return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
+
+    def check_upload_meta(self, name: str, mime_type: str) -> tuple[str, str]:
+        """upload_file's checks on a file's name and type: (name, mime)."""
+        name = validate_name(name)
+        if not isinstance(mime_type, str) or not _MIME_RE.fullmatch(mime_type.strip()):
+            raise InvalidInputError("mime_type must look like type/subtype")
+        mime_type = mime_type.strip()
+        if mime_type.lower().startswith(GOOGLE_APPS_PREFIX):
+            raise InvalidInputError("use create_doc or create_folder for Google Workspace types")
+        return name, mime_type
+
     def upload_payload(
         self,
         name: str,
@@ -678,12 +704,7 @@ class DriveService:
         content_base64: str | None = None,
     ) -> tuple[str, str, bytes]:
         """upload_file's checks on its input, without a Drive call: (name, mime, bytes)."""
-        name = validate_name(name)
-        if not isinstance(mime_type, str) or not _MIME_RE.fullmatch(mime_type.strip()):
-            raise InvalidInputError("mime_type must look like type/subtype")
-        mime_type = mime_type.strip()
-        if mime_type.lower().startswith(GOOGLE_APPS_PREFIX):
-            raise InvalidInputError("use create_doc or create_folder for Google Workspace types")
+        name, mime_type = self.check_upload_meta(name, mime_type)
         if (content_text is None) == (content_base64 is None):
             raise InvalidInputError("provide exactly one of content_text or content_base64")
         if content_text is not None:

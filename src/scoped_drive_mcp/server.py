@@ -62,6 +62,7 @@ from .drive_client import (
     drive_not_connected_message,
     oauth_credentials,
 )
+from .drop_storage import BlobApi, BlobBudget, BlobParts, VercelBlobApi, blob_configured
 from .drops import DropBox, drop_partition
 from .external import ExternalShares, SharedAccessError, acting_as
 from .flags import EdgeConfigFlags
@@ -831,6 +832,7 @@ def build_app(
     bot_drive_factory: Callable[[str], DriveClient] | None = None,
     notion_api_factory: Callable[[str], NotionApi] | None = None,
     notion_oauth: NotionOAuth | None = None,
+    blob_api: BlobApi | None = None,
 ) -> Starlette:
     """Build the ASGI app. Tests inject `settings`, fake Drive clients, a store and OAuth."""
     if settings is None:
@@ -1021,6 +1023,24 @@ def build_app(
         drop_guard.invalidate_allowlist()
         guard.invalidate_allowlist()
 
+    # Held files go to Vercel Blob when a store is connected (tests pass `blob_api`).
+    drop_blob: BlobParts | None = None
+    drop_budget: BlobBudget | None = None
+    if blob_api is None and blob_configured():
+        try:
+            blob_api = VercelBlobApi()
+        except ImportError:
+            logger.warning("a Blob store is connected but vercel-blob is not installed")
+    if blob_api is not None:
+        drop_blob = BlobParts(blob_api, enc_key)
+        drop_budget = BlobBudget(
+            kv,
+            drop_blob,
+            monthly_uploads=settings.drop_blob_monthly_uploads,
+            held_bytes=settings.drop_blob_storage_mb * 1024 * 1024,
+            hold_hours=settings.drop_hold_hours,
+        )
+
     drop_box = DropBox(
         actor_kv,
         routed,
@@ -1038,6 +1058,9 @@ def build_app(
         on_folder_change=drop_folder_changed,
         encryption_key=enc_key,
         hold_hours=settings.drop_hold_hours,
+        max_bytes=settings.drop_max_mb * 1024 * 1024,
+        blob=drop_blob,
+        budget=drop_budget,
     )
     if not enc_key:
         logger.warning(

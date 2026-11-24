@@ -280,7 +280,11 @@ uv run ruff check . && uv run ruff format --check .
 | `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER` | required | Google's file picker, which is how files are added. Restrict the key by HTTP referrer and to the Picker API; it is visible in the page |
 | `MAX_BYTES` | 5242880 | bytes fetched per read |
 | `MAX_CHARS` | 100000 | characters returned per read |
-| `DROP_HOLD_HOURS` | 48 | hours a file a paired person sent is held for its recipient to save (24 to 168); then it is deleted |
+| `DROP_HOLD_HOURS` | 24 | hours a file a paired person sent is held for its recipient to save (24 to 168); then it is deleted |
+| `DROP_MAX_MB` | 20 | largest file a person may send from the dashboard (1 to 100). It is sent in 4 MB pieces, under Vercel's 4.5 MB request limit. An assistant's `send_file` keeps the `MAX_BYTES` limit |
+| `BLOB_READ_WRITE_TOKEN` (or `BLOB_STORE_ID`) | unset | set by Vercel when a Blob store is connected to the project. Held files then go to Blob instead of Redis or Postgres. Use a **private** store |
+| `DROP_BLOB_MONTHLY_UPLOADS` | 1500 | Blob uploads a calendar month (each 4 MB piece is one). The free tier includes 2,000 and turns Blob off for 30 days past it |
+| `DROP_BLOB_STORAGE_MB` | 800 | MB that held files may take in Blob (the free tier includes 1 GB). Sends are refused past either cap until it frees up |
 | `EXTRACT_ISOLATION` | on | reads PDF and Office files in a separate process with hard memory and CPU limits. `0` reads them in the server process, only for hosts that cannot start a process |
 | `EXTRACT_MEMORY_MB` | 768 | address-space limit of that process, in MB (256 to 8192). Up to two run at once (at most one per caller), so keep two of them plus the server under the function's memory |
 | `SCOPE_CACHE_TTL` | 60 | seconds folder ancestry is cached |

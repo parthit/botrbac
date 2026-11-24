@@ -691,3 +691,117 @@
     }
   });
 })();
+
+// Files sent to a paired person (Sharing → Shared with me). Vercel refuses request and
+// response bodies over 4.5 MB, so a file goes up, and comes back down, in pieces of at
+// most 4 MB. Without JavaScript the plain form still sends files up to 4 MB.
+(function () {
+  function fail(response) {
+    return response.json().then(
+      function (body) { throw new Error((body && body.message) || "Something went wrong. Try again."); },
+      function () { throw new Error("Something went wrong (" + response.status + "). Reload the page and try again."); }
+    );
+  }
+
+  function post(url, body) {
+    return fetch(url, {
+      method: "POST",
+      body: body,
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }).then(function (response) { return response.ok ? response.json() : fail(response); });
+  }
+
+  var form = document.querySelector("form[data-drop-send]");
+  if (form && window.fetch && window.FormData) {
+    var status = form.querySelector("[data-drop-status]");
+    var button = form.querySelector("button[type=submit]");
+    var say = function (text) { if (status) status.textContent = text; };
+    form.addEventListener("submit", function (event) {
+      var file = form.elements.file.files[0];
+      if (!file) return;
+      event.preventDefault();
+      var max = parseInt(form.getAttribute("data-drop-max"), 10) || 0;
+      if (max && file.size > max) {
+        say("That file is larger than " + Math.floor(max / 1048576) + " MB.");
+        return;
+      }
+      var csrf = form.elements.csrf.value;
+      var start = new FormData();
+      start.append("csrf", csrf);
+      start.append("to", form.elements.to.value);
+      start.append("name", file.name);
+      start.append("type", file.type || "application/octet-stream");
+      start.append("size", String(file.size));
+      button.disabled = true;
+      say("Starting…");
+      var upload;
+      post("/shared/send/start", start)
+        .then(function (begun) {
+          upload = begun;
+          var base = "/shared/send/" + encodeURIComponent(begun.upload_id);
+          var next = function (n) {
+            if (n >= begun.pieces) return Promise.resolve();
+            say("Sending… " + Math.round((n / begun.pieces) * 100) + "%");
+            var body = new FormData();
+            body.append("csrf", csrf);
+            body.append("piece", file.slice(n * begun.piece_bytes, (n + 1) * begun.piece_bytes), "piece");
+            var send = function () { return post(base + "/piece/" + n, body); };
+            // One retry for a dropped connection; a refusal from the server is final.
+            return send()
+              .catch(function (err) { if (err instanceof TypeError) return send(); throw err; })
+              .then(function () { return next(n + 1); });
+          };
+          return next(0).then(function () {
+            var done = new FormData();
+            done.append("csrf", csrf);
+            say("Finishing…");
+            return post(base + "/finish", done);
+          });
+        })
+        .then(function () { window.location.assign("/sharing?tab=with-me"); })
+        .catch(function (err) {
+          button.disabled = false;
+          say(err && err.message ? err.message : "The file could not be sent. Try again.");
+        });
+    });
+  }
+
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest("a[data-drop-download]");
+    if (!link || !window.fetch || !window.Blob || !window.URL) return;
+    var pieces = parseInt(link.getAttribute("data-drop-pieces"), 10) || 1;
+    if (pieces <= 1) return; // small enough for the plain link
+    event.preventDefault();
+    if (link.getAttribute("aria-busy") === "true") return;
+    var id = encodeURIComponent(link.getAttribute("data-drop-download"));
+    var label = link.textContent;
+    var parts = [];
+    link.setAttribute("aria-busy", "true");
+    var next = function (n) {
+      if (n >= pieces) return Promise.resolve();
+      link.textContent = "Downloading… " + Math.round((n / pieces) * 100) + "%";
+      return fetch("/drops/" + id + "/piece/" + n, { credentials: "same-origin" })
+        .then(function (response) { return response.ok ? response.blob() : fail(response); })
+        .then(function (blob) { parts.push(blob); return next(n + 1); });
+    };
+    next(0)
+      .then(function () {
+        var url = URL.createObjectURL(new Blob(parts, { type: "application/octet-stream" }));
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = link.getAttribute("data-drop-name") || "file";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+      })
+      .catch(function (err) {
+        window.alert(err && err.message ? err.message : "The file could not be downloaded.");
+      })
+      .then(function () {
+        link.textContent = label;
+        link.removeAttribute("aria-busy");
+      });
+  });
+})();

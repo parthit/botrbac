@@ -4,7 +4,7 @@ A pairing with another person lets each side read what the other shares. A drop 
 other way: Eve, paired with Ada, sends Ada one file.
 
 Bot RBAC is not file storage. A drop is held here for a short time (`DROP_HOLD_HOURS`,
-48 hours by default) so Ada can look at it and, if she wants to keep it, choose **Save to
+24 hours by default) so Ada can look at it and, if she wants to keep it, choose **Save to
 Google Drive**. Saving copies it into a folder this app made in her Drive ("Sent to me (Bot
 RBAC)") and deletes the held copy at once. A drop nobody saves is deleted when the hold
 ends: every stored piece has that expiry on it, so the store drops it even if nothing here
@@ -19,9 +19,14 @@ runs again.
   `DROPS_PER_HOUR` files from one person to another an hour, and about `MAX_HELD` drops
   and `MAX_HELD_BYTES` held for one person at a time (sends at the same moment can pass
   that cap together, by at most the hourly limit).
-* The bytes are stored in pieces (`CHUNK_BYTES`), encrypted with a key derived from
-  ENCRYPTION_KEY when it is set. Without it they are stored as plain base64 (still deleted
-  at the end of the hold), and the server logs a warning at startup.
+* The bytes are stored in pieces (drop_storage.py): in Vercel Blob when a Blob store is
+  connected, otherwise in the key-value store. They are encrypted with a key derived from
+  ENCRYPTION_KEY when it is set. Without it they are stored unencrypted (still deleted at
+  the end of the hold), and the server logs a warning at startup.
+* Files up to `max_bytes` (DROP_MAX_MB, 20 MB by default). The dashboard sends one in
+  pieces (`begin`, `put_piece`, `finish`), each under Vercel's 4.5 MB request limit, and
+  the recipient's browser downloads it the same way (`piece`). An assistant's send_file
+  carries the whole file in one call, so it keeps upload_file's MAX_BYTES limit.
 * Ada's own assistants see drops (`list_drops`, `read_drop`, `download_drop`) marked
   `untrusted_peer`: the name and contents are Eve's. A saved copy is stamped with Eve as
   its writer, so it keeps that mark wherever Ada's assistants see it in Drive.
@@ -36,9 +41,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from . import drop_storage
 from .audit import audit
 from .auth import current_actor, current_principal
 from .drive_client import FOLDER_MIME, BotNotConnectedError, DriveClient, DriveNotFoundError
+from .drop_storage import BlobBudget, BlobParts, DropParts, KvParts, piece_count
 from .errors import report_exception
 from .external import (
     NOT_LINKED_LOG_EVERY,
@@ -52,31 +59,38 @@ from .external import (
 )
 from .scope import InvalidInputError
 from .service import DOWNLOAD_BYTE_CAP, DriveService
-from .store import AllowEntry, Allowlist, KeyValueStore, purpose_fernet, utc_now
+from .store import AllowEntry, Allowlist, KeyValueStore, utc_now
 
 logger = logging.getLogger(__name__)
 
 # Store keys, on the recipient's own (actor) store.
 DROP_FOLDER_KEY = "drops:folder"
 DROPS_INDEX_KEY = "drops:index"
-DROP_PART_PREFIX = "drops:part:"
+DROP_UPLOAD_PREFIX = "drops:upload:"
+DROP_OUTGOING_PREFIX = "drops:outgoing:"
+# Uploads in progress for this recipient (id -> size and deadline), counted in the caps.
+DROPS_PENDING_KEY = "drops:pending"
 DROPS_OFF_KEY = "drops:off"
 DROPS_SENT_PREFIX = "drops:sent:"
 DROP_SAVING_PREFIX = "drops:saving:"
 # Longest a save may hold its lock (a crashed save frees it after this).
 SAVE_LOCK_SECONDS = 120
+# How long a dashboard upload may take from its first piece to its last.
+UPLOAD_SECONDS = 3600
+# Longest one piece's store may hold its claim, and `finish` its lock (a crash frees
+# them after this).
+CLAIM_SECONDS = 120
 # What secrets.token_urlsafe(16) makes.
 _DROP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 DROP_FOLDER_NAME = "Sent to me (Bot RBAC)"
-DROP_HOLD_HOURS = 48
+DROP_HOLD_HOURS = 24
 # Files one person may send another per hour.
 DROPS_PER_HOUR = 20
 # Held for one recipient at a time (unsaved, not yet expired).
 MAX_HELD = 50
-MAX_HELD_BYTES = 50 * 1024 * 1024
-# Stored in pieces small enough for any of the stores (an Upstash request is capped).
-CHUNK_BYTES = 512 * 1024
+MAX_HELD_BYTES = 100 * 1024 * 1024
+DROP_MAX_BYTES = 20 * 1024 * 1024
 MAX_LIST = 100
 
 SEND_TOOL = "send_file"
@@ -104,6 +118,9 @@ class DropBox:
         on_folder_change: Callable[[], None] | None = None,
         encryption_key: str | None = None,
         hold_hours: int = DROP_HOLD_HOURS,
+        max_bytes: int = DROP_MAX_BYTES,
+        blob: BlobParts | None = None,
+        budget: BlobBudget | None = None,
         clock: Callable[[], datetime] = _now,
     ):
         # `store`, `drive` and `own_allowlist` resolve the current actor on each call, so
@@ -118,7 +135,11 @@ class DropBox:
         self.once = once or (lambda _key, _ttl: False)
         # Clears the guards' cached allowlists after the folder is made or replaced.
         self.on_folder_change = on_folder_change or (lambda: None)
-        self._fernet = purpose_fernet(encryption_key, "drops") if encryption_key else None
+        self.kv_parts = KvParts(store, encryption_key, clock)
+        # New files go to Blob when it is connected; rows say where theirs are.
+        self.blob = blob
+        self.budget = budget
+        self.max_bytes = max_bytes
         self.hold = timedelta(hours=hold_hours)
         self.clock = clock
 
@@ -126,21 +147,42 @@ class DropBox:
     def hold_hours(self) -> int:
         return int(self.hold.total_seconds() // 3600)
 
+    @property
+    def max_mb(self) -> int:
+        return self.max_bytes // (1024 * 1024)
+
     # ---- stored pieces ---------------------------------------------------
 
-    def _seal(self, data: bytes) -> str:
-        if self._fernet is not None:
-            return self._fernet.encrypt(data).decode()
-        return base64.b64encode(data).decode()
+    def _parts(self, row: dict[str, Any]) -> DropParts:
+        if row.get("store") == "blob":
+            if self.blob is None:
+                raise SharedAccessError("not_found", "That file is no longer available.")
+            return self.blob
+        return self.kv_parts
 
-    def _open(self, raw: str) -> bytes:
-        if self._fernet is not None:
-            return self._fernet.decrypt(raw.encode())
-        return base64.b64decode(raw)
+    def _new_layout(self, size: int) -> dict[str, Any]:
+        """Where a new file of `size` bytes goes: the row fields for its pieces."""
+        if self.blob is not None:
+            return {"store": "blob", "parts": piece_count(size)}
+        return {"store": "kv", "parts": KvParts.parts_for(size)}
 
     def _drop_parts(self, row: dict[str, Any]) -> None:
-        for n in range(int(row.get("parts") or 0)):
-            self.store.delete(f"{DROP_PART_PREFIX}{row['id']}:{n}")
+        self._parts(row).delete(row)
+
+    def _put_piece(self, row: dict[str, Any], n: int, data: bytes) -> None:
+        self._parts(row).put_piece(str(row["id"]), int(row["exp"]), n, data)
+
+    def _storage_full(self) -> SharedAccessError:
+        return SharedAccessError(
+            "storage_full",
+            "Sending files is paused for now: this app's file storage is near its limit. "
+            "Try again later.",
+        )
+
+    def _budget(self, row_or_layout: dict[str, Any]) -> BlobBudget | None:
+        if row_or_layout.get("store") != "blob" or self.blob is None:
+            return None
+        return self.budget
 
     # ---- what is held (as the recipient) ---------------------------------
 
@@ -157,7 +199,12 @@ class DropBox:
             if not isinstance(row, dict) or str(row.get("expires_at", "")) <= now:
                 self.store.hdel(DROPS_INDEX_KEY, drop_id)
                 if isinstance(row, dict) and row.get("id") == drop_id:
-                    self._drop_parts(row)
+                    # A store error must not break the list; the sweep (Blob) or the
+                    # store's own expiry (key-value) deletes what is left.
+                    try:
+                        self._drop_parts(row)
+                    except Exception as exc:
+                        report_exception(exc, where="drop_expire")
                 continue
             rows.append(row)
         rows.sort(key=lambda r: str(r.get("at", "")), reverse=True)
@@ -175,7 +222,7 @@ class DropBox:
             "they arrive unless they are saved to Google Drive.",
         )
 
-    def _bytes(self, row: dict[str, Any]) -> bytes:
+    def _check_held(self, row: dict[str, Any]) -> None:
         if row.get("saved_file_id"):
             raise SharedAccessError(
                 "saved",
@@ -183,21 +230,44 @@ class DropBox:
                 "with read_file or download_file.",
                 file_id=row["saved_file_id"],
             )
-        parts: list[bytes] = []
-        for n in range(int(row.get("parts") or 0)):
-            raw = self.store.get(f"{DROP_PART_PREFIX}{row['id']}:{n}")
-            if raw is None:
-                raise SharedAccessError("not_found", "That file has expired.")
-            try:
-                parts.append(self._open(raw))
-            except Exception:
-                raise SharedAccessError("not_found", "That file could not be read.") from None
-        return b"".join(parts)
+
+    def pieces(self, row: dict[str, Any]) -> int:
+        """How many pieces `piece` serves for this row."""
+        return piece_count(int(row.get("size") or 0))
+
+    def _piece(self, row: dict[str, Any], n: int) -> bytes:
+        try:
+            data = self._parts(row).get_piece(row, n)
+        except SharedAccessError:
+            raise
+        except Exception as exc:
+            report_exception(exc, where="drop_read")
+            raise SharedAccessError(
+                "unavailable", "That file could not be read right now. Try again later."
+            ) from None
+        if data is None:
+            raise SharedAccessError("not_found", "That file has expired.")
+        return data
+
+    def _bytes(self, row: dict[str, Any]) -> bytes:
+        self._check_held(row)
+        data = b"".join(self._piece(row, n) for n in range(self.pieces(row)))
+        if len(data) != int(row.get("size") or 0):
+            raise SharedAccessError("not_found", "That file could not be read.")
+        return data
 
     def download(self, drop_id: str) -> tuple[dict[str, Any], bytes]:
         """For the recipient: the drop's record and its bytes."""
         row = self._get(drop_id)
         return row, self._bytes(row)
+
+    def piece(self, drop_id: str, n: int) -> tuple[dict[str, Any], bytes]:
+        """For the recipient's browser: one piece (at most PIECE_BYTES) of a held file."""
+        row = self._get(drop_id)
+        self._check_held(row)
+        if not isinstance(n, int) or not 0 <= n < self.pieces(row):
+            raise SharedAccessError("not_found", "No such piece.")
+        return row, self._piece(row, n)
 
     def dismiss(self, drop_id: str) -> None:
         """Delete a drop from the list now (a saved copy in Drive stays)."""
@@ -243,12 +313,13 @@ class DropBox:
         return {"drop": self._public(row), **result, "content_trust": "untrusted_peer"}
 
     def download_for_assistant(self, drop_id: str) -> dict[str, Any]:
-        row, data = self.download(drop_id)
+        # The cap is below one piece, so only the first piece is read.
+        row, data = self.piece(drop_id, 0)
         cap = min(DOWNLOAD_BYTE_CAP, self.service.max_bytes)
         return {
             "drop": self._public(row),
             "content_base64": base64.b64encode(data[:cap]).decode(),
-            "truncated": len(data) > cap,
+            "truncated": int(row.get("size") or 0) > cap,
             "content_trust": "untrusted_peer",
         }
 
@@ -319,12 +390,12 @@ class DropBox:
             folder = self._ensure_folder()
             # Stamped with the sender as its writer, so it stays marked untrusted.
             with guest_of(me, sender):
-                created = self.service.upload_file(
+                created = self.service.upload_bytes(
                     row.get("name") or "file",
                     row.get("mime_type") or "application/octet-stream",
-                    None,
-                    base64.b64encode(data).decode(),
+                    data,
                     parent_id=folder,
+                    max_bytes=self.max_bytes,
                 )
         except InvalidInputError as exc:
             raise SharedAccessError("invalid_input", str(exc)) from None
@@ -364,18 +435,9 @@ class DropBox:
 
     # ---- sending (as the sender) -----------------------------------------
 
-    def send(
-        self,
-        caller: str,
-        to: str,
-        name: str,
-        mime_type: str,
-        content_text: str | None = None,
-        content_base64: str | None = None,
-        *,
-        via: str | None = None,
-    ) -> dict[str, Any]:
-        """Hold one file from `caller` for `to`, a person `caller` is actively paired with."""
+    def _pair(self, caller: str, to: str, via: str | None) -> tuple[str, str]:
+        """(sender, recipient) for a send from `caller` to `to`, or refuse: only to a person
+        `caller` is actively paired with."""
         you = normalize_email(caller)
         try:
             them = normalize_email(to)
@@ -403,61 +465,268 @@ class DropBox:
                 "people approve the pairing on the dashboard's Sharing page first.",
                 to=them,
             )
+        return you, them
+
+    def _admit(
+        self, you: str, them: str, size: int, via: str | None, *, charge: bool
+    ) -> dict[str, Any]:
+        """As the recipient: refuse, or return the new row (no `at` or `expires_at` yet).
+
+        The Blob budget is checked first, so a `storage_full` refusal does not use up the
+        sender's hourly limit. `charge` counts every piece against it now (a whole send,
+        stored at once); a send in pieces is counted as each piece arrives instead, so an
+        upload that is started and never sent costs the budget nothing."""
+        layout = self._new_layout(size)
+        budget = self._budget(layout)
+        refusal = None
+        if budget is not None:
+            budget.maybe_sweep()
+            if not budget.allows(layout["parts"]):
+                refusal = self._storage_full()
+        if refusal is None:
+            refusal = self._refusal(you, them, size)
+        if (
+            refusal is None
+            and budget is not None
+            and charge
+            and not budget.reserve(layout["parts"])
+        ):
+            refusal = self._storage_full()
+        if refusal is not None:
+            audit(tool=SEND_TOOL, decision="deny", reason=refusal.code, **_guest_who(you, via))
+            raise SharedAccessError(refusal.code, refusal.message, to=them, **refusal.details)
+        # Stored pieces outlive the hold by the longest an upload may take; the hold itself
+        # starts when the file is listed (`_stored`), so a slow upload does not shorten it.
+        keep = self.clock() + self.hold + timedelta(seconds=UPLOAD_SECONDS)
+        return {
+            "id": secrets.token_urlsafe(16),
+            "size": size,
+            **layout,
+            "from": you,
+            "exp": int(keep.timestamp()),
+            "via": via or "assistant",
+        }
+
+    def _stored(self, row: dict[str, Any], you: str, them: str, via: str | None) -> dict[str, Any]:
+        """As the recipient: list a fully stored file, log it on both sides, and return
+        what the sender is told (write-only: no id they could use to reach it again)."""
+        now = self.clock()
+        row = {**row, "at": _iso(now), "expires_at": _iso(now + self.hold)}
+        self.store.hset(DROPS_INDEX_KEY, row["id"], json.dumps(row, separators=(",", ":")))
+        audit(tool=SEND_TOOL, decision="allow", reason="ok", **_guest_who(you, via))
+        # The sender's own log shows the send too, without anything about the recipient.
+        with acting_as(you):
+            sender_who = _caller_who() if not via else {"token_name": via, "role": None}
+            audit(tool=SEND_TOOL, decision="allow", reason="ok", **sender_who, owner=them)
+        return {
+            "sent": True,
+            "to": them,
+            "name": row["name"],
+            "size": row["size"],
+            "note": (
+                f"Sent. {them} can open it on their Bot RBAC dashboard for "
+                f"{self.hold_hours} hours and save it to their Google Drive to keep it."
+            ),
+        }
+
+    def _store_failed(self, exc: Exception, row: dict[str, Any], you: str, via: str | None) -> None:
+        report_exception(exc, where="drop")
+        try:
+            self._drop_parts(row)
+        except Exception as cleanup:
+            report_exception(cleanup, where="drop_cleanup")
+        audit(tool=SEND_TOOL, decision="error", reason=type(exc).__name__, **_guest_who(you, via))
+
+    def send(
+        self,
+        caller: str,
+        to: str,
+        name: str,
+        mime_type: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+        *,
+        via: str | None = None,
+    ) -> dict[str, Any]:
+        """Hold one file from `caller` for `to`, a person `caller` is actively paired with.
+        The whole file in one call (an assistant's send_file, or a small dashboard send)."""
+        you, them = self._pair(caller, to, via)
         try:
             name, mime_type, data = self.service.upload_payload(
                 name, mime_type, content_text, content_base64
             )
         except InvalidInputError as exc:
             raise SharedAccessError("invalid_input", str(exc), to=them) from None
-        who = _guest_who(you, via)
         with guest_of(them, you):
-            refusal = self._refusal(you, them, len(data))
-            if refusal is not None:
-                audit(tool=SEND_TOOL, decision="deny", reason=refusal.code, **who)
-                raise SharedAccessError(refusal.code, refusal.message, to=them, **refusal.details)
-            now = self.clock()
-            ttl = int(self.hold.total_seconds()) + 60
-            drop_id = secrets.token_urlsafe(16)
-            step = CHUNK_BYTES
-            chunks = [data[i : i + step] for i in range(0, len(data), step)] or [b""]
+            row = {
+                **self._admit(you, them, len(data), via, charge=True),
+                "name": name,
+                "mime_type": mime_type,
+            }
+            step = drop_storage.PIECE_BYTES
             try:
-                for n, chunk in enumerate(chunks):
-                    self.store.set(f"{DROP_PART_PREFIX}{drop_id}:{n}", self._seal(chunk), ex=ttl)
+                for n in range(piece_count(len(data))):
+                    self._put_piece(row, n, data[n * step : (n + 1) * step])
             except Exception as exc:
-                report_exception(exc, where="drop")
-                self._drop_parts({"id": drop_id, "parts": len(chunks)})
-                audit(tool=SEND_TOOL, decision="error", reason=type(exc).__name__, **who)
+                self._store_failed(exc, row, you, via)
                 raise SharedAccessError(
                     "unavailable", "The file could not be stored. Try again later.", to=them
                 ) from None
+            return self._stored(row, you, them, via)
+
+    # A dashboard send in pieces: begin, put_piece for each piece, finish. The upload's
+    # record is the recipient's (with their other drops); the sender's store only notes
+    # who it is for, so a piece from anyone else is refused.
+
+    def _upload(self, you: str, upload_id: str) -> tuple[str, dict[str, Any]]:
+        """(recipient, upload record) for one of `you`'s uploads in progress. Call as the
+        sender; the record is read as the recipient."""
+        if not isinstance(upload_id, str) or not _DROP_ID.fullmatch(upload_id):
+            raise SharedAccessError("not_found", "No such upload.")
+        them = self.store.get(f"{DROP_OUTGOING_PREFIX}{upload_id}")
+        if not them:
+            raise SharedAccessError(
+                "not_found", "This upload took too long and was cancelled. Send the file again."
+            )
+        with guest_of(them, you):
+            raw = self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}")
+        try:
+            row = json.loads(raw) if raw else None
+        except ValueError:
+            row = None
+        if not isinstance(row, dict) or row.get("from") != you or row.get("id") != upload_id:
+            raise SharedAccessError(
+                "not_found", "This upload took too long and was cancelled. Send the file again."
+            )
+        return them, row
+
+    def begin(
+        self, caller: str, to: str, name: str, mime_type: str, size: int, *, via: str
+    ) -> dict[str, Any]:
+        """Start a send in pieces. Every check a whole send makes happens here, before any
+        bytes arrive; the hourly limit and the storage budget count it now."""
+        you, them = self._pair(caller, to, via)
+        try:
+            name, mime_type = self.service.check_upload_meta(name, mime_type)
+        except InvalidInputError as exc:
+            raise SharedAccessError("invalid_input", str(exc), to=them) from None
+        if not isinstance(size, int) or size <= 0:
+            raise SharedAccessError("invalid_input", "That file is empty.", to=them)
+        if size > self.max_bytes:
+            raise SharedAccessError(
+                "too_large", f"That file is larger than {self.max_mb} MB.", to=them
+            )
+        with guest_of(them, you):
             row = {
-                "id": drop_id,
+                **self._admit(you, them, size, via, charge=False),
                 "name": name,
                 "mime_type": mime_type,
-                "size": len(data),
-                "parts": len(chunks),
-                "from": you,
-                "at": _iso(now),
-                "expires_at": _iso(now + self.hold),
-                "via": via or "assistant",
             }
-            self.store.hset(DROPS_INDEX_KEY, drop_id, json.dumps(row, separators=(",", ":")))
-            audit(tool=SEND_TOOL, decision="allow", reason="ok", **who)
-        # The sender's own log shows the send too, without anything about the recipient.
-        with acting_as(you):
-            sender_who = _caller_who() if not via else {"token_name": via, "role": None}
-            audit(tool=SEND_TOOL, decision="allow", reason="ok", **sender_who, owner=them)
-        # Write-only: the sender gets no id they could use to reach the file again.
+            pending = {"size": size, "until": int(self.clock().timestamp()) + UPLOAD_SECONDS}
+            self.store.hset(DROPS_PENDING_KEY, row["id"], json.dumps(pending))
+            self.store.set(
+                f"{DROP_UPLOAD_PREFIX}{row['id']}",
+                json.dumps(row, separators=(",", ":")),
+                ex=UPLOAD_SECONDS,
+            )
+        self.store.set(f"{DROP_OUTGOING_PREFIX}{row['id']}", them, ex=UPLOAD_SECONDS)
         return {
-            "sent": True,
-            "to": them,
-            "name": name,
-            "size": len(data),
-            "note": (
-                f"Sent. {them} can open it on their Bot RBAC dashboard for "
-                f"{self.hold_hours} hours and save it to their Google Drive to keep it."
-            ),
+            "upload_id": row["id"],
+            "piece_bytes": drop_storage.PIECE_BYTES,
+            "pieces": piece_count(size),
         }
+
+    def put_piece(self, caller: str, upload_id: str, n: int, data: bytes) -> dict[str, Any]:
+        """Store piece `n` of an upload `caller` began. Every piece but the last is exactly
+        PIECE_BYTES."""
+        you = normalize_email(caller)
+        them, row = self._upload(you, upload_id)
+        step = drop_storage.PIECE_BYTES
+        count = piece_count(int(row["size"]))
+        if not isinstance(n, int) or not 0 <= n < count:
+            raise SharedAccessError("invalid_input", "No such piece.")
+        expected = step if n < count - 1 else int(row["size"]) - step * (count - 1)
+        if len(data) != expected:
+            raise SharedAccessError(
+                "invalid_input", "Part of the file arrived damaged. Send the file again."
+            )
+        with guest_of(them, you):
+            # Each piece is stored once: a repeat would be another Blob upload no cap sees.
+            # `stored` is set only after the piece is stored, so `finish` never lists a file
+            # with a piece missing; `claim` keeps two copies of one piece from storing at
+            # once, and expires by itself if this process dies holding it.
+            stored = f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"
+            claim = f"{stored}:claim"
+            if self.store.get(stored):
+                raise SharedAccessError("invalid_input", "That part of the file already arrived.")
+            if not self.store.set_if_absent(claim, "1", ex=CLAIM_SECONDS):
+                raise SharedAccessError("busy", "That part of the file is arriving now.")
+            try:
+                if self.store.get(stored):
+                    raise SharedAccessError(
+                        "invalid_input", "That part of the file already arrived."
+                    )
+                budget = self._budget(row)
+                if budget is not None and not budget.reserve(1):
+                    raise self._storage_full()
+                try:
+                    self._put_piece(row, n, data)
+                except Exception as exc:
+                    report_exception(exc, where="drop")
+                    raise SharedAccessError(
+                        "unavailable", "The file could not be stored. Try again later."
+                    ) from None
+                self.store.set(stored, "1", ex=UPLOAD_SECONDS)
+            finally:
+                self.store.delete(claim)
+        return {"stored": n}
+
+    def finish(self, caller: str, upload_id: str) -> dict[str, Any]:
+        """List an upload whose pieces have all arrived. The pairing and the recipient's
+        switch are checked again: either may have changed while it uploaded."""
+        you = normalize_email(caller)
+        them, row = self._upload(you, upload_id)
+        via = str(row.get("via") or "")
+        if not self.is_linked(you, them):
+            raise SharedAccessError(
+                "not_linked", "You are no longer paired with this person.", to=them
+            )
+        with guest_of(them, you):
+            # One finish at a time, so a double click lists and logs the file once; the
+            # second gets `busy`, or `not_found` once the first has finished.
+            lock = f"{DROP_UPLOAD_PREFIX}{upload_id}:finishing"
+            if not self.store.set_if_absent(lock, "1", ex=CLAIM_SECONDS):
+                raise SharedAccessError("busy", "This file is being sent now.", to=them)
+            try:
+                return self._finish(you, them, upload_id, row, via)
+            finally:
+                self.store.delete(lock)
+
+    def _finish(
+        self, you: str, them: str, upload_id: str, row: dict[str, Any], via: str
+    ) -> dict[str, Any]:
+        """`finish` under its lock, as the recipient."""
+        # Read again under the lock: a finish that just completed has deleted it.
+        if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}"):
+            raise SharedAccessError("not_found", "This file was already sent.", to=them)
+        if self.is_off_for(you):
+            raise SharedAccessError(
+                "drops_off", f"{them} is not accepting files from you now.", to=them
+            )
+        for n in range(piece_count(int(row["size"]))):
+            if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"):
+                raise SharedAccessError(
+                    "invalid_input", "Some of the file did not arrive. Send it again."
+                )
+        result = self._stored(row, you, them, via)
+        self.store.hdel(DROPS_PENDING_KEY, upload_id)
+        self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}")
+        for n in range(piece_count(int(row["size"]))):
+            self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}")
+        # The sender's note of who the upload was for.
+        with acting_as(you):
+            self.store.delete(f"{DROP_OUTGOING_PREFIX}{upload_id}")
+        return result
 
     def _refusal(self, you: str, them: str, size: int) -> SharedAccessError | None:
         """Why a file from `you` cannot be held for `them` (the current actor) now, or
@@ -465,13 +734,16 @@ class DropBox:
         the hourly limit. Every other attempt is counted before it is stored, including one
         whose storing then fails, so the limit stays firm when sends arrive together.
 
-        The held-files cap is a read then a write, so sends that arrive at the same moment
-        can pass it together; the hourly limit bounds how far over it can go."""
+        Uploads still in progress count toward the held-files cap. The cap is a read then a
+        write, so sends that arrive at the same moment can pass it together; the hourly
+        limit bounds how far over it can go."""
         if self.is_off_for(you):
             return SharedAccessError("drops_off", f"{them} is not accepting files from you now.")
-        held = [r for r in self.received(MAX_LIST) if not r.get("saved_file_id")]
-        held_bytes = sum(int(r.get("size") or 0) for r in held)
-        if len(held) >= MAX_HELD or held_bytes + size > MAX_HELD_BYTES:
+        held = [
+            int(r.get("size") or 0) for r in self.received(MAX_LIST) if not r.get("saved_file_id")
+        ]
+        held += self._pending_sizes()
+        if len(held) >= MAX_HELD or sum(held) + size > MAX_HELD_BYTES:
             return SharedAccessError(
                 "inbox_full", f"{them} has too many unsaved files waiting. Try again later."
             )
@@ -482,6 +754,23 @@ class DropBox:
                 retry_after_seconds=3600,
             )
         return None
+
+    def _pending_sizes(self) -> list[int]:
+        """Sizes of uploads in progress for the current actor; finished or abandoned
+        ones are removed here."""
+        now = int(self.clock().timestamp())
+        sizes: list[int] = []
+        for upload_id, raw in self.store.hgetall(DROPS_PENDING_KEY).items():
+            try:
+                entry = json.loads(raw)
+                size, until = int(entry["size"]), int(entry["until"])
+            except (ValueError, KeyError, TypeError):
+                size, until = 0, 0
+            if until <= now:
+                self.store.hdel(DROPS_PENDING_KEY, upload_id)
+                continue
+            sizes.append(size)
+        return sizes
 
 
 def drop_partition() -> str:
