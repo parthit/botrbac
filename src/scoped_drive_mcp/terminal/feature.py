@@ -197,7 +197,7 @@ class TerminalFeature:
             terminal = await caller(request)
             if isinstance(terminal, Response):
                 return terminal
-            await _run(self.terminals.update, terminal.email, terminal.id, last_seen=time.time())
+            await _run(self.terminals.touch, terminal.id, last_seen=time.time())
             body = await _run(self.policy_for, terminal)
             return JSONResponse(body, headers={"cache-control": "no-store"})
 
@@ -232,7 +232,7 @@ class TerminalFeature:
                 changes["unguarded"] = sorted(
                     {str(u)[:64] for u in unguarded if isinstance(u, str) and u.strip()}
                 )[:MAX_UNGUARDED]
-            await _run(self.terminals.update, terminal.email, terminal.id, **changes)
+            await _run(self.terminals.touch, terminal.id, **changes)
             return JSONResponse(result)
 
         return [
