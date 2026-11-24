@@ -205,6 +205,14 @@ class NotionService:
             try:
                 tokens = self.oauth.refresh(refresh)
             except NotionOAuthError:
+                # Notion rotates refresh tokens: another call may have refreshed first,
+                # spending this one. Use what it stored, if anything changed.
+                latest = vault.notion()
+                if latest and latest.get("t") and latest.get("t") != record["t"]:
+                    try:
+                        return fn(self.api_factory(latest["t"]))
+                    except NotionUnauthorizedError:
+                        pass
                 raise self._reconnect() from None
             vault.set_notion(
                 tokens.access_token,

@@ -23,6 +23,8 @@ AUTHORIZE_URL = f"{API_BASE}/oauth/authorize"
 TOKEN_URL = f"{API_BASE}/oauth/token"
 REVOKE_URL = f"{API_BASE}/oauth/revoke"
 # Pinned so a Notion change to response shapes cannot change what this code reads.
+# Notion still serves 2022-06-28, but on it a database with more than one data source
+# answers with a validation error. Moving to 2025-09-03 (data sources) is a follow-up.
 NOTION_VERSION = "2022-06-28"
 
 PAGE = "page"

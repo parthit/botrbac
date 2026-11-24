@@ -218,6 +218,13 @@ def require(
             except NotionApiError as exc:
                 audit(tool=tool, decision="error", reason="notion_error", **who, **ids)
                 logger.warning("tool %s: %s", tool, exc)
+                if getattr(exc, "code", "") == "validation_error":
+                    # On API version 2022-06-28, a database with more than one data source
+                    # answers with a validation error.
+                    raise ToolError(
+                        "Notion refused that request. A database with more than one data "
+                        "source can't be read yet."
+                    ) from None
                 raise ToolError("Notion request failed. Try again in a moment.") from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)

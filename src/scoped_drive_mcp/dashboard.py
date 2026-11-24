@@ -1409,8 +1409,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         record = await blocking(ctx.notion_record)
         await blocking(ctx.vault.clear_notion)
         confirmed = True
-        if record and record.get("t"):
-            confirmed = await blocking(ctx.notion.oauth.revoke, record["t"])
+        # Notion revokes one token per call: the access token, then the refresh token.
+        for key in ("t", "r"):
+            if record and record.get(key):
+                confirmed = await blocking(ctx.notion.oauth.revoke, record[key]) and confirmed
         audit_owner("notion_disconnect", connection="notion")
         if confirmed:
             flash(request, "ok", "Notion is disconnected. Assistants can no longer reach it.")

@@ -357,7 +357,7 @@ def test_disconnect_removes_and_revokes_the_token(c, memstore, notion_oauth) -> 
     r = c.post("/connect/notion/disconnect", data={"csrf": token})
     assert r.status_code == 303
     assert memstore.get(f"{KEY_PREFIX}{NOTION_TOKEN_KEY}") is None
-    assert notion_oauth.revoked == ["notion-access-1"]
+    assert notion_oauth.revoked == ["notion-access-1", "notion-refresh-1"]
     out = result(c, "notion_list_pages")
     assert out["structuredContent"]["error"] == "notion_not_connected"
 
@@ -522,3 +522,30 @@ def test_another_persons_notion_is_separate(app, allowed) -> None:
     page = eve.get("/files?tab=notion").text
     assert 'id="notion-connect"' in page
     assert "Team wiki" not in page
+
+
+def test_a_refresh_spent_by_another_call_uses_the_stored_token(allowed, notion, app) -> None:
+    """Notion rotates refresh tokens. If another call refreshed first, the spent refresh
+    token fails, and the newer stored access token is used instead of asking to reconnect."""
+    from scoped_drive_mcp.auth import current_actor
+
+    notion.tokens.clear()
+    notion.tokens.add("notion-access-9")
+    vault = app.state.dashboard.vault
+    oauth = app.state.dashboard.notion.oauth
+    calls = {"n": 0}
+
+    def racing_refresh(token):
+        # The other call wins the race and stores its new pair just before ours fails.
+        calls["n"] += 1
+        reset = current_actor.set(OWNER_EMAIL)
+        try:
+            vault.set_notion("notion-access-9", "notion-refresh-9", OWNER_EMAIL, "ws-1", "Acme HQ")
+        finally:
+            current_actor.reset(reset)
+        raise NotionOAuthError("refresh token already used")
+
+    oauth.refresh = racing_refresh
+    out = result(allowed, "notion_read_page", page_id=TOP)["structuredContent"]
+    assert "welcome to the wiki" in out["content"]
+    assert calls["n"] == 1
