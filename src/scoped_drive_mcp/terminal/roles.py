@@ -23,7 +23,12 @@ MAX_OFFLINE_DAYS = 30
 
 
 class RoleError(ValueError):
-    """A role that cannot be saved; the message is shown to the person."""
+    """A role that cannot be saved; the message is shown to the person, next to `field`
+    (name, patterns or offline_days) when it is about one."""
+
+    def __init__(self, message: str, field: str = ""):
+        super().__init__(message)
+        self.field = field
 
 
 @dataclass(frozen=True)
@@ -67,12 +72,24 @@ BUILTIN: dict[str, Role] = {
         builtin=True,
         description=(
             "Tools whose names start with read, get, list or search, and Claude Code's "
-            "Read, Grep, Glob and LS. This goes by the name only: check what each "
-            "server's tools really do."
+            "Read, Grep, Glob and LS. No shell, no edits. This goes by the name only: "
+            "check what each server's tools really do."
         ),
     ),
-    FULL: Role(FULL, "Full access", ["*"], builtin=True, description="Every tool."),
-    NO_TOOLS: Role(NO_TOOLS, "No tools", [], builtin=True, description="Blocks every tool."),
+    FULL: Role(
+        FULL,
+        "Full access",
+        ["*"],
+        builtin=True,
+        description="Every tool on every server, and all of an agent's own tools.",
+    ),
+    NO_TOOLS: Role(
+        NO_TOOLS,
+        "No tools",
+        [],
+        builtin=True,
+        description="Blocks every tool. Use it to pause a terminal.",
+    ),
 }
 # What a new terminal gets. A terminal whose role was deleted gets No tools instead.
 DEFAULT_ROLE = READ_ONLY
@@ -121,18 +138,18 @@ class TerminalRoles:
     ) -> Role:
         name = " ".join(name.split())
         if not name or len(name) > MAX_NAME:
-            raise RoleError(f"Give the role a name of 1 to {MAX_NAME} characters.")
+            raise RoleError(f"Give the role a name of 1 to {MAX_NAME} characters.", "name")
         if role_id in BUILTIN:
             raise RoleError("Built-in roles cannot be changed. Make a new role instead.")
         try:
             checked = validate_all(patterns)
         except PatternError as exc:
-            raise RoleError(str(exc)) from None
+            raise RoleError(str(exc), "patterns") from None
         if not 1 <= offline_days <= MAX_OFFLINE_DAYS:
-            raise RoleError(f"Offline grace must be 1 to {MAX_OFFLINE_DAYS} days.")
+            raise RoleError(f"Offline grace must be 1 to {MAX_OFFLINE_DAYS} days.", "offline_days")
         existing = self.all(email)
         if any(r.name.lower() == name.lower() and r.id != role_id for r in existing):
-            raise RoleError(f"You already have a role called {name!r}.")
+            raise RoleError(f"You already have a role called {name!r}.", "name")
         if role_id:
             if self.get(email, role_id) is None:
                 raise RoleError("That role no longer exists.")

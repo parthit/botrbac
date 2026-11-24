@@ -5,39 +5,61 @@
 <h1>{% if not role %}New role{% elif role.builtin %}{{ role.name }}{% else %}Edit role: {{ role.name }}{% endif %}</h1>
 {{ terminal_tabs('roles') }}
 {% if role and role.builtin %}
-<p class="muted">{{ role.description }} Built-in roles cannot be changed.</p>
-<p>{% for p in role.patterns %}<code>{{ p }}</code>{{ ", " if not loop.last }}{% else %}<span class="muted">No tools.</span>{% endfor %}</p>
+<section class="card">
+  <p><span class="pill">built-in</span></p>
+  <p>{{ role.description }}</p>
+  <p class="muted small">Patterns: {% for p in role.patterns %}<code>{{ p }}</code> {% else %}none{% endfor %}</p>
+  <p class="muted small">Built-in roles cannot be changed. <a href="/terminal/roles/new">Make a new role</a> to allow something else.</p>
+</section>
+<p><a class="btn" href="/terminal/roles">Back to roles</a></p>
 {% else %}
-<form class="stack" method="post" action="/terminal/roles/save">
+{% set f = typed or {} %}
+{% set ticked_now = f.ticked if typed else (role.patterns if role else []) %}
+{% set picked = [] %}
+{% for server, tools in seen.items() %}{% for t in tools %}{% if (server ~ '/' ~ t) in ticked_now %}{% set _ = picked.append(server ~ '/' ~ t) %}{% endif %}{% endfor %}{% endfor %}
+{% if error %}<div class="flash error" role="alert" id="role-error">{% if f.field == 'patterns' %}Not saved. <a href="#patterns">Check the patterns</a>: {{ error }}{% else %}Not saved: {{ error }}{% endif %}</div>{% endif %}
+<p class="muted lead">A role does nothing on its own: give it to a connected computer on the <a href="/terminal">Terminals</a> tab, or start an agent with <code>--role NAME</code>.</p>
+<form class="stack term-role" method="post" action="/terminal/roles/save" novalidate>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   {% if role %}<input type="hidden" name="role_id" value="{{ role.id }}">{% endif %}
-  <label>Name <input name="name" required maxlength="60" value="{{ role.name if role else '' }}"></label>
+  <label>Name
+    <input type="text" name="name" required maxlength="60" value="{{ f.name if typed else (role.name if role else '') }}"{% if f.field == 'name' %} aria-invalid="true" aria-describedby="role-error" autofocus{% endif %}>
+  </label>
   <fieldset>
     <legend>Tools this role may use</legend>
     {% if seen %}
-    <p class="muted">Tools your terminals have reported. Tick the ones this role may use.</p>
+    <p class="muted small">Tools your computers have reported. Tick the ones this role may use.</p>
     {% for server, tools in seen.items() %}
-    <p><strong>{{ server }}</strong><br>
+    <div class="term-tools">
+      <p class="term-server">{{ server }}</p>
+      <div class="term-ticks">
       {% for t in tools %}{% set tid = server ~ '/' ~ t %}
-      <label class="inline"><input type="checkbox" name="tool" value="{{ tid }}"{% if role and tid in role.patterns %} checked{% endif %}> {{ t }}</label>
+      <label class="term-tick"><input type="checkbox" name="tool" value="{{ tid }}"{% if tid in ticked_now %} checked{% endif %}> <span>{{ t }}</span></label>
       {% endfor %}
-    </p>
+      </div>
+    </div>
     {% endfor %}
     {% else %}
-    <p class="muted">No tools reported yet. Once a terminal syncs, its tools are listed here. Until then, type patterns below.</p>
+    <p class="muted small">No tools reported yet. Once a connected computer syncs, its tools are listed here to tick. Until then, type patterns below.</p>
     {% endif %}
-    {% set ticked = [] %}
-    {% if role %}{% for server, tools in seen.items() %}{% for t in tools %}{% if (server ~ '/' ~ t) in role.patterns %}{% set _ = ticked.append(server ~ '/' ~ t) %}{% endif %}{% endfor %}{% endfor %}{% endif %}
-    <label>Patterns, one per line
-      <textarea name="patterns" rows="6" spellcheck="false" placeholder="github/*&#10;fs/read_*&#10;claude-code/Bash">{% if role %}{% for p in role.patterns if p not in ticked %}{{ p }}
+    <label for="patterns">Patterns, one per line</label>
+    <div class="term-help" id="patterns-help">
+      <p class="small">A pattern is <code>server/tool</code>. End it with <code>*</code> to match the start of a name, or use <code>*</code> alone for everything. Examples:</p>
+      <ul class="term-examples">
+        <li><button type="button" class="term-example" data-insert="github/*" data-target="patterns">github/*</button> <span class="muted small">every tool on the github server</span></li>
+        <li><button type="button" class="term-example" data-insert="claude-code/Read" data-target="patterns">claude-code/Read</button> <span class="muted small">Claude Code's own Read tool</span></li>
+        <li><button type="button" class="term-example" data-insert="cmd/gh" data-target="patterns">cmd/gh</button> <span class="muted small">the <code>gh</code> program in the agent's shell</span></li>
+      </ul>
+    </div>
+    {% if f.field == 'patterns' %}<p class="term-field-error" id="patterns-error">{{ error }}</p>{% endif %}
+    <textarea id="patterns" name="patterns" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="{{ 'patterns-error ' if f.field == 'patterns' }}patterns-help"{% if f.field == 'patterns' %} aria-invalid="true" autofocus{% endif %}>{% if typed %}{{ f.patterns }}{% elif role %}{% for p in role.patterns if p not in picked %}{{ p }}
 {% endfor %}{% endif %}</textarea>
-    </label>
-    <p class="muted"><code>server/tool</code> is one tool, <code>server/*</code> every tool on a server, <code>server/read_*</code> tools starting with <code>read_</code>, <code>*</code> everything.</p>
+    <p class="muted small">Shell programs (<code>cmd/…</code>) are checked only with the agent's hook installed, and only when its shell tool, such as <code>claude-code/Bash</code>, is allowed too. A role without any <code>cmd/</code> pattern lets the shell run anything.</p>
   </fieldset>
   <label>Offline grace (days)
-    <input name="offline_days" type="number" min="1" max="30" value="{{ role.offline_days if role else default_offline }}">
+    <input type="number" inputmode="numeric" name="offline_days" min="1" max="30" value="{{ f.offline_days if typed else (role.offline_days if role else default_offline) }}"{% if f.field == 'offline_days' %} aria-invalid="true" aria-describedby="role-error" autofocus{% endif %}>
   </label>
-  <p class="muted">Without internet, terminals keep this role for this many days, then block every tool until they can check in.</p>
+  <p class="muted small">Without internet, computers keep this role for this many days, then block every tool until they can check in.</p>
   <div class="actions"><a class="btn" href="/terminal/roles">Cancel</a><button class="primary" type="submit">Save</button></div>
 </form>
 {% endif %}

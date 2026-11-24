@@ -87,6 +87,40 @@
     }
   });
 
+  // Example buttons that add a line to a textarea (Terminal role patterns).
+  document.addEventListener("click", function (event) {
+    var btn = event.target.closest("[data-insert]");
+    if (!btn) return;
+    var area = document.getElementById(btn.getAttribute("data-target") || "");
+    if (!area) return;
+    var line = btn.getAttribute("data-insert") || "";
+    var lines = area.value.split("\n").map(function (l) { return l.trim(); });
+    if (lines.indexOf(line) === -1) {
+      area.value = area.value.replace(/\s*$/, "") + (area.value.trim() ? "\n" : "") + line + "\n";
+    }
+    area.focus();
+    announce("ok", "Added " + line + ".");
+  });
+
+  // Terminal setup: an agent picker that rewrites one copyable command. Without
+  // JavaScript the picker stays hidden and every agent's command is listed instead.
+  Array.prototype.forEach.call(document.querySelectorAll("[data-agent-pick]"), function (pick) {
+    var select = pick.querySelector("select");
+    var input = select && document.getElementById(select.getAttribute("data-target") || "");
+    var button = input && input.parentNode.querySelector("[data-copy]");
+    if (!button) return;
+    pick.hidden = false;
+    var way = pick.parentNode;
+    Array.prototype.forEach.call(way.querySelectorAll("[data-nojs-only]"), function (el) { el.hidden = true; });
+    var sync = function () {
+      input.textContent = select.value;
+      button.setAttribute("data-copy", select.value);
+      button.setAttribute("aria-label", "Copy: " + select.value);
+    };
+    select.addEventListener("change", sync);
+    sync();  // a browser may restore the select's choice after a reload
+  });
+
   // ---- Row actions without a full page reload --------------------------------
   // Forms marked data-async (Allow, Remove, Share, Stop sharing, Disconnect) post in the
   // background and update only their own row. The server answers JSON when asked for it

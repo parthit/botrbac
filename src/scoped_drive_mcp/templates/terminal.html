@@ -1,61 +1,145 @@
 {% extends "base.html" %}
 {% from "_terminal_tabs.html" import terminal_tabs %}
 {% block title %}Terminal{% endblock %}
+{% macro copy_line(id, value, label="Copy") -%}
+<div class="term-copy">
+  <code class="term-cmd" id="{{ id }}" aria-label="{{ label }} command">{{ value }}</code>
+  <button type="button" data-copy="{{ value }}" aria-label="Copy: {{ value }}">Copy</button>
+</div>
+{%- endmacro %}
+{% macro setup_card(first) -%}
+{% set prompt = "Set up Bot RBAC Terminal for me by following " ~ site ~ "/terminal/setup.md" %}
+<section class="card term-setup" id="setup" aria-labelledby="setup-title">
+  <h2 id="setup-title">{% if first %}Connect your first computer{% else %}Connect another computer{% endif %}</h2>
+  <p class="muted">Pick one way. Either way you approve a single code on this site, and that is all.</p>
+  <div class="term-ways">
+    <div class="term-way" id="way-terminal">
+      <h3><span class="term-badge" aria-hidden="true">A</span> Paste into your terminal</h3>
+      <p class="small">Installs <code>botrbac</code>, connects this computer and adds Bot RBAC to your agent.</p>
+      <div class="term-agent-pick" data-agent-pick hidden>
+        <label for="pick-agent" class="small">Agent</label>
+        <select id="pick-agent" data-target="cmd-install-all">
+          {% for a, label in agents %}<option value="{{ install_cmds[a] }}">{{ label }}</option>{% endfor %}
+        </select>
+      </div>
+      {{ copy_line("cmd-install-all", install_cmds["claude-code"], "Install for Claude Code") }}
+      <details class="how term-more" data-nojs-only>
+        <summary>Cursor, Codex or Gemini CLI</summary>
+        {% for a, label in agents if a != "claude-code" %}
+        <p class="small"><b>{{ label }}</b></p>
+        {{ copy_line("cmd-install-" ~ a, install_cmds[a], "Install for " ~ label) }}
+        {% endfor %}
+      </details>
+      <p class="muted small"><a href="/terminal/install.sh">Read the script</a> before you run it.</p>
+    </div>
+    <div class="term-way" id="way-agent">
+      <h3><span class="term-badge" aria-hidden="true">B</span> Paste into your agent</h3>
+      <p class="small">Claude Code, Cursor, Codex or Gemini CLI does the same steps for you, from <a href="/terminal/setup.md">these instructions</a>.</p>
+      {{ copy_line("agent-prompt", prompt, "Agent prompt") }}
+    </div>
+  </div>
+
+  <details class="how term-more" id="manual">
+    <summary>Prefer to do each step yourself?</summary>
+    <ol class="term-steps">
+      <li>
+        <b>Install</b>
+        {{ copy_line("cmd-install", "uv tool install git+https://github.com/parthit/botrbac", "Install") }}
+        <p class="muted small">No uv? <code>pipx install git+https://github.com/parthit/botrbac</code> works too.</p>
+      </li>
+      <li>
+        <b>Log in</b>
+        {{ copy_line("cmd-login", login_cmd, "Log in") }}
+        <p class="muted small">Open the link it prints and approve the code on this site.</p>
+      </li>
+      <li>
+        <b>Add Bot RBAC to your agent</b>
+        {{ copy_line("cmd-add", "claude mcp add botrbac -- botrbac gateway", "Add to Claude Code") }}
+        <p class="muted small">That is for Claude Code. Restart the agent so it loads the new server.</p>
+        <details class="how term-more">
+          <summary>Using another agent?</summary>
+          <p class="small"><code>botrbac add-gateway --agent cursor</code> (or <code>codex</code>, <code>gemini</code>) adds it to that agent's file and keeps a backup. Or add it by hand, keeping the servers already there:</p>
+          <p class="small"><b>Cursor</b> <span class="muted">· <code>~/.cursor/mcp.json</code>, inside <code>mcpServers</code></span></p>
+          <pre class="snippet">"botrbac": { "command": "botrbac", "args": ["gateway", "--agent", "cursor"] }</pre>
+          <p class="small"><b>Gemini CLI</b> <span class="muted">· <code>~/.gemini/settings.json</code>, inside <code>mcpServers</code></span></p>
+          <pre class="snippet">"botrbac": { "command": "botrbac", "args": ["gateway", "--agent", "gemini"] }</pre>
+          <p class="small"><b>Codex</b> <span class="muted">· <code>~/.codex/config.toml</code></span></p>
+          <pre class="snippet">[mcp_servers.botrbac]
+command = "botrbac"
+args = ["gateway", "--agent", "codex"]</pre>
+        </details>
+      </li>
+    </ol>
+  </details>
+
+  <details class="how term-more" id="more-options">
+    <summary>More options</summary>
+    <dl class="term-options">
+      <dt>Put an MCP server behind Bot RBAC</dt>
+      <dd>So that server's tools follow the role. <code>botrbac servers add github -- npx -y @modelcontextprotocol/server-github</code>, or <code>botrbac servers add notes --url https://…/mcp</code>.</dd>
+      <dt>Move every server in a config file</dt>
+      <dd>When an agent already has several MCP servers. <code>botrbac wrap claude-code</code> (or <code>cursor</code>, <code>gemini</code>, <code>codex</code>) moves them all and keeps a backup; add <code>--dry-run</code> to see the changes first.</dd>
+      <dt>Check the agent's own tools</dt>
+      <dd>When shell commands and file edits should follow the role too, including <code>cmd/gh</code>-style patterns. <code>botrbac hooks install claude-code</code>.</dd>
+      <dt>A narrower role for one run</dt>
+      <dd>When one session should do less than the computer's role. Add <code>eval "$(botrbac shell-init)"</code> to your shell's startup file, then <code>claude --botrbac --role reviewer</code>.</dd>
+      <dt>Check the setup</dt>
+      <dd><code>botrbac doctor</code> lists anything that still goes around Bot RBAC.</dd>
+    </dl>
+  </details>
+  <p class="muted small term-note">Bot RBAC only controls tool calls that go through it. It stops an agent from going around your rules; it cannot stop someone who owns the computer from removing it. <a href="https://github.com/parthit/botrbac/blob/main/docs/terminal.md">Full guide</a></p>
+</section>
+{%- endmacro %}
 {% block content %}
 <h1>Terminal</h1>
-<p class="muted">Control what AI agents on your computers can do. Works with any agent that supports MCP: Claude Code, Codex, Cursor, Gemini CLI and others.</p>
+<p class="muted lead">Control what AI agents on your computers can do. Works with any agent that supports MCP: Claude Code, Codex, Cursor, Gemini CLI and others.</p>
 {{ terminal_tabs('terminals') }}
 
-<section class="card" aria-labelledby="get-started">
-  <h2 id="get-started">Get started</h2>
-  <ol>
-    <li>Install: <code>uv tool install git+https://github.com/parthit/botrbac</code></li>
-    <li>Log in: <code>botrbac login --server {{ request.base_url | string | trim('/') }}</code>, then approve the code on this site.</li>
-    <li>Put your agent's tool servers behind Bot RBAC: <code>botrbac wrap claude-code</code> (or <code>cursor</code>, <code>gemini</code>), or add <code>botrbac gateway</code> as an MCP server yourself.</li>
-    <li>Optional: <code>eval "$(botrbac shell-init)"</code>, then start an agent with a narrower role: <code>claude --botrbac --role reviewer</code>.</li>
-  </ol>
-  <p class="muted">Bot RBAC only controls tool calls that go through it. It stops an agent from going around your rules; it cannot stop someone who owns the computer from removing it.</p>
-</section>
-
+{% if not terminals %}
+{{ setup_card(true) }}
 <h2>Your terminals</h2>
-{% if terminals %}
-<table class="cards" id="terminals">
-  <thead><tr><th>Name</th><th>Role</th><th>Last seen</th><th>Waiting to sync</th><th></th></tr></thead>
+<p class="muted" id="no-terminals">No terminals yet. Once a computer is connected it shows up here, and you can give it a <a href="/terminal/roles">role</a>.</p>
+{% else %}
+<h2>Your terminals</h2>
+<table class="cards term-table" id="terminals">
+  <thead><tr><th>Name</th><th>Role</th><th>Last seen</th><th>Waiting to sync</th><th><span class="sr-only">Actions</span></th></tr></thead>
   <tbody>
   {% for t in terminals %}
   <tr id="terminal-{{ t.id }}">
-    <td>{{ t.name }}<br><span class="muted">{{ t.hostname }}{% if t.os %} · {{ t.os }}{% endif %}{% if t.version %} · botrbac {{ t.version }}{% endif %}</span>
-      {% if t.unguarded %}<br><span class="pill warn" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>{% endif %}</td>
-    <td>
-      <form class="inline" method="post" action="/terminal/t/{{ t.id }}/role">
+    <td data-label="Name"><div class="term-name"><b>{{ t.name }}</b>
+      <span class="muted small">{{ t.hostname }}{% if t.os %} · {{ t.os }}{% endif %}{% if t.version %} · botrbac {{ t.version }}{% endif %}</span>
+      {% if t.unguarded %}<span class="pill pending" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>{% endif %}</div></td>
+    <td data-label="Role">
+      <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/role">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="sr-only" for="role-{{ t.id }}">Role for {{ t.name }}</label>
         <select id="role-{{ t.id }}" name="role_id">
           {% for r in roles %}<option value="{{ r.id }}"{% if r.id == t.role_id %} selected{% endif %}>{{ r.name }}</option>{% endfor %}
           {% if t.role_id not in role_names %}<option value="" selected>No tools (its role was deleted)</option>{% endif %}
         </select>
-        <button type="submit" class="ghost">Change</button>
+        <button type="submit">Change<span class="sr-only"> role for {{ t.name }}</span></button>
       </form>
     </td>
-    <td>{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
-    <td>{% if t.queued %}{{ t.queued }} row{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>
-    <td>
-      <form class="inline" method="post" action="/terminal/t/{{ t.id }}/rename">
+    <td data-label="Last seen">{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
+    <td data-label="Waiting">{% if t.queued %}{{ t.queued }} row{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>
+    <td data-label="Manage">
+      <div class="term-manage">
+      <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/rename">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label class="sr-only" for="name-{{ t.id }}">New name</label>
-        <input id="name-{{ t.id }}" name="name" maxlength="80" placeholder="New name" size="10">
-        <button type="submit" class="ghost">Rename</button>
+        <label class="sr-only" for="name-{{ t.id }}">New name for {{ t.name }}</label>
+        <input id="name-{{ t.id }}" type="text" name="name" maxlength="80" required placeholder="New name">
+        <button type="submit">Rename</button>
       </form>
-      <form class="inline" method="post" action="/terminal/t/{{ t.id }}/revoke">
+      <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/revoke" data-confirm="Disconnect {{ t.name }}? Its agents lose Bot RBAC tools until it logs in again.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button type="submit" class="ghost">Disconnect</button>
+        <button type="submit" class="danger">Disconnect<span class="sr-only"> {{ t.name }}</span></button>
       </form>
+      </div>
     </td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
-{% else %}
-<p class="muted" id="no-terminals">No terminals yet. Run <code>botrbac login</code> on a computer to add one.</p>
+{{ setup_card(false) }}
 {% endif %}
 {% endblock %}

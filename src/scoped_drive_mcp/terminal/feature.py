@@ -4,16 +4,20 @@ import csv
 import hashlib
 import io
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import anyio.to_thread
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
+
+from botrbac_cli.api import DEFAULT_SERVER
 
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
@@ -71,6 +75,44 @@ TERMINAL_LIMIT = 240
 MAX_BODY = 2 * 1024 * 1024
 MAX_UNGUARDED = 50
 ACTIVITY_PAGE = 100
+_TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
+SETUP_MD = _TEMPLATES / "terminal_setup.md"
+INSTALL_SH = _TEMPLATES / "terminal_install.sh"
+# A site address that is safe to bake into a shell script and markdown as is.
+_SAFE_SITE = re.compile(r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+AGENTS = (
+    ("claude-code", "Claude Code"),
+    ("cursor", "Cursor"),
+    ("codex", "Codex"),
+    ("gemini", "Gemini CLI"),
+)
+
+
+def safe_site(base: str) -> str:
+    base = base.rstrip("/")
+    return base if _SAFE_SITE.fullmatch(base) else DEFAULT_SERVER
+
+
+def install_command(base: str, agent: str = "claude-code") -> str:
+    return f"curl -fsSL {safe_site(base)}/terminal/install.sh | sh -s -- --agent {agent}"
+
+
+def install_script(base: str) -> str:
+    """/terminal/install.sh with this site's address filled in."""
+    return INSTALL_SH.read_text(encoding="utf-8").replace("{{ server }}", safe_site(base))
+
+
+def login_command(base: str) -> str:
+    """`botrbac login`, with --server only when this site is not the CLI's default."""
+    base = safe_site(base)
+    return "botrbac login" if base == DEFAULT_SERVER else f"botrbac login --server {base}"
+
+
+def setup_markdown(base: str) -> str:
+    """The setup steps a coding agent follows (/terminal/setup.md), for this site."""
+    base = safe_site(base)
+    text = SETUP_MD.read_text(encoding="utf-8")
+    return text.replace("{{ server }}", base).replace("{{ login }}", login_command(base))
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -130,6 +172,9 @@ class TerminalFeature:
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
         self.activity = TerminalActivity(self.store)
+
+    def site(self, request: Request) -> str:
+        return safe_site(self.base_url or str(request.base_url))
 
     def policy_for(self, terminal: Terminal) -> dict[str, Any]:
         """What the CLI enforces: this terminal's role, every role it may narrow to with
@@ -237,7 +282,22 @@ class TerminalFeature:
             await _run(self.terminals.touch, terminal.id, **changes)
             return JSONResponse(result)
 
+        async def setup_md(request: Request) -> Response:
+            text = await _run(setup_markdown, self.site(request))
+            return PlainTextResponse(
+                text, media_type="text/markdown", headers={"cache-control": "no-cache"}
+            )
+
+        async def install_sh(request: Request) -> Response:
+            text = await _run(install_script, self.site(request))
+            return PlainTextResponse(
+                text, media_type="text/x-shellscript", headers={"cache-control": "no-cache"}
+            )
+
         return [
+            # Public: the instructions a coding agent reads to set a computer up.
+            Route("/terminal/setup.md", setup_md, methods=["GET"]),
+            Route("/terminal/install.sh", install_sh, methods=["GET"]),
             Route("/api/terminal/device", device, methods=["POST"]),
             Route("/api/terminal/token", token, methods=["POST"]),
             Route("/api/terminal/policy", policy, methods=["GET"]),
@@ -252,8 +312,17 @@ class TerminalFeature:
             terminals = await _run(self.terminals.for_person, email)
             roles = await _run(self.roles.all, email)
             names = {r.id: r.name for r in roles}
+            site = self.site(request)
             return render(
-                request, "terminal.html", terminals=terminals, roles=roles, role_names=names
+                request,
+                "terminal.html",
+                terminals=terminals,
+                roles=roles,
+                role_names=names,
+                site=site,
+                login_cmd=login_command(site),
+                agents=AGENTS,
+                install_cmds={a: install_command(site, a) for a, _ in AGENTS},
             )
 
         async def device_page(request: Request) -> Response:
@@ -333,8 +402,19 @@ class TerminalFeature:
             return RedirectResponse("/terminal", status_code=303)
 
         async def roles_page(request: Request) -> Response:
-            roles = await _run(self.roles.all, _me())
-            return render(request, "terminal_roles.html", roles=roles)
+            email = _me()
+            roles = await _run(self.roles.all, email)
+            terminals = await _run(self.terminals.for_person, email)
+            used: dict[str, int] = {}
+            for t in terminals:
+                used[t.role_id] = used.get(t.role_id, 0) + 1
+            return render(
+                request,
+                "terminal_roles.html",
+                roles=roles,
+                used=used,
+                has_terminals=bool(terminals),
+            )
 
         async def role_edit(request: Request) -> Response:
             email = _me()
@@ -344,13 +424,27 @@ class TerminalFeature:
                 role = await _run(self.roles.get, email, role_id)
                 if role is None:
                     return render(request, "error.html", 404, message="Page not found.")
+            return await role_form(request, email, role)
+
+        async def role_form(
+            request: Request,
+            email: str,
+            role: Any,
+            error: str = "",
+            typed: dict[str, Any] | None = None,
+        ) -> Response:
+            """The role page. After a refused save it shows the error next to the
+            patterns and keeps everything the person typed and ticked."""
             seen = await _run(self.roles.seen_tools, email)
             return render(
                 request,
                 "terminal_role.html",
+                400 if error else 200,
                 role=role,
                 seen=seen,
                 default_offline=DEFAULT_OFFLINE_DAYS,
+                error=error,
+                typed=typed,
             )
 
         async def role_save(request: Request, _form: Any) -> Response:
@@ -373,9 +467,18 @@ class TerminalFeature:
                     days,
                 )
             except RoleError as exc:
-                kit.flash(request, "error", str(exc))
-                back = f"/terminal/roles/{role_id}" if role_id else "/terminal/roles/new"
-                return RedirectResponse(back, status_code=303)
+                existing = await _run(self.roles.get, email, role_id) if role_id else None
+                if role_id and existing is None:
+                    kit.flash(request, "error", str(exc))
+                    return RedirectResponse("/terminal/roles", status_code=303)
+                typed_form = {
+                    "name": str(form.get("name") or "")[:200],
+                    "patterns": "\n".join(typed)[:20_000],
+                    "ticked": ticked[:500],
+                    "offline_days": str(form.get("offline_days") or "")[:4],
+                }
+                typed_form["field"] = exc.field or "form"
+                return await role_form(request, email, existing, str(exc), typed_form)
             audit_owner("terminal_role_saved", role=role.id)
             kit.flash(request, "ok", f"Saved {role.name}.")
             return RedirectResponse("/terminal/roles", status_code=303)

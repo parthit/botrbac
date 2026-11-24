@@ -129,9 +129,18 @@ def test_roles_pages(world, memstore, oauth) -> None:
     listing = c.get("/terminal/roles").text
     assert "Reviewer" in listing and "github/get_*" in listing
 
-    bad = c.post("/terminal/roles/save", data={"csrf": token, "name": "Bad", "patterns": "nope"})
-    assert bad.headers["location"] == "/terminal/roles/new"
-    assert "is not a tool pattern" in c.get("/terminal/roles/new").text
+    bad = c.post(
+        "/terminal/roles/save",
+        data={"csrf": token, "name": "Bad", "patterns": "github/*\ngh", "offline_days": "4"},
+    )
+    # Shown next to the field, with everything typed kept (not a redirect that loses it).
+    assert bad.status_code == 400
+    assert "To allow the gh command, use cmd/gh." in bad.text
+    assert 'id="patterns-error"' in bad.text and 'aria-invalid="true"' in bad.text
+    assert 'value="Bad"' in bad.text and 'value="4"' in bad.text
+    textarea = bad.text.split('name="patterns"', 1)[1].split("</textarea>", 1)[0]
+    assert "github/*" in textarea and "gh" in textarea
+    assert "Bad" not in c.get("/terminal/roles").text
 
     role_id = listing.split('id="role-r_', 1)[1].split('"', 1)[0]
     c.post(f"/terminal/roles/r_{role_id}/delete", data={"csrf": token})
