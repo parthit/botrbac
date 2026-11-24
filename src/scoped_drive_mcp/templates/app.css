@@ -1250,3 +1250,15 @@ header { view-transition-name: site-header; }
   .tabs { gap: 0; }
   .tabs a { padding: 0 8px; }
 }
+
+/* ---- Google file picker ------------------------------------------------------------
+   Google adds the picker to this page with position: absolute and a top it works out from
+   the scroll position. In Safari that lands near the top of the page, so on a page scrolled
+   down the picker opened out of view. Pin it, and its backdrop, to the window instead.
+   Google sets the size and position inline, hence !important. */
+.picker-dialog-bg { position: fixed !important; inset: 0 !important; }
+.picker-dialog {
+  position: fixed !important;
+  inset: 0 !important;
+  margin: auto !important;
+}
