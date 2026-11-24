@@ -195,7 +195,8 @@ def programs(command: str) -> list[str]:
     shell_running: str | None = None
     tokens = _tokens(command)
     for index, (word, is_op) in enumerate(tokens):
-        if not is_op and word.isdigit() and index + 1 < len(tokens):
+        # An option's value (`xargs -n 1 >f rm`) is consumed below, never read as an fd.
+        if not is_op and not wrapper_skip and word.isdigit() and index + 1 < len(tokens):
             after, after_op = tokens[index + 1]
             if after_op and after[:1] in "<>":
                 # `2>f rm`: a file descriptor number, not a program. (Read this way even

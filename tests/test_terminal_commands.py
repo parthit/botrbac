@@ -245,3 +245,12 @@ def test_a_file_descriptor_before_a_redirect_is_not_the_program(command) -> None
     from botrbac_cli.shellcmd import programs
 
     assert "rm" in programs(command)
+
+
+@pytest.mark.parametrize(
+    "command", ["sudo -u 1 >f rm -rf x", "xargs -n 1 >f rm x", "xargs -n 1 2>f rm x", "sudo 2>f rm"]
+)
+def test_a_numeric_option_value_before_a_redirect_is_still_a_value(command) -> None:
+    from botrbac_cli.shellcmd import programs
+
+    assert "rm" in programs(command)
