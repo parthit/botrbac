@@ -50,9 +50,26 @@ class AuditQueue:
             (KEEP_SENT,),
         )
 
+    def mark_rejected(self, event_ids: list[str]) -> None:
+        """Rows the server refused one by one. Kept here (state 2), never deleted, so
+        `botrbac log` shows them and `botrbac sync --retry-rejected` can send them again."""
+        self.db.executemany(
+            "UPDATE rows SET sent = 2 WHERE event_id = ?", [(e,) for e in event_ids]
+        )
+
+    def rejected(self) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM rows WHERE sent = 2").fetchone()[0])
+
+    def requeue_rejected(self) -> int:
+        return self.db.execute("UPDATE rows SET sent = 0 WHERE sent = 2").rowcount
+
     def waiting(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM rows WHERE sent = 0").fetchone()[0])
 
     def recent(self, limit: int = 20) -> list[dict[str, Any]]:
         cur = self.db.execute("SELECT body, sent FROM rows ORDER BY ts DESC LIMIT ?", (limit,))
-        return [{**json.loads(body), "sent": bool(sent)} for body, sent in cur.fetchall()]
+        status = {0: "waiting", 1: "sent", 2: "rejected"}
+        return [
+            {**json.loads(body), "sent": sent == 1, "status": status.get(sent, "waiting")}
+            for body, sent in cur.fetchall()
+        ]

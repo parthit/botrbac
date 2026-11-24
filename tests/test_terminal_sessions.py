@@ -379,3 +379,14 @@ def test_wrap_codex_reports_a_taken_name(home, capsys) -> None:
     config.write_text('[mcp_servers.botrbac]\ncommand = "my-own-thing"\n')
     assert main(["wrap", "codex", "--file", str(config)]) == 0
     assert "was not added" in capsys.readouterr().out
+
+
+def test_wrap_keeps_a_symlinked_config_a_symlink(home) -> None:
+    real = home / "dotfiles" / "mcp.json"
+    real.parent.mkdir()
+    real.write_text(json.dumps({"mcpServers": {"gh": {"command": "npx"}}}))
+    link = home / "linked.json"
+    link.symlink_to(real)
+    assert main(["wrap", "cursor", "--file", str(link)]) == 0
+    assert link.is_symlink()
+    assert "botrbac" in json.loads(real.read_text())["mcpServers"]
