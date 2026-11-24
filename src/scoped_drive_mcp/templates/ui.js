@@ -882,10 +882,8 @@
               .then(function (k) { return unseal(k, where.path, stored); })
               .catch(function () { return get(own, false); });
           },
-          function (err) {
-            if (err instanceof TypeError) return get(own, false);
-            throw err;
-          }
+          // Out of reach, or refused (the link ran out): the app's route still serves it.
+          function () { return get(own, false); }
         );
       });
   }
