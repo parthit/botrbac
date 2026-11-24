@@ -198,6 +198,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if problems or found else 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    from .check import run
+
+    return run(args.agent, args.tool, args.block_unguarded, args.format)
+
+
+def cmd_hooks(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .hooks import install_claude_code
+
+    if args.agent != "claude-code":
+        print(
+            "Automatic hook setup is only for Claude Code. For another agent, make its "
+            f"pre-tool hook run: botrbac check --agent {args.agent} (see docs/terminal.md)."
+        )
+        return 0
+    base = Path.home() if args.user else Path.cwd()
+    result = install_claude_code(base / ".claude" / "settings.json", not args.allow_unguarded)
+    print(f"Claude Code now asks botrbac before every tool call: {result['file']}")
+    if result["backup"]:
+        print(f"Backup: {result['backup']}")
+    print("Give the role claude-code/<Tool> patterns (claude-code/Read, claude-code/*) as needed.")
+    return 0
+
+
 # ---- upstream servers ------------------------------------------------------------
 
 
@@ -276,6 +302,26 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="check login, policy and unguarded servers").set_defaults(
         fn=cmd_doctor
     )
+    p = sub.add_parser("check", help="for an agent's pre-tool hook: allow or block one call")
+    p.add_argument("--agent", required=True, help="the agent's name, e.g. claude-code")
+    p.add_argument("--tool", help="the tool's name (default: read the hook's JSON on stdin)")
+    p.add_argument(
+        "--block-unguarded",
+        action="store_true",
+        help="block MCP tools that do not come through botrbac gateway",
+    )
+    p.add_argument("--format", choices=["exit", "json"], default="exit")
+    p.set_defaults(fn=cmd_check)
+    p = sub.add_parser("hooks", help="install the pre-tool hook for an agent")
+    p.add_argument("action", choices=["install"])
+    p.add_argument("agent")
+    p.add_argument("--user", action="store_true", help="all projects (~/.claude/settings.json)")
+    p.add_argument(
+        "--allow-unguarded",
+        action="store_true",
+        help="check MCP tools that bypass the gateway instead of blocking them",
+    )
+    p.set_defaults(fn=cmd_hooks)
     p = sub.add_parser(
         "servers",
         help="MCP servers the gateway sits in front of",

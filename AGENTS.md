@@ -15,6 +15,8 @@ Node.js function (`api/blob-sign.mjs`) that only signs Vercel Blob URLs for the 
   `uv run --env-file .env uvicorn api.index:app --reload --port 8000`
 - **After changing dependencies:** `uv export --no-dev --no-hashes --no-emit-project -o requirements.txt`
   (Vercel installs from `requirements.txt`; CI fails if it drifts from `uv.lock`).
+- **Terminal CLI** (`src/botrbac_cli/`, the `botrbac` command; [docs/terminal.md](docs/terminal.md)): its
+  tests run in the same `uv run pytest -q`. Try it with `uv run botrbac --help`.
 - Code lives in `src/scoped_drive_mcp/` (the package keeps its original name). Layout:
   [docs/development.md](docs/development.md).
 - Never commit `.env`, tokens, or Google client JSON. Keep the allowlist check, role checks and security
