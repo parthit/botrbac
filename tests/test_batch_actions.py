@@ -30,8 +30,9 @@ def test_batch_needs_csrf_and_a_known_action(owner_c) -> None:
     r = batch(owner_c, "delete", "proj")
     assert r.status_code == 303
     assert "Choose what to do" in owner_c.get("/files").text
-    r = batch(owner_c, "remove", "bad id")
-    assert r.status_code == 400
+    r = batch(owner_c, "remove", "loose-doc", "bad id")
+    assert r.status_code == 303
+    assert "One of the ticked items is not a Drive item" in owner_c.get("/files").text
 
 
 def test_allow_and_remove_several(owner_c, p2_app) -> None:
@@ -162,3 +163,18 @@ def test_sharing_a_hidden_item_brings_it_back(people) -> None:  # noqa: F811
     assert 'value="loose-two"' not in owner.get("/files").text
     batch(owner, "share", "loose-two")
     assert 'value="loose-two"' in owner.get("/files").text
+
+
+def test_remove_does_not_claim_unreachable_when_drive_cannot_be_asked(owner_c, monkeypatch) -> None:
+    from scoped_drive_mcp.grants import GrantService
+
+    batch(owner_c, "allow", "proj", "proj-notes", "loose-doc")
+
+    def down(self, file_id, extra=None):
+        raise RuntimeError("drive down")
+
+    monkeypatch.setattr(GrantService, "covering_entry", down)
+    batch(owner_c, "remove", "proj-notes", "loose-doc")
+    page = owner_c.get("/files").text
+    assert "Removed 2 items. If a folder above them is allowed" in page
+    assert "can no longer use them" not in page

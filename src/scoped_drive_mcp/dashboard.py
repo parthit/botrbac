@@ -2038,7 +2038,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if action not in BATCH_ACTIONS:
             return action_done(request, "error", "Choose what to do with the items.", next_url)
         raw = (await request.form()).getlist("file_id")
-        ids = list(dict.fromkeys(validate_drive_id(str(v)) for v in raw))
+        try:
+            ids = list(dict.fromkeys(validate_drive_id(str(v)) for v in raw))
+        except InvalidInputError:
+            # Only a hand-made request carries one: the page renders real ids. Refuse the
+            # whole batch rather than act on part of it.
+            return action_done(
+                request, "error", "One of the ticked items is not a Drive item.", next_url
+            )
         if not ids:
             return action_done(request, "error", "Tick at least one item first.", next_url)
         if len(ids) > BATCH_LIMIT:
@@ -2114,19 +2121,22 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # still includes it, so the message must not say the item is unreachable.
             root = ctx.visible_root_folder_id()
             extra = {root: "the folder set on the server"} if root else None
-            still = []
-            for fid in changed[:COVER_CHECK_LIMIT]:
-                cover = await still_covered(own, fid, extra)
-                if cover:
-                    still.append(cover)
-        elif action == "unshare" and ext is not None:
-            still = []
-            for fid in changed[:COVER_CHECK_LIMIT]:
-                cover = await still_covered(ext, fid)
-                if cover:
-                    still.append(cover)
         else:
-            still = []
+            extra = None
+        # still: the folder that still covers each removed item. unknown: removed items
+        # whose folders were not checked, because Drive did not answer ("") or the batch
+        # was past COVER_CHECK_LIMIT. Then the message must not say they are unreachable.
+        still: list[str] = []
+        unknown = 0
+        checker = own if action == "remove" else ext if action == "unshare" else None
+        if checker is not None:
+            unknown = max(0, len(changed) - COVER_CHECK_LIMIT)
+            for fid in changed[:COVER_CHECK_LIMIT]:
+                cover = await still_covered(checker, fid, extra)
+                if cover:
+                    still.append(cover)
+                elif cover == "":
+                    unknown += 1
         what = f"\u201c{names[0]}\u201d" if done == 1 and names else plural(done)
         message = {
             "allow": f"Allowed {what} for your assistants.",
@@ -2139,6 +2149,19 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             f"{'it' if done == 1 else 'them'}. Google still lists Bot RBAC as able to open "
             f"{'it' if done == 1 else 'them'} until you remove the app in your Google Account.",
         }[action]
+        if unknown and not still:
+            # Same wording as one row's Remove when Drive could not be asked.
+            them = "it" if done == 1 else "them"
+            if action == "remove":
+                message = (
+                    f"Removed {what}. If a folder above {them} is allowed, your assistants "
+                    f"can still use {them} through that folder."
+                )
+            else:
+                message = (
+                    f"Stopped sharing {what}. If a folder above {them} is on your Sharing "
+                    f"list, paired people\u2019s assistants can still read {them} through it."
+                )
         if still:
             folders = ", ".join(f"\u201c{c}\u201d" for c in dict.fromkeys(still))
             stays = "stays" if len(set(still)) == 1 else "stay"
