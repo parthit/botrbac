@@ -36,5 +36,8 @@ token*.json
 .idea/
 .vscode/
 
+# Node (api/blob-sign.mjs)
+node_modules/
+
 # Local agent worktrees
 .claude/worktrees/

@@ -694,7 +694,10 @@
 
 // Files sent to a paired person (Sharing → Shared with me). Vercel refuses request and
 // response bodies over 4.5 MB, so a file goes up, and comes back down, in pieces of at
-// most 4 MB. Without JavaScript the plain form still sends files up to 4 MB.
+// most 4 MB. When the server hands out presigned Blob URLs ("direct"), the browser moves
+// each piece to and from Vercel Blob itself; the server still decides who may do what.
+// If Blob cannot be reached, the send starts again through the server. Without
+// JavaScript the plain form still sends files up to 4 MB.
 (function () {
   function fail(response) {
     return response.json().then(
@@ -712,11 +715,82 @@
     }).then(function (response) { return response.ok ? response.json() : fail(response); });
   }
 
+  // Blob could not be reached (network or CORS): send through the server route instead.
+  function blobError(cause) {
+    var err = new Error("The file could not be sent. Try again.");
+    err.blob = true;
+    err.cause = cause;
+    return err;
+  }
+
+  // Blob refused the signed URL (403: expired, or refused): start the send again, so
+  // the server checks it again and signs new URLs.
+  function refusedError(status) {
+    var err = new Error("The upload link was refused (" + status + "). Try sending the file again.");
+    err.restart = true;
+    return err;
+  }
+
+  // One retry for a dropped connection; a refusal is final.
+  function retried(send) {
+    return send().catch(function (err) { if (err instanceof TypeError) return send(); throw err; });
+  }
+
   var form = document.querySelector("form[data-drop-send]");
   if (form && window.fetch && window.FormData) {
     var status = form.querySelector("[data-drop-status]");
     var button = form.querySelector("button[type=submit]");
     var say = function (text) { if (status) status.textContent = text; };
+
+    var sendFile = function (file, csrf, direct) {
+      var start = new FormData();
+      start.append("csrf", csrf);
+      start.append("to", form.elements.to.value);
+      start.append("name", file.name);
+      start.append("type", file.type || "application/octet-stream");
+      start.append("size", String(file.size));
+      if (!direct) start.append("direct", "0");
+      say("Starting…");
+      return post("/shared/send/start", start).then(function (begun) {
+        var base = "/shared/send/" + encodeURIComponent(begun.upload_id);
+        var slice = function (n) { return file.slice(n * begun.piece_bytes, (n + 1) * begun.piece_bytes); };
+        var putPiece = function (n) {
+          if (begun.direct) {
+            var signed = begun.direct[n];
+            return retried(function () {
+              return fetch(signed.url, {
+                method: "PUT",
+                body: slice(n),
+                headers: signed.headers || {},
+                credentials: "omit",
+              });
+            }).then(
+              function (response) {
+                if (response.status === 403) throw refusedError(response.status);
+                if (!response.ok) throw blobError(response.status);
+              },
+              function (err) { throw blobError(err); }
+            );
+          }
+          var body = new FormData();
+          body.append("csrf", csrf);
+          body.append("piece", slice(n), "piece");
+          return retried(function () { return post(base + "/piece/" + n, body); });
+        };
+        var next = function (n) {
+          if (n >= begun.pieces) return Promise.resolve();
+          say("Sending… " + Math.round((n / begun.pieces) * 100) + "%");
+          return putPiece(n).then(function () { return next(n + 1); });
+        };
+        return next(0).then(function () {
+          var done = new FormData();
+          done.append("csrf", csrf);
+          say("Finishing…");
+          return post(base + "/finish", done);
+        });
+      });
+    };
+
     form.addEventListener("submit", function (event) {
       var file = form.elements.file.files[0];
       if (!file) return;
@@ -727,37 +801,16 @@
         return;
       }
       var csrf = form.elements.csrf.value;
-      var start = new FormData();
-      start.append("csrf", csrf);
-      start.append("to", form.elements.to.value);
-      start.append("name", file.name);
-      start.append("type", file.type || "application/octet-stream");
-      start.append("size", String(file.size));
       button.disabled = true;
-      say("Starting…");
-      var upload;
-      post("/shared/send/start", start)
-        .then(function (begun) {
-          upload = begun;
-          var base = "/shared/send/" + encodeURIComponent(begun.upload_id);
-          var next = function (n) {
-            if (n >= begun.pieces) return Promise.resolve();
-            say("Sending… " + Math.round((n / begun.pieces) * 100) + "%");
-            var body = new FormData();
-            body.append("csrf", csrf);
-            body.append("piece", file.slice(n * begun.piece_bytes, (n + 1) * begun.piece_bytes), "piece");
-            var send = function () { return post(base + "/piece/" + n, body); };
-            // One retry for a dropped connection; a refusal from the server is final.
-            return send()
-              .catch(function (err) { if (err instanceof TypeError) return send(); throw err; })
-              .then(function () { return next(n + 1); });
-          };
-          return next(0).then(function () {
-            var done = new FormData();
-            done.append("csrf", csrf);
-            say("Finishing…");
-            return post(base + "/finish", done);
-          });
+      var fallback = function (err) {
+        if (err && err.blob) return sendFile(file, csrf, false);
+        throw err;
+      };
+      sendFile(file, csrf, true)
+        .catch(function (err) {
+          // Once: a second refusal is shown, not retried.
+          if (err && err.restart) return sendFile(file, csrf, true).catch(fallback);
+          return fallback(err);
         })
         .then(function () { window.location.assign("/sharing?tab=with-me"); })
         .catch(function (err) {
@@ -767,11 +820,31 @@
     });
   }
 
+  // One piece: ask this app where to fetch it (a short-lived Blob URL, or its own route),
+  // then fetch it. A Blob URL that cannot be reached falls back to the app's route.
+  function fetchPiece(id, n) {
+    var own = "/drops/" + id + "/piece/" + n;
+    var get = function (url, direct) {
+      return fetch(url, { credentials: direct ? "omit" : "same-origin" })
+        .then(function (response) { return response.ok ? response.blob() : fail(response); });
+    };
+    return fetch(own + "/url", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (response) { return response.ok ? response.json() : fail(response); })
+      .then(function (where) {
+        if (!where.direct) return get(own, false);
+        return get(where.url, true).catch(function (err) {
+          if (err instanceof TypeError) return get(own, false);
+          throw err;
+        });
+      });
+  }
+
   document.addEventListener("click", function (event) {
     var link = event.target.closest("a[data-drop-download]");
     if (!link || !window.fetch || !window.Blob || !window.URL) return;
     var pieces = parseInt(link.getAttribute("data-drop-pieces"), 10) || 1;
-    if (pieces <= 1) return; // small enough for the plain link
+    // A small file the app encrypted is fine through the plain link.
+    if (pieces <= 1 && !link.hasAttribute("data-drop-direct")) return;
     event.preventDefault();
     if (link.getAttribute("aria-busy") === "true") return;
     var id = encodeURIComponent(link.getAttribute("data-drop-download"));
@@ -781,9 +854,7 @@
     var next = function (n) {
       if (n >= pieces) return Promise.resolve();
       link.textContent = "Downloading… " + Math.round((n / pieces) * 100) + "%";
-      return fetch("/drops/" + id + "/piece/" + n, { credentials: "same-origin" })
-        .then(function (response) { return response.ok ? response.blob() : fail(response); })
-        .then(function (blob) { parts.push(blob); return next(n + 1); });
+      return fetchPiece(id, n).then(function (blob) { parts.push(blob); return next(n + 1); });
     };
     next(0)
       .then(function () {

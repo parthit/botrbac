@@ -4,10 +4,13 @@
     "api/index.py": {
       "maxDuration": 120,
       "includeFiles": "src/scoped_drive_mcp/templates/**",
-      "excludeFiles": "{tests/**,docs/**,scripts/**,.venv/**,**/__pycache__/**}"
+      "excludeFiles": "{tests/**,docs/**,scripts/**,.venv/**,**/__pycache__/**,node_modules/**}"
+    },
+    "api/blob-sign.mjs": {
+      "maxDuration": 10
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
+    { "source": "/((?!api/blob-sign).*)", "destination": "/api/index" }
   ]
 }

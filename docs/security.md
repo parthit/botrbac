@@ -161,10 +161,24 @@
   an id nobody can pick stays pending until denied; one app can have at most `MAX_PENDING_REQUESTS` waiting.
 - **Files paired people send.** A paired person can send you a file (`send_file`, or the dashboard). It is
   held for `DROP_HOLD_HOURS` (encrypted when `ENCRYPTION_KEY` is set, in a private Vercel Blob store when
-  one is connected, otherwise in the key-value store) and then deleted; nothing is written to your Drive unless you
-  save it. The sender cannot read, list or change it afterwards. Your assistants see it marked
+  one is connected, otherwise in the key-value store) and then deleted; nothing is written to your Drive
+  unless you save it. The sender cannot read, list or change it afterwards. Your assistants see it marked
   `untrusted_peer`. You can stop one person's files without ending the pairing. See
   [sharing.md](sharing.md#sending-a-file-to-a-paired-person).
+- **Direct transfers trade app encryption for speed (off by default).** With `DROP_DIRECT_UPLOADS=true`
+  (and a Blob store and `ENCRYPTION_KEY`), the browser uploads a dashboard send straight to Blob and
+  downloads it from there, with URLs the Node function `api/blob-sign.mjs` signs. Those files are **not**
+  encrypted with `ENCRYPTION_KEY`, because their bytes never reach this app: they rely only on Vercel
+  Blob's own encryption at rest and on the store being private. Leave it off to keep every held file
+  encrypted by the app. When it is on:
+  - Records of such files are marked `"enc": "blob-at-rest"`; only marked records are read as raw bytes,
+    and every other record must still decrypt.
+  - The signer is not public. It answers only requests signed with HMAC-SHA256 (key derived from
+    `ENCRYPTION_KEY`) over the body and a timestamp less than 60 seconds old, and signs only held-file
+    piece pathnames, each upload capped at that piece's exact size. A request replayed within those 60
+    seconds only signs the same URL again; that is accepted.
+  - Python decides who may upload or download; the signer only signs. Upload URLs last 15 minutes and are
+    issued once per piece; download URLs last 5 minutes and are given only to the recipient.
 - **Paired people's writes.** A paired person's assistant can write only inside items you marked
   editable for them, and only create, upload, update and rename (never trash, move or share). Inside an
   editable folder it can't rename anything on your Sharing list, on your own assistants' Access list or

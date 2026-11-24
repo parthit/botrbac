@@ -6,7 +6,9 @@ Local setup, tests and pull requests are in [CONTRIBUTING.md](../CONTRIBUTING.md
 
 ```
 api/index.py                  Vercel entry point (app = build_app())
-vercel.json                   routes everything to api/index.py, maxDuration, bundles templates
+api/blob-sign.mjs             Node.js function that signs Vercel Blob URLs for held files (drops)
+package.json                  its one dependency, @vercel/blob (pinned; `npm ci`, `npm test`)
+vercel.json                   routes everything else to api/index.py, maxDuration, bundles templates
 requirements.txt              runtime deps for Vercel (exported from uv.lock)
 scripts/bootstrap_oauth.py    optional: one-time sign-in → refresh token (legacy GOOGLE_OAUTH_REFRESH_TOKEN)
 scripts/make_token.py         generate API tokens + hashes
@@ -31,6 +33,7 @@ src/scoped_drive_mcp/
   service.py                  tool implementations
   server.py                   FastMCP tools + build_app()
 tests/                        pytest suite with a fake Drive (owner and bot views) and in-memory store
+tests/node/                   node --test suite for api/blob-sign.mjs (Blob SDK faked)
 ```
 
 ### Implementation notes
