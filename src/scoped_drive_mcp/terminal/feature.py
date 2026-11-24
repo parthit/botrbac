@@ -64,6 +64,8 @@ DEVICE_LIMIT = 30
 TOKEN_LIMIT = 600
 # Per signed-in person, per 10 minutes: approving or refusing codes on /device.
 APPROVE_LIMIT = 30
+# ... and looking codes up on /device (a hit shows the other computer's name).
+LOOKUP_LIMIT = 60
 # Calls by one signed-in terminal (policy checks and audit batches).
 TERMINAL_LIMIT = 240
 MAX_BODY = 2 * 1024 * 1024
@@ -257,6 +259,9 @@ class TerminalFeature:
         async def device_page(request: Request) -> Response:
             email = _me()
             code = normalize_user_code(request.query_params.get("code") or "")
+            if code and not allow(self.store, "termlookup", email, LOOKUP_LIMIT, API_WINDOW):
+                kit.flash(request, "error", "Too many codes tried. Wait a few minutes.")
+                code = ""
             found = await _run(self.terminals.pending, code) if code else None
             roles = await _run(self.roles.all, email)
             return render(
