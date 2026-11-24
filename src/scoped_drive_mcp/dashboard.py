@@ -262,6 +262,8 @@ class DashboardContext:
     notion: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
     drops: Any = None
+    # The Terminal beta (terminal.TerminalFeature). None when it is off for everyone.
+    terminal: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -640,6 +642,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
+    ctx.setdefault("terminal_tab", getattr(request.state, "terminal_tab", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -806,10 +809,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             except Exception:
                 logger.exception("mailbox approval count failed")
 
+        async def terminal() -> None:
+            request.state.terminal_tab = False
+            if ctx.terminal is None or not actor:
+                return
+            try:
+                request.state.terminal_tab = await blocking(ctx.terminal.enabled_for, actor)
+            except Exception:
+                logger.exception("terminal flag check failed")
+
         async with anyio.create_task_group() as tg:
             tg.start_soon(pending)
             tg.start_soon(reconsent)
             tg.start_soon(mailbox)
+            tg.start_soon(terminal)
 
     def session_user(request: Request) -> str | None:
         """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
@@ -3585,6 +3598,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         *legal_routes(),
+        *(ctx.terminal.page_routes(owner_only, render, session_user) if ctx.terminal else []),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     app = Starlette(

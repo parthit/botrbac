@@ -98,6 +98,7 @@ from .store import (
     build_store,
     signing_key,
 )
+from .terminal import TerminalFeature
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
 logger = logging.getLogger(__name__)
@@ -1197,6 +1198,10 @@ def build_app(
         sharer_of=shares.sharer_of,
         notion=notion,
         drops=drop_box,
+        # Off for everyone unless TERMINAL_ENABLED or an Edge Config is connected.
+        terminal=TerminalFeature(settings.terminal_enabled, flags.terminal_enabled)
+        if settings.terminal_enabled or flags.connection
+        else None,
     )
     dashboard = build_dashboard(ctx)
 

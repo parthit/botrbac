@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 SELF_PAIRING_ITEM = "self_pairing"
+TERMINAL_ITEM = "terminal"
 CACHE_SECONDS = 30.0
 TIMEOUT_SECONDS = 2.0
 
@@ -43,6 +44,22 @@ def self_pairing_allowed(value: Any, email: str) -> bool:
     if not isinstance(blocked, list):
         return False
     return domain not in {str(item).strip().lower().lstrip("@") for item in blocked}
+
+
+def terminal_allowed(value: Any, email: str) -> bool:
+    """Whether the `terminal` item turns the beta on for this person.
+
+    `{"enabled": true}` is everyone; `{"enabled": true, "emails": [...]}` is only those
+    addresses. A missing or malformed item means off: the beta is opt-in.
+    """
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return False
+    emails = value.get("emails")
+    if emails is None:
+        return True
+    if not isinstance(emails, list):
+        return False
+    return email.strip().lower() in {str(item).strip().lower() for item in emails}
 
 
 class EdgeConfigFlags:
@@ -72,6 +89,13 @@ class EdgeConfigFlags:
         if not found:
             return False
         return self_pairing_allowed(value, email)
+
+    def terminal_enabled(self, email: str) -> bool:
+        """The Terminal beta. Unlike self_pairing it is off without Edge Config."""
+        if self.connection is None:
+            return False
+        found, value = self._item(TERMINAL_ITEM)
+        return found and terminal_allowed(value, email)
 
     def _item(self, key: str) -> tuple[bool, Any]:
         """(known, value). `known` is False only when nothing was ever read."""
