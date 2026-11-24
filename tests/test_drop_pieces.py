@@ -1,6 +1,7 @@
 """Larger files sent to a paired person: held in Vercel Blob, sent and downloaded in pieces
 under Vercel's 4.5 MB request limit, inside the free Blob tier (drop_storage.py)."""
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -198,12 +199,103 @@ def test_old_rows_in_the_key_value_store_still_read(setup, memstore, blob) -> No
         assert box.download(row["id"])[1] == PDF_BYTES
 
 
+def _piece(c, token: str, upload: str, n: int, data: bytes):
+    return c.post(
+        f"/shared/send/{upload}/piece/{n}", data={"csrf": token}, files={"piece": ("p", data)}
+    )
+
+
+def _month_uploads(app) -> int:
+    return app.state.drops.budget.usage()["month_uploads"]
+
+
+def test_uploads_are_counted_as_pieces_arrive_not_at_start(setup, blob) -> None:
+    """An upload that is started and never sent costs the Blob budget nothing."""
+    app, _owner, (eve, _token) = setup
+    _token_, r = _start(eve, 24)
+    assert r.status_code == 200
+    swept = _month_uploads(app)  # the first send's sweep counts one list call
+    for _ in range(3):
+        _start(eve, 24)
+    assert _month_uploads(app) == swept
+    token, r = _start(eve, 8)
+    assert _piece(eve, token, r.json()["upload_id"], 0, b"x" * 8).status_code == 200
+    assert _month_uploads(app) == swept + 1
+
+
+def test_a_piece_cannot_be_uploaded_twice(setup, blob) -> None:
+    app, _owner, (eve, _token) = setup
+    token, r = _start(eve, 16)
+    upload = r.json()["upload_id"]
+    assert _piece(eve, token, upload, 0, b"a" * 8).status_code == 200
+    used = _month_uploads(app)
+    again = _piece(eve, token, upload, 0, b"b" * 8)
+    assert again.status_code == 400 and again.json()["error"] == "invalid_input"
+    assert _month_uploads(app) == used
+    assert b"b" * 8 not in b"".join(blob.blobs.values())
+
+
 def test_the_budget_refuses_uploads_past_the_monthly_cap(setup, blob) -> None:
     app, _owner, (eve, _token) = setup
-    app.state.drops.budget.monthly_uploads = 5
-    _start(eve, 16)  # 2 pieces, plus one for the first sweep
-    _token_, r = _start(eve, 24)  # 3 more would make 6
+    budget = app.state.drops.budget
+    token, r = _start(eve, 16)  # 2 pieces; the first sweep counts one
+    upload = r.json()["upload_id"]
+    budget.monthly_uploads = _month_uploads(app) + 1
+    assert _piece(eve, token, upload, 0, b"x" * 8).status_code == 200
+    full = _piece(eve, token, upload, 1, b"y" * 8)
+    assert full.json()["error"] == "storage_full"
+    # A send that cannot fit is refused at start, and does not use up the hourly limit.
+    _token_, r = _start(eve, 8)
     assert r.json()["error"] == "storage_full"
+    with acting_as(OWNER_EMAIL):
+        assert int(app.state.drops.store.get(f"drops:sent:{EVE}") or 0) == 1
+
+
+def test_uploads_in_progress_count_toward_the_waiting_cap(setup, blob, monkeypatch) -> None:
+    from scoped_drive_mcp import drops
+
+    _app_, _owner, (eve, _token) = setup
+    monkeypatch.setattr(drops, "MAX_HELD_BYTES", 20)
+    assert _start(eve, 16)[1].status_code == 200
+    _token_, r = _start(eve, 8)
+    assert r.json()["error"] == "inbox_full"
+
+
+def test_the_hold_starts_when_the_upload_finishes(setup, blob) -> None:
+    app, _owner, (eve, _token) = setup
+    box = app.state.drops
+    start = box.clock()
+    _upload(eve, b"z" * 8)
+    [row] = _held(app)
+    expires = datetime.strptime(row["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    assert expires >= start + box.hold - timedelta(seconds=1)
+    # The stored pieces outlive the hold by the longest an upload may take.
+    assert row["exp"] >= int((start + box.hold).timestamp()) + 3500
+
+
+def test_a_failed_delete_does_not_break_the_list(setup, blob, monkeypatch) -> None:
+    app, owner, (eve, _token) = setup
+    box = app.state.drops
+    _upload(eve, b"q" * 8)
+    with acting_as(OWNER_EMAIL):
+        [row] = box.received()
+        box.store.hset(
+            "drops:index", row["id"], json.dumps({**row, "expires_at": "2000-01-01T00:00:00Z"})
+        )
+
+    def broken(_row) -> None:
+        raise RuntimeError("blob down")
+
+    monkeypatch.setattr(box, "_drop_parts", broken)
+    assert owner.get("/sharing?tab=with-me").status_code == 200
+    assert _held(app) == []
+
+
+def test_a_plain_piece_is_refused_when_a_key_is_set(blob) -> None:
+    keyed, plain = BlobParts(blob, "k" * 44), BlobParts(blob, None)
+    plain.put_piece("d", 5, 0, b"forged")
+    assert plain.get_piece({"id": "d", "exp": 5, "parts": 1}, 0) == b"forged"
+    assert keyed.get_piece({"id": "d", "exp": 5, "parts": 1}, 0) is None
 
 
 def test_the_budget_counts_storage_over_the_hold() -> None:

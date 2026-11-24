@@ -128,21 +128,23 @@ needs nothing on the recipient's Sharing list, and the sender gets no access to 
   function (`api/blob-sign.mjs`) signs Blob URLs, which the Python SDK cannot. The server makes every check
   first (pairing, size, type, hourly limit, storage budget), then gives the page one upload URL per 4 MB piece:
   valid 15 minutes, for that exact pathname, at most that piece's size, no overwriting, and with a Blob
-  expiry of the hold plus a day (2 days for a 24-hour hold), so Blob deletes the piece even if nothing here
+  expiry that outlasts the hold and the upload window (2 days for a 24-hour hold), so Blob deletes the piece even if nothing here
   runs. The page uploads each piece to Blob itself, and **Finish** checks with Blob that every piece is
   there with exactly the right size before the file is listed. Downloads work the same way: the page asks
   for each piece's URL (valid 5 minutes, only for the recipient) and fetches it from Blob. These pieces
   never pass through Bot RBAC, so **they are not encrypted with `ENCRYPTION_KEY`; they rely on Vercel Blob's
   own encryption at rest** (the store is private, and a URL works only while it is valid). If the signer is
   not set up or fails, or the browser cannot reach Blob, the send goes through the server as before and its
-  pieces are encrypted with `ENCRYPTION_KEY`. `BLOB_SIGNER_URL=off` turns direct transfers off.
+  pieces are encrypted with `ENCRYPTION_KEY`. Each piece's upload URL is issued once and counts against the Blob budget when it is issued. `BLOB_SIGNER_URL=off` turns direct transfers off.
 - **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (24 by
   default, 24 to 168) and then deleted. With a Vercel Blob store connected (a private one), the pieces go
   there, named with their expiry; expired ones are deleted when someone opens their list, and a sweep that
   runs at most every 6 hours, on a send, deletes the rest. Without Blob they go to the key-value store, where
   every piece carries the expiry, so the store deletes it even if nothing else runs. To stay inside the free
   Blob tier (2,000 uploads a month, 1 GB), sends are refused with `storage_full` past
-  `DROP_BLOB_MONTHLY_UPLOADS` or `DROP_BLOB_STORAGE_MB`. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
+  `DROP_BLOB_MONTHLY_UPLOADS` or `DROP_BLOB_STORAGE_MB`. Each piece is counted as it arrives and can
+  arrive only once, so an upload that is started and never sent costs nothing; uploads in progress count
+  toward the recipient's waiting-files cap. The hold starts when the last piece arrives. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
   it they are stored unencrypted (still deleted at the end of the hold) and the server logs a warning at
   startup. One person can send another at most 20 files an hour, counted before the file is stored, so a
   send that fails to store still counts. One recipient can have about 50 unsaved files (100 MB) waiting:

@@ -384,3 +384,20 @@ def test_a_python_signature_verifies_in_the_node_function() -> None:
         timeout=30,
     )
     assert json.loads(out.stdout) == [None, "unauthorized"]
+
+
+def test_presigned_puts_count_against_the_budget_when_issued(setup, signer) -> None:
+    app, _owner, eve = setup
+    budget = app.state.drops.budget
+    before = budget.usage()["month_uploads"]
+    begun = _start(eve, 20)[1].json()  # 3 pieces
+    assert len(begun["direct"]) == 3
+    # The three URLs (and the first sweep) are counted now, once.
+    assert budget.usage()["month_uploads"] - before == 4
+    budget.monthly_uploads = budget.usage()["month_uploads"] + 2
+    signer.puts.clear()
+    r = _start(eve, 20)[1]
+    assert r.json()["error"] == "storage_full"
+    # Refused before any URL is signed.
+    assert "direct" not in r.json() and signer.puts == []
+    assert app.state.drops.ttl_days == 2
