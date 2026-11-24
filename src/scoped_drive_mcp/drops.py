@@ -77,6 +77,9 @@ DROP_SAVING_PREFIX = "drops:saving:"
 SAVE_LOCK_SECONDS = 120
 # How long a dashboard upload may take from its first piece to its last.
 UPLOAD_SECONDS = 3600
+# Longest one piece's store may hold its claim, and `finish` its lock (a crash frees
+# them after this).
+CLAIM_SECONDS = 120
 # What secrets.token_urlsafe(16) makes.
 _DROP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
@@ -649,21 +652,33 @@ class DropBox:
             )
         with guest_of(them, you):
             # Each piece is stored once: a repeat would be another Blob upload no cap sees.
-            marker = f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"
-            if not self.store.set_if_absent(marker, "1", ex=UPLOAD_SECONDS):
+            # `stored` is set only after the piece is stored, so `finish` never lists a file
+            # with a piece missing; `claim` keeps two copies of one piece from storing at
+            # once, and expires by itself if this process dies holding it.
+            stored = f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"
+            claim = f"{stored}:claim"
+            if self.store.get(stored):
                 raise SharedAccessError("invalid_input", "That part of the file already arrived.")
-            budget = self._budget(row)
-            if budget is not None and not budget.reserve(1):
-                self.store.delete(marker)
-                raise self._storage_full()
+            if not self.store.set_if_absent(claim, "1", ex=CLAIM_SECONDS):
+                raise SharedAccessError("busy", "That part of the file is arriving now.")
             try:
-                self._put_piece(row, n, data)
-            except Exception as exc:
-                report_exception(exc, where="drop")
-                self.store.delete(marker)
-                raise SharedAccessError(
-                    "unavailable", "The file could not be stored. Try again later."
-                ) from None
+                if self.store.get(stored):
+                    raise SharedAccessError(
+                        "invalid_input", "That part of the file already arrived."
+                    )
+                budget = self._budget(row)
+                if budget is not None and not budget.reserve(1):
+                    raise self._storage_full()
+                try:
+                    self._put_piece(row, n, data)
+                except Exception as exc:
+                    report_exception(exc, where="drop")
+                    raise SharedAccessError(
+                        "unavailable", "The file could not be stored. Try again later."
+                    ) from None
+                self.store.set(stored, "1", ex=UPLOAD_SECONDS)
+            finally:
+                self.store.delete(claim)
         return {"stored": n}
 
     def finish(self, caller: str, upload_id: str) -> dict[str, Any]:
@@ -677,21 +692,40 @@ class DropBox:
                 "not_linked", "You are no longer paired with this person.", to=them
             )
         with guest_of(them, you):
-            if self.is_off_for(you):
+            # One finish at a time, so a double click lists and logs the file once; the
+            # second gets `busy`, or `not_found` once the first has finished.
+            lock = f"{DROP_UPLOAD_PREFIX}{upload_id}:finishing"
+            if not self.store.set_if_absent(lock, "1", ex=CLAIM_SECONDS):
+                raise SharedAccessError("busy", "This file is being sent now.", to=them)
+            try:
+                return self._finish(you, them, upload_id, row, via)
+            finally:
+                self.store.delete(lock)
+
+    def _finish(
+        self, you: str, them: str, upload_id: str, row: dict[str, Any], via: str
+    ) -> dict[str, Any]:
+        """`finish` under its lock, as the recipient."""
+        # Read again under the lock: a finish that just completed has deleted it.
+        if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}"):
+            raise SharedAccessError("not_found", "This file was already sent.", to=them)
+        if self.is_off_for(you):
+            raise SharedAccessError(
+                "drops_off", f"{them} is not accepting files from you now.", to=them
+            )
+        for n in range(piece_count(int(row["size"]))):
+            if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"):
                 raise SharedAccessError(
-                    "drops_off", f"{them} is not accepting files from you now.", to=them
+                    "invalid_input", "Some of the file did not arrive. Send it again."
                 )
-            for n in range(piece_count(int(row["size"]))):
-                if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"):
-                    raise SharedAccessError(
-                        "invalid_input", "Some of the file did not arrive. Send it again."
-                    )
-            result = self._stored(row, you, them, via)
-            self.store.hdel(DROPS_PENDING_KEY, upload_id)
-            self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}")
-            for n in range(piece_count(int(row["size"]))):
-                self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}")
-        self.store.delete(f"{DROP_OUTGOING_PREFIX}{upload_id}")
+        result = self._stored(row, you, them, via)
+        self.store.hdel(DROPS_PENDING_KEY, upload_id)
+        self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}")
+        for n in range(piece_count(int(row["size"]))):
+            self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}")
+        # The sender's note of who the upload was for.
+        with acting_as(you):
+            self.store.delete(f"{DROP_OUTGOING_PREFIX}{upload_id}")
         return result
 
     def _refusal(self, you: str, them: str, size: int) -> SharedAccessError | None:
