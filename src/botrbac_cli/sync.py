@@ -12,7 +12,7 @@ PERMANENT = frozenset({400, 413, 422})
 
 
 class _Budget:
-    """At most this many requests per sync while narrowing down a refusal, so a server
+    """At most this many requests per batch while narrowing down a refusal, so a server
     that refuses everything costs a handful of requests, not one per row. Rows not
     tried before it runs out simply stay waiting; what was settled is kept, so every
     sync makes progress."""
@@ -54,6 +54,14 @@ def _send(
     except ApiError as exc:
         if exc.status not in PERMANENT:
             raise
+        too_large = exc.status == 413
+    if too_large and len(rows) > 1:
+        # Too large is about the batch, not the report: split it and keep the report.
+        half = len(rows) // 2
+        sent_a, refused_a = _send(api, rows[:half], meta, budget)
+        rest = {k: v for k, v in meta.items() if k == "queued"}
+        sent_b, refused_b = _send(api, rows[half:], rest, budget)
+        return sent_a + sent_b, refused_a + refused_b
     if "tools" in meta or "unguarded" in meta:
         print(
             "botrbac: the server refused this computer's tool report; sending rows without it",
@@ -70,6 +78,15 @@ def _send(
     sent_a, refused_a = _send(api, rows[:half], meta, budget)
     sent_b, refused_b = _send(api, rows[half:], meta, budget)
     return sent_a + sent_b, refused_a + refused_b
+
+
+def _probe(api: Any, row: dict[str, Any]) -> bool:
+    """Whether the server takes one row on its own (any failure counts as no)."""
+    try:
+        api.send_audit({"rows": [row]})
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
@@ -102,8 +119,15 @@ def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
             }
         queue.mark_sent(ok)
         if refused:
-            # Every row refused on its own looks like the server, not the rows: keep
-            # them waiting rather than set aside a whole queue because of a bad deploy.
+            # Nothing accepted and several refused: bad rows, or a server refusing
+            # everything (a bad deploy)? If the cap stopped before every row was tried,
+            # try one untried row from the far end to tell them apart.
+            if not ok and len(refused) > 1:
+                settled = set(refused)
+                untried = [r for r in clean if r["event_id"] not in settled]
+                if untried and _probe(api, untried[-1]):
+                    ok = [untried[-1]["event_id"]]
+                    queue.mark_sent(ok)
             if not ok and len(refused) > 1:
                 fresh = policy.refresh(api)
                 return {

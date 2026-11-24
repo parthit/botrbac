@@ -386,7 +386,7 @@ def test_a_server_refusing_everything_costs_few_requests() -> None:
     for i in range(300):
         queue.add(decision="allow", tool=f"github/t{i}")
     result = sync(Refuses(), queue)
-    assert len(calls) <= 24 and result["waiting"] == 300 and queue.rejected() == 0
+    assert len(calls) <= 25 and result["waiting"] == 300 and queue.rejected() == 0
 
 
 def test_several_bad_rows_still_make_progress_every_sync() -> None:
@@ -435,3 +435,54 @@ def test_a_refused_tool_report_is_dropped(capsys) -> None:
     state.note_seen(tools=["github/get_issue"])
     sync(Api(), AuditQueue())
     assert "tools" not in (state.read_json("state.json") or {})
+
+
+def test_a_run_of_bad_rows_at_the_head_does_not_wedge_the_queue() -> None:
+    from botrbac_cli.api import ApiError
+
+    bad = {f"github/t{i}" for i in range(25)}
+
+    class Api:
+        stored: list = []
+
+        def send_audit(self, body):
+            if any(r["tool"] in bad for r in body["rows"]):
+                raise ApiError(400, "x")
+            Api.stored += [r["tool"] for r in body["rows"]]
+            return {}
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    queue = AuditQueue()
+    for i in range(500):
+        queue.add(decision="allow", tool=f"github/t{i}")
+    for _ in range(40):
+        sync(Api(), queue)
+        if not queue.waiting():
+            break
+    assert queue.waiting() == 0 and queue.rejected() == 25 and len(Api.stored) == 475
+
+
+def test_too_large_keeps_the_tool_report() -> None:
+    from botrbac_cli.api import ApiError
+
+    class Api:
+        reports = 0
+
+        def send_audit(self, body):
+            if len(body["rows"]) > 2:
+                raise ApiError(413, "too_large")
+            Api.reports += "tools" in body
+            return {}
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    state.note_seen(tools=["github/get_issue"])
+    queue = AuditQueue()
+    for i in range(4):
+        queue.add(decision="allow", tool=f"github/t{i}")
+    sync(Api(), queue)
+    assert queue.waiting() == 0 and Api.reports == 1
+    assert "tools" in (state.read_json("state.json") or {})
