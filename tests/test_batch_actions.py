@@ -133,3 +133,32 @@ def test_stop_sharing_several_leaves_allowed_alone(people) -> None:  # noqa: F81
     # Sharing and allowing are separate lists.
     assert "loose-doc" in ctx.allowlist.entries()
     assert "Stopped sharing 2 items" in owner.get("/sharing?tab=by-me").text
+
+
+def test_folder_note_counts_only_items_that_were_removed(owner_c) -> None:
+    # proj-notes sits inside the allowed folder but has no entry of its own, so Remove
+    # skips it; the result must not warn about it.
+    batch(owner_c, "allow", "proj", "loose-doc")
+    batch(owner_c, "remove", "loose-doc", "proj-notes")
+    page = owner_c.get("/files").text
+    assert "Removed “Loose memo”. Your assistants can no longer use it." in page
+    assert "can still use" not in page
+
+
+def test_folder_note_wording_for_several(owner_c) -> None:
+    batch(owner_c, "allow", "proj", "proj-notes", "loose-doc")
+    batch(owner_c, "remove", "proj-notes", "loose-doc")
+    page = owner_c.get("/files").text
+    assert (
+        "Removed 2 items, but your assistants can still use 1 of them through “Projects”, "
+        "which stays allowed." in page
+    )
+
+
+def test_sharing_a_hidden_item_brings_it_back(people) -> None:  # noqa: F811
+    app, owner, _, _ = people
+    _pair(app, OWNER_EMAIL, EVE)
+    batch(owner, "forget", "loose-two")
+    assert 'value="loose-two"' not in owner.get("/files").text
+    batch(owner, "share", "loose-two")
+    assert 'value="loose-two"' in owner.get("/files").text

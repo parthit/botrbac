@@ -2050,27 +2050,38 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         own = ctx.grants()
         ext = ctx.ext_grants() if ctx.ext_allowlist is not None else None
 
-        def run() -> tuple[int, list[str], list[str]]:
+        def run() -> tuple[int, list[str], list[str], list[str]]:
             done = 0
             errors: list[str] = []
             names: list[str] = []
+            # Ids actually taken off a list, for the folder check below. Skipped items
+            # (Remove on something that was not allowed) must not be reported on.
+            changed: list[str] = []
+            hidden = ctx.hidden
+
+            def unhide(*fids: str) -> None:
+                if hidden is not None:
+                    for one in set(fids):
+                        hidden.unhide(one)
+
             for fid in ids:
                 try:
                     if action == "allow":
                         entry = own.grant(fid)
                         names.append(entry.name)
-                        if ctx.hidden is not None:
-                            ctx.hidden.unhide(fid)
-                            ctx.hidden.unhide(entry.id)
+                        unhide(fid, entry.id)
                     elif action == "share":
                         assert ext is not None
-                        names.append(ext.grant(fid).name)
+                        entry = ext.grant(fid)
+                        names.append(entry.name)
+                        unhide(fid, entry.id)
                     elif action == "remove":
                         entry = ctx.allowlist.get(fid)
                         if entry is None:
                             continue
                         names.append(entry.name)
                         own.revoke(fid)
+                        changed.append(fid)
                     elif action == "unshare":
                         assert ext is not None and ctx.ext_allowlist is not None
                         entry = ctx.ext_allowlist.get(fid)
@@ -2078,39 +2089,39 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                             continue
                         names.append(entry.name)
                         ext.revoke(fid)
+                        changed.append(fid)
                     else:  # forget: off both lists, then off this list
                         mine = ctx.allowlist.get(fid)
                         theirs = ctx.ext_allowlist.get(fid) if ctx.ext_allowlist else None
-                        named = (mine or theirs).name if (mine or theirs) else ""
-                        if named:
-                            names.append(named)
+                        listed = mine or theirs
+                        if listed is not None and listed.name:
+                            names.append(listed.name)
                         if mine is not None:
                             own.revoke(fid)
                         shared = ctx.ext_allowlist
                         if ext is not None and shared is not None and shared.get(fid) is not None:
                             ext.revoke(fid)
-                        if ctx.hidden is not None:
-                            ctx.hidden.hide(fid)
+                        if hidden is not None:
+                            hidden.hide(fid)
                     done += 1
                 except GrantError as exc:
                     errors.append(str(exc))
-            return done, errors, names
+            return done, errors, names, changed
 
-        done, errors, names = await blocking(run)
+        done, errors, names, changed = await blocking(run)
         if action == "remove":
             # Same check as one row's Remove, bounded: an allowed folder above an item
             # still includes it, so the message must not say the item is unreachable.
             root = ctx.visible_root_folder_id()
             extra = {root: "the folder set on the server"} if root else None
             still = []
-            for fid in ids[:COVER_CHECK_LIMIT]:
-                if ctx.allowlist.get(fid) is None:
-                    cover = await still_covered(own, fid, extra)
-                    if cover:
-                        still.append(cover)
+            for fid in changed[:COVER_CHECK_LIMIT]:
+                cover = await still_covered(own, fid, extra)
+                if cover:
+                    still.append(cover)
         elif action == "unshare" and ext is not None:
             still = []
-            for fid in ids[:COVER_CHECK_LIMIT]:
+            for fid in changed[:COVER_CHECK_LIMIT]:
                 cover = await still_covered(ext, fid)
                 if cover:
                     still.append(cover)
@@ -2130,17 +2141,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         }[action]
         if still:
             folders = ", ".join(f"\u201c{c}\u201d" for c in dict.fromkeys(still))
+            stays = "stays" if len(set(still)) == 1 else "stay"
             if action == "remove":
                 message = (
                     f"Removed {what}, but your assistants can still use "
-                    f"{plural(len(still), 'one', 'some')} of them through {folders}, "
-                    "which stays allowed."
+                    f"{len(still)} of them through {folders}, "
+                    f"which {stays} allowed."
                     if done > 1
                     else f"Removed {what}, but your assistants can still use it because "
                     f"{folders} is allowed."
                 )
             else:
-                message += f" Still readable through {folders}, which stays shared."
+                message += f" Still readable through {folders}, which {stays} shared."
         if errors:
             first = errors[0].replace("allowlist", "list")
             failed = plural(len(errors))
