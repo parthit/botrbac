@@ -90,7 +90,7 @@ def to_upstream(spec: dict[str, Any]) -> dict[str, Any] | None:
     """An agent's server entry as a gateway upstream, or None if the gateway can't run it."""
     url = spec.get("url") or spec.get("httpUrl")
     if url:
-        if spec.get("type") == "sse" or (spec.get("url") and "sse" in str(spec.get("type", ""))):
+        if "sse" in str(spec.get("type") or ""):
             return None  # the old SSE transport: leave it where it is
         return {"url": str(url), "headers": dict(spec.get("headers") or {})}
     if spec.get("command"):
@@ -226,7 +226,9 @@ def _backup(path: Path) -> str | None:
 
 def _write_atomic(path: Path, text: str) -> None:
     """Replace the file in one step, keeping its permissions, so an agent that reads or
-    writes it at the same moment never sees half a file."""
+    writes it at the same moment never sees half a file. A symlink (a dotfile manager's)
+    stays a symlink: the file it points to is the one replaced."""
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
