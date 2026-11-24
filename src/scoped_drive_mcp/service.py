@@ -199,6 +199,7 @@ class DriveService:
         guard: ScopeGuard,
         settings: Settings,
         writer: Callable[[], str | None] | None = None,
+        created_note: str = "Created by {who}'s assistant through Bot RBAC.",
     ):
         self.drive = drive
         self.guard = guard
@@ -209,6 +210,8 @@ class DriveService:
         self.extract_memory_mb = settings.extract_memory_mb
         # For the paired-person write service: who is writing (stamped on what they write).
         self.writer = writer
+        # The Drive description put on a new file written for a paired person.
+        self.created_note = created_note
         # Called after every check of a write has passed and right before the Drive call
         # (the paired-person service charges its hourly quota here). It may raise to stop it.
         self.before_write: Callable[[], None] | None = None
@@ -494,6 +497,32 @@ class DriveService:
 
     def _read_extracted(self, file_id: str, result: dict[str, Any], kind: str) -> dict[str, Any]:
         data = self.drive.download(file_id, self.max_bytes + 1)
+        return self._extracted_text(data, kind, result)
+
+    def text_from_bytes(self, data: bytes, mime: str, name: str) -> dict[str, Any]:
+        """read_file's text for bytes that are not in Drive (a file someone sent and that
+        is held for a while): `content` (or None) plus `truncated` and an optional `note`."""
+        result: dict[str, Any] = {"content": None, "truncated": False}
+        kind = document_kind(mime, name)
+        if kind is not None:
+            return self._extracted_text(data, kind, result)
+        if not is_text_like(mime, name):
+            result["note"] = f"binary file ({mime or 'unknown type'}); text not available"
+            return result
+        if len(data) > self.max_bytes:
+            data = data[: self.max_bytes]
+            result["truncated"] = True
+        if b"\x00" in data[:8192]:
+            result["note"] = "file looks binary; content not returned"
+            return result
+        text = data.decode("utf-8", errors="replace")
+        if len(text) > self.max_chars:
+            text = text[: self.max_chars]
+            result["truncated"] = True
+        result["content"] = text
+        return result
+
+    def _extracted_text(self, data: bytes, kind: str, result: dict[str, Any]) -> dict[str, Any]:
         source_truncated = len(data) > self.max_bytes
         if source_truncated:
             data = data[: self.max_bytes]
@@ -616,7 +645,7 @@ class DriveService:
         # cannot remove the mark or put someone else's name in it.
         stamp: dict[str, Any] = {"appProperties": {WRITER_PROPERTY: f"guest:{who}"}}
         if created:
-            stamp["description"] = f"Created by {who}'s assistant through Bot RBAC."
+            stamp["description"] = self.created_note.format(who=who)
         return stamp
 
     def create_folder(self, name: str, parent_id: str | None = None) -> dict[str, Any]:
@@ -638,6 +667,17 @@ class DriveService:
         content_base64: str | None = None,
         parent_id: str | None = None,
     ) -> dict[str, Any]:
+        name, mime_type, data = self.upload_payload(name, mime_type, content_text, content_base64)
+        return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
+
+    def upload_payload(
+        self,
+        name: str,
+        mime_type: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+    ) -> tuple[str, str, bytes]:
+        """upload_file's checks on its input, without a Drive call: (name, mime, bytes)."""
         name = validate_name(name)
         if not isinstance(mime_type, str) or not _MIME_RE.fullmatch(mime_type.strip()):
             raise InvalidInputError("mime_type must look like type/subtype")
@@ -659,7 +699,7 @@ class DriveService:
                 raise InvalidInputError("content_base64 is not valid base64") from None
             if len(data) > self.max_bytes:
                 raise InvalidInputError(f"content is larger than the {self.max_bytes}-byte limit")
-        return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
+        return name, mime_type, data
 
     def update_file_content(self, file_id: str, content: str) -> dict[str, Any]:
         meta = self._fetch_meta(file_id)

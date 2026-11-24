@@ -56,7 +56,7 @@ Invites and pairing states:
 
 Each person has a second list, separate from **Access**: the **Sharing** page. Items on it can be read by the
 assistant of anyone you have an **active pairing** with (both of you approved on the Sharing page). This is the
-only thing a pairing with another person does: their assistant can never message yours. Use it for things like
+main thing a pairing with another person does (the other is [sending a file](#sending-a-file-to-a-paired-person)): their assistant can never message yours. Use it for things like
 a resume that any paired person's assistant may see.
 
 - **Shared with me:** the dashboard's **Shared with me** page shows what paired people share with *you*,
@@ -112,6 +112,38 @@ a resume that any paired person's assistant may see.
   `get_metadata`, `list_folder`, `search_files`, `download_file`), it carries `written_by` and
   `content_trust: untrusted_peer`, and `read_file` wraps its text, because its name and content came from that
   person. Drive keeps earlier versions if you need to undo.
+
+## Sending a file to a paired person
+
+People with an active pairing can send each other a file, for example a PDF. This is separate from sharing: it
+needs nothing on the recipient's Sharing list, and the sender gets no access to the recipient's Drive.
+
+- **Sending:** on the dashboard, **Sharing → Shared with me → Send a file** (up to 4 MB, Vercel's request
+  limit), or an assistant whose connection is **Read and edit** or **Full** calls `send_file` (up to
+  `MAX_BYTES`). The name, type and size get the same checks as `upload_file`.
+- **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (48 by
+  default, 24 to 168) and then deleted. Every stored piece carries that expiry, so the store deletes it even
+  if nothing else runs. Pieces are encrypted with a key derived from `ENCRYPTION_KEY`. One recipient can have
+  at most 50 unsaved files (50 MB) waiting, and one person can send another at most 20 files an hour.
+- **Keeping it:** the recipient sees it under **Sent to you** with **Download**, **Save to Google Drive** and
+  **Delete**. Saving copies it into a folder this app makes at the top of their Drive, "Sent to me (Bot RBAC)",
+  and deletes the held copy at once. The folder is added to their **Access** list when it is made, so their
+  own assistants can open what they saved; removing it there takes that away. An assistant with an editing
+  connection can save too, with `save_drop`, when its human asks.
+- **Write-only for the sender:** `send_file` returns no id. The sender cannot list, read, change or delete what
+  they sent, and learns nothing about the recipient's Drive or other files.
+- **Untrusted:** the recipient's assistants see sent files with `list_drops`, `read_drop` and `download_drop`.
+  Each is marked `untrusted_peer` and `read_drop` wraps its text in the same markers as `read_shared_file`.
+  A saved copy is stamped with the sender as its writer, so it keeps that mark in Drive.
+- **Turning it off:** each active pairing card on **People** has **Stop files from &lt;person&gt;**. Their
+  sends then return `drops_off`; the pairing itself stays on. Ending the pairing also stops sending.
+- **Activity:** each send is on the recipient's Activity page as `guest:<sender>` and on the sender's own.
+
+Errors from `send_file`: `not_linked`, `own_drive`, `drops_off`, `inbox_full`, `rate_limited`,
+`invalid_input`. From `read_drop`, `download_drop` and `save_drop`: `not_found` (expired, deleted, or not
+yours) and `saved` (it is in Drive now; use `read_file` with the returned `file_id`).
+
+## Errors
 
 Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
 your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.

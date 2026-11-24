@@ -73,6 +73,19 @@
   <p class="muted">You share nothing with {{ peer }} right now. <a href="/sharing?tab=by-me">Share something</a></p>
   {% endif %}
   {% endif %}
+  {% if drops_on %}
+  {%- set blocked = peer in drops_off %}
+  <form method="post" action="/drops/allow">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="person" value="{{ peer }}">
+    <input type="hidden" name="on" value="{{ '1' if blocked else '0' }}">
+    {% if blocked %}
+    <p>{{ peer }} cannot send you files. <button type="submit">Let them send files</button></p>
+    {% else %}
+    <p>{{ peer }} can send you files. <button type="submit">Stop files from {{ peer }}</button></p>
+    {% endif %}
+  </form>
+  {% endif %}
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Disconnect from {{ peer }}? You will each stop being able to read what the other shares.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="actions"><button class="danger" type="submit">Disconnect</button></div>

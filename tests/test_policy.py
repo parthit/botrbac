@@ -46,6 +46,9 @@ MAILBOX_TOOLS = {
     "set_webhook",
     "clear_webhook",
 }
+# Files paired people sent this human (read) and sending one (write, editor and up).
+DROP_READ_TOOLS = {"list_drops", "read_drop", "download_drop"}
+DROP_SEND_TOOLS = {"send_file", "save_drop"}
 SHARED_TOOLS = {
     "list_shared_with_me",
     "search_shared_files",
@@ -75,6 +78,7 @@ VIEWER_EXPECTED = (
     | MAILBOX_TOOLS
     | SHARED_TOOLS
     | NOTION_READ_TOOLS
+    | DROP_READ_TOOLS
 )
 EXPECTED = {
     Role.VIEWER: VIEWER_EXPECTED,
@@ -86,12 +90,15 @@ EXPECTED = {
         "update_file_content",
         "rename_file",
     }
-    | SHARED_WRITE_TOOLS,
+    | SHARED_WRITE_TOOLS
+    | DROP_SEND_TOOLS,
     Role.ADMIN: set(VALID_ARGS)
     | MAILBOX_TOOLS
     | SHARED_TOOLS
     | SHARED_WRITE_TOOLS
-    | NOTION_READ_TOOLS,
+    | NOTION_READ_TOOLS
+    | DROP_READ_TOOLS
+    | DROP_SEND_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")

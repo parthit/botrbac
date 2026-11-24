@@ -131,6 +131,11 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
     "update_shared_file": ("edited {item}", "edit {item}"),
     "rename_shared_file": ("renamed {item}", "rename {item}"),
+    "send_file": ("sent a file", "send a file"),
+    "list_drops": ("listed files people sent you", "list files people sent you"),
+    "read_drop": ("read a file someone sent you", "read a file someone sent you"),
+    "download_drop": ("downloaded a file someone sent you", "download a file someone sent you"),
+    "save_drop": ("saved a file someone sent you to Drive", "save a file to Drive"),
     "read_shared_file": ("read {item}", "read {item}"),
     "download_shared_file": ("downloaded {item}", "download {item}"),
 }

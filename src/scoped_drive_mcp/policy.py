@@ -56,6 +56,10 @@ VIEWER_TOOLS: frozenset[str] = (
             "get_webhook",
             "set_webhook",
             "clear_webhook",
+            # Files paired people sent this human (drops.py), marked untrusted.
+            "list_drops",
+            "read_drop",
+            "download_drop",
         }
     )
 )
@@ -71,10 +75,14 @@ GUEST_WRITE_TOOLS: frozenset[str] = frozenset(
         "rename_shared_file",
     }
 )
+# Sending one file to a paired person (drops.py), and saving one sent to this human into
+# their own Drive. Like the writes above, only for a connection allowed to edit.
+DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
 
 EDITOR_TOOLS: frozenset[str] = (
     VIEWER_TOOLS
     | GUEST_WRITE_TOOLS
+    | DROP_TOOLS
     | {
         "create_folder",
         "create_doc",

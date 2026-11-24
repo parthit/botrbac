@@ -11,6 +11,63 @@
 {{ sharing_tabs('with-me') }}
 {% if people %}{% include "_shared_search.html" %}{% endif %}
 
+{% if drops_on and received %}
+<div class="card" id="sent-to-you">
+  <h2>Sent to you</h2>
+  <p class="muted">Files people you are paired with sent you. Bot RBAC keeps each one for {{ hold_hours }} hours, then
+    deletes it. To keep a file, save it to your Google Drive. Names and contents come from the sender: your assistants
+    see them marked as untrusted.</p>
+  <ul class="files">
+    {% for d in received %}
+    <li class="file">
+      <div class="file-name">
+        {{ file_icon(icon_kind(d.mime_type or "")) }}
+        {% if d.saved_file_id %}
+        <a href="https://drive.google.com/open?id={{ d.saved_file_id | urlencode }}" target="_blank" rel="noopener noreferrer">{{ d.name }}</a>
+        {% else %}{{ d.name }}{% endif %}
+      </div>
+      <div class="file-meta"><span>From {{ d["from"] }}</span><span>{{ d.at | when }}</span>{% if d.size %}<span>{{ human_size(d.size) }}</span>{% endif %}
+        {% if d.saved_file_id %}<span>Saved to your Drive</span>{% else %}<span>Deleted {{ d.expires_at | when }} unless saved</span>{% endif %}</div>
+      <div class="file-actions">
+        {% if not d.saved_file_id %}
+        <a class="btn" href="/drops/{{ d.id | urlencode }}/download">Download</a>
+        <form class="inline" method="post" action="/drops/{{ d.id | urlencode }}/save">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="primary" type="submit">Save to Google Drive</button>
+        </form>
+        {% endif %}
+        <form class="inline" method="post" action="/drops/{{ d.id | urlencode }}/dismiss"{% if not d.saved_file_id %} data-confirm="Delete “{{ d.name }}”? You will not be able to get it back from Bot RBAC."{% endif %}>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit">{{ "Remove from list" if d.saved_file_id else "Delete" }}</button>
+        </form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if drops_on and peers %}
+<div class="card" id="send-a-file">
+  <h2>Send a file</h2>
+  <p class="muted">Send one file to someone you are paired with. They have {{ hold_hours }} hours to open it and save
+    it to their Google Drive; then Bot RBAC deletes it. You cannot open it again after sending. Up to
+    {{ send_limit_mb }} MB.</p>
+  <form class="stack" method="post" action="/shared/send" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>To
+      <select name="to" required>
+        {% for peer in peers %}<option value="{{ peer }}">{{ peer }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>File
+      <input type="file" name="file" required>
+    </label>
+    <div class="actions"><button class="primary" type="submit">Send</button></div>
+  </form>
+</div>
+{% endif %}
+
 {% if people %}
   {% for p in people %}
   <section class="card">

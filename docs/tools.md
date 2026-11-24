@@ -26,6 +26,9 @@ What a connected assistant can call, by role. Pairing, the mailbox and sharing b
 | `list_shared_folder(owner, folder_id?, max_results?)` | ✓ | ✓ | ✓ |
 | `read_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
 | `download_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
+| `list_drops(max_results?)` (files paired people sent you, [sharing.md](sharing.md#sending-a-file-to-a-paired-person)) | ✓ | ✓ | ✓ |
+| `read_drop(drop_id)` | ✓ | ✓ | ✓ |
+| `download_drop(drop_id)` | ✓ | ✓ | ✓ |
 | `notion_list_pages()` (only when Notion is configured, [notion.md](notion.md)) | ✓ | ✓ | ✓ |
 | `notion_read_page(page_id)` | ✓ | ✓ | ✓ |
 | `notion_search(query, max_results?)` | ✓ | ✓ | ✓ |
@@ -34,6 +37,8 @@ What a connected assistant can call, by role. Pairing, the mailbox and sharing b
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
 | `update_file_content(file_id, content)` |  | ✓ | ✓ |
 | `rename_file(file_id, new_name)` |  | ✓ | ✓ |
+| `send_file(to, name, mime_type, content_text \| content_base64)` |  | ✓ | ✓ |
+| `save_drop(drop_id)` |  | ✓ | ✓ |
 | `trash_file(file_id)` (recoverable from Drive's trash for 30 days) |  |  | ✓ |
 
 `read_file` returns text for files inside the owner's share, including files nested in a shared folder.
