@@ -7,6 +7,8 @@ A pattern is one of:
 - `server/*`          every tool on one server (`*/tool` is any server)
 - `server/tool`       one tool
 - `server/prefix*`    tools whose name starts with `prefix`
+- `cmd/program`       a program an agent's shell tool may run (`cmd/gh`, `cmd/git*`,
+                      `cmd/*`); see `command_allowed`
 
 A role is a list of patterns. A session narrows a role by adding more lists; a tool is
 allowed only when every list in the chain allows it. Pure Python, no imports from the
@@ -19,7 +21,10 @@ _SERVER = r"[a-z0-9][a-z0-9_.-]{0,63}"
 _TOOL = r"[A-Za-z0-9_.:-]{1,128}"
 _PATTERN = re.compile(rf"^(\*|{_SERVER})/(\*|{_TOOL}\*?)$")
 _TOOL_ID = re.compile(rf"^{_SERVER}/{_TOOL}$")
+_BARE_WORD = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 MAX_PATTERNS = 200
+# `cmd/<program>` patterns name programs a shell tool may run, not MCP tools.
+COMMAND_SERVER = "cmd"
 
 
 class PatternError(ValueError):
@@ -45,8 +50,14 @@ def validate(pattern: str) -> str:
     if value == "*":
         return value
     if not _PATTERN.fullmatch(value):
+        if _BARE_WORD.fullmatch(value):
+            raise PatternError(
+                f"{value!r} is not a pattern. To allow the {value} command, use "
+                f"cmd/{value}. For a tool, use server/tool (for example claude-code/{value})."
+            )
         raise PatternError(
-            f"{value[:80]!r} is not a tool pattern. Use server/tool, server/*, server/prefix* or *."
+            f"{value[:80]!r} is not a tool pattern. Use server/tool, server/*, "
+            "server/prefix*, cmd/program or *."
         )
     return value
 
@@ -88,3 +99,29 @@ def allows(patterns: list[str], tool: str) -> bool:
 def chain_allows(chain: list[list[str]], tool: str) -> bool:
     """Every list must allow the tool. An empty chain allows nothing (fail closed)."""
     return bool(chain) and all(allows(patterns, tool) for patterns in chain)
+
+
+# ---- programs run by an agent's shell tool -------------------------------------------
+
+
+def is_command_pattern(pattern: str) -> bool:
+    return pattern.startswith(COMMAND_SERVER + "/")
+
+
+def has_command_rules(patterns: list[str]) -> bool:
+    """A list with no `cmd/` patterns does not limit which programs a shell runs."""
+    return any(is_command_pattern(p) for p in patterns)
+
+
+def command_allowed(patterns: list[str], program: str) -> bool:
+    """Only `cmd/` patterns count here: `*` or `*/read*` never allow a program."""
+    target = f"{COMMAND_SERVER}/{program}"
+    return any(matches(p, target) for p in patterns if is_command_pattern(p))
+
+
+def chain_allows_command(chain: list[list[str]], program: str) -> bool:
+    """Every list that has `cmd/` patterns must allow the program; lists without any
+    keep the shell all-or-nothing, as before. An empty chain allows nothing."""
+    return bool(chain) and all(
+        command_allowed(patterns, program) for patterns in chain if has_command_rules(patterns)
+    )

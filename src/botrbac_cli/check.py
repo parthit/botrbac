@@ -9,6 +9,11 @@ prints the reason on stderr, which is how Claude Code's PreToolUse hooks block a
 MCP tools that come through `botrbac gateway` (`mcp__botrbac__*`) are allowed here: the
 gateway checks and logs them. Other MCP tools are checked as `<server>/<tool>`, or
 blocked outright with `--block-unguarded`, so an agent cannot go around the gateway.
+
+A shell tool (Claude Code's Bash, Codex's shell, Gemini's run_shell_command; see
+shellcmd.SHELL_TOOLS) is checked twice when the role has `cmd/` patterns: the tool
+itself, then every program in its command as `cmd/<program>`. Only program names are
+logged, never the command.
 """
 
 import json
@@ -19,6 +24,7 @@ from . import policy
 from .gateway import safe_tool
 from .patterns import normalize_server
 from .queue import AuditQueue
+from .shellcmd import CommandError, command_text, is_shell_tool, programs
 
 GATEWAY_PREFIX = "mcp__botrbac__"
 _NAME_KEYS = ("tool_name", "toolName", "tool", "name")
@@ -46,6 +52,7 @@ def classify(agent: str, name: str) -> tuple[str, bool]:
 
 
 def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tuple[bool, str]:
+    payload: Any = None
     if tool is None:
         try:
             payload = json.loads(raw) if raw.strip() else {}
@@ -67,7 +74,15 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
         reason = "MCP servers must go through botrbac gateway (run: botrbac wrap)"
         _record(decision="deny", reason=reason, role="", **row)
         return False, f"Blocked by Bot RBAC: {tool_id}: {reason}"
-    decision = policy.Enforcer().decide(tool_id)
+    enforcer = policy.Enforcer()
+    decision = enforcer.decide(tool_id)
+    by_command = (
+        decision.allowed
+        and is_shell_tool(normalize_server(agent), tool)
+        and enforcer.limits_commands()
+    )
+    if by_command:
+        decision = _decide_command(enforcer, payload, decision.role)
     _record(
         decision="allow" if decision.allowed else "deny",
         reason=decision.reason,
@@ -76,10 +91,31 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
     )
     if decision.allowed:
         return True, "ok"
+    if by_command:
+        return False, (
+            f"Blocked by Bot RBAC: {decision.reason}. Run allowed programs one at a time, "
+            "or ask the person to add cmd/<program> to the role on the Terminal page."
+        )
     return False, (
         f"Blocked by Bot RBAC: {tool_id} is {decision.reason}. "
         "Ask the person to change the role on the Terminal page if this tool is needed."
     )
+
+
+def _decide_command(enforcer: policy.Enforcer, payload: Any, role: str) -> policy.Decision:
+    """The shell tool is allowed; now every program in its command must be. Anything
+    that cannot be read is blocked. The reason names programs, never the command."""
+    command = command_text(payload)
+    if command is None:
+        return policy.Decision(False, "botrbac could not find the shell command", role)
+    try:
+        found = programs(command)
+    except CommandError as exc:
+        return policy.Decision(False, str(exc), role)
+    decision = enforcer.decide_programs(found)
+    if decision.allowed:
+        decision.reason = "ok: runs " + ", ".join(found[:10])
+    return decision
 
 
 def _record(**row: Any) -> None:

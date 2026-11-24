@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import state
-from .patterns import normalize_server
+from .patterns import COMMAND_SERVER, normalize_server
 from .shell import botrbac_command
 
 GATEWAY_NAME = "botrbac"
@@ -254,7 +254,7 @@ def _place(name: str, upstream: dict[str, Any], upstreams: dict[str, Any]) -> st
 
 
 def _free_name(name: str, taken: dict[str, Any]) -> str:
-    if name == GATEWAY_NAME:
+    if name in (GATEWAY_NAME, COMMAND_SERVER):
         name = f"{name}-upstream"
     candidate, n = name, 2
     while candidate in taken:
