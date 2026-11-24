@@ -2960,8 +2960,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request,
                 "error",
                 f"Signed {signed}, but {failed} could not be signed because they changed "
-                "at that moment or the store refused. Run this again, and do not turn on "
-                "REQUIRE_SIGNED_RECORDS until it reports none left.",
+                "at that moment or the store refused. Run this again, and keep "
+                "REQUIRE_SIGNED_RECORDS=0 until it reports none left.",
             )
         else:
             flash(

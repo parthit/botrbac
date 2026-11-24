@@ -614,7 +614,6 @@ def test_get_webhook_does_not_show_the_assistant_its_url_or_key(app) -> None:
 
     box = app.state.mailbox
     box.wake = WakeSettings(
-        enabled=True,
         kek=b"k" * 32,
         allowlist=("api2.cursor.sh",),
         lookup=lambda _host: ["8.8.8.8"],

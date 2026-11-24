@@ -939,7 +939,6 @@ def build_app(
         strict=isinstance(kv, SignedStore) and kv.require,
         encryption_key=enc_key,
         wake=WakeSettings(
-            enabled=settings.webhooks_enabled,
             kek=decode_kek(
                 settings.webhook_kek.get_secret_value() if settings.webhook_kek else None
             ),

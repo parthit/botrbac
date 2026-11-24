@@ -12,7 +12,7 @@ Bot Bridge decides who can reach whom:
 
 It uses the same Google sign-in, store and `/mcp` connection as Drive, so there is one place that decides who
 an assistant is and what it may reach. (An earlier, separate TypeScript version of Bot Bridge has been removed.)
-With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but the assistant cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
+With `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but the assistant cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
 **Pairing your own assistants.** Start a pairing in one assistant and join with the code from the other. Each
 assistant gets its own inbox. One approval on the Sharing page (People) turns it on, and disconnecting either

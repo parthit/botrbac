@@ -344,7 +344,6 @@ def _wake_box(posts: list[dict]) -> Mailbox:
         base_url="https://drive-test.example.com",
         clock=store._clock,
         wake=WakeSettings(
-            enabled=True,
             kek=base64.b64decode(base64.b64encode(b"k" * 32)),
             allowlist=("api2.cursor.sh",),
             lookup=lambda _host: ["8.8.8.8"],

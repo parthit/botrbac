@@ -304,11 +304,11 @@ uv run ruff check . && uv run ruff format --check .
 | `MAX_PENDING_REQUESTS` | 50 | access requests one app may have waiting |
 | `LOGIN_RATE_LIMIT`, `LOGIN_RATE_WINDOW_SECONDS` | 30 / 600 | sign-in attempts per IP |
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | 300 / 60 | `/mcp` calls per token |
-| `REQUIRE_SIGNED_RECORDS` | off | `1` ignores unsigned allowlist, app and pairing records. Turn on after **Sign existing records** on `/admin`. See [security.md](security.md) |
+| `REQUIRE_SIGNED_RECORDS` | on | Unsigned allowlist, app and pairing records are ignored. A deployment from before records were signed sets `0`, runs **Sign existing records** on `/admin`, then removes it. See [security.md](security.md) |
 | `TRUSTED_PROXY_HOPS` | unset | proxies in front of the server that add to `X-Forwarded-For`. Leave unset on Vercel |
 | `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET` | unset | optional Notion connection; both set turns it on ([notion.md](notion.md)) |
 | `EDGE_CONFIG` | unset | Vercel Edge Config connection string; holds the `self_pairing` switch ([sharing.md](sharing.md)) |
-| `WEBHOOKS_ENABLED`, `WEBHOOK_KEK`, `WEBHOOK_HOST_ALLOWLIST` | off | wake-up pings to paired assistants ([sharing.md](sharing.md)) |
+| `WEBHOOK_KEK`, `WEBHOOK_HOST_ALLOWLIST` | off until `WEBHOOK_KEK` is set | wake-up pings to paired assistants ([sharing.md](sharing.md)) |
 | `VERCEL_OBSERVABILITY` | on | `off` removes Vercel Speed Insights and Web Analytics scripts |
 | `OAUTH_TEST_CALLBACK` | off | `1` accepts this server's own `/oauth/done` as an OAuth redirect, for local testing only |
 | `OAUTH_LOOPBACK_CALLBACK` | off | `1` accepts `http://localhost:8787/callback` and `http://127.0.0.1:8787/callback` as OAuth redirects, for a local MCP client you run yourself |

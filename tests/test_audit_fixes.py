@@ -21,7 +21,7 @@ from scoped_drive_mcp.store import (
     TenantDirectory,
     TokenVault,
 )
-from tests.conftest import BASE_URL, ENCRYPTION_KEY, EVE, OWNER_EMAIL
+from tests.conftest import BASE_URL, ENCRYPTION_KEY, EVE, OWNER_EMAIL, before_signing
 from tests.dash import client, csrf, login, mcp_call, post
 from tests.test_external_sharing import _error, _pair
 from tests.test_multi_user import CAROL, _app, _mcp
@@ -586,6 +586,7 @@ def test_a_store_writer_cannot_add_an_app_and_an_allowlist_entry(world, memstore
     assert "owner-root" not in app.state.dashboard.allowlist.entries()
 
 
+@before_signing
 def test_the_admin_can_sign_older_records_from_the_people_page(p2_app, memstore) -> None:
     from scoped_drive_mcp.store import KEY_PREFIX
 
@@ -1045,3 +1046,20 @@ def test_an_encrypted_parked_redirect_needs_the_key_and_a_plain_one_is_refused_w
     assert with_key.take_completion(ticket, OWNER_EMAIL) == url
     plain = without_key.park_completion(url, OWNER_EMAIL)
     assert with_key.take_completion(plain, OWNER_EMAIL) is None
+
+
+def test_signed_records_are_required_by_default() -> None:
+    from tests.conftest import make_settings
+
+    assert make_settings().require_signed_records is True
+    # Without ENCRYPTION_KEY nothing is signed, so the default must not refuse to start.
+    assert make_settings(encryption_key=None).encryption_key is None
+
+
+def test_a_fresh_deployment_has_nothing_to_sign(p2_app) -> None:
+    """Signing is required out of the box, so /admin offers no signing of older records."""
+    c = client(p2_app)
+    login(c)
+    page = c.get("/admin").text
+    assert "Sign existing records" not in page
+    assert "an unsigned one is ignored (the default)" in page

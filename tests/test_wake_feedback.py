@@ -47,7 +47,6 @@ def test_send_says_failed_and_records_the_http_status() -> None:
         base_url="https://drive-test.example.com",
         clock=store._clock,
         wake=WakeSettings(
-            enabled=True,
             kek=base64.b64decode(base64.b64encode(b"k" * 32)),
             allowlist=("api2.cursor.sh",),
             lookup=lambda _host: ["8.8.8.8"],
@@ -134,7 +133,6 @@ def test_settings_page_puts_each_wakeup_on_its_assistant(world, memstore, oauth)
     posts: list[dict] = []
     app = _app(world, memstore, oauth)
     app.state.mailbox.wake = WakeSettings(
-        enabled=True,
         kek=base64.b64decode(base64.b64encode(b"k" * 32)),
         allowlist=("api2.cursor.sh",),
         lookup=lambda _host: ["8.8.8.8"],
