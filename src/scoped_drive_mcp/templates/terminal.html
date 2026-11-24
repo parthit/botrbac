@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_terminal_tabs.html" import terminal_tabs %}
+{% block title %}Terminal{% endblock %}
+{% block content %}
+<h1>Terminal</h1>
+<p class="muted">Control what AI agents on your computers can do. Works with any agent that supports MCP: Claude Code, Codex, Cursor, Gemini CLI and others.</p>
+{{ terminal_tabs('terminals') }}
+
+<section class="card" aria-labelledby="get-started">
+  <h2 id="get-started">Get started</h2>
+  <ol>
+    <li>Install: <code>uv tool install git+https://github.com/parthit/botrbac</code></li>
+    <li>Log in: <code>botrbac login --server {{ request.base_url | string | trim('/') }}</code>, then approve the code on this site.</li>
+    <li>Put your agent's tool servers behind Bot RBAC: <code>botrbac wrap claude-code</code> (or <code>cursor</code>, <code>gemini</code>), or add <code>botrbac gateway</code> as an MCP server yourself.</li>
+    <li>Optional: <code>eval "$(botrbac shell-init)"</code>, then start an agent with a narrower role: <code>claude --botrbac --role reviewer</code>.</li>
+  </ol>
+  <p class="muted">Bot RBAC only controls tool calls that go through it. It stops an agent from going around your rules; it cannot stop someone who owns the computer from removing it.</p>
+</section>
+
+<h2>Your terminals</h2>
+{% if terminals %}
+<table class="cards" id="terminals">
+  <thead><tr><th>Name</th><th>Role</th><th>Last seen</th><th>Waiting to sync</th><th></th></tr></thead>
+  <tbody>
+  {% for t in terminals %}
+  <tr id="terminal-{{ t.id }}">
+    <td>{{ t.name }}<br><span class="muted">{{ t.hostname }}{% if t.os %} · {{ t.os }}{% endif %}{% if t.version %} · botrbac {{ t.version }}{% endif %}</span>
+      {% if t.unguarded %}<br><span class="pill warn" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>{% endif %}</td>
+    <td>
+      <form class="inline" method="post" action="/terminal/t/{{ t.id }}/role">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="sr-only" for="role-{{ t.id }}">Role for {{ t.name }}</label>
+        <select id="role-{{ t.id }}" name="role_id">
+          {% for r in roles %}<option value="{{ r.id }}"{% if r.id == t.role_id %} selected{% endif %}>{{ r.name }}</option>{% endfor %}
+          {% if t.role_id not in role_names %}<option value="" selected>No tools (its role was deleted)</option>{% endif %}
+        </select>
+        <button type="submit" class="ghost">Change</button>
+      </form>
+    </td>
+    <td>{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
+    <td>{% if t.queued %}{{ t.queued }} row{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>
+    <td>
+      <form class="inline" method="post" action="/terminal/t/{{ t.id }}/rename">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="sr-only" for="name-{{ t.id }}">New name</label>
+        <input id="name-{{ t.id }}" name="name" maxlength="80" placeholder="New name" size="10">
+        <button type="submit" class="ghost">Rename</button>
+      </form>
+      <form class="inline" method="post" action="/terminal/t/{{ t.id }}/revoke">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="ghost">Disconnect</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted" id="no-terminals">No terminals yet. Run <code>botrbac login</code> on a computer to add one.</p>
+{% endif %}
+{% endblock %}

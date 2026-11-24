@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "_terminal_tabs.html" import terminal_tabs %}
+{% block title %}Terminal roles{% endblock %}
+{% block content %}
+<h1>Roles</h1>
+<p class="muted">A role is a list of tools an agent may use. Give one to each terminal, or start an agent with <code>--role</code> to narrow it further.</p>
+{{ terminal_tabs('roles') }}
+<p><a class="btn primary" href="/terminal/roles/new" id="new-role">New role</a></p>
+<table class="cards" id="roles">
+  <thead><tr><th>Name</th><th>Tools</th><th>Offline grace</th><th></th></tr></thead>
+  <tbody>
+  {% for r in roles %}
+  <tr id="role-{{ r.id }}">
+    <td>{{ r.name }}{% if r.builtin %} <span class="pill">built-in</span>{% endif %}<br><span class="muted">id <code>{{ r.id }}</code></span></td>
+    <td>{% if r.patterns %}{% for p in r.patterns[:6] %}<code>{{ p }}</code>{{ ", " if not loop.last }}{% endfor %}{% if r.patterns|length > 6 %} <span class="muted">and {{ r.patterns|length - 6 }} more</span>{% endif %}{% else %}<span class="muted">none</span>{% endif %}</td>
+    <td>{{ r.offline_days }} day{{ "s" if r.offline_days != 1 }}</td>
+    <td>{% if r.builtin %}<a href="/terminal/roles/{{ r.id }}">View</a>{% else %}<a href="/terminal/roles/{{ r.id }}">Edit</a>
+      <form class="inline" method="post" action="/terminal/roles/{{ r.id }}/delete">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="ghost">Delete</button>
+      </form>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

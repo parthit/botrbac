@@ -99,6 +99,7 @@ from .store import (
     build_store,
     signing_key,
 )
+from .terminal import TerminalFeature
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
 logger = logging.getLogger(__name__)
@@ -1177,6 +1178,11 @@ def build_app(
     if mcp_oauth is not None:
         # Disconnecting an app (or its grant being dropped) ends its own-assistant pairings.
         mcp_oauth.on_revoke = mailbox.end_assistant_links
+    terminal = TerminalFeature(
+        kv,
+        base_url,
+        signed_in=lambda email: settings.sign_in_allowed(email) and directory.is_known_user(email),
+    )
     ctx = DashboardContext(
         settings=settings,
         store=kv,
@@ -1200,6 +1206,7 @@ def build_app(
         sharer_of=shares.sharer_of,
         notion=notion,
         drops=drop_box,
+        terminal=terminal,
     )
     dashboard = build_dashboard(ctx)
 
@@ -1238,6 +1245,7 @@ def build_app(
     ]
     if mcp_oauth is not None:
         routes.extend(mcp_oauth.routes())
+    routes.extend(terminal.api_routes())
     routes.append(Mount("/", app=dashboard))
     # The dashboard sets these on its own pages. /mcp, /health, the OAuth endpoints and
     # the discovery documents sit outside it and get the same headers here.
@@ -1254,4 +1262,5 @@ def build_app(
     app.state.shares = shares
     app.state.shared_with_me = shared_with_me
     app.state.drops = drop_box
+    app.state.terminal = terminal
     return app

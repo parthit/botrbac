@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% from "_terminal_tabs.html" import terminal_tabs %}
+{% block title %}{{ role.name if role else "New role" }}{% endblock %}
+{% block content %}
+<h1>{% if not role %}New role{% elif role.builtin %}{{ role.name }}{% else %}Edit role: {{ role.name }}{% endif %}</h1>
+{{ terminal_tabs('roles') }}
+{% if role and role.builtin %}
+<p class="muted">{{ role.description }} Built-in roles cannot be changed.</p>
+<p>{% for p in role.patterns %}<code>{{ p }}</code>{{ ", " if not loop.last }}{% else %}<span class="muted">No tools.</span>{% endfor %}</p>
+{% else %}
+<form class="stack" method="post" action="/terminal/roles/save">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% if role %}<input type="hidden" name="role_id" value="{{ role.id }}">{% endif %}
+  <label>Name <input name="name" required maxlength="60" value="{{ role.name if role else '' }}"></label>
+  <fieldset>
+    <legend>Tools this role may use</legend>
+    {% if seen %}
+    <p class="muted">Tools your terminals have reported. Tick the ones this role may use.</p>
+    {% for server, tools in seen.items() %}
+    <p><strong>{{ server }}</strong><br>
+      {% for t in tools %}{% set tid = server ~ '/' ~ t %}
+      <label class="inline"><input type="checkbox" name="tool" value="{{ tid }}"{% if role and tid in role.patterns %} checked{% endif %}> {{ t }}</label>
+      {% endfor %}
+    </p>
+    {% endfor %}
+    {% else %}
+    <p class="muted">No tools reported yet. Once a terminal syncs, its tools are listed here. Until then, type patterns below.</p>
+    {% endif %}
+    {% set ticked = [] %}
+    {% if role %}{% for server, tools in seen.items() %}{% for t in tools %}{% if (server ~ '/' ~ t) in role.patterns %}{% set _ = ticked.append(server ~ '/' ~ t) %}{% endif %}{% endfor %}{% endfor %}{% endif %}
+    <label>Patterns, one per line
+      <textarea name="patterns" rows="6" spellcheck="false" placeholder="github/*&#10;fs/read_*&#10;claude-code/Bash">{% if role %}{% for p in role.patterns if p not in ticked %}{{ p }}
+{% endfor %}{% endif %}</textarea>
+    </label>
+    <p class="muted"><code>server/tool</code> is one tool, <code>server/*</code> every tool on a server, <code>server/read_*</code> tools starting with <code>read_</code>, <code>*</code> everything.</p>
+  </fieldset>
+  <label>Offline grace (days)
+    <input name="offline_days" type="number" min="1" max="30" value="{{ role.offline_days if role else default_offline }}">
+  </label>
+  <p class="muted">Without internet, terminals keep this role for this many days, then block every tool until they can check in.</p>
+  <div class="actions"><a class="btn" href="/terminal/roles">Cancel</a><button class="primary" type="submit">Save</button></div>
+</form>
+{% endif %}
+{% endblock %}

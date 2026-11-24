@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Connect a terminal{% endblock %}
+{% block content %}
+<section class="card consent">
+<h1>Connect a terminal</h1>
+{% if found %}
+<p>A terminal is asking to connect to your Bot RBAC account.</p>
+<dl>
+  <dt>Code</dt><dd><code id="user-code">{{ code }}</code> <span class="muted">(check it matches your terminal)</span></dd>
+  {% if found.hostname %}<dt>Computer</dt><dd>{{ found.hostname }}{% if found.os %} · {{ found.os }}{% endif %}{% if found.version %} · botrbac {{ found.version }}{% endif %}</dd>{% endif %}
+</dl>
+<form class="stack" method="post" action="/device/approve">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="code" value="{{ code }}">
+  <label>Name <input name="name" maxlength="80" value="{{ found.hostname }}"></label>
+  <fieldset>
+    <legend>Role</legend>
+    {% for r in roles %}
+    <label class="inline"><input type="radio" name="role_id" value="{{ r.id }}"{% if r.id == 'read-only' %} checked{% endif %}> {{ r.name }}</label>
+    {% endfor %}
+    <p class="muted"><a href="/terminal/roles">Manage roles</a></p>
+  </fieldset>
+  <p class="muted">Approve only a code you started on your own computer: approving lets that computer act with this role on your account. It will only run the tools its role allows, and you can change or disconnect it at any time.</p>
+  <div class="actions">
+    <button class="primary" type="submit">Approve</button>
+    <button type="submit" formaction="/device/deny">Refuse</button>
+  </div>
+</form>
+{% else %}
+{% if typed %}<div class="flash error">That code is not valid or has expired. Check your terminal, or run <code>botrbac login</code> again.</div>{% endif %}
+<p>Enter the code shown in your terminal.</p>
+<form class="stack" method="get" action="/device">
+  <label>Code <input name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" value="{{ typed }}"></label>
+  <div class="actions"><button class="primary" type="submit">Continue</button></div>
+</form>
+{% endif %}
+</section>
+{% endblock %}

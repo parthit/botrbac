@@ -281,3 +281,30 @@ is read only when its original block is itself under an allowed item. A trashed 
 its children readable. The tools are read-only and page text is wrapped in untrusted-content markers.
 The Notion token is encrypted with `ENCRYPTION_KEY` and names the account it belongs to. The connect
 flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
+
+## Terminal
+
+Bot RBAC Terminal ([terminal.md](terminal.md)) is separate from `/mcp`. Its tokens (`brt_at_…`, one hour,
+and `brt_rt_…`, 90 days, rotated on every refresh with the previous one revoked) are issued only through the
+device flow after the signed-in person approves the code on `/device` with a CSRF-checked form, and are
+accepted only on `/api/terminal/*`; `/mcp` does not look them up, and API tokens or OAuth tokens are not
+accepted on `/api/terminal/*`. Every token check also re-checks that the person may still sign in.
+Disconnecting a terminal deletes its record, so its tokens stop working at once. Device codes expire after
+10 minutes, are single-use, and polling faster than the interval gets `slow_down`; the open endpoints are
+rate-limited per address and the token endpoints per terminal.
+
+Roles, terminals, tokens, device codes and revoked sessions are stored under `term:` and signed like OAuth
+records. Audit batches are capped (500 rows, 2 MB), every field is stripped to a small character set and
+capped, rows are de-duplicated by the client's event id, and only identifiers and decisions are stored.
+CSV export prefixes cells that would start a spreadsheet formula.
+
+Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
+owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
+a policy older than the role's offline grace, an unknown session or a revoked session all block every tool.
+A session can only narrow the terminal's role (the check is the intersection of every role in the chain).
+The CLI trusts the computer's user: session files and `BOTRBAC_SESSION` are not signed, so an agent that can
+run shell commands can drop back to the terminal's own role (never above it) by starting a gateway without
+the variable. The hook adapter fails closed on any error (exit 2), but an agent that cannot find the
+`botrbac` program at all usually lets the call through. Read-only and other name-based patterns limit
+which tools run, not which files a tool such as Claude Code's Read can open.
+
