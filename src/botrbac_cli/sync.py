@@ -13,15 +13,28 @@ PERMANENT = frozenset({400, 413, 422})
 
 class _Budget:
     """At most this many requests per sync while narrowing down a refusal, so a server
-    that refuses everything costs a handful of requests, not one per row."""
+    that refuses everything costs a handful of requests, not one per row. Rows not
+    tried before it runs out simply stay waiting; what was settled is kept, so every
+    sync makes progress."""
 
     def __init__(self, requests: int = 24):
         self.left = requests
 
-    def spend(self) -> None:
+    def spend(self) -> bool:
         if self.left <= 0:
-            raise ApiError(503, "too_many_refusals")  # temporary: keep every row
+            return False
         self.left -= 1
+        return True
+
+
+def _forget_report() -> None:
+    """A refused tools/unguarded report won't be accepted next time either: drop it, so
+    each later sync doesn't spend a request (and a warning) on it again. Fresh tools
+    are collected again as the gateway sees them."""
+    data = state.read_json("state.json", {}) or {}
+    data.pop("tools", None)
+    data.pop("unguarded", None)
+    state.write_json("state.json", data)
 
 
 def _send(
@@ -33,7 +46,8 @@ def _send(
     errors are raised to the caller, which keeps every row for the next sync."""
     budget = budget or _Budget()
     ids = [r["event_id"] for r in rows]
-    budget.spend()
+    if not budget.spend():
+        return [], []  # not tried this time: these rows stay waiting
     try:
         api.send_audit({"rows": rows, **meta})
         return ids, []
@@ -45,6 +59,7 @@ def _send(
             "botrbac: the server refused this computer's tool report; sending rows without it",
             file=sys.stderr,
         )
+        _forget_report()
         return _send(api, rows, {k: v for k, v in meta.items() if k == "queued"}, budget)
     if len(rows) <= 1:
         # One row refused on its own (or nothing to narrow down): set it aside. A single
