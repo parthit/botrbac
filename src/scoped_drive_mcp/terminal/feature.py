@@ -42,9 +42,13 @@ def _me() -> str:
     return email
 
 
-# Unauthenticated API calls (device codes, token polls) per address.
-API_LIMIT = 60
 API_WINDOW = 600
+# Per address, per 10 minutes. A login polls every 5 seconds for up to 10 minutes
+# (120 polls), so token calls get room for a few logins behind one address.
+DEVICE_LIMIT = 30
+TOKEN_LIMIT = 600
+# Per signed-in person, per 10 minutes: approving or refusing codes on /device.
+APPROVE_LIMIT = 30
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -64,6 +68,15 @@ def _oauth_error(code: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"error": code}, status_code=status, headers={"cache-control": "no-store"})
 
 
+def _too_many() -> JSONResponse:
+    # Not RFC 8628's slow_down: that tells a client to poll more slowly, not to wait.
+    return JSONResponse(
+        {"error": "rate_limited"},
+        status_code=429,
+        headers={"cache-control": "no-store", "retry-after": "60"},
+    )
+
+
 @dataclass
 class TerminalFeature:
     store: Any
@@ -79,14 +92,12 @@ class TerminalFeature:
     # ---- API (no cookies; mounted outside the dashboard) -----------------------
 
     def api_routes(self) -> list[Route]:
-        def limited(request: Request) -> bool:
-            return not allow(
-                self.store, "termapi", ip_identity(request.scope), API_LIMIT, API_WINDOW
-            )
+        def limited(request: Request, name: str, limit: int) -> bool:
+            return not allow(self.store, name, ip_identity(request.scope), limit, API_WINDOW)
 
         async def device(request: Request) -> Response:
-            if limited(request):
-                return _oauth_error("slow_down", 429)
+            if limited(request, "termdevice", DEVICE_LIMIT):
+                return _too_many()
             data = await _body(request)
             started = await _run(self.terminals.start, data)
             base = (self.base_url or str(request.base_url)).rstrip("/")
@@ -95,8 +106,8 @@ class TerminalFeature:
             return JSONResponse(started, headers={"cache-control": "no-store"})
 
         async def token(request: Request) -> Response:
-            if limited(request):
-                return _oauth_error("slow_down", 429)
+            if limited(request, "termtoken", TOKEN_LIMIT):
+                return _too_many()
             data = await _body(request)
             grant = str(data.get("grant_type") or "")
             if grant == "urn:ietf:params:oauth:grant-type:device_code":
@@ -149,9 +160,14 @@ class TerminalFeature:
             action = request.path_params["action"]
             if action not in ("approve", "deny"):
                 return render(request, "error.html", 404, message="Page not found.")
+            if not allow(self.store, "termapprove", email, APPROVE_LIMIT, API_WINDOW):
+                kit.flash(request, "error", "Too many codes tried. Wait a few minutes.")
+                return RedirectResponse("/device", status_code=303)
             if action == "deny":
-                await _run(self.terminals.deny, code)
-                kit.flash(request, "ok", "Login refused. The terminal was not connected.")
+                if await _run(self.terminals.deny, code):
+                    kit.flash(request, "ok", "Login refused. The terminal was not connected.")
+                else:
+                    kit.flash(request, "error", "That code has expired or was already used.")
                 return RedirectResponse("/terminal", status_code=303)
             try:
                 terminal = await _run(
