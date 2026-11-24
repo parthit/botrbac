@@ -189,7 +189,7 @@
     that is not a Blob URL for the pathname it asked for. It does not follow redirects from the signer.
     Upload URLs last 15 minutes and are issued once per piece; download URLs last 5 minutes and are
     given only to the recipient. Only Sharing → Shared with me may connect to Blob (`connect-src`: the
-    Blob upload path and private store hosts).
+    Blob upload path and this deployment's own private store host, never another store).
   - What is left: an upload URL still works until it expires even if the file was saved or deleted in
     the meantime, so a sender can put a piece back for up to 15 minutes. Nobody can read it (no record
     points at it), and Blob's expiry and the sweep delete it. A browser without Web Crypto, or one

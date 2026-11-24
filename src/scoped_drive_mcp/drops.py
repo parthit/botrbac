@@ -181,6 +181,11 @@ class DropBox:
         each file's key is kept encrypted with it."""
         return self.signer is not None and self.blob is not None and self.blob.can_wrap
 
+    @property
+    def store_host(self) -> str | None:
+        """The one Blob host pages download from, when the signer knows it."""
+        return getattr(self.signer, "store_host", None) if self.direct else None
+
     def _signer(self) -> BlobSigner | None:
         if not self.direct:
             return None

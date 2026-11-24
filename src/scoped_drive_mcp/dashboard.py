@@ -63,7 +63,7 @@ from .drive_client import (
     LazyBotDriveClient,
     OwnerDriveClient,
 )
-from .drop_storage import BLOB_API_HOST, BLOB_API_PATH, PIECE_BYTES
+from .drop_storage import BLOB_API_HOST, BLOB_API_PATH, PIECE_BYTES, STORE_HOST_SUFFIX
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
 from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
@@ -173,16 +173,20 @@ PICKER_CSP = (
 )
 # Sharing → Shared with me when the browser sends and fetches held files straight to and
 # from Vercel Blob (drop_storage.BlobSigner): uploads go to the Blob API (that path only),
-# downloads come from a private store's host. Same as STRICT_CSP otherwise.
-BLOB_CONNECT = (
-    b"https://" + BLOB_API_HOST.encode() + BLOB_API_PATH.encode() + b" "
-    b"https://*.private.blob.vercel-storage.com"
-)
-DIRECT_DROP_CSP = STRICT_CSP.replace(
-    b"connect-src 'self'; ", b"connect-src 'self' " + BLOB_CONNECT + b"; "
-)
-# The replace must have matched, or the page would block its own uploads silently.
-assert DIRECT_DROP_CSP != STRICT_CSP, "STRICT_CSP lost its connect-src 'self'"
+# downloads come from this deployment's own private store. Same as STRICT_CSP otherwise.
+_CONNECT_SELF = b"connect-src 'self'; "
+# The replace below must match, or the page would block its own uploads silently.
+assert _CONNECT_SELF in STRICT_CSP, "STRICT_CSP lost its connect-src 'self'"
+
+
+def direct_drop_csp(store_host: str | None) -> str:
+    """`store_host` is the connected store's host. Without one (only a signer passed in
+    by a test has none) any private store host is allowed."""
+    store = store_host or "*" + STORE_HOST_SUFFIX
+    connect = f"https://{BLOB_API_HOST}{BLOB_API_PATH} https://{store}".encode()
+    return STRICT_CSP.replace(_CONNECT_SELF, b"connect-src 'self' " + connect + b"; ").decode()
+
+
 # Templates with a picker button (#pick-drive or [data-pick]). They get PICKER_CSP when
 # the picker is configured (render's `picker_ready`); every other response gets STRICT_CSP.
 PICKER_TEMPLATES = frozenset({"browse.html", "access.html", "request.html"})
@@ -654,7 +658,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     if template in PICKER_TEMPLATES and ctx.get("picker_ready"):
         response.headers["content-security-policy"] = PICKER_CSP.decode()
     elif template == "shared.html" and ctx.get("drops_direct"):
-        response.headers["content-security-policy"] = DIRECT_DROP_CSP.decode()
+        response.headers["content-security-policy"] = direct_drop_csp(ctx.get("drops_store_host"))
     return response
 
 
@@ -2217,6 +2221,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "peers": peers,
                 "drops_on": ctx.drops is not None,
                 "drops_direct": ctx.drops is not None and ctx.drops.direct,
+                "drops_store_host": ctx.drops.store_host if ctx.drops is not None else None,
                 "received": [],
                 "send_limit_mb": DROP_UPLOAD_MB,
                 "send_max_mb": ctx.drops.max_mb if ctx.drops is not None else 0,

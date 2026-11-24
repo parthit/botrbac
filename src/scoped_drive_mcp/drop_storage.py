@@ -454,7 +454,27 @@ SIGNER_TIMEOUT_SECONDS = 5
 # Where a presigned URL may point: the Blob API (uploads) and a private store (reads).
 BLOB_API_HOST = "vercel.com"
 BLOB_API_PATH = "/api/blob/"
-_STORE_HOST = re.compile(r"[a-z0-9-]{1,64}\.private\.blob\.vercel-storage\.com")
+STORE_HOST_SUFFIX = ".private.blob.vercel-storage.com"
+_STORE_HOST = re.compile(r"[a-z0-9-]{1,64}" + re.escape(STORE_HOST_SUFFIX))
+_STORE_ID = re.compile(r"[A-Za-z0-9]{1,64}")
+
+
+def blob_store_host() -> str | None:
+    """The host the connected private store's blobs are read from, `<store id>.private.
+    blob.vercel-storage.com`, or None when the store id cannot be told.
+
+    The id is found the way both Blob SDKs find it: BLOB_STORE_ID (with or without its
+    `store_` prefix), else the fourth `_` part of BLOB_READ_WRITE_TOKEN
+    (`vercel_blob_rw_<store id>_<secret>`). Only the id is used; the rest stays secret."""
+    store_id = os.environ.get("BLOB_STORE_ID", "").strip().removeprefix("store_")
+    if not store_id:
+        parts = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip().split("_")
+        store_id = parts[3] if len(parts) > 4 else ""
+    if not _STORE_ID.fullmatch(store_id):
+        return None
+    return store_id.lower() + STORE_HOST_SUFFIX
+
+
 # What the browser sends with a presigned PUT (the SDK's own upload headers).
 _PUT_HEADERS = frozenset(
     {"x-vercel-blob-access", "x-api-version", "x-vercel-blob-store-id", "x-content-type"}
@@ -481,10 +501,11 @@ def signer_headers(key: bytes, body: bytes, now: int) -> dict[str, str]:
     return {"x-botrbac-timestamp": str(now), "x-botrbac-signature": mac}
 
 
-def _checked_url(value: Any, op: str, pathname: str) -> str:
+def _checked_url(value: Any, op: str, pathname: str, store_host: str | None = None) -> str:
     """The signer's URL, only if it is what was asked for: an upload to the Blob API or a
-    read from a private store, for exactly `pathname`. It goes to a browser, so an answer
-    that points anywhere else is refused."""
+    read from this deployment's private store (`store_host`; any private store when it
+    is not known), for exactly `pathname`. It goes to a browser, so an answer that
+    points anywhere else is refused."""
     if not isinstance(value, str) or len(value) > 8192:
         raise SignerError("no url")
     try:
@@ -501,7 +522,8 @@ def _checked_url(value: Any, op: str, pathname: str) -> str:
             and parse_qs(parts.query).get("pathname") == [pathname]
         )
     else:
-        ok = bool(_STORE_HOST.fullmatch(host)) and parts.path == "/" + pathname
+        right_host = host == store_host if store_host else bool(_STORE_HOST.fullmatch(host))
+        ok = right_host and parts.path == "/" + pathname
     if not ok:
         raise SignerError("unexpected url")
     return value
@@ -517,7 +539,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class BlobSigner(Protocol):
-    """Presigned Blob URLs, one pathname each (tests pass a fake)."""
+    """Presigned Blob URLs, one pathname each (tests pass a fake). `store_host` is the
+    one host its read URLs point at, when known: the page may connect only there."""
+
+    store_host: str | None
 
     def sign_put(
         self, pathname: str, max_bytes: int, valid_for: int, ttl_days: int
@@ -538,6 +563,7 @@ class HttpBlobSigner:
         encryption_key: str,
         *,
         bypass: str | None = None,
+        store_host: str | None = None,
         timeout: float = SIGNER_TIMEOUT_SECONDS,
         clock: Callable[[], float] = time.time,
     ):
@@ -548,6 +574,7 @@ class HttpBlobSigner:
         self.url = url
         self._key = signer_key(encryption_key)
         self._bypass = bypass
+        self.store_host = store_host
         self.timeout = timeout
         self.clock = clock
         self._opener = urllib.request.build_opener(_NoRedirect)
@@ -595,7 +622,7 @@ class HttpBlobSigner:
 
     def sign_get(self, pathname: str, valid_for: int) -> str:
         data = self._call({"op": "get", "pathname": pathname, "validForSeconds": valid_for})
-        return _checked_url(data.get("url"), "get", pathname)
+        return _checked_url(data.get("url"), "get", pathname, self.store_host)
 
 
 def signer_url_from_env(app_base_url: str | None) -> str | None:
@@ -622,9 +649,18 @@ def signer_url_from_env(app_base_url: str | None) -> str | None:
 def blob_signer_from_env(
     encryption_key: str | None, app_base_url: str | None
 ) -> HttpBlobSigner | None:
-    """The signer, when Blob, ENCRYPTION_KEY (its auth key) and a URL are all there."""
+    """The signer, when Blob, ENCRYPTION_KEY (its auth key) and a URL are all there.
+    None too when the store's own host cannot be told: browsers are let through to that
+    one host only, never to every private store."""
     url = signer_url_from_env(app_base_url)
     if not url or not encryption_key or not blob_configured():
         return None
+    store_host = blob_store_host()
+    if store_host is None:
+        logger.warning(
+            "the Blob store id could not be read from BLOB_STORE_ID or "
+            "BLOB_READ_WRITE_TOKEN: files people send go through the app"
+        )
+        return None
     bypass = os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET", "").strip() or None
-    return HttpBlobSigner(url, encryption_key, bypass=bypass)
+    return HttpBlobSigner(url, encryption_key, bypass=bypass, store_host=store_host)

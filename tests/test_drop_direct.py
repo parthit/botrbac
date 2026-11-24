@@ -25,6 +25,8 @@ from scoped_drive_mcp.drop_storage import (
     BlobParts,
     HttpBlobSigner,
     SignerError,
+    blob_signer_from_env,
+    blob_store_host,
     signer_headers,
     signer_key,
     signer_url_from_env,
@@ -43,6 +45,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class FakeSigner:
     """Hands out fake presigned URLs; `fail` makes every call raise."""
+
+    store_host: str | None = None
 
     def __init__(self) -> None:
         self.puts: list[tuple[str, int, int, int]] = []
@@ -306,6 +310,11 @@ def test_the_page_allows_blob_hosts_only_when_direct(setup, world, memstore, oau
     csp = r.headers["content-security-policy"]
     blob_hosts = "https://vercel.com/api/blob/ https://*.private.blob.vercel-storage.com"
     assert f"connect-src 'self' {blob_hosts};" in csp
+    # With the store known, only that one store's host.
+    _app_.state.drops.signer.store_host = "store.private.blob.vercel-storage.com"
+    csp = eve.get("/sharing?tab=with-me").headers["content-security-policy"]
+    assert "https://vercel.com/api/blob/ https://store.private.blob.vercel-storage.com;" in csp
+    assert "*.private" not in csp
     # Every other page keeps the strict policy.
     assert "vercel.com" not in eve.get("/").headers.get("content-security-policy", "")
 
@@ -530,6 +539,46 @@ def test_the_http_signer_refuses_a_read_url_that_is_not_what_it_asked_for(monkey
 def test_the_http_signer_refuses_an_upload_url_that_is_not_what_it_asked_for(monkeypatch, url):
     with pytest.raises(SignerError):
         _answering(monkeypatch, url).sign_put("drops/1/a/0", 8, 900, 2)
+
+
+def test_the_store_host_comes_from_the_connected_store(monkeypatch) -> None:
+    for name in ("BLOB_STORE_ID", "BLOB_READ_WRITE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    assert blob_store_host() is None
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_AbC123xyz_s3cretPart")
+    assert blob_store_host() == "abc123xyz.private.blob.vercel-storage.com"
+    # The secret part is never in it.
+    assert "s3cret" not in blob_store_host().lower()
+    monkeypatch.setenv("BLOB_STORE_ID", "store_OtherStore9")
+    assert blob_store_host() == "otherstore9.private.blob.vercel-storage.com"
+    monkeypatch.delenv("BLOB_STORE_ID")
+    for odd in ("vercel_blob_rw_onlythree", "nonsense", "a_b_c_bad.host/x_secret", "a_b_c__d"):
+        monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", odd)
+        assert blob_store_host() is None, odd
+
+
+def test_without_a_store_host_there_is_no_signer(monkeypatch) -> None:
+    """Browsers are let through to one store only: if it cannot be named, to none."""
+    monkeypatch.setenv("BLOB_SIGNER_URL", "https://app.example/api/blob-sign")
+    monkeypatch.delenv("BLOB_STORE_ID", raising=False)
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "an-odd-token")
+    assert blob_signer_from_env("k" * 44, None) is None
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_Mine_secret")
+    signer = blob_signer_from_env("k" * 44, None)
+    assert signer is not None
+    assert signer.store_host == "mine.private.blob.vercel-storage.com"
+
+
+def test_a_read_url_for_another_store_is_refused(monkeypatch) -> None:
+    mine = "https://mine.private.blob.vercel-storage.com/drops/1/a/0?sig=x"
+    theirs = "https://theirs.private.blob.vercel-storage.com/drops/1/a/0?sig=x"
+    s = _answering(monkeypatch, mine)
+    s.store_host = "mine.private.blob.vercel-storage.com"
+    assert s.sign_get("drops/1/a/0", 300) == mine
+    s = _answering(monkeypatch, theirs)
+    s.store_host = "mine.private.blob.vercel-storage.com"
+    with pytest.raises(SignerError):
+        s.sign_get("drops/1/a/0", 300)
 
 
 def test_the_http_signer_takes_the_urls_it_asked_for(monkeypatch) -> None:
