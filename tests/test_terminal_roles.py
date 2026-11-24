@@ -143,3 +143,31 @@ def test_role_pages_need_csrf(world, memstore, oauth) -> None:
     dash.login(c)
     r = c.post("/terminal/roles/save", data={"name": "X", "patterns": "fs/*"})
     assert r.status_code == 403
+
+
+def test_hand_typed_pattern_survives_an_edit(world, memstore, oauth) -> None:
+    """A typed pattern that is not one of the ticked tools stays in the textarea, so saving
+    the page again without touching it keeps it."""
+    app = terminal_app(world, memstore, oauth)
+    c = dash.client(app)
+    dash.login(c)
+    roles = app.state.dashboard.terminal.roles
+    roles.note_tools("owner@example.com", ["github/get_issue"])
+    role = roles.save("owner@example.com", None, "Mixed", ["github/get_issue", "fs/read_*"], 7)
+    page = c.get(f"/terminal/roles/{role.id}").text
+    assert 'value="github/get_issue" checked' in page
+    textarea = page.split('name="patterns"', 1)[1].split("</textarea>", 1)[0]
+    assert "fs/read_*" in textarea and "github/get_issue" not in textarea
+    token = dash.csrf(c, f"/terminal/roles/{role.id}")
+    c.post(
+        "/terminal/roles/save",
+        data={
+            "csrf": token,
+            "role_id": role.id,
+            "name": "Mixed",
+            "tool": "github/get_issue",
+            "patterns": "fs/read_*\n",
+            "offline_days": "7",
+        },
+    )
+    assert roles.get("owner@example.com", role.id).patterns == ["github/get_issue", "fs/read_*"]
