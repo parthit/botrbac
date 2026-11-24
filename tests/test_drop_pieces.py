@@ -375,3 +375,51 @@ def test_saved_folder_is_a_folder(setup, world) -> None:
     assert world.files[folder].mime_type == FOLDER_MIME
     again = mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])
     assert _error(again)["error"] == "saved"
+
+
+def test_a_piece_counts_only_once_it_is_stored(setup, blob, monkeypatch) -> None:
+    """If storing a piece fails, finish does not list a file with that piece missing, and
+    the piece can be sent again."""
+    app, _owner, (eve, _token) = setup
+    token, r = _start(eve, 8)
+    upload = r.json()["upload_id"]
+
+    def down(*_args) -> None:
+        raise RuntimeError("blob down")
+
+    monkeypatch.setattr(blob, "put", down)
+    assert _piece(eve, token, upload, 0, b"x" * 8).json()["error"] == "unavailable"
+    assert eve.post(f"/shared/send/{upload}/finish", data={"csrf": token}).status_code == 400
+    assert _held(app) == []
+    monkeypatch.undo()
+    assert _piece(eve, token, upload, 0, b"x" * 8).status_code == 200
+    assert eve.post(f"/shared/send/{upload}/finish", data={"csrf": token}).json()["ok"]
+
+
+def test_a_piece_being_stored_is_not_stored_twice_at_once(setup, blob) -> None:
+    app, _owner, (eve, _token) = setup
+    token, r = _start(eve, 8)
+    upload = r.json()["upload_id"]
+    with acting_as(OWNER_EMAIL):
+        assert app.state.drops.store.set_if_absent(f"drops:upload:{upload}:0:claim", "1", ex=60)
+    busy = _piece(eve, token, upload, 0, b"x" * 8)
+    assert busy.json()["error"] == "busy"
+    assert blob.blobs == {}
+
+
+def test_finish_lists_and_logs_a_file_once(setup, blob) -> None:
+    app, owner, (eve, _token) = setup
+    token, r = _start(eve, 8)
+    upload = r.json()["upload_id"]
+    _piece(eve, token, upload, 0, b"x" * 8)
+    with acting_as(OWNER_EMAIL):
+        store = app.state.drops.store
+        assert store.set_if_absent(f"drops:upload:{upload}:finishing", "1", ex=60)
+    busy = eve.post(f"/shared/send/{upload}/finish", data={"csrf": token})
+    assert busy.json()["error"] == "busy"
+    with acting_as(OWNER_EMAIL):
+        store.delete(f"drops:upload:{upload}:finishing")
+    assert eve.post(f"/shared/send/{upload}/finish", data={"csrf": token}).json()["ok"]
+    again = eve.post(f"/shared/send/{upload}/finish", data={"csrf": token})
+    assert again.status_code == 400 and again.json()["error"] == "not_found"
+    assert len(_held(app)) == 1

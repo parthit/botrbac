@@ -38,3 +38,6 @@ token*.json
 
 # Node (api/blob-sign.mjs)
 node_modules/
+
+# Local agent worktrees
+.claude/worktrees/

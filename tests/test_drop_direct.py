@@ -20,6 +20,7 @@ from scoped_drive_mcp.drop_storage import (
     signer_key,
     signer_url_from_env,
 )
+from scoped_drive_mcp.external import acting_as
 from tests.conftest import EVE, OWNER_EMAIL
 from tests.dash import client, csrf, login, mcp_call
 from tests.test_drop_pieces import PIECE, FakeBlob, _start
@@ -401,3 +402,21 @@ def test_presigned_puts_count_against_the_budget_when_issued(setup, signer) -> N
     # Refused before any URL is signed.
     assert "direct" not in r.json() and signer.puts == []
     assert app.state.drops.ttl_days == 2
+
+
+def test_each_signed_put_is_claimed_and_finish_runs_once(setup, blob) -> None:
+    app, _owner, eve = setup
+    data = b"w" * 12
+    token, r = _start(eve, len(data))
+    begun = r.json()
+    upload = begun["upload_id"]
+    with acting_as(OWNER_EMAIL):
+        store = app.state.drops.store
+        claims = [store.get(f"drops:upload:{upload}:{n}:claim") for n in range(2)]
+    assert claims == ["1", "1"]
+    for n, signed in enumerate(begun["direct"]):
+        _browser_put(blob, signed, data[n * PIECE : (n + 1) * PIECE])
+    assert eve.post(f"/shared/send/{upload}/finish", data={"csrf": token}).json()["ok"] is True
+    again = eve.post(f"/shared/send/{upload}/finish", data={"csrf": token})
+    assert again.status_code == 400
+    assert len(_held(app)) == 1
