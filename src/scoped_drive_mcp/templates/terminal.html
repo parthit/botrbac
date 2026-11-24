@@ -37,7 +37,7 @@
         <button type="submit" class="ghost">Change</button>
       </form>
     </td>
-    <td>{% if t.last_seen %}{{ t.last_seen | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
+    <td>{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
     <td>{% if t.queued %}{{ t.queued }} row{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>
     <td>
       <form class="inline" method="post" action="/terminal/t/{{ t.id }}/rename">

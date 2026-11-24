@@ -2,5 +2,6 @@
 <nav class="actions" aria-label="Terminal">
   <a class="btn{{ ' primary' if active == 'terminals' }}" href="/terminal"{% if active == 'terminals' %} aria-current="page"{% endif %}>Terminals</a>
   <a class="btn{{ ' primary' if active == 'roles' }}" href="/terminal/roles"{% if active == 'roles' %} aria-current="page"{% endif %}>Roles</a>
+  <a class="btn{{ ' primary' if active == 'activity' }}" href="/terminal/activity"{% if active == 'activity' %} aria-current="page"{% endif %}>Activity</a>
 </nav>
 {%- endmacro %}

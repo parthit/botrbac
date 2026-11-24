@@ -106,6 +106,7 @@ from .store import (
     usable_email,
 )
 from .terminal.feature import Kit as TerminalKit
+from .terminal.feature import epoch_iso
 
 logger = logging.getLogger(__name__)
 
@@ -3822,5 +3823,6 @@ _env.globals["shared_href"] = shared_href
 _env.globals["human_size"] = human_size
 _env.globals["assistant_label"] = assistant_label
 _env.filters["when"] = when
+_env.filters["epoch"] = epoch_iso
 _env.globals["icon_kind"] = icon_kind
 _env.globals["role_labels"] = ROLE_LABELS
