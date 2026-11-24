@@ -6,6 +6,7 @@ from botrbac_cli.patterns import (
     PatternError,
     allows,
     chain_allows,
+    is_tool_id,
     matches,
     normalize_server,
     validate,
@@ -48,6 +49,13 @@ def test_bad_patterns(bad) -> None:
         validate(bad)
 
 
+def test_trailing_newline_is_not_a_tool() -> None:
+    assert not is_tool_id("fs/read\n")
+    assert is_tool_id("fs/read")
+    with pytest.raises(PatternError):
+        validate("fs/*\nx")
+
+
 def test_validate_all_dedupes_and_skips_blank() -> None:
     assert validate_all(["fs/*", " ", "fs/*", "github/get_*"]) == ["fs/*", "github/get_*"]
 
@@ -86,7 +94,9 @@ def test_roles_crud() -> None:
     assert roles.delete(ME, role.id)
     assert not roles.delete(ME, role.id)
     assert not roles.delete(ME, "full")
-    assert roles.effective(ME, role.id).id == DEFAULT_ROLE
+    assert roles.effective(ME, role.id).id == "none"  # deleted: fail closed
+    assert roles.effective(ME, None).id == DEFAULT_ROLE
+    assert roles.effective(ME, "r_corrupt").patterns == []
 
 
 def test_seen_tools() -> None:

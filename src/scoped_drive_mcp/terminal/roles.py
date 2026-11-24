@@ -56,12 +56,15 @@ BUILTIN: dict[str, Role] = {
         "Read-only",
         ["*/read*", "*/get*", "*/list*", "*/search*"],
         builtin=True,
-        description="Tools whose names start with read, get, list or search.",
+        description=(
+            "Tools whose names start with read, get, list or search. This goes by the "
+            "name only: check what each server's tools really do."
+        ),
     ),
     FULL: Role(FULL, "Full access", ["*"], builtin=True, description="Every tool."),
     NO_TOOLS: Role(NO_TOOLS, "No tools", [], builtin=True, description="Blocks every tool."),
 }
-# What a new terminal gets, and what a terminal falls back to when its role is deleted.
+# What a new terminal gets. A terminal whose role was deleted gets No tools instead.
 DEFAULT_ROLE = READ_ONLY
 
 
@@ -91,8 +94,12 @@ class TerminalRoles:
         return _load(raw) if raw else None
 
     def effective(self, email: str, role_id: str | None) -> Role:
-        """The role a terminal runs with. A missing or deleted role is read-only."""
-        return self.get(email, role_id) or BUILTIN[DEFAULT_ROLE]
+        """The role a terminal runs with. No role set means the default (Read-only). A
+        role that is set but cannot be found (deleted, or a record that fails its
+        signature check) means No tools: never a different set than the person chose."""
+        if not role_id:
+            return BUILTIN[DEFAULT_ROLE]
+        return self.get(email, role_id) or BUILTIN[NO_TOOLS]
 
     def save(
         self,
