@@ -161,7 +161,15 @@
   an id nobody can pick stays pending until denied; one app can have at most `MAX_PENDING_REQUESTS` waiting.
 - **Files paired people send.** A paired person can send you a file (`send_file`, or the dashboard). It is
   held for `DROP_HOLD_HOURS` (encrypted when `ENCRYPTION_KEY` is set, in a private Vercel Blob store when
-  one is connected, otherwise in the key-value store) and then deleted; nothing is written to your Drive unless you
+  one is connected, otherwise in the key-value store) and then deleted. **Exception:** a file the browser
+  uploads straight to Blob (on Vercel, through the signer `api/blob-sign.mjs`) is not encrypted with
+  `ENCRYPTION_KEY`, because its bytes never reach this app; it relies on Vercel Blob's own encryption at
+  rest. Its record is marked so (`"enc": "blob-at-rest"`), and only marked records are read as raw bytes;
+  every other record must still decrypt. The signer is not public: it answers only requests signed with
+  HMAC-SHA256 (key derived from `ENCRYPTION_KEY`) over the body and a timestamp less than 60 seconds old,
+  and signs only held-file piece pathnames, each upload capped at that piece's exact size. Python decides
+  who may upload or download; the signer only signs. Turn it off with `BLOB_SIGNER_URL=off`.
+  Nothing is written to your Drive unless you nothing is written to your Drive unless you
   save it. The sender cannot read, list or change it afterwards. Your assistants see it marked
   `untrusted_peer`. You can stop one person's files without ending the pairing. See
   [sharing.md](sharing.md#sending-a-file-to-a-paired-person).

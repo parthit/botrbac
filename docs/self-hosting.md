@@ -82,6 +82,16 @@ public needs brand verification (`drive.file` is not a restricted scope, so no s
 3. **Storage:** in the project, **Storage → Create / Connect** → **Upstash for Redis** (free plan) → connect
    it to this project. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` (or the `UPSTASH_REDIS_REST_*`
    pair) for you. Neon Postgres works too: it adds `DATABASE_URL`.
+4. **Optional, for files people send each other:** **Storage → Create → Blob**, access **Private**, and
+   connect it to this project (Vercel adds `BLOB_READ_WRITE_TOKEN`). The project then also deploys a small
+   Node.js function, `api/blob-sign.mjs` (Vercel installs it from `package.json`), that lets browsers
+   upload and download those files straight to and from Blob. It needs `ENCRYPTION_KEY` (step 3) and no
+   other secret. If **Settings → Deployment Protection** covers `*.vercel.app` URLs (Vercel Authentication
+   with "All deployments except custom domains", or "Standard Protection"), also turn on **Protection
+   Bypass for Automation** there and redeploy: Vercel then adds `VERCEL_AUTOMATION_BYPASS_SECRET`, which the
+   app sends when it calls its own deployment's signer. Without that, previews (and a production without a
+   custom `APP_BASE_URL`) still work, through the Python function. See
+   [sharing.md](sharing.md#sending-a-file-to-a-paired-person).
 
 Prefer the CLI? `npm i -g vercel`, then `vercel link` and `vercel env add NAME production` for each
 variable below. Storage still has to be connected once in the dashboard (or with
@@ -284,6 +294,8 @@ uv run ruff check . && uv run ruff format --check .
 | `DROP_MAX_MB` | 20 | largest file a person may send from the dashboard (1 to 100). It is sent in 4 MB pieces, under Vercel's 4.5 MB request limit. An assistant's `send_file` keeps the `MAX_BYTES` limit |
 | `BLOB_READ_WRITE_TOKEN` (or `BLOB_STORE_ID`) | unset | set by Vercel when a Blob store is connected to the project. Held files then go to Blob instead of Redis or Postgres. Use a **private** store |
 | `DROP_BLOB_MONTHLY_UPLOADS` | 1500 | Blob uploads a calendar month (each 4 MB piece is one). The free tier includes 2,000 and turns Blob off for 30 days past it |
+| `BLOB_SIGNER_URL` | unset | where the Node function `api/blob-sign.mjs` answers. Unset: on Vercel, production calls `APP_BASE_URL` and other deployments their own `VERCEL_URL`. `off` turns direct browser-to-Blob transfers off (files then go through the Python function, encrypted) |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | unset | set by Vercel when **Protection Bypass for Automation** is on. Sent to the signer so it can be reached on protected deployment URLs |
 | `DROP_BLOB_STORAGE_MB` | 800 | MB that held files may take in Blob (the free tier includes 1 GB). Sends are refused past either cap until it frees up |
 | `EXTRACT_ISOLATION` | on | reads PDF and Office files in a separate process with hard memory and CPU limits. `0` reads them in the server process, only for hosts that cannot start a process |
 | `EXTRACT_MEMORY_MB` | 768 | address-space limit of that process, in MB (256 to 8192). Up to two run at once (at most one per caller), so keep two of them plus the server under the function's memory |

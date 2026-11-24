@@ -62,7 +62,15 @@ from .drive_client import (
     drive_not_connected_message,
     oauth_credentials,
 )
-from .drop_storage import BlobApi, BlobBudget, BlobParts, VercelBlobApi, blob_configured
+from .drop_storage import (
+    BlobApi,
+    BlobBudget,
+    BlobParts,
+    BlobSigner,
+    VercelBlobApi,
+    blob_configured,
+    blob_signer_from_env,
+)
 from .drops import DropBox, drop_partition
 from .external import ExternalShares, SharedAccessError, acting_as
 from .flags import EdgeConfigFlags
@@ -833,6 +841,7 @@ def build_app(
     notion_api_factory: Callable[[str], NotionApi] | None = None,
     notion_oauth: NotionOAuth | None = None,
     blob_api: BlobApi | None = None,
+    blob_signer: BlobSigner | None = None,
 ) -> Starlette:
     """Build the ASGI app. Tests inject `settings`, fake Drive clients, a store and OAuth."""
     if settings is None:
@@ -1040,6 +1049,12 @@ def build_app(
             held_bytes=settings.drop_blob_storage_mb * 1024 * 1024,
             hold_hours=settings.drop_hold_hours,
         )
+        # The browser moves the bytes to and from Blob itself when api/blob-sign.mjs can
+        # sign URLs (tests pass `blob_signer`).
+        if blob_signer is None:
+            blob_signer = blob_signer_from_env(enc_key, settings.app_base_url)
+    else:
+        blob_signer = None
 
     drop_box = DropBox(
         actor_kv,
@@ -1061,6 +1076,7 @@ def build_app(
         max_bytes=settings.drop_max_mb * 1024 * 1024,
         blob=drop_blob,
         budget=drop_budget,
+        signer=blob_signer,
     )
     if not enc_key:
         logger.warning(

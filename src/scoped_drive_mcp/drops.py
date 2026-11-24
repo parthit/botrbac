@@ -25,8 +25,12 @@ runs again.
   the end of the hold), and the server logs a warning at startup.
 * Files up to `max_bytes` (DROP_MAX_MB, 20 MB by default). The dashboard sends one in
   pieces (`begin`, `put_piece`, `finish`), each under Vercel's 4.5 MB request limit, and
-  the recipient's browser downloads it the same way (`piece`). An assistant's send_file
-  carries the whole file in one call, so it keeps upload_file's MAX_BYTES limit.
+  the recipient's browser downloads it the same way (`piece`). With the Blob signer
+  (drop_storage.BlobSigner), `begin` hands out a presigned PUT per piece instead, the
+  browser uploads to Blob itself, and `finish` checks each piece's size there; downloads
+  use `piece_url`. Those pieces rely on Blob's encryption at rest, not ENCRYPTION_KEY.
+  An assistant's send_file carries the whole file in one call, so it keeps upload_file's
+  MAX_BYTES limit.
 * Ada's own assistants see drops (`list_drops`, `read_drop`, `download_drop`) marked
   `untrusted_peer`: the name and contents are Eve's. A saved copy is stamped with Eve as
   its writer, so it keeps that mark wherever Ada's assistants see it in Drive.
@@ -45,7 +49,15 @@ from . import drop_storage
 from .audit import audit
 from .auth import current_actor, current_principal
 from .drive_client import FOLDER_MIME, BotNotConnectedError, DriveClient, DriveNotFoundError
-from .drop_storage import BlobBudget, BlobParts, DropParts, KvParts, piece_count
+from .drop_storage import (
+    BLOB_AT_REST,
+    BlobBudget,
+    BlobParts,
+    BlobSigner,
+    DropParts,
+    KvParts,
+    piece_count,
+)
 from .errors import report_exception
 from .external import (
     NOT_LINKED_LOG_EVERY,
@@ -75,6 +87,13 @@ DROP_SAVING_PREFIX = "drops:saving:"
 SAVE_LOCK_SECONDS = 120
 # How long a dashboard upload may take from its first piece to its last.
 UPLOAD_SECONDS = 3600
+# How long a presigned URL from the Blob signer may be used: an upload URL, and a
+# download URL (the browser fetches it at once).
+DIRECT_PUT_SECONDS = 15 * 60
+DIRECT_GET_SECONDS = 5 * 60
+# After the signer fails, sends and downloads go through this app for a while, so a signer
+# that is down or unreachable does not slow every send by its timeout.
+SIGNER_BACKOFF = timedelta(minutes=5)
 # What secrets.token_urlsafe(16) makes.
 _DROP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
@@ -116,6 +135,7 @@ class DropBox:
         max_bytes: int = DROP_MAX_BYTES,
         blob: BlobParts | None = None,
         budget: BlobBudget | None = None,
+        signer: BlobSigner | None = None,
         clock: Callable[[], datetime] = _now,
     ):
         # `store`, `drive` and `own_allowlist` resolve the current actor on each call, so
@@ -134,6 +154,9 @@ class DropBox:
         # New files go to Blob when it is connected; rows say where theirs are.
         self.blob = blob
         self.budget = budget
+        # Presigned Blob URLs (api/blob-sign.mjs), so the browser moves the bytes itself.
+        self.signer = signer
+        self._signer_off_until: datetime | None = None
         self.max_bytes = max_bytes
         self.hold = timedelta(hours=hold_hours)
         self.clock = clock
@@ -145,6 +168,28 @@ class DropBox:
     @property
     def max_mb(self) -> int:
         return self.max_bytes // (1024 * 1024)
+
+    @property
+    def direct(self) -> bool:
+        """Browsers may upload to and download from Blob directly."""
+        return self.signer is not None and self.blob is not None
+
+    def _signer(self) -> BlobSigner | None:
+        if self.signer is None or self.blob is None:
+            return None
+        if self._signer_off_until is not None and self.clock() < self._signer_off_until:
+            return None
+        return self.signer
+
+    def _signer_failed(self, exc: Exception) -> None:
+        report_exception(exc, where="drop_presign")
+        self._signer_off_until = self.clock() + SIGNER_BACKOFF
+
+    @property
+    def ttl_days(self) -> int:
+        """Blob deletes a directly uploaded piece on its own after this many days: the
+        hold, from an upload that starts after `begin`, plus a day."""
+        return -(-self.hold_hours // 24) + 1
 
     # ---- stored pieces ---------------------------------------------------
 
@@ -226,6 +271,13 @@ class DropBox:
         """How many pieces `piece` serves for this row."""
         return piece_count(int(row.get("size") or 0))
 
+    @staticmethod
+    def _piece_size(row: dict[str, Any], n: int) -> int:
+        """Bytes in piece `n`: every piece but the last is exactly PIECE_BYTES."""
+        step = drop_storage.PIECE_BYTES
+        count = piece_count(int(row["size"]))
+        return step if n < count - 1 else int(row["size"]) - step * (count - 1)
+
     def _piece(self, row: dict[str, Any], n: int) -> bytes:
         try:
             data = self._parts(row).get_piece(row, n)
@@ -259,6 +311,24 @@ class DropBox:
         if not isinstance(n, int) or not 0 <= n < self.pieces(row):
             raise SharedAccessError("not_found", "No such piece.")
         return row, self._piece(row, n)
+
+    def piece_url(self, drop_id: str, n: int) -> str | None:
+        """For the recipient's browser: a presigned Blob URL for piece `n`, valid a few
+        minutes, or None when it should fetch the piece from this app (`piece`). Only
+        pieces the browser uploaded directly: the others are encrypted here."""
+        row = self._get(drop_id)
+        self._check_held(row)
+        if not isinstance(n, int) or not 0 <= n < self.pieces(row):
+            raise SharedAccessError("not_found", "No such piece.")
+        signer = self._signer()
+        if row.get("enc") != BLOB_AT_REST or signer is None:
+            return None
+        path = BlobParts.path(str(row["id"]), int(row["exp"]), n)
+        try:
+            return signer.sign_get(path, DIRECT_GET_SECONDS)
+        except Exception as exc:
+            self._signer_failed(exc)
+            return None
 
     def dismiss(self, drop_id: str) -> None:
         """Delete a drop from the list now (a saved copy in Drive stays)."""
@@ -566,11 +636,43 @@ class DropBox:
             )
         return them, row
 
+    def _presign_puts(self, row: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """One presigned PUT per piece, each for exactly that piece's size at most, or None
+        (no signer, or it failed: the pieces then come through `put_piece`)."""
+        signer = self._signer()
+        if signer is None or row.get("store") != "blob":
+            return None
+        try:
+            return [
+                signer.sign_put(
+                    BlobParts.path(str(row["id"]), int(row["exp"]), n),
+                    self._piece_size(row, n),
+                    DIRECT_PUT_SECONDS,
+                    self.ttl_days,
+                )
+                for n in range(piece_count(int(row["size"])))
+            ]
+        except Exception as exc:
+            self._signer_failed(exc)
+            return None
+
     def begin(
-        self, caller: str, to: str, name: str, mime_type: str, size: int, *, via: str
+        self,
+        caller: str,
+        to: str,
+        name: str,
+        mime_type: str,
+        size: int,
+        *,
+        via: str,
+        direct: bool = True,
     ) -> dict[str, Any]:
         """Start a send in pieces. Every check a whole send makes happens here, before any
-        bytes arrive; the hourly limit and the storage budget count it now."""
+        bytes arrive; the hourly limit and the storage budget count it now.
+
+        With the Blob signer (and `direct`), the answer carries a presigned PUT for each
+        piece and the browser uploads to Blob itself; `finish` then checks every piece is
+        there with the right size."""
         you, them = self._pair(caller, to, via)
         try:
             name, mime_type = self.service.check_upload_meta(name, mime_type)
@@ -584,29 +686,39 @@ class DropBox:
             )
         with guest_of(them, you):
             row = {**self._admit(you, them, size, via), "name": name, "mime_type": mime_type}
+            puts = self._presign_puts(row) if direct else None
+            if puts is not None:
+                row["enc"] = BLOB_AT_REST
             self.store.set(
                 f"{DROP_UPLOAD_PREFIX}{row['id']}",
                 json.dumps(row, separators=(",", ":")),
                 ex=UPLOAD_SECONDS,
             )
         self.store.set(f"{DROP_OUTGOING_PREFIX}{row['id']}", them, ex=UPLOAD_SECONDS)
-        return {
+        started: dict[str, Any] = {
             "upload_id": row["id"],
             "piece_bytes": drop_storage.PIECE_BYTES,
             "pieces": piece_count(size),
         }
+        if puts is not None:
+            started["direct"] = puts
+        return started
 
     def put_piece(self, caller: str, upload_id: str, n: int, data: bytes) -> dict[str, Any]:
         """Store piece `n` of an upload `caller` began. Every piece but the last is exactly
         PIECE_BYTES."""
         you = normalize_email(caller)
         them, row = self._upload(you, upload_id)
-        step = drop_storage.PIECE_BYTES
+        if row.get("enc") == BLOB_AT_REST:
+            # Its pieces go straight to Blob, unencrypted here; never mix in a piece
+            # this app would have to store the same way.
+            raise SharedAccessError(
+                "invalid_input", "This upload goes straight to storage. Send the file again."
+            )
         count = piece_count(int(row["size"]))
         if not isinstance(n, int) or not 0 <= n < count:
             raise SharedAccessError("invalid_input", "No such piece.")
-        expected = step if n < count - 1 else int(row["size"]) - step * (count - 1)
-        if len(data) != expected:
+        if len(data) != self._piece_size(row, n):
             raise SharedAccessError(
                 "invalid_input", "Part of the file arrived damaged. Send the file again."
             )
@@ -636,17 +748,37 @@ class DropBox:
                 raise SharedAccessError(
                     "drops_off", f"{them} is not accepting files from you now.", to=them
                 )
-            for n in range(piece_count(int(row["size"]))):
-                if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"):
-                    raise SharedAccessError(
-                        "invalid_input", "Some of the file did not arrive. Send it again."
-                    )
+            if row.get("enc") == BLOB_AT_REST:
+                self._check_direct(row)
+            else:
+                for n in range(piece_count(int(row["size"]))):
+                    if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"):
+                        raise SharedAccessError(
+                            "invalid_input", "Some of the file did not arrive. Send it again."
+                        )
             result = self._stored(row, you, them, via)
             self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}")
             for n in range(piece_count(int(row["size"]))):
                 self.store.delete(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}")
         self.store.delete(f"{DROP_OUTGOING_PREFIX}{upload_id}")
         return result
+
+    def _check_direct(self, row: dict[str, Any]) -> None:
+        """Every piece the browser uploaded to Blob is there, with exactly its size."""
+        if self.blob is None:
+            raise SharedAccessError("unavailable", "The file could not be stored.")
+        for n in range(piece_count(int(row["size"]))):
+            try:
+                stored = self.blob.size(row, n)
+            except Exception as exc:
+                report_exception(exc, where="drop_head")
+                raise SharedAccessError(
+                    "unavailable", "The file could not be checked right now. Try again."
+                ) from None
+            if stored != self._piece_size(row, n):
+                raise SharedAccessError(
+                    "invalid_input", "Some of the file did not arrive. Send it again."
+                )
 
     def _refusal(self, you: str, them: str, size: int) -> SharedAccessError | None:
         """Why a file from `you` cannot be held for `them` (the current actor) now, or

@@ -30,7 +30,7 @@
         {% if d.saved_file_id %}<span>Saved to your Drive</span>{% else %}<span>Deleted {{ d.expires_at | when }} unless saved</span>{% endif %}</div>
       <div class="file-actions">
         {% if not d.saved_file_id %}
-        <a class="btn" href="/drops/{{ d.id | urlencode }}/download" data-drop-download="{{ d.id }}" data-drop-pieces="{{ d.pieces }}" data-drop-name="{{ d.name }}">Download</a>
+        <a class="btn" href="/drops/{{ d.id | urlencode }}/download" data-drop-download="{{ d.id }}" data-drop-pieces="{{ d.pieces }}" data-drop-name="{{ d.name }}"{% if d.enc == "blob-at-rest" %} data-drop-direct{% endif %}>Download</a>
         <form class="inline" method="post" action="/drops/{{ d.id | urlencode }}/save">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button class="primary" type="submit">Save to Google Drive</button>

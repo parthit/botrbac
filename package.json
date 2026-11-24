@@ -1,0 +1,17 @@
+{
+  "name": "botrbac-blob-signer",
+  "private": true,
+  "description": "The Node.js function (api/blob-sign.mjs) that signs Vercel Blob URLs for held files.",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test": "node --test tests/node/blob-sign.test.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "2.9.0"
+  },
+  "overrides": {
+    "zod": "4.6.7"
+  }
+}

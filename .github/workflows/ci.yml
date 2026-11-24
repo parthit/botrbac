@@ -45,3 +45,11 @@ jobs:
         run: |
           uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
           git diff --exit-code requirements.txt
+
+      # The Node function that signs Blob URLs (api/blob-sign.mjs), with the runner's Node.
+      - name: Node signer
+        run: |
+          npm ci --ignore-scripts
+          node --check api/blob-sign.mjs
+          node --check src/scoped_drive_mcp/templates/ui.js
+          npm test

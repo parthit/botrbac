@@ -171,6 +171,13 @@ PICKER_CSP = (
     b"form-action 'self' https://accounts.google.com; "
     b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 )
+# Sharing → Shared with me when the browser sends and fetches held files straight to and
+# from Vercel Blob (drop_storage.BlobSigner): uploads go to the Blob API, downloads come
+# from the private store's host. Same as STRICT_CSP otherwise.
+BLOB_CONNECT = b"https://vercel.com https://*.private.blob.vercel-storage.com"
+DIRECT_DROP_CSP = STRICT_CSP.replace(
+    b"connect-src 'self'; ", b"connect-src 'self' " + BLOB_CONNECT + b"; "
+)
 # Templates with a picker button (#pick-drive or [data-pick]). They get PICKER_CSP when
 # the picker is configured (render's `picker_ready`); every other response gets STRICT_CSP.
 PICKER_TEMPLATES = frozenset({"browse.html", "access.html", "request.html"})
@@ -641,6 +648,8 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     response = HTMLResponse(html, status_code=status_code)
     if template in PICKER_TEMPLATES and ctx.get("picker_ready"):
         response.headers["content-security-policy"] = PICKER_CSP.decode()
+    elif template == "shared.html" and ctx.get("drops_direct"):
+        response.headers["content-security-policy"] = DIRECT_DROP_CSP.decode()
     return response
 
 
@@ -2202,6 +2211,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "people": ctx.shared_with_me.overview(email),
                 "peers": peers,
                 "drops_on": ctx.drops is not None,
+                "drops_direct": ctx.drops is not None and ctx.drops.direct,
                 "received": [],
                 "send_limit_mb": DROP_UPLOAD_MB,
                 "send_max_mb": ctx.drops.max_mb if ctx.drops is not None else 0,
@@ -2299,6 +2309,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     mime,
                     size,
                     via=VIA_DASHBOARD,
+                    # ui.js asks again with direct=0 when the browser could not reach Blob.
+                    direct=form.get("direct") != "0",
                 )
             )
         except SharedAccessError as exc:
@@ -2355,6 +2367,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             media_type="application/octet-stream",
             headers={"Content-Disposition": "attachment", "Cache-Control": "no-store"},
         )
+
+    async def drop_piece_link(request: Request) -> Response:
+        """Where the recipient's browser fetches one piece: a presigned Blob URL valid for
+        a few minutes when the piece was uploaded straight to Blob, else this app's own
+        piece route (ui.js)."""
+        if ctx.drops is None:
+            return Response(status_code=404)
+        drop_id = request.path_params["drop_id"]
+        try:
+            n = int(request.path_params["n"])
+        except ValueError:
+            n = -1
+        try:
+            url = await blocking(ctx.drops.piece_url, drop_id, n)
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        if url is None:
+            return JSONResponse({"ok": True, "url": f"/drops/{quote(drop_id, safe='')}/piece/{n}"})
+        return JSONResponse({"ok": True, "url": url, "direct": True})
 
     async def drop_download(request: Request) -> Response:
         """The recipient downloads a held file. Never served inline: it is another
@@ -3524,6 +3555,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/drops/allow", csrf_protected(drop_allow), methods=["POST"]),
         Route("/drops/{drop_id}/download", owner_only(drop_download), methods=["GET"]),
         Route("/drops/{drop_id}/piece/{n}", owner_only(drop_piece_get), methods=["GET"]),
+        Route("/drops/{drop_id}/piece/{n}/url", owner_only(drop_piece_link), methods=["GET"]),
         Route("/drops/{drop_id}/{action}", csrf_protected(drop_act), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),

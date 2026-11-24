@@ -35,3 +35,6 @@ token*.json
 .DS_Store
 .idea/
 .vscode/
+
+# Node (api/blob-sign.mjs)
+node_modules/
