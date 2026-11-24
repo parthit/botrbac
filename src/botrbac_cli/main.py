@@ -77,7 +77,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     )
     reach = "online" if online else "offline"
     print(f"Policy:   v{pol.get('version', '?')}, {int(age // 60)} min old · {reach}")
-    print(f"Waiting:  {queue.waiting()} audit rows to send")
+    refused = queue.rejected()
+    note = f", {refused} refused (botrbac sync --retry-rejected)" if refused else ""
+    print(f"Waiting:  {queue.waiting()} audit rows to send{note}")
     session = policy.load_session(os.environ.get(policy.SESSION_ENV))
     if session:
         print(f"Session:  {session.get('id')} as {session.get('role_name')}")
@@ -89,7 +91,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_sync(args: argparse.Namespace) -> int:
     from .sync import sync
 
-    result = sync(_api(args), AuditQueue())
+    queue = AuditQueue()
+    if args.retry_rejected:
+        print(f"Sending {queue.requeue_rejected()} refused rows again.")
+    result = sync(_api(args), queue)
     if result.get("error"):
         print(f"Offline: {result['waiting']} rows waiting ({result['error']})")
         return 1
@@ -101,7 +106,9 @@ def cmd_log(args: argparse.Namespace) -> int:
     for row in AuditQueue().recent(args.limit):
         when = datetime.fromtimestamp(row["ts"]).strftime("%Y-%m-%d %H:%M:%S")
         what = row.get("tool") or f"session {row.get('session_id')} as {row.get('role')}"
-        mark = "" if row["sent"] else "  (not sent yet)"
+        mark = {"sent": "", "rejected": "  (refused by the server)"}.get(
+            row.get("status", ""), "  (not sent yet)"
+        )
         print(f"{when}  {row['decision']:<7} {what}  {row.get('reason', '')}{mark}")
     return 0
 
@@ -167,9 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="login, role, policy age, rows waiting").set_defaults(
         fn=cmd_status
     )
-    sub.add_parser("sync", help="send waiting audit rows and fetch the policy").set_defaults(
-        fn=cmd_sync
+    p = sub.add_parser("sync", help="send waiting audit rows and fetch the policy")
+    p.add_argument(
+        "--retry-rejected", action="store_true", help="send rows the server refused again"
     )
+    p.set_defaults(fn=cmd_sync)
     p = sub.add_parser("log", help="recent tool calls on this computer")
     p.add_argument("-n", "--limit", type=int, default=20)
     p.set_defaults(fn=cmd_log)

@@ -289,31 +289,63 @@ def test_refresh_uses_what_another_process_just_got(monkeypatch) -> None:
     assert client._token() == "a-new"
 
 
-def test_a_rejected_batch_does_not_block_the_queue() -> None:
+def test_one_bad_row_does_not_cost_the_good_ones(capsys) -> None:
     from botrbac_cli.api import ApiError
 
-    calls = []
-
     class Api:
+        def __init__(self):
+            self.stored = []
+
         def send_audit(self, body):
-            calls.append(len(body["rows"]))
-            if len(calls) == 1:
+            if "tools" in body or any(r["tool"] == "bad/row" for r in body["rows"]):
                 raise ApiError(400, "invalid_request")
-            return {"accepted": len(body["rows"])}
+            self.stored += [r["tool"] for r in body["rows"]]
+            return {}
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    state.note_seen(tools=["github/get_issue"])
+    queue = AuditQueue()
+    for tool in ("github/a", "bad/row", "github/b", "github/c"):
+        queue.add(decision="allow", tool=tool)
+    api = Api()
+    result = sync(api, queue)
+    assert sorted(api.stored) == ["github/a", "github/b", "github/c"]
+    assert result["rejected"] == 1 and result["waiting"] == 0
+    assert queue.rejected() == 1
+    assert "refused 1 audit row" in capsys.readouterr().err
+    assert [r["status"] for r in queue.recent() if r["tool"] == "bad/row"] == ["rejected"]
+    assert queue.requeue_rejected() == 1 and queue.waiting() == 1
+
+
+def test_a_server_refusing_everything_keeps_the_rows() -> None:
+    from botrbac_cli.api import ApiError
+
+    class Broken:
+        def send_audit(self, body):
+            raise ApiError(400, "invalid_request")
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    queue = AuditQueue()
+    for tool in ("github/a", "github/b"):
+        queue.add(decision="allow", tool=tool)
+    result = sync(Broken(), queue)
+    assert result["waiting"] == 2 and "error" in result and queue.rejected() == 0
+
+
+def test_temporary_errors_keep_the_rows() -> None:
+    from botrbac_cli.api import ApiError
+
+    class Down:
+        def send_audit(self, body):
+            raise ApiError(503, "unavailable")
 
         def policy(self):
             return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
 
     queue = AuditQueue()
     queue.add(decision="allow", tool="github/get_issue")
-    result = sync(Api(), queue)
-    assert result["rejected"] == 1 and result["waiting"] == 0
-    queue.add(decision="allow", tool="github/list_issues")
-    assert sync(Api(), queue)["sent"] == 1  # later rows still go out
-
-    class Down(Api):
-        def send_audit(self, body):
-            raise ApiError(503, "unavailable")
-
-    queue.add(decision="allow", tool="github/get_issue")
-    assert sync(Down(), queue)["waiting"] == 1  # a temporary error keeps the rows
+    assert sync(Down(), queue)["waiting"] == 1
