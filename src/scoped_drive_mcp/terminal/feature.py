@@ -106,7 +106,11 @@ class TerminalFeature:
             role_id = request.path_params["role_id"]
             if await _run(self.roles.delete, _me(), role_id):
                 audit_owner("terminal_role_deleted", role=role_id)
-                kit.flash(request, "ok", "Role deleted. Terminals that used it are now read-only.")
+                kit.flash(
+                    request,
+                    "ok",
+                    "Role deleted. Terminals that used it now have no tools until you give them a role.",
+                )
             else:
                 kit.flash(request, "error", "That role cannot be deleted.")
             return RedirectResponse("/terminal/roles", status_code=303)
