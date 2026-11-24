@@ -105,6 +105,8 @@ from .store import (
     sign_existing_records,
     usable_email,
 )
+from .terminal.feature import Kit as TerminalKit
+from .terminal.feature import epoch_iso
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +264,9 @@ class DashboardContext:
     notion: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
     drops: Any = None
+    # Bot RBAC Terminal (terminal.TerminalFeature): roles for agents on people's own
+    # computers. None leaves its pages out (tests that build a bare context).
+    terminal: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -640,6 +645,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
+    ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -3584,6 +3590,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         *legal_routes(),
+        *(
+            ctx.terminal.page_routes(TerminalKit(owner_only, csrf_protected, render, flash))
+            if ctx.terminal
+            else []
+        ),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     app = Starlette(
@@ -3601,6 +3612,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ],
     )
     app.state.owner_email = settings.owner_email
+    app.state.terminal_tab = ctx.terminal is not None
     # Mount("/") serves this app, so request.app is this app, not the outer one.
     app.state.dashboard = ctx
     return app
@@ -3810,5 +3822,6 @@ _env.globals["shared_href"] = shared_href
 _env.globals["human_size"] = human_size
 _env.globals["assistant_label"] = assistant_label
 _env.filters["when"] = when
+_env.filters["epoch"] = epoch_iso
 _env.globals["icon_kind"] = icon_kind
 _env.globals["role_labels"] = ROLE_LABELS

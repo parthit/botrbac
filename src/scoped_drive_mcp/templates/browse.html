@@ -25,6 +25,7 @@
   {% endif %}
 </form>
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>
+{% if picker_ready %}{% include "_safari_note.html" %}{% endif %}
 
 {% if not q %}
 {% if is_root %}<p class="muted" id="root-note">Files you chose from Google Drive, plus the ones Bot RBAC created. Google keeps the rest of your Drive closed to it. <b>Choosing a file doesn’t give any assistant access</b>: Allow does that. A folder you chose still opens to show what’s inside, so a file can appear both here and in its folder.</p>{% endif %}
