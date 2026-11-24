@@ -53,7 +53,12 @@ def install_claude_code(path: Path, block_unguarded: bool = True) -> dict[str, A
         if not isinstance(data, dict):
             raise ValueError(f"{path} is not a JSON object; it was left as it is")
     hooks = data.setdefault("hooks", {})
-    entries = [e for e in hooks.get("PreToolUse") or [] if not _ours(e)]
+    existing = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    if not isinstance(hooks, dict) or not isinstance(existing or [], list):
+        raise ValueError(
+            f"{path} has a hooks section botrbac does not understand; it was left as it is"
+        )
+    entries = [e for e in existing or [] if not _ours(e)]
     entries.append(
         {
             "matcher": "*",

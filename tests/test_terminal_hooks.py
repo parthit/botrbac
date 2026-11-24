@@ -186,3 +186,14 @@ def test_unrelated_hook_that_mentions_botrbac_is_kept(home) -> None:
     install_claude_code(settings)
     entries = json.loads(settings.read_text())["hooks"]["PreToolUse"]
     assert entries[0]["hooks"][0] == mine and len(entries) == 2
+
+
+@pytest.mark.parametrize("hooks", [[], {"PreToolUse": {"matcher": "*"}}])
+def test_odd_hooks_shapes_are_left_alone(home, hooks) -> None:
+    settings = home / "odd" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    text = json.dumps({"hooks": hooks})
+    settings.write_text(text)
+    with pytest.raises(ValueError, match="left as it is"):
+        install_claude_code(settings)
+    assert settings.read_text() == text
