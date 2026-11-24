@@ -10,7 +10,9 @@ import { makeHandler, sign, signerKey } from "../../api/blob-sign.mjs";
 
 const KEY = "test-encryption-key-0123456789abcdefghijkl";
 const NOW = Date.UTC(2026, 10, 24, 12, 0, 0);
-const PATH = "drops/1795000000/AbC_d-9/0";
+// A piece of a file held until a day after `ms`.
+const pathAt = (ms) => `drops/${Math.floor(ms / 1000) + 86400}/AbC_d-9/0`;
+const PATH = pathAt(NOW);
 
 function fakeToken(validUntil) {
   const payload = { storeId: "store123", pathname: "*", operations: ["put", "get"], validUntil };
@@ -80,6 +82,24 @@ test("a signed put is answered with a URL and the upload headers", async () => {
   assert.equal(options.allowOverwrite, false);
   assert.equal(options.access, "private");
   assert.equal(options.validUntil, NOW + 900 * 1000);
+  assert.deepEqual(options.allowedContentTypes, ["application/octet-stream"]);
+  assert.equal(options.cacheControlMaxAge, 60);
+  // The token can sign uploads and reads only, never more than one sealed piece.
+  assert.deepEqual(fake.calls.issueOptions.operations, ["put", "get"]);
+  assert.equal(fake.calls.issueOptions.maximumSizeInBytes, 4 * 1024 * 1024 + 29);
+});
+
+test("nothing is signed for a file whose hold has ended, or held past Blob's own expiry", async () => {
+  const { fake, handle } = handler();
+  const now = Math.floor(NOW / 1000);
+  const get = { op: "get", validForSeconds: 300 };
+  assert.equal((await handle(request({ ...get, pathname: `drops/${now}/abc/0` }))).status, 400);
+  assert.equal((await handle(request({ ...put, pathname: `drops/${now - 1}/abc/0` }))).status, 400);
+  // ttlDays is 2: Blob deletes the piece then, so the file may not be held longer.
+  const late = `drops/${now + 2 * 86400 + 1}/abc/0`;
+  assert.equal((await handle(request({ ...put, pathname: late }))).status, 400);
+  assert.equal((await handle(request({ ...put, pathname: `drops/${now + 2 * 86400}/abc/0` }))).status, 200);
+  assert.equal(fake.calls.presigned.length, 1);
 });
 
 test("the token is reused until near its expiry", async () => {
@@ -123,13 +143,16 @@ test("a request older or newer than 60 seconds is refused", async () => {
 test("only held-file piece pathnames are signed", async () => {
   const { fake, handle } = handler();
   for (const pathname of [
-    "other/1/abc/0",
-    "drops/1/abc/0/../../secret",
-    "drops/1/abc",
+    PATH.replace("drops/", "other/"),
+    `${PATH}/../../secret`,
+    PATH.replace(/\/0$/, ""),
     "drops/x/abc/0",
-    "drops/1/a.b/0",
-    "drops/1/abc/12345",
-    `drops/1/${"a".repeat(65)}/0`,
+    PATH.replace("AbC_d-9", "a.b"),
+    `${PATH}1234`,
+    PATH.replace("AbC_d-9", "a".repeat(65)),
+    `drops/${"9".repeat(13)}/abc/0`,
+    ` ${PATH}`,
+    `${PATH}\n`,
     "*",
   ]) {
     const res = await handle(request({ ...put, pathname }));
@@ -142,7 +165,7 @@ test("sizes, lifetimes and operations are bounded", async () => {
   const { handle } = handler();
   const bad = [
     { ...put, op: "delete" },
-    { ...put, maxBytes: 4 * 1024 * 1024 + 1 },
+    { ...put, maxBytes: 4 * 1024 * 1024 + 30 },
     { ...put, maxBytes: 0 },
     { ...put, maxBytes: undefined },
     { ...put, validForSeconds: 901 },
@@ -225,17 +248,21 @@ test("the real presignUrl accepts what is asked of it", async (t) => {
   // The real presignUrl checks expiry against the real clock.
   const handle = makeHandler({ blob, env: { ENCRYPTION_KEY: KEY } });
   const at = Date.now();
-  const res = await handle(request(put, { at }));
+  const pathname = pathAt(at);
+  const res = await handle(request({ ...put, pathname }, { at }));
   assert.equal(res.status, 200);
   const upload = new URL((await res.json()).url);
   assert.equal(upload.origin, "https://vercel.com");
-  assert.equal(upload.searchParams.get("pathname"), PATH);
+  assert.equal(upload.pathname, "/api/blob/");
+  assert.equal(upload.searchParams.get("pathname"), pathname);
+  assert.equal(upload.searchParams.get("vercel-blob-allowed-content-types"), "application/octet-stream");
+  assert.equal(upload.searchParams.get("vercel-blob-cache-control-max-age"), "60");
   assert.equal(upload.searchParams.get("vercel-blob-maximum-size-in-bytes"), "1024");
   assert.equal(upload.searchParams.get("vercel-blob-ttl-days"), "2");
   assert.equal(upload.searchParams.get("vercel-blob-allow-overwrite"), "false");
-  const got = await handle(request({ op: "get", pathname: PATH, validForSeconds: 300 }, { at }));
+  const got = await handle(request({ op: "get", pathname, validForSeconds: 300 }, { at }));
   assert.equal(got.status, 200);
   const download = new URL((await got.json()).url);
   assert.equal(download.origin, "https://store123.private.blob.vercel-storage.com");
-  assert.equal(download.pathname, `/${PATH}`);
+  assert.equal(download.pathname, `/${pathname}`);
 });
