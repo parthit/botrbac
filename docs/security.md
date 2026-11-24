@@ -127,6 +127,8 @@
   the two minutes between Allow and the redirect, is encrypted as well. A Drive sign-in copied into another account's slot is
   refused too, because the encrypted record names its account (a sign-in saved before that was written into
   the record is covered once that person reconnects Google Drive).
+  - **Only with `ENCRYPTION_KEY`.** The signing key is made from `ENCRYPTION_KEY`, so without it nothing is
+    signed or checked, whatever `REQUIRE_SIGNED_RECORDS` says.
   - **On by default.** An unsigned record is ignored. A deployment with records saved before signing
     existed sets `REQUIRE_SIGNED_RECORDS=0` before upgrading, opens **People** (`/admin`) and chooses
     **Sign existing records**. It signs each one with a compare-and-swap, so a change made at the same
