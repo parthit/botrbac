@@ -287,3 +287,33 @@ def test_refresh_uses_what_another_process_just_got(monkeypatch) -> None:
         "https://x.example", client=httpx.Client(transport=httpx.MockTransport(no_network))
     )
     assert client._token() == "a-new"
+
+
+def test_a_rejected_batch_does_not_block_the_queue() -> None:
+    from botrbac_cli.api import ApiError
+
+    calls = []
+
+    class Api:
+        def send_audit(self, body):
+            calls.append(len(body["rows"]))
+            if len(calls) == 1:
+                raise ApiError(400, "invalid_request")
+            return {"accepted": len(body["rows"])}
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    queue = AuditQueue()
+    queue.add(decision="allow", tool="github/get_issue")
+    result = sync(Api(), queue)
+    assert result["rejected"] == 1 and result["waiting"] == 0
+    queue.add(decision="allow", tool="github/list_issues")
+    assert sync(Api(), queue)["sent"] == 1  # later rows still go out
+
+    class Down(Api):
+        def send_audit(self, body):
+            raise ApiError(503, "unavailable")
+
+    queue.add(decision="allow", tool="github/get_issue")
+    assert sync(Down(), queue)["waiting"] == 1  # a temporary error keeps the rows
