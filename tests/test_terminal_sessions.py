@@ -262,3 +262,113 @@ def test_session_page_and_revoke(world, memstore, oauth) -> None:
     policy_body = c.get("/api/terminal/policy", headers=headers).json()
     assert policy_body["revoked_sessions"] == [root]
     assert app.state.terminal.activity.revoked_sessions(OWNER_EMAIL) == [root]
+
+
+def test_ambiguous_role_name_is_an_error() -> None:
+    state.write_json(
+        "policy.json",
+        {
+            "policy": {
+                "role": {"id": "dev", "name": "Dev", "patterns": ["*"]},
+                "roles": [
+                    {"id": "r_1", "name": "Reviewer", "patterns": ["a/*"]},
+                    {"id": "r_2", "name": "reviewer", "patterns": ["b/*"]},
+                ],
+                "revoked_sessions": [],
+            },
+            "fetched_at": time.time(),
+        },
+    )
+    with pytest.raises(session.SessionError, match="r_1, r_2"):
+        session.start("Reviewer", "claude")
+    assert session.start("r_2", "claude")["role_id"] == "r_2"
+
+
+def test_signal_exit_code(home) -> None:
+    _cache()
+    code = main(["run", "--role", "reviewer", "--", sys.executable, "-c",
+                 "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"])  # fmt: skip
+    assert code == 128 + 15
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not installed")
+def test_shell_init_stops_at_double_dash(home) -> None:
+    _cache()
+    bin_dir = _fake_agent(home)
+    init = subprocess.run(  # noqa: S603 - this repo's CLI
+        [*CLI, "shell-init", "--shell", "bash", "--agents", "claude"],
+        capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def bash(line: str) -> subprocess.CompletedProcess:
+        return subprocess.run(  # noqa: S603 - the test's own script
+            [BASH, "-c", f"{init}\n{line}"], capture_output=True, text=True, env=env
+        )
+
+    plain = bash("claude -- --botrbac --role x")
+    assert "args:-- --botrbac --role x" in plain.stdout and "session:none" in plain.stdout
+    wrapped = bash("claude --botrbac --role reviewer -- --role keep")
+    assert "args:-- --role keep" in wrapped.stdout and "session:none" not in wrapped.stdout
+    missing = bash("claude --botrbac --role")
+    assert missing.returncode == 2 and "needs a value" in missing.stderr
+
+
+def test_wrap_claude_user_file_with_projects(home) -> None:
+    user = home / "home" / ".claude.json"
+    user.write_text(
+        json.dumps(
+            {
+                "numStartups": 3,
+                "mcpServers": {"notes": {"type": "http", "url": "https://n.example.com/mcp"}},
+                "projects": {
+                    "/work/app": {"mcpServers": {"db": {"command": "db-mcp"}}, "x": 1},
+                },
+            }
+        )
+    )
+    user.chmod(0o640)
+    assert main(["wrap", "claude-code", "--user"]) == 0
+    data = json.loads(user.read_text())
+    assert data["numStartups"] == 3
+    assert set(data["mcpServers"]) == {"botrbac"}
+    assert data["projects"]["/work/app"] == {"mcpServers": {}, "x": 1}
+    assert oct(user.stat().st_mode & 0o777) == "0o640"  # permissions kept
+    backups = list(user.parent.glob(".claude.json.botrbac-backup-*"))
+    assert backups and oct(backups[0].stat().st_mode & 0o777) == "0o600"
+    assert set(state.read_json("config.json")["servers"]) == {"notes", "db"}
+    assert unguarded(home) == []
+
+
+def test_wrap_codex_file_and_bad_json(home, capsys) -> None:
+    toml_file = home / "codex.toml"
+    toml_file.write_text('[mcp_servers.gh]\ncommand = "npx"\n')
+    assert main(["wrap", "codex", "--file", str(toml_file)]) == 0
+    assert "[mcp_servers.botrbac]" in toml_file.read_text()
+    broken = home / "broken.json"
+    broken.write_text("{not json")
+    assert main(["wrap", "cursor", "--file", str(broken)]) == 1
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_wrap_warns_about_untyped_urls(home, capsys) -> None:
+    cfg = home / "c.json"
+    cfg.write_text(json.dumps({"mcpServers": {"maybe": {"url": "https://m.example.com/sse"}}}))
+    main(["wrap", "cursor", "--file", str(cfg)])
+    assert "treated as streamable HTTP" in capsys.readouterr().out
+
+
+def test_session_page_escapes_terminal_text(world, memstore, oauth) -> None:
+    app = terminal_app(world, memstore, oauth)
+    c = dash.client(app)
+    dash.login(c)
+    root = "d" * 32
+    app.state.terminal.activity.add(
+        OWNER_EMAIL,
+        "t_x",
+        "<b>box</b>",
+        [{"event_id": "h" * 16, "ts": time.time(), "decision": "session", "session_id": root,
+          "role": "<i>r</i>", "program": "claude"}],
+    )  # fmt: skip
+    page = c.get(f"/terminal/sessions/{root}").text
+    assert "<b>box</b>" not in page and "&lt;b&gt;box&lt;/b&gt;" in page
