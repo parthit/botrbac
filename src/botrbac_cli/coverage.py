@@ -7,8 +7,12 @@ backup). This guards against the agent. It cannot stop the person who owns the c
 from editing the files back.
 """
 
+import contextlib
 import json
+import os
 import shutil
+import stat
+import tempfile
 import time
 import tomllib
 from dataclasses import dataclass
@@ -108,7 +112,10 @@ def gateway_entry(agent: str) -> dict[str, Any]:
 
 
 def wrap(config: AgentConfig, dry_run: bool = False) -> dict[str, Any]:
-    """Move the file's top-level servers behind the gateway. Returns what was done."""
+    """Move the file's servers behind the gateway. Returns what was done.
+
+    In Claude Code's ~/.claude.json, servers set for one project (under `projects`) are
+    moved too; the gateway entry itself goes at the top level, which covers them all."""
     if config.kind == "codex":
         return _wrap_codex(config, dry_run)
     try:
@@ -117,30 +124,44 @@ def wrap(config: AgentConfig, dry_run: bool = False) -> dict[str, Any]:
         raise ValueError(f"{config.path} is not valid JSON") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{config.path} is not a JSON object")
-    servers = dict(data.get("mcpServers") or {})
     upstreams = dict((state.read_json("config.json", {}) or {}).get("servers") or {})
-    moved, kept = [], []
-    for name, spec in servers.items():
-        if is_gateway(spec):
-            continue
-        upstream = to_upstream(spec) if isinstance(spec, dict) else None
-        if upstream is None:
-            kept.append(name)
-            continue
-        target = _place(name, upstream, upstreams)
-        moved.append((name, target))
-    remaining = {n: s for n, s in servers.items() if n in kept}
-    remaining[GATEWAY_NAME] = gateway_entry(config.agent)
-    result = {"file": str(config.path), "moved": moved, "kept": kept, "backup": None}
+    moved: list[tuple[str, str]] = []
+    kept: list[str] = []
+    assumed_http: list[str] = []
+    blocks = [data]
+    for project in (data.get("projects") or {}).values():
+        if isinstance(project, dict) and isinstance(project.get("mcpServers"), dict):
+            blocks.append(project)
+    for block in blocks:
+        servers = dict(block.get("mcpServers") or {})
+        remaining: dict[str, Any] = {}
+        for name, spec in servers.items():
+            if is_gateway(spec):
+                if block is data:
+                    remaining[name] = spec
+                continue
+            upstream = to_upstream(spec) if isinstance(spec, dict) else None
+            if upstream is None:
+                kept.append(name)
+                remaining[name] = spec
+                continue
+            if "url" in upstream and not spec.get("type") and not spec.get("httpUrl"):
+                assumed_http.append(name)
+            moved.append((name, _place(name, upstream, upstreams)))
+        if block is data:
+            remaining[GATEWAY_NAME] = gateway_entry(config.agent)
+        block["mcpServers"] = remaining
+    result = {
+        "file": str(config.path),
+        "moved": moved,
+        "kept": kept,
+        "assumed_http": assumed_http,
+        "backup": None,
+    }
     if dry_run:
         return result
-    if config.path.exists():
-        backup = config.path.with_name(f"{config.path.name}.botrbac-backup-{int(time.time())}")
-        shutil.copy2(config.path, backup)
-        result["backup"] = str(backup)
-    data["mcpServers"] = remaining
-    config.path.parent.mkdir(parents=True, exist_ok=True)
-    config.path.write_text(json.dumps(data, indent=2) + "\n")
+    result["backup"] = backup_file(config.path)
+    write_atomic(config.path, json.dumps(data, indent=2) + "\n")
     cfg = state.read_json("config.json", {}) or {}
     cfg["servers"] = upstreams
     state.write_json("config.json", cfg, private=True)
@@ -161,10 +182,15 @@ def _wrap_codex(config: AgentConfig, dry_run: bool) -> dict[str, Any]:
         if upstream is None:
             kept.append(name)
             continue
-        target = _place(name, upstream, upstreams)
-        moved.append((name, target))
-    result = {"file": str(config.path), "moved": moved, "kept": kept, "backup": None}
-    result["delete_tables"] = [f"[mcp_servers.{name}]" for name, _ in moved]
+        moved.append((name, _place(name, upstream, upstreams)))
+    result: dict[str, Any] = {
+        "file": str(config.path),
+        "moved": moved,
+        "kept": kept,
+        "assumed_http": [],
+        "backup": None,
+        "delete_tables": [f"[mcp_servers.{name}]" for name, _ in moved],
+    }
     if dry_run:
         return result
     if GATEWAY_NAME not in servers:
@@ -174,17 +200,40 @@ def _wrap_codex(config: AgentConfig, dry_run: bool) -> dict[str, Any]:
             f"\n[mcp_servers.{GATEWAY_NAME}]\ncommand = {json.dumps(entry['command'])}\n"
             f"args = [{args}]\n"
         )
-        config.path.parent.mkdir(parents=True, exist_ok=True)
-        if config.path.exists():
-            backup = config.path.with_name(f"{config.path.name}.botrbac-backup-{int(time.time())}")
-            shutil.copy2(config.path, backup)
-            result["backup"] = str(backup)
-        with config.path.open("a") as handle:
-            handle.write(block)
+        before = config.path.read_text() if config.path.exists() else ""
+        result["backup"] = backup_file(config.path)
+        write_atomic(config.path, before + block)
     cfg = state.read_json("config.json", {}) or {}
     cfg["servers"] = upstreams
     state.write_json("config.json", cfg, private=True)
     return result
+
+
+def backup_file(path: Path) -> str | None:
+    """A copy of the file before it changes, readable by this user only (it can hold
+    the servers' keys)."""
+    if not path.exists():
+        return None
+    backup = path.with_name(f"{path.name}.botrbac-backup-{int(time.time())}")
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+    return str(backup)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Replace the file in one step, keeping its permissions, so an agent that reads or
+    writes it at the same moment never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
 
 
 def _place(name: str, upstream: dict[str, Any], upstreams: dict[str, Any]) -> str:

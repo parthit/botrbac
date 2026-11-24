@@ -1,6 +1,8 @@
 """The website's /api/terminal endpoints, with token refresh."""
 
+import contextlib
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -68,23 +70,34 @@ class Api:
     # ---- authenticated calls -----------------------------------------------------
 
     def _token(self, force_refresh: bool = False) -> str:
-        creds = state.read_json("credentials.json", {}) or {}
+        creds = _creds()
         if not creds.get("refresh_token"):
             raise NotLoggedIn("Not logged in. Run: botrbac login --server <url>")
-        if force_refresh or time.time() >= float(creds.get("expires_at") or 0):
+        if not force_refresh and time.time() < float(creds.get("expires_at") or 0):
+            return str(creds["access_token"])
+        # Several gateways (one per agent) share these credentials, and each refresh
+        # token works once. Refresh one at a time, and use what another process got.
+        with _refresh_lock():
+            latest = _creds()
+            if latest.get("refresh_token") != creds.get("refresh_token") and time.time() < float(
+                latest.get("expires_at") or 0
+            ):
+                return str(latest["access_token"])
             r = self.client.post(
                 f"{self.server}/api/terminal/token",
-                data={"grant_type": "refresh_token", "refresh_token": creds["refresh_token"]},
+                data={"grant_type": "refresh_token", "refresh_token": latest["refresh_token"]},
             )
             if r.status_code != 200:
                 if _code(r) == "invalid_grant":
+                    again = _creds()
+                    if again.get("refresh_token") != latest.get("refresh_token"):
+                        return str(again["access_token"])
                     raise NotLoggedIn(
                         "This terminal was disconnected on the website. Run: botrbac login"
                     )
                 raise ApiError(r.status_code, _code(r))
             self._save(r.json())
-            return r.json()["access_token"]
-        return str(creds["access_token"])
+            return str(r.json()["access_token"])
 
     def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         for attempt in (0, 1):
@@ -102,6 +115,26 @@ class Api:
 
     def send_audit(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._call("POST", "/api/terminal/audit", json=body)
+
+
+def _creds() -> dict[str, Any]:
+    return state.read_json("credentials.json", {}) or {}
+
+
+@contextlib.contextmanager
+def _refresh_lock() -> Iterator[None]:
+    """An exclusive lock across processes (POSIX); without fcntl, no lock."""
+    with open(state.home() / ".refresh.lock", "a") as handle:
+        try:
+            import fcntl
+        except ImportError:  # Windows
+            yield
+            return
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _code(r: httpx.Response) -> str:

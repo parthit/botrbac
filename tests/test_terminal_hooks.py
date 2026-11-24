@@ -120,3 +120,69 @@ def test_hooks_command(home, monkeypatch, capsys) -> None:
     assert "--block-unguarded" not in command["hooks"][0]["command"]
     assert main(["hooks", "install", "codex"]) == 0
     assert "botrbac check --agent codex" in capsys.readouterr().out
+
+
+def test_unexpected_error_blocks(monkeypatch, capsys) -> None:
+    def boom(*_args, **_kwargs):
+        raise OSError("disk")
+
+    monkeypatch.setattr(policy.Enforcer, "decide", boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_hook("Read")))
+    assert main(["check", "--agent", "claude-code"]) == 2
+    assert "check failed" in capsys.readouterr().err
+
+
+def test_audit_write_failure_keeps_the_decision(monkeypatch, capsys) -> None:
+    def broken(self, **_row):
+        raise OSError("read-only disk")
+
+    monkeypatch.setattr(AuditQueue, "add", broken)
+    assert check("claude-code", _hook("Read"), None, False)[0]
+    assert not check("claude-code", _hook("Edit"), None, False)[0]
+    assert "could not record" in capsys.readouterr().err
+
+
+def test_large_payload_is_read_whole(monkeypatch) -> None:
+    payload = json.dumps({"tool_name": "Read", "tool_input": {"content": "x" * 3_000_000}})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+    assert main(["check", "--agent", "claude-code"]) == 0
+
+
+def test_tool_names_are_case_sensitive() -> None:
+    assert check("claude-code", "", "Read", False)[0]
+    assert not check("claude-code", "", "read", False)[0]
+
+
+def test_hook_install_user_scope_and_bad_file(home, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(home / "h"))
+    (home / "h").mkdir()
+    assert main(["hooks", "install", "claude-code", "--user"]) == 0
+    settings = home / "h" / ".claude" / "settings.json"
+    assert "check" in settings.read_text()
+
+    bad = home / "bad" / ".claude" / "settings.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("{oops")
+    with pytest.raises(ValueError, match="left as it is"):
+        install_claude_code(bad)
+    assert bad.read_text() == "{oops"
+
+
+def test_hook_install_twice_makes_no_new_backup(home) -> None:
+    settings = home / "p" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{}")
+    assert install_claude_code(settings)["changed"]
+    second = install_claude_code(settings)
+    assert not second["changed"] and second["backup"] is None
+    assert len(list(settings.parent.glob("settings.json.botrbac-backup-*"))) == 1
+
+
+def test_unrelated_hook_that_mentions_botrbac_is_kept(home) -> None:
+    settings = home / "q" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    mine = {"type": "command", "command": "echo botrbac check --agent is great"}
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [mine]}]}}))
+    install_claude_code(settings)
+    entries = json.loads(settings.read_text())["hooks"]["PreToolUse"]
+    assert entries[0]["hooks"][0] == mine and len(entries) == 2

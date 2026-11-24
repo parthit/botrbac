@@ -25,11 +25,18 @@ class SessionError(Exception):
 
 
 def find_role(pol: dict[str, Any], wanted: str) -> dict[str, Any] | None:
-    key = wanted.strip().lower()
-    for role in pol.get("roles") or []:
-        if str(role.get("id", "")).lower() == key or str(role.get("name", "")).lower() == key:
+    """By exact id first, then by name (any case). Two roles with that name is an error,
+    never a silent pick."""
+    roles = [r for r in pol.get("roles") or [] if isinstance(r, dict)]
+    for role in roles:
+        if str(role.get("id", "")) == wanted.strip():
             return role
-    return None
+    key = wanted.strip().lower()
+    named = [r for r in roles if str(r.get("name", "")).lower() == key]
+    if len(named) > 1:
+        ids = ", ".join(str(r.get("id")) for r in named)
+        raise SessionError(f"More than one role is called {wanted!r}. Use its id: {ids}")
+    return named[0] if named else None
 
 
 def start(role_name: str, program: str, agent: str | None = None) -> dict[str, Any]:
@@ -96,6 +103,8 @@ def run(role_name: str, command: list[str], agent: str | None, api: Any) -> int:
     except FileNotFoundError:
         print(f"botrbac: {command[0]} not found", file=sys.stderr)
         code = 127
+    if code < 0:
+        code = 128 - code  # killed by a signal: report it the way a shell does
     if api is not None:
         from .sync import sync
 

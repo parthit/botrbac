@@ -65,10 +65,10 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
     }
     if bypass and block_unguarded:
         reason = "MCP servers must go through botrbac gateway (run: botrbac wrap)"
-        AuditQueue().add(decision="deny", reason=reason, role="", **row)
+        _record(decision="deny", reason=reason, role="", **row)
         return False, f"Blocked by Bot RBAC: {tool_id}: {reason}"
     decision = policy.Enforcer().decide(tool_id)
-    AuditQueue().add(
+    _record(
         decision="allow" if decision.allowed else "deny",
         reason=decision.reason,
         role=decision.role,
@@ -82,9 +82,24 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
     )
 
 
+def _record(**row: Any) -> None:
+    """Write the audit row. A failure here (a full or read-only disk) is reported, but
+    does not change the decision already made."""
+    try:
+        AuditQueue().add(**row)
+    except Exception as exc:  # noqa: BLE001
+        print(f"botrbac: could not record this call: {exc}", file=sys.stderr)
+
+
 def run(agent: str, tool: str | None, block_unguarded: bool, fmt: str) -> int:
-    raw = "" if tool is not None else sys.stdin.read(1_000_000)
-    allowed, reason = check(agent, raw, tool, block_unguarded)
+    """Any unexpected error blocks the call. Claude Code only blocks on exit code 2: an
+    uncaught exception (exit 1) would let the tool run."""
+    try:
+        # All of it: a large Write or Edit carries the whole file in tool_input.
+        raw = "" if tool is not None else sys.stdin.read()
+        allowed, reason = check(agent, raw, tool, block_unguarded)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        allowed, reason = False, f"Blocked by Bot RBAC: the check failed ({type(exc).__name__})"
     if fmt == "json":
         print(json.dumps({"decision": "allow" if allowed else "deny", "reason": reason}))
         return 0

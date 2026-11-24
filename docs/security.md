@@ -294,4 +294,9 @@ Enforcement happens on the person's computer, so it protects against the agent, 
 owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
 a policy older than the role's offline grace, an unknown session or a revoked session all block every tool.
 A session can only narrow the terminal's role (the check is the intersection of every role in the chain).
+The CLI trusts the computer's user: session files and `BOTRBAC_SESSION` are not signed, so an agent that can
+run shell commands can drop back to the terminal's own role (never above it) by starting a gateway without
+the variable. The hook adapter fails closed on any error (exit 2), but an agent that cannot find the
+`botrbac` program at all usually lets the call through. Read-only and other name-based patterns limit
+which tools run, not which files a tool such as Claude Code's Read can open.
 

@@ -32,7 +32,7 @@
         <label class="sr-only" for="role-{{ t.id }}">Role for {{ t.name }}</label>
         <select id="role-{{ t.id }}" name="role_id">
           {% for r in roles %}<option value="{{ r.id }}"{% if r.id == t.role_id %} selected{% endif %}>{{ r.name }}</option>{% endfor %}
-          {% if t.role_id not in role_names %}<option value="" selected>Read-only (its role was deleted)</option>{% endif %}
+          {% if t.role_id not in role_names %}<option value="" selected>No tools (its role was deleted)</option>{% endif %}
         </select>
         <button type="submit" class="ghost">Change</button>
       </form>

@@ -20,7 +20,8 @@ your MCP servers (GitHub, filesystem, …)
 2. **Log in:** `botrbac login --server https://<your Bot RBAC site>`. Open the link it prints, check the
    code matches, pick a role and approve. The computer appears on the **Terminal** page.
 3. **Put your agent's MCP servers behind Bot RBAC:**
-   - `botrbac wrap claude-code` (the project's `.mcp.json`), `botrbac wrap cursor`, `botrbac wrap gemini`,
+   - `botrbac wrap claude-code` (the project's `.mcp.json`; add `--user` for `~/.claude.json`, including
+     servers set for one project), `botrbac wrap cursor`, `botrbac wrap gemini`,
      `botrbac wrap codex`, or `botrbac wrap other --file path/to/config.json`. The original file is kept as
      `<name>.botrbac-backup-<time>`. Add `--dry-run` to see what would change.
    - Or add servers yourself, `botrbac servers add github -- npx -y @modelcontextprotocol/server-github`
@@ -47,8 +48,13 @@ Tools are named `<server>/<tool>`. Server names are the names in `botrbac server
 tools (see [hooks](#an-agents-own-tools-hooks)) use the agent's name: `claude-code/Bash`, `codex/shell`.
 Once a terminal syncs, the tools it saw are offered as tick boxes on the role page.
 
-Built-in roles: **Read-only** (the default for a new terminal, and what a terminal falls back to if its role
-is deleted), **Full access** and **No tools**. Each role also sets an **offline grace** (1–30 days, below).
+Built-in roles: **Read-only**, **Full access** and **No tools**. A terminal whose role is deleted gets **No
+tools** until you give it another role. Each role also sets an **offline grace** (1–30 days, below).
+
+Patterns go by tool **names**. Read-only allows tools whose names start with read, get, list or search,
+which is not a promise about what a server's tool really does, so check them. It also allows Claude Code's
+Read, Grep, Glob and LS, which can read any file the computer's user can, including `~/.config/botrbac`.
+Roles limit which tools run, not which files those tools touch.
 
 ## Narrower roles for one run: `--role`
 
@@ -72,6 +78,9 @@ to wrap.
   `codex exec`, scripts and gateways. A session started inside another one gets the intersection again, so
   it can only **narrow**; asking for a wider role changes nothing.
 - Subagents running inside the agent's own process share its connection and so its role.
+- This relies on the agent keeping `BOTRBAC_SESSION`. An agent that can run shell commands could start
+  `botrbac gateway` without it and get the terminal's own role (never more). If that matters, make the
+  terminal's role itself narrow, or block the agent's shell tool with the hook below.
 - **Terminal → Activity** links each call to its session. The session page shows the tree of sessions
   started under it and lets you **revoke** it, which blocks it and everything under it the next time the
   terminal checks in (about a minute while online).
@@ -94,8 +103,14 @@ instead.
 
 For another agent with pre-tool hooks, make the hook run `botrbac check --agent <name>` with the tool call
 as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with
-the reason on stderr. `--format json` prints `{"decision": "allow"|"deny", "reason": …}` instead, and
-`--tool NAME` skips stdin.
+the reason on stderr; any error inside the check also exits 2. `--format json` prints
+`{"decision": "allow"|"deny", "reason": …}` and always exits 0, so a caller using it must read
+`decision`. `--tool NAME` skips stdin.
+
+The hook command uses botrbac's full path. If that file is removed, the agent cannot run the hook, and most
+agents (Claude Code included) then let the call go ahead: run `botrbac doctor` after moving or reinstalling
+botrbac. MCP tools named `mcp__botrbac__…` are left to the gateway, which checks them itself; this trusts
+that the server called `botrbac` in the agent's config is the gateway (`botrbac wrap` sets it up that way).
 
 ## Offline
 
