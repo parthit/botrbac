@@ -1251,6 +1251,63 @@ header { view-transition-name: site-header; }
   .tabs a { padding: 0 8px; }
 }
 
+/* ---- Tick several, act once (_batch.html) ---------------------------------------- */
+/* The bar sticks under the fixed header while the list scrolls. */
+.batch {
+  position: sticky;
+  top: 76px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin: 8px 0 16px;
+  padding: 10px 12px 10px 18px;
+  background: var(--card);
+  border: 1px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+.batch-count { margin: 0; flex: 1 1 auto; }
+.batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.batch-actions .act-who { min-width: 0; margin-left: 6px; }
+.batch-actions button[data-batch-needs]:disabled,
+.batch-actions button:disabled { opacity: 0.4; }
+.batch-check {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
+.batch-all-row { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-weight: 500; color: var(--ink2); cursor: pointer; }
+/* The first two columns keep a minimum width; with a tick column in front, that is the
+   name column, not the tick. */
+table.cards th.pick, table.cards td.pick { width: 36px; min-width: 0; padding-right: 8px; }
+table.cards td.pick + td { min-width: 8em; }
+table.cards tr.ticked td, .file.ticked { background: var(--accent-wash); }
+.file.ticked { box-shadow: -8px 0 0 var(--accent-wash), 8px 0 0 var(--accent-wash); }
+.file-name .batch-check { margin-right: 4px; }
+#hidden-note { max-width: 680px; }
+@media (max-width: 720px) {
+  .batch { top: 72px; padding: 10px 12px; }
+  .batch-actions { width: 100%; }
+}
+/* Wherever a table turns into cards: phones, and six-column tables (these, with the tick
+   column) on a portrait tablet. The tick takes the place of the NAME label, and the name
+   moves to the left of the card. */
+@media (max-width: 900px) {
+  table.cards:has(> thead th.pick) tr { position: relative; }
+  table.cards:has(> thead th.pick) td.pick { position: absolute; top: 25px; left: 14px; padding: 0; border: 0; width: auto; }
+  table.cards:has(> thead th.pick) td.pick::before { display: none; }
+  table.cards:has(> thead th.pick) td.pick:empty { display: none; }
+  table.cards:has(> thead th.pick) td.pick + td { border-top: 0; justify-content: flex-start; text-align: left; font-weight: 500; }
+  table.cards:has(> thead th.pick) td.pick + td::before { content: ""; flex: 0 0 22px; margin-right: 0; }
+  table.cards:has(> thead th.pick) tr.ticked { border-color: var(--accent); background: var(--accent-wash); }
+  table.cards:has(> thead th.pick) tr.ticked td { background: transparent; }
+}
+
 /* ---- Google file picker ------------------------------------------------------------
    Google adds the picker to this page with position: absolute and a top it works out from
    the scroll position. In Safari that lands near the top of the page, so on a page scrolled

@@ -238,6 +238,14 @@
 - **Folders.** Picking a folder in Google's file picker may not open every file already inside it to the
   app. Those files are refused (Google answers "not found") until they are picked too. Files the
   assistant creates inside an allowed folder are the app's own, so they stay reachable.
+- **Remove from Bot RBAC does not give the file back to Google.** Google offers no way for an app to drop
+  one picked file. Remove from Bot RBAC (Files) takes the item off the allowlist and the Sharing list,
+  so no assistant can open it, and hides it from Files. Google still opens it to the app, and the page
+  and the confirmation say so. Only removing the app in the Google Account closes it. Picking the item
+  again brings it back onto Files.
+- **Batch actions are single actions in a loop.** `POST /files/batch` (the action bar on Files and
+  Sharing) runs each ticked item through the same grant and revoke calls as its row button, with the
+  same checks and audit records, at most 50 items per request.
 
 ## How the restriction works
 

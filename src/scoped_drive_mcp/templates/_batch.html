@@ -1,0 +1,33 @@
+{#- Ticking several items and acting on them together: Files › Allowed, Files › From Google
+    Drive and Sharing › Shared by me. Import "with context" so the bar gets the csrf token.
+
+    The checkboxes sit in the list and point at the bar's form with form="…", because each
+    row already holds its own forms and forms cannot nest. Without JavaScript the bar is a
+    plain form: tick, choose an action, and the server skips items it does not apply to.
+    ui.js hides the bar until something is ticked, counts what each button would change,
+    and asks before anything is taken away. -#}
+
+{#- covered_by / shared_by: the allowed / shared folder above this item, if any. -#}
+{% macro batch_check(form_id, value, name, covered_by=None, shared_by=None) -%}
+<input type="checkbox" class="batch-check" name="file_id" value="{{ value }}" form="{{ form_id }}" data-name="{{ name }}"{% if covered_by %} data-covered-by="{{ covered_by }}"{% endif %}{% if shared_by %} data-shared-by="{{ shared_by }}"{% endif %} aria-label="Select {{ name }}">
+{%- endmacro %}
+
+{% macro batch_all(form_id) -%}
+<input type="checkbox" class="batch-check" data-batch-all="{{ form_id }}" aria-label="Select all" hidden>
+{%- endmacro %}
+
+{#- caller() supplies the action buttons. Each is a submit button with name="action" and:
+    data-batch-needs  a selector the ticked item's row must match to count (optional),
+    data-batch-ask    the confirm question, with {n} for "3 items" (optional: none asks),
+    data-batch-note   a second sentence for the confirm, and
+    data-batch-warn   "allowed" or "shared": warn when an item stays reachable through a
+                      folder that is not ticked too (data-covered-by / data-shared-by). -#}
+{% macro batch_bar(form_id, next, label="Selection") -%}
+<form id="{{ form_id }}" class="batch" method="post" action="/files/batch" data-batch aria-label="{{ label }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="next" value="{{ next }}">
+  <p class="batch-count"><b data-batch-count>Tick items, then choose what to do with them.</b></p>
+  <button type="button" class="ghost" data-batch-clear hidden>Clear</button>
+  <div class="batch-actions">{{ caller() }}</div>
+</form>
+{%- endmacro %}

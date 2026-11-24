@@ -1560,6 +1560,30 @@ class FirstReads:
         self.store.delete(FIRST_READS_KEY)
 
 
+HIDDEN_FILES_KEY = "files_hidden"
+
+
+class HiddenFiles:
+    """Items this person removed from Bot RBAC on Files.
+
+    Google gives an app no way to hand back one file picked in its file picker, so
+    "Remove from Bot RBAC" takes the item off both lists and hides it here. The page says
+    that Google still lists the app as able to open it. Picking it again brings it back.
+    """
+
+    def __init__(self, store: KeyValueStore):
+        self.store = store
+
+    def hide(self, file_id: str) -> None:
+        self.store.hset(HIDDEN_FILES_KEY, file_id, utc_now())
+
+    def unhide(self, file_id: str) -> None:
+        self.store.hdel(HIDDEN_FILES_KEY, file_id)
+
+    def ids(self) -> set[str]:
+        return set(self.store.hgetall(HIDDEN_FILES_KEY))
+
+
 def _copy_string(source: KeyValueStore, dest: KeyValueStore, key: str) -> None:
     value = source.get(key)
     if value is not None:
