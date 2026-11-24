@@ -1198,10 +1198,7 @@ def build_app(
         sharer_of=shares.sharer_of,
         notion=notion,
         drops=drop_box,
-        # Off for everyone unless TERMINAL_ENABLED or an Edge Config is connected.
-        terminal=TerminalFeature(settings.terminal_enabled, flags.terminal_enabled)
-        if settings.terminal_enabled or flags.connection
-        else None,
+        terminal=TerminalFeature(),
     )
     dashboard = build_dashboard(ctx)
 

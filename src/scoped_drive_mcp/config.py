@@ -113,9 +113,6 @@ class Settings(BaseSettings):
     # Vercel Edge Config connection string (set when an Edge Config is connected to the
     # project). Holds server-side switches such as `self_pairing`; see flags.py.
     edge_config: SecretStr | None = None
-    # Bot RBAC Terminal (beta, docs/terminal.md): on for everyone when true. Otherwise only for
-    # the people the `terminal` Edge Config item lists (flags.py). Off by default.
-    terminal_enabled: bool = False
 
     redis_rest_url: str | None = Field(
         default=None,
