@@ -66,8 +66,9 @@ def _wrapper_option(wrapper: str, word: str) -> int:
             return 0 if eq else 1
         if name in plain_long and not eq:
             return 0
-    elif word == "-" and wrapper == "env":
-        return 0
+    elif word == "-":
+        if wrapper == "env":
+            return 0  # `env -` is env -i
     else:
         letters = word[1:]
         for i, letter in enumerate(letters):
@@ -199,6 +200,11 @@ def programs(command: str) -> list[str]:
             )
         if not expect_program:
             continue
+        # An option's value first, whatever it looks like: `sudo -u A=b rm` must not
+        # read A=b as an assignment and then take `rm` for the value.
+        if wrapper_skip:
+            wrapper_skip -= 1  # sudo -u USER, xargs -I {}
+            continue
         # Only where a program would be: `echo done` and `git commit -m fi` are fine.
         if word in KEYWORDS:
             raise CommandError(
@@ -207,9 +213,6 @@ def programs(command: str) -> list[str]:
             )
         if _ASSIGNMENT.match(word):
             continue  # FOO=1 gh …
-        if wrapper_skip:
-            wrapper_skip -= 1  # sudo -u USER, xargs -I {}
-            continue
         if in_wrapper and word == "--":
             in_wrapper = None  # end of the wrapper's options: the program is next
             continue
