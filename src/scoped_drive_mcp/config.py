@@ -136,7 +136,15 @@ class Settings(BaseSettings):
     max_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
     # How long a file a paired person sent is held for its recipient to save to their own
     # Drive. After this it is deleted here; a saved copy in their Drive stays.
-    drop_hold_hours: int = Field(default=48, ge=24, le=168)
+    drop_hold_hours: int = Field(default=24, ge=24, le=168)
+    # Largest file a person may send from the dashboard (in pieces, each under Vercel's
+    # 4.5 MB request limit). An assistant's send_file keeps the MAX_BYTES limit.
+    drop_max_mb: int = Field(default=20, ge=1, le=100)
+    # With a Vercel Blob store connected, held files go there. These keep them inside the
+    # free (Hobby) Blob tier: 2,000 uploads a month and 1 GB stored. Going over turns Blob
+    # off for 30 days, so the defaults leave room. Raise them on a paid plan.
+    drop_blob_monthly_uploads: int = Field(default=1500, ge=10, le=10_000_000)
+    drop_blob_storage_mb: int = Field(default=800, ge=16, le=10_000_000)
     # Read PDF and Office files in a separate process with hard memory and CPU limits.
     # Turn off only where the host does not allow starting a process.
     extract_isolation: bool = True

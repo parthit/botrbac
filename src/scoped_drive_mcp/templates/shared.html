@@ -30,7 +30,7 @@
         {% if d.saved_file_id %}<span>Saved to your Drive</span>{% else %}<span>Deleted {{ d.expires_at | when }} unless saved</span>{% endif %}</div>
       <div class="file-actions">
         {% if not d.saved_file_id %}
-        <a class="btn" href="/drops/{{ d.id | urlencode }}/download">Download</a>
+        <a class="btn" href="/drops/{{ d.id | urlencode }}/download" data-drop-download="{{ d.id }}" data-drop-pieces="{{ d.pieces }}" data-drop-name="{{ d.name }}">Download</a>
         <form class="inline" method="post" action="/drops/{{ d.id | urlencode }}/save">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button class="primary" type="submit">Save to Google Drive</button>
@@ -52,8 +52,8 @@
   <h2>Send a file</h2>
   <p class="muted">Send one file to someone you are paired with. They have {{ hold_hours }} hours to open it and save
     it to their Google Drive; then Bot RBAC deletes it. You cannot open it again after sending. Up to
-    {{ send_limit_mb }} MB.</p>
-  <form class="stack" method="post" action="/shared/send" enctype="multipart/form-data">
+    {{ send_max_mb }} MB<noscript> ({{ send_limit_mb }} MB with JavaScript off)</noscript>.</p>
+  <form class="stack" method="post" action="/shared/send" enctype="multipart/form-data" data-drop-send data-drop-max="{{ send_max_bytes }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label>To
       <select name="to" required>
@@ -64,6 +64,7 @@
       <input type="file" name="file" required>
     </label>
     <div class="actions"><button class="primary" type="submit">Send</button></div>
+    <p class="muted" data-drop-status role="status" aria-live="polite"></p>
   </form>
 </div>
 {% endif %}

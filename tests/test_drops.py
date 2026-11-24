@@ -58,7 +58,7 @@ def test_a_sent_file_is_held_not_written_to_drive(setup, world) -> None:
     assert sent["isError"] is False, sent
     body = sent["structuredContent"]
     assert body["sent"] is True and body["to"] == OWNER_EMAIL
-    assert "48 hours" in body["note"]
+    assert "24 hours" in body["note"]
     # Write-only: nothing the sender could use to reach it again.
     assert not {"id", "file_id", "drop_id", "folder_id"} & set(body)
     # Nothing in the recipient's Drive until they choose to save it.
@@ -320,7 +320,9 @@ def test_the_dashboard_refuses_a_body_that_is_too_large(setup) -> None:
 
 def test_a_large_file_is_held_in_pieces(setup, monkeypatch) -> None:
     app, owner, eve, _carol = setup
-    monkeypatch.setattr(drops_module, "CHUNK_BYTES", 4)
+    from scoped_drive_mcp import drop_storage
+
+    monkeypatch.setattr(drop_storage, "KV_PART_BYTES", 4)
     _send(eve)
     [row] = _held(app)
     assert row["parts"] == 4

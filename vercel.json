@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/index.py": {
-      "maxDuration": 60,
+      "maxDuration": 120,
       "includeFiles": "src/scoped_drive_mcp/templates/**",
       "excludeFiles": "{tests/**,docs/**,scripts/**,.venv/**,**/__pycache__/**}"
     }

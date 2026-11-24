@@ -118,15 +118,22 @@ a resume that any paired person's assistant may see.
 People with an active pairing can send each other a file, for example a PDF. This is separate from sharing: it
 needs nothing on the recipient's Sharing list, and the sender gets no access to the recipient's Drive.
 
-- **Sending:** on the dashboard, **Sharing → Shared with me → Send a file** (up to 4 MB, Vercel's request
-  limit), or an assistant whose connection is **Read and edit** or **Full** calls `send_file` (up to
-  `MAX_BYTES`). The name, type and size get the same checks as `upload_file`.
-- **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (48 by
-  default, 24 to 168) and then deleted. Every stored piece carries that expiry, so the store deletes it even
-  if nothing else runs. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
+- **Sending:** on the dashboard, **Sharing → Shared with me → Send a file** (up to `DROP_MAX_MB`, 20 MB by
+  default), or an assistant whose connection is **Read and edit** or **Full** calls `send_file` (up to
+  `MAX_BYTES`, since the whole file is in one call). The name, type and size get the same checks as
+  `upload_file`. Vercel refuses request and response bodies over 4.5 MB, so the page sends a file in 4 MB
+  pieces and the recipient's page downloads it the same way. Without JavaScript the form sends up to 4 MB,
+  and a larger file can still be saved to Drive.
+- **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (24 by
+  default, 24 to 168) and then deleted. With a Vercel Blob store connected (a private one), the pieces go
+  there, named with their expiry; expired ones are deleted when someone opens their list, and a sweep that
+  runs at most every 6 hours, on a send, deletes the rest. Without Blob they go to the key-value store, where
+  every piece carries the expiry, so the store deletes it even if nothing else runs. To stay inside the free
+  Blob tier (2,000 uploads a month, 1 GB), sends are refused with `storage_full` past
+  `DROP_BLOB_MONTHLY_UPLOADS` or `DROP_BLOB_STORAGE_MB`. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
   it they are stored unencrypted (still deleted at the end of the hold) and the server logs a warning at
   startup. One person can send another at most 20 files an hour, counted before the file is stored, so a
-  send that fails to store still counts. One recipient can have about 50 unsaved files (50 MB) waiting:
+  send that fails to store still counts. One recipient can have about 50 unsaved files (100 MB) waiting:
   sends that arrive at the same moment can pass that cap together, by at most the hourly limit.
 - **Keeping it:** the recipient sees it under **Sent to you** with **Download**, **Save to Google Drive** and
   **Delete**. Saving copies it into a folder this app makes at the top of their Drive, "Sent to me (Bot RBAC)",

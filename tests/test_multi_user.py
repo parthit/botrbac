@@ -27,7 +27,7 @@ def _extend(world: FakeDrive) -> None:
     world.add(EVE_DOC, EVE_DOC_NAME, "text/plain", ["eve-root"], b"eve only text", owner=EVE)
 
 
-def _app(world, memstore, oauth):
+def _app(world, memstore, oauth, **extra):
     _accounts(oauth)
     _extend(world)
 
@@ -44,6 +44,7 @@ def _app(world, memstore, oauth):
         owner_drive_factory=drive_for,
         oauth=oauth,
         bot_drive_factory=drive_for,
+        **extra,
     )
     return app
 
