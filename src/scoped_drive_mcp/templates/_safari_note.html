@@ -1,4 +1,8 @@
 {#- Safari blocks Google's cookies inside the picker's frame while "Prevent cross-site
     tracking" is on, and Google then shows "Can't access your Google Account". This page
-    can't see inside that frame, so ui.js shows the note to every Safari visitor. -#}
-<p class="muted safari-note" data-safari-note hidden>Using Safari? Google’s file picker can’t load while Safari’s <b>Prevent cross-site tracking</b> is on. Turn it off in Safari → Settings → Privacy while you pick, then turn it back on: files you’ve picked stay picked. Or use another browser.</p>
+    can't see inside that frame, so ui.js shows the note to every Safari visitor, with the
+    Mac or the iPhone/iPad steps (every iOS browser runs on Safari's engine). -#}
+<p class="muted safari-note" data-safari-note hidden>
+  <span data-safari-mac>Using Safari? Google’s file picker can’t load while Safari’s <b>Prevent cross-site tracking</b> is on. Turn it off in Safari → Settings → Privacy while you pick, then turn it back on: files you’ve picked stay picked. Or use another browser.</span>
+  <span data-safari-ios hidden>On iPhone or iPad, Google’s file picker can’t load while cross-site tracking is blocked. In the Settings app, go to Apps → Safari and turn off <b>Prevent Cross-Site Tracking</b> while you pick, then turn it back on: files you’ve picked stay picked. In another browser, turn on <b>Allow Cross-Website Tracking</b> for it instead.</span>
+</p>

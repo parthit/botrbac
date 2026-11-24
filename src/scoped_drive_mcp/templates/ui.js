@@ -542,8 +542,13 @@
   // cookies in the picker's frame while cross-site tracking prevention is on.
   var ua = navigator.userAgent;
   var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/.test(ua);
+  // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
+  var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   if (webkitOnly) {
     Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
+      var mac = note.querySelector("[data-safari-mac]");
+      var touch = note.querySelector("[data-safari-ios]");
+      if (ios && mac && touch) { mac.hidden = true; touch.hidden = false; }
       note.hidden = false;
     });
   }
