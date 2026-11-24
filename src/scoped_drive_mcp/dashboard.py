@@ -12,6 +12,7 @@ ASGI app behind BearerAuthMiddleware). Every POST requires the per-session CSRF 
 a cross-origin `Origin` is refused.
 """
 
+import base64
 import functools
 import hashlib
 import hmac
@@ -90,6 +91,7 @@ from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
+from .shared_sources import VIA_DASHBOARD
 from .store import (
     ACCESS_EDIT,
     ACCESS_READ,
@@ -190,6 +192,14 @@ SECURITY_HEADERS = [
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Searches per person per minute on "Shared with me". Each one reads every sharer's Drive.
 SHARED_SEARCH_LIMIT = 20
+# Files sent from the dashboard. Vercel refuses request bodies over 4.5 MB, so the form
+# stays under it; an assistant's send_file has the larger MAX_BYTES limit.
+DROP_UPLOAD_LIMIT = 4_000_000
+DROP_UPLOAD_MB = DROP_UPLOAD_LIMIT // 1_000_000
+# Room for the form's other fields and the multipart framing around the file.
+DROP_FORM_OVERHEAD = 64_000
+# Files listed under "Sent to you" on the Shared with me page.
+DROPS_SHOWN = 50
 # Folder lookups one Files page may make to work out search-result paths and
 # folder-inherited access. Past this, the remaining rows say to open their folder.
 SEARCH_LOOKUPS = 40
@@ -232,6 +242,8 @@ class DashboardContext:
     first_reads: Any = None
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
+    # Files paired people send this person (drops.DropBox). None hides sending.
+    drops: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -2182,10 +2194,139 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         def gather() -> dict[str, Any]:
             peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
-            return {"people": ctx.shared_with_me.overview(email), "peers": peers}
+            data: dict[str, Any] = {
+                "people": ctx.shared_with_me.overview(email),
+                "peers": peers,
+                "drops_on": ctx.drops is not None,
+                "received": [],
+                "send_limit_mb": DROP_UPLOAD_MB,
+                "hold_hours": ctx.drops.hold_hours if ctx.drops is not None else 0,
+            }
+            if ctx.drops is not None:
+                data["received"] = ctx.drops.received(DROPS_SHOWN)
+            return data
 
         data = await blocking(gather)
         return render(request, "shared.html", **data)
+
+    async def drop_send(request: Request, form: dict[str, str]) -> Response:
+        """A person sends one file from the dashboard to someone they are paired with."""
+        back = "/sharing?tab=with-me"
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        email = str(request.session.get("owner") or "")
+        upload = (await request.form()).get("file")
+        to = (form.get("to") or "").strip()
+        if not to:
+            flash(request, "error", "Pick who to send the file to.")
+            return RedirectResponse(back, status_code=303)
+        if upload is None or isinstance(upload, str) or not upload.filename:
+            flash(request, "error", "Choose a file to send.")
+            return RedirectResponse(back, status_code=303)
+        data = await upload.read(DROP_UPLOAD_LIMIT + 1)
+        if len(data) > DROP_UPLOAD_LIMIT:
+            flash(request, "error", f"That file is larger than {DROP_UPLOAD_MB} MB.")
+            return RedirectResponse(back, status_code=303)
+        if not data:
+            flash(request, "error", "That file is empty.")
+            return RedirectResponse(back, status_code=303)
+        mime = (upload.content_type or "").split(";")[0].strip() or "application/octet-stream"
+        try:
+            sent = await blocking(
+                ctx.drops.send,
+                email,
+                to,
+                upload.filename,
+                mime,
+                None,
+                base64.b64encode(data).decode(),
+                via=VIA_DASHBOARD,
+            )
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+        else:
+            flash(request, "ok", f"Sent “{sent['name']}” to {sent['to']}.")
+        return RedirectResponse(back, status_code=303)
+
+    def body_limited(handler: Handler, limit: int) -> Handler:
+        """Refuse a request body larger than `limit` before it is read."""
+
+        async def wrapped(request: Request) -> Response:
+            try:
+                length = int(request.headers.get("content-length") or "")
+            except ValueError:
+                length = -1
+            if length < 0 or length > limit:
+                return refused(
+                    request,
+                    413,
+                    f"That file is too large to send. The limit is {DROP_UPLOAD_MB} MB.",
+                    title="File too large",
+                )
+            return await handler(request)
+
+        return wrapped
+
+    async def drop_download(request: Request) -> Response:
+        """The recipient downloads a held file. Never served inline: it is another
+        person's file and this is our origin."""
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        try:
+            row, data = await blocking(ctx.drops.download, request.path_params["drop_id"])
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+            return RedirectResponse("/sharing?tab=with-me", status_code=303)
+        return Response(
+            data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": attachment_disposition(str(row.get("name") or "file"))},
+        )
+
+    async def drop_act(request: Request, form: dict[str, str]) -> Response:
+        """Save a held file to the recipient's Drive, or delete it now."""
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        drop_id = request.path_params["drop_id"]
+        action = request.path_params["action"]
+        try:
+            if action == "save":
+                saved = await blocking(ctx.drops.save, drop_id)
+                audit_owner("drop_saved", file_id=saved["file_id"])
+                flash(
+                    request,
+                    "ok",
+                    f"Saved “{saved['name']}” to “Sent to me (Bot RBAC)” in your Google Drive.",
+                )
+            elif action == "dismiss":
+                await blocking(ctx.drops.dismiss, drop_id)
+                flash(request, "ok", "Deleted.")
+            else:
+                return render(request, "error.html", 404, message="That page is not available.")
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+        return RedirectResponse("/sharing?tab=with-me", status_code=303)
+
+    async def drop_allow(request: Request, form: dict[str, str]) -> Response:
+        """Turn files from one paired person on or off."""
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        person = (form.get("person") or "").strip()
+        on = form.get("on") == "1"
+        try:
+            await blocking(ctx.drops.set_allowed, person, on)
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+        else:
+            audit_owner("drops_on" if on else "drops_off", person=person.lower())
+            flash(
+                request,
+                "ok",
+                f"{person} can send you files again."
+                if on
+                else f"{person} can no longer send you files. Your pairing is still on.",
+            )
+        return RedirectResponse("/sharing?tab=people", status_code=303)
 
     async def shared_search(request: Request) -> Response:
         if ctx.shared_with_me is None:
@@ -2943,6 +3084,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 peer = link.get("peer_email")
                 if peer and not link.get("same_account"):
                     data["visible_to"][peer] = [e for e in ordered if e.readable_by(peer)]
+        data["drops_on"] = ctx.drops is not None
+        data["drops_off"] = await blocking(ctx.drops.off_list) if ctx.drops is not None else set()
         return render(request, "bridge.html", tab="people", **data)
 
     async def settings_page(request: Request) -> Response:
@@ -3268,6 +3411,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
         Route("/shared/open", owner_only(shared_open), methods=["GET"]),
         Route("/shared/download", owner_only(shared_download), methods=["GET"]),
+        Route(
+            "/shared/send",
+            body_limited(csrf_protected(drop_send), DROP_UPLOAD_LIMIT + DROP_FORM_OVERHEAD),
+            methods=["POST"],
+        ),
+        Route("/drops/allow", csrf_protected(drop_allow), methods=["POST"]),
+        Route("/drops/{drop_id}/download", owner_only(drop_download), methods=["GET"]),
+        Route("/drops/{drop_id}/{action}", csrf_protected(drop_act), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),

@@ -134,6 +134,9 @@ class Settings(BaseSettings):
 
     max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
+    # How long a file a paired person sent is held for its recipient to save to their own
+    # Drive. After this it is deleted here; a saved copy in their Drive stays.
+    drop_hold_hours: int = Field(default=48, ge=24, le=168)
     # Read PDF and Office files in a separate process with hard memory and CPU limits.
     # Turn off only where the host does not allow starting a process.
     extract_isolation: bool = True

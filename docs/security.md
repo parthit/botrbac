@@ -159,6 +159,11 @@
   file that does not exist and for one the person has not picked. So an assistant asking for an unknown id
   gets an approval link (carrying no name or content), where the person can pick the file. A request for
   an id nobody can pick stays pending until denied; one app can have at most `MAX_PENDING_REQUESTS` waiting.
+- **Files paired people send.** A paired person can send you a file (`send_file`, or the dashboard). It is
+  held for `DROP_HOLD_HOURS` (encrypted when `ENCRYPTION_KEY` is set) and then deleted; nothing is written to your Drive unless you
+  save it. The sender cannot read, list or change it afterwards. Your assistants see it marked
+  `untrusted_peer`. You can stop one person's files without ending the pairing. See
+  [sharing.md](sharing.md#sending-a-file-to-a-paired-person).
 - **Paired people's writes.** A paired person's assistant can write only inside items you marked
   editable for them, and only create, upload, update and rename (never trash, move or share). Inside an
   editable folder it can't rename anything on your Sharing list, on your own assistants' Access list or
