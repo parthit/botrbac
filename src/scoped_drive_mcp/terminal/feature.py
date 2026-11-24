@@ -1,18 +1,25 @@
 """Bot RBAC Terminal's dashboard pages."""
 
+import csv
+import hashlib
+import io
+import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio.to_thread
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from ..audit import audit_owner
-from ..auth import current_actor
+from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
-from .device import DeviceError, Terminals, normalize_user_code
+from .device import DeviceError, Terminal, Terminals, normalize_user_code
+from .ingest import IngestError, TerminalActivity
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -36,6 +43,14 @@ async def _run(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     return await anyio.to_thread.run_sync(lambda: fn(*args, **kwargs))
 
 
+def epoch_iso(value: Any) -> str:
+    """Seconds since 1970 as ISO 8601, for the dashboard's `when` filter."""
+    try:
+        return datetime.fromtimestamp(float(value), UTC).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
 def _me() -> str:
     email = current_actor.get()
     assert email, "owner_only sets the actor"
@@ -51,6 +66,11 @@ TOKEN_LIMIT = 600
 APPROVE_LIMIT = 30
 # ... and looking codes up on /device (a hit shows the other computer's name).
 LOOKUP_LIMIT = 60
+# Calls by one signed-in terminal (policy checks and audit batches).
+TERMINAL_LIMIT = 240
+MAX_BODY = 2 * 1024 * 1024
+MAX_UNGUARDED = 50
+ACTIVITY_PAGE = 100
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -64,6 +84,24 @@ async def _body(request: Request) -> dict[str, Any]:
         return {k: str(v) for k, v in form.items()}
     except Exception:  # noqa: BLE001 - a malformed body is just empty
         return {}
+
+
+async def _read_capped(request: Request, limit: int) -> bytes | None:
+    """The body, or None when it is (or claims to be) larger than `limit`. Counted while
+    streaming, so a chunked request without Content-Length is capped too."""
+    try:
+        if int(request.headers.get("content-length") or 0) > limit:
+            return None
+    except ValueError:
+        return None
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _oauth_error(code: str, status: int = 400) -> JSONResponse:
@@ -86,10 +124,29 @@ class TerminalFeature:
     signed_in: Callable[[str], bool] = lambda _email: True
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
+    activity: TerminalActivity = field(init=False)
 
     def __post_init__(self) -> None:
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
+        self.activity = TerminalActivity(self.store)
+
+    def policy_for(self, terminal: Terminal) -> dict[str, Any]:
+        """What the CLI enforces: this terminal's role, every role it may narrow to with
+        --role, and sessions revoked on the website."""
+        email = terminal.email
+        role = self.roles.effective(email, terminal.role_id)
+        body: dict[str, Any] = {
+            "email": email,
+            "terminal": {"id": terminal.id, "name": terminal.name},
+            "role": role.public(),
+            "roles": [r.public() for r in self.roles.all(email)],
+            "revoked_sessions": self.activity.revoked_sessions(email),
+        }
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+        body["version"] = digest[:16]
+        body["issued_at"] = time.time()
+        return body
 
     # ---- API (no cookies; mounted outside the dashboard) -----------------------
 
@@ -125,9 +182,66 @@ class TerminalFeature:
                 return _oauth_error("unsupported_grant_type")
             return JSONResponse(issued, headers={"cache-control": "no-store"})
 
+        async def caller(request: Request) -> Terminal | Response:
+            raw = extract_token(request.headers.get("authorization"))
+            terminal = await _run(self.terminals.resolve, raw) if raw else None
+            if terminal is None:
+                return JSONResponse(
+                    {"error": "invalid_token"},
+                    status_code=401,
+                    headers={"www-authenticate": 'Bearer error="invalid_token"'},
+                )
+            if not allow(self.store, "termcall", terminal.id, TERMINAL_LIMIT, API_WINDOW):
+                return JSONResponse({"error": "rate_limited"}, status_code=429)
+            return terminal
+
+        async def policy(request: Request) -> Response:
+            terminal = await caller(request)
+            if isinstance(terminal, Response):
+                return terminal
+            await _run(self.terminals.touch, terminal.id, last_seen=time.time())
+            body = await _run(self.policy_for, terminal)
+            return JSONResponse(body, headers={"cache-control": "no-store"})
+
+        async def audit(request: Request) -> Response:
+            terminal = await caller(request)
+            if isinstance(terminal, Response):
+                return terminal
+            raw = await _read_capped(request, MAX_BODY)
+            if raw is None:
+                return JSONResponse({"error": "too_large"}, status_code=413)
+            try:
+                data = json.loads(raw or b"{}")
+            except ValueError:
+                data = None
+            if not isinstance(data, dict):
+                return JSONResponse({"error": "invalid_request"}, status_code=400)
+            try:
+                result = await _run(
+                    self.activity.add, terminal.email, terminal.id, terminal.name, data.get("rows")
+                )
+            except IngestError as exc:
+                return JSONResponse({"error": "invalid_request", "message": str(exc)}, 400)
+            tools = data.get("tools")
+            if isinstance(tools, list):
+                await _run(self.roles.note_tools, terminal.email, tools[:500])
+            changes: dict[str, Any] = {"last_seen": time.time()}
+            queued = data.get("queued")
+            if isinstance(queued, int) and queued >= 0:
+                changes["queued"] = min(queued, 10**9)
+            unguarded = data.get("unguarded")
+            if isinstance(unguarded, list):
+                changes["unguarded"] = sorted(
+                    {str(u)[:64] for u in unguarded if isinstance(u, str) and u.strip()}
+                )[:MAX_UNGUARDED]
+            await _run(self.terminals.touch, terminal.id, **changes)
+            return JSONResponse(result)
+
         return [
             Route("/api/terminal/device", device, methods=["POST"]),
             Route("/api/terminal/token", token, methods=["POST"]),
+            Route("/api/terminal/policy", policy, methods=["GET"]),
+            Route("/api/terminal/audit", audit, methods=["POST"]),
         ]
 
     def page_routes(self, kit: Kit) -> list[Route]:
@@ -280,6 +394,68 @@ class TerminalFeature:
                 kit.flash(request, "error", "That role cannot be deleted.")
             return RedirectResponse("/terminal/roles", status_code=303)
 
+        def filtered(request: Request, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            q = request.query_params
+            if q.get("terminal"):
+                rows = [r for r in rows if r.get("terminal_id") == q["terminal"]]
+            if q.get("agent"):
+                rows = [r for r in rows if r.get("agent") == q["agent"]]
+            if q.get("blocked") == "1":
+                rows = [r for r in rows if r.get("decision") == "deny"]
+            return rows
+
+        async def activity_page(request: Request) -> Response:
+            email = _me()
+            rows = await _run(self.activity.recent, email)
+            terminals = await _run(self.terminals.for_person, email)
+            agents = sorted({r["agent"] for r in rows if r.get("agent")})
+            shown = filtered(request, rows)
+            try:
+                limit = max(ACTIVITY_PAGE, min(int(request.query_params.get("show") or 0), 2000))
+            except ValueError:
+                limit = ACTIVITY_PAGE
+            return render(
+                request,
+                "terminal_activity.html",
+                rows=shown[:limit],
+                more=len(shown) > limit,
+                limit=limit,
+                total=len(rows),
+                terminals=terminals,
+                agents=agents,
+                q=request.query_params,
+                export_query=request.url.query,
+            )
+
+        async def activity_export(request: Request) -> Response:
+            rows = filtered(request, await _run(self.activity.recent, _me()))
+            fields = [
+                "ts", "terminal", "terminal_id", "agent", "tool", "decision", "reason",
+                "role", "session_id", "parent_session_id", "via", "event_id", "received",
+            ]  # fmt: skip
+            if request.query_params.get("format") == "jsonl":
+                text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
+                kind, ext = "application/x-ndjson", "jsonl"
+            else:
+                out = io.StringIO()
+                writer = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
+                writer.writeheader()
+                for r in rows:
+                    # A cell starting with = + - @ would run as a formula in a spreadsheet.
+                    writer.writerow(
+                        {k: ("'" + v if isinstance(v, str) and v and v[0] in "=+-@\t\r" else v)
+                         for k, v in r.items()}
+                    )  # fmt: skip
+                text, kind, ext = out.getvalue(), "text/csv", "csv"
+            return PlainTextResponse(
+                text,
+                media_type=kind,
+                headers={
+                    "content-disposition": f'attachment; filename="terminal-activity.{ext}"',
+                    "cache-control": "no-store",
+                },
+            )
+
         own = kit.owner_only
         csrf = kit.csrf_protected
         return [
@@ -288,6 +464,8 @@ class TerminalFeature:
             Route("/device/{action:str}", csrf(device_decide), methods=["POST"]),
             Route("/terminal/t/{terminal_id}/{action}", csrf(terminal_act), methods=["POST"]),
             Route("/terminal/roles", own(roles_page), methods=["GET"]),
+            Route("/terminal/activity", own(activity_page), methods=["GET"]),
+            Route("/terminal/activity/export", own(activity_export), methods=["GET"]),
             Route("/terminal/roles/new", own(role_edit), methods=["GET"]),
             Route("/terminal/roles/save", csrf(role_save), methods=["POST"]),
             Route("/terminal/roles/{role_id}", own(role_edit), methods=["GET"]),
