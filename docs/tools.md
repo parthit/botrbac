@@ -26,6 +26,9 @@ What a connected assistant can call, by role. Pairing, the mailbox and sharing b
 | `list_shared_folder(owner, folder_id?, max_results?)` | ✓ | ✓ | ✓ |
 | `read_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
 | `download_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
+| `notion_list_pages()` (only when Notion is configured, [notion.md](notion.md)) | ✓ | ✓ | ✓ |
+| `notion_read_page(page_id)` | ✓ | ✓ | ✓ |
+| `notion_search(query, max_results?)` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |

@@ -5,7 +5,7 @@
 {% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
 <h1>Files</h1>
-{{ files_tabs('all', allow_count) }}
+{{ files_tabs('all', allow_count, notion_tab) }}
 <p class="muted lead"><b>Allow</b> lets your own assistants use an item. <b>Share</b> lets the assistants of people you are paired with read it. The two are separate: you can do either, both or neither. An allowed folder includes everything inside it.</p>
 {% if picking %}
 <div class="warn">Choosing an item for this request:

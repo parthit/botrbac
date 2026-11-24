@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "_tabs.html" import files_tabs %}
+{% block title %}Files from Notion{% endblock %}
+{% block content %}
+<h1>Files</h1>
+{{ files_tabs('notion', allow_count, notion_tab) }}
+{% if not notion_connected %}
+<div class="card empty" id="notion-connect">
+  <h2>Notion isn’t connected</h2>
+  <p>Connect Notion, and Notion will ask which pages to share with Bot RBAC. Then come back here and <b>Allow</b> the ones your assistants may read. Bot RBAC never edits Notion.</p>
+  <form method="post" action="/connect/notion">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="/files?tab=notion">
+    <button class="primary" type="submit">Connect Notion</button>
+  </form>
+</div>
+{% else %}
+<p class="muted lead">Your assistants can read the Notion pages and databases you <b>Allow</b> here, and everything inside them. They can’t edit Notion.{% if workspace %} Workspace: <b>{{ workspace }}</b>.{% endif %}</p>
+
+<h2>Allowed <span class="count">{{ allowed | length }}</span></h2>
+{% if allowed %}
+<table class="cards" data-list>
+  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for e in allowed %}
+  <tr data-row>
+    <td data-label="Name">{{ e.name or "Untitled" }}</td>
+    <td data-label="Type">{{ "Database" if e.mime_type == "notion/database" else "Page" }}</td>
+    <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
+    <td data-label="Action">
+      <form class="inline" method="post" action="/notion/remove" data-confirm="Stop assistants reading this page and everything inside it?" data-confirm-action="Remove">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="page_id" value="{{ e.id }}">
+        <button class="danger" type="submit">Remove<span class="sr-only"> {{ e.name }}</span></button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted" id="notion-none-allowed">Nothing from Notion is allowed yet. Choose <b>Allow</b> on a page below.</p>
+{% endif %}
+
+<h2>What Notion shows Bot RBAC</h2>
+<p class="muted">Only the pages you picked on Notion’s screen, and what is inside them. To add or remove pages there, choose <b>Pick pages in Notion</b>.</p>
+<form method="get" action="/files" class="actions" role="search">
+  <input type="hidden" name="tab" value="notion">
+  <label class="sr-only" for="nq">Search Notion</label>
+  <input id="nq" type="search" name="q" value="{{ query }}" placeholder="Search your shared Notion pages">
+  <button type="submit">Search</button>
+  {% if query %}<a href="/files?tab=notion">Clear search</a>{% endif %}
+</form>
+<form method="post" action="/connect/notion" class="actions">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="next" value="/files?tab=notion">
+  <button type="submit">Pick pages in Notion</button>
+</form>
+{% if notion_error %}
+<div class="warn" role="alert" id="notion-error">{{ notion_error }}</div>
+{% elif visible %}
+<table class="cards">
+  <thead><tr><th>Name</th><th>Type</th><th>Edited</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for v in visible %}
+  <tr>
+    <td data-label="Name">{% if v.url %}<a href="{{ v.url }}" target="_blank" rel="noopener noreferrer">{{ v.title }}</a>{% else %}{{ v.title }}{% endif %}</td>
+    <td data-label="Type">{{ "Database" if v.type == "database" else "Page" }}</td>
+    <td data-label="Edited" class="muted">{{ v.last_edited_time | when if v.last_edited_time else "—" }}</td>
+    <td data-label="Action">
+      {% if v.allowed %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
+      {% elif v.covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed through “{{ v.covered_by }}”</span>
+      {% else %}
+      <form class="inline" method="post" action="/notion/allow">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="page_id" value="{{ v.id }}">
+        <button type="submit">Allow<span class="sr-only"> {{ v.title }}</span></button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted" id="notion-none-visible">{% if query %}No shared Notion pages match “{{ query }}”.{% else %}Notion isn’t showing Bot RBAC any pages. Choose <b>Pick pages in Notion</b> and tick the pages to share.{% endif %}</p>
+{% endif %}
+
+<h2>Disconnect</h2>
+<form method="post" action="/connect/notion/disconnect" data-confirm="Disconnect Notion? Assistants lose access to it immediately." data-confirm-action="Disconnect">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button class="danger" type="submit">Disconnect Notion</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -14,6 +14,7 @@ from .audit import audit
 from .auth import Principal, current_principal
 from .config import Role
 from .drive_client import BotNotConnectedError
+from .notion_client import NotionApiError
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 
 logger = logging.getLogger(__name__)
@@ -30,26 +31,33 @@ GUEST_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-VIEWER_TOOLS: frozenset[str] = GUEST_TOOLS | frozenset(
-    {
-        "search_files",
-        "list_folder",
-        "get_metadata",
-        "read_file",
-        "download_file",
-        "request_access",
-        "check_access_request",
-        "request_link",
-        "list_links",
-        "send_message",
-        "list_inbox",
-        "check_messages",
-        "reply",
-        "mark_read",
-        "get_webhook",
-        "set_webhook",
-        "clear_webhook",
-    }
+# Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
+NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
+
+VIEWER_TOOLS: frozenset[str] = (
+    GUEST_TOOLS
+    | NOTION_TOOLS
+    | frozenset(
+        {
+            "search_files",
+            "list_folder",
+            "get_metadata",
+            "read_file",
+            "download_file",
+            "request_access",
+            "check_access_request",
+            "request_link",
+            "list_links",
+            "send_message",
+            "list_inbox",
+            "check_messages",
+            "reply",
+            "mark_read",
+            "get_webhook",
+            "set_webhook",
+            "clear_webhook",
+        }
+    )
 )
 # Writing into an item another person shared with this person's assistant and marked
 # editable. The owner's "edit" setting is checked on the server for every call; the
@@ -85,7 +93,7 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
-_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id", "owner")
+_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id", "owner", "page_id")
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
 ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]
@@ -207,6 +215,10 @@ def require(
             except BotNotConnectedError as exc:
                 audit(tool=tool, decision="error", reason="bot_not_connected", **who, **ids)
                 raise ToolError(exc.user_message) from None
+            except NotionApiError as exc:
+                audit(tool=tool, decision="error", reason="notion_error", **who, **ids)
+                logger.warning("tool %s: %s", tool, exc)
+                raise ToolError("Notion request failed. Try again in a moment.") from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)

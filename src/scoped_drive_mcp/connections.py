@@ -3,7 +3,8 @@
 Signing in (step 1) only proves who someone is. Each entry here is a separate,
 explicit step 2: the person chooses **Connect**, Google (or later, another provider)
 shows the wider permission, and the refresh token that comes back is stored for that
-person. Google Drive is the first connection. Adding another service means adding an
+person. Google Drive is the first connection; Notion is the second (offered only when
+its OAuth client is configured, see notion.py). Adding another service means adding an
 entry here, a token slot for it, and the tools that use it; the sign-in step does not
 change.
 """
@@ -21,7 +22,7 @@ class Connection:
     name: str
     """What the person sees, e.g. "Google Drive"."""
     provider: str
-    """Who runs the consent screen. Only "google" exists today."""
+    """Who runs the consent screen: "google" or "notion"."""
     scopes: tuple[str, ...]
     """Scopes requested in addition to the sign-in scopes."""
     required_scope: str
@@ -55,7 +56,23 @@ GOOGLE_DRIVE = Connection(
     ),
 )
 
-CONNECTIONS: dict[str, Connection] = {c.key: c for c in (GOOGLE_DRIVE,)}
+NOTION = Connection(
+    key="notion",
+    name="Notion",
+    provider="notion",
+    # Notion has no scopes: its consent screen asks which pages to share instead.
+    scopes=(),
+    required_scope="",
+    allowed_scopes=frozenset(),
+    summary="Only the Notion pages you pick, and only to read.",
+    disclosure=(
+        "Notion will ask which pages to share with Bot RBAC. Bot RBAC can read only those "
+        "pages and what is inside them, and never edits Notion. An assistant still reaches "
+        "only the pages you allow on Files."
+    ),
+)
+
+CONNECTIONS: dict[str, Connection] = {c.key: c for c in (GOOGLE_DRIVE, NOTION)}
 
 
 def get_connection(key: str | None) -> Connection | None:

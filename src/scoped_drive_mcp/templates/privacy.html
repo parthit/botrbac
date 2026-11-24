@@ -36,6 +36,16 @@
      Drive’s trash. This app has no tool to permanently delete a file, to change who a
      file is shared with, or to move a file between folders.</p>
 
+  <h2>Notion data we access</h2>
+  <p>Connecting Notion is optional, and only offered when this deployment has set it up.
+     Notion then asks you which pages to share with Bot RBAC. This app can read only those
+     pages and what is inside them, and never edits Notion. An assistant can read only
+     the Notion pages you allow on Files, and what is inside them. The Notion access
+     token is stored encrypted, like the Google refresh token. Page text is read only to
+     answer an assistant’s request and is not stored. Disconnect Notion in Settings to
+     delete the token and ask Notion to revoke it, or remove Bot RBAC in Notion under
+     Settings → Connections.</p>
+
   <h2>How we use it</h2>
   <p>Google user data is used only to provide the features on the home page and in the
      dashboard:</p>

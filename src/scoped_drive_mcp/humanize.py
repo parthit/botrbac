@@ -123,6 +123,9 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
         "search files people share with you",
     ),
     "list_shared_folder": ("opened {item}", "open {item}"),
+    "notion_list_pages": ("listed your allowed Notion pages", "list your Notion pages"),
+    "notion_read_page": ("read a Notion page", "read a Notion page"),
+    "notion_search": ("searched your allowed Notion pages", "search your Notion pages"),
     "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
     "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
@@ -250,6 +253,10 @@ _REFUSALS = {
     "not_shared": "it isn’t shared with you",
     "not_found": "it wasn’t found",
     "webhooks_disabled": "wake-ups are turned off on this server",
+    "not_allowed": "that Notion page isn’t allowed",
+    "notion_not_connected": "Notion isn’t connected",
+    "notion_reconnect": "Notion needs to be connected again",
+    "notion_error": "Notion returned an error",
 }
 
 
@@ -343,6 +350,7 @@ def _owner_row(
     item = _item_text(record, names, request_names)
     client = str(record.get("client") or "an app")
     role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
+    notion_name = _quoted(str(record.get("name") or "Untitled"))
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -375,6 +383,16 @@ def _owner_row(
             _DONE,
         ),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
+        "notion_connect": ("You connected Notion.", Badge("ok", "Connected", "✓")),
+        "notion_disconnect": ("You disconnected Notion.", Badge("", "Disconnected", "–")),
+        "notion_allow": (
+            f"You allowed the Notion page {notion_name} for your assistants.",
+            _ALLOWED,
+        ),
+        "notion_remove": (
+            f"You removed the Notion page {notion_name} from your assistants’ list.",
+            Badge("", "Removed", "–"),
+        ),
     }
     group = "you"
     if decision == "deny":
