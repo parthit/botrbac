@@ -372,3 +372,10 @@ def test_session_page_escapes_terminal_text(world, memstore, oauth) -> None:
     )  # fmt: skip
     page = c.get(f"/terminal/sessions/{root}").text
     assert "<b>box</b>" not in page and "&lt;b&gt;box&lt;/b&gt;" in page
+
+
+def test_wrap_codex_reports_a_taken_name(home, capsys) -> None:
+    config = home / "codex2.toml"
+    config.write_text('[mcp_servers.botrbac]\ncommand = "my-own-thing"\n')
+    assert main(["wrap", "codex", "--file", str(config)]) == 0
+    assert "was not added" in capsys.readouterr().out

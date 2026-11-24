@@ -176,6 +176,11 @@ def cmd_wrap(args: argparse.Namespace) -> int:
         for name in result.get("assumed_http") or []:
             print(f"  {name} has a url and no type: treated as streamable HTTP. If it is an")
             print("    old SSE server it will fail behind botrbac; restore it from the backup.")
+        if result.get("name_taken"):
+            print(
+                "  [mcp_servers.botrbac] is one of your own servers, so the gateway was not "
+                "added. Rename that table, then run this again."
+            )
         for table in result.get("delete_tables") or []:
             print(f"  Now delete {table} from that file so Codex only uses botrbac")
         if result["backup"]:
