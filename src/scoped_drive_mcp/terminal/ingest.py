@@ -33,12 +33,20 @@ def _word(value: Any, limit: int) -> str:
     return _WORD.sub("", str(value or ""))[:limit].strip()
 
 
-def _ts(value: Any) -> float | None:
+# How far ahead of the server's clock a terminal's clock may be.
+CLOCK_SKEW = 300
+
+
+def _ts(value: Any, now: float) -> float | None:
+    """When it happened on the computer. A time in the future is not believed (it would
+    pin the row to the top of the log), so it becomes the time it arrived."""
     try:
         ts = float(value)
     except (TypeError, ValueError):
         return None
-    return ts if 1_500_000_000 < ts < 4_000_000_000 else None
+    if not 1_500_000_000 < ts <= now + CLOCK_SKEW:
+        return None
+    return ts
 
 
 def clean_row(raw: Any, now: float) -> dict[str, Any] | None:
@@ -54,7 +62,7 @@ def clean_row(raw: Any, now: float) -> dict[str, Any] | None:
         return None
     row: dict[str, Any] = {
         "event_id": event_id,
-        "ts": _ts(raw.get("ts")) or now,
+        "ts": _ts(raw.get("ts"), now) or now,
         "decision": decision,
         "tool": tool[:200] if decision != "session" else "",
         "agent": _word(raw.get("agent"), 40),
@@ -98,7 +106,13 @@ class TerminalActivity:
                 duplicates += 1
                 continue
             row.update(terminal_id=terminal_id, terminal=terminal_name[:80], received=now)
-            self.store.lpush(key, json.dumps(row, separators=(",", ":")))
+            try:
+                self.store.lpush(key, json.dumps(row, separators=(",", ":")))
+            except Exception:
+                # Not stored: forget the id so the terminal's retry is not taken for a
+                # duplicate and dropped.
+                self.store.delete(seen)
+                raise
             accepted += 1
         if accepted:
             self.store.ltrim(key, 0, ACTIVITY_MAX - 1)
