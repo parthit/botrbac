@@ -387,3 +387,51 @@ def test_a_server_refusing_everything_costs_few_requests() -> None:
         queue.add(decision="allow", tool=f"github/t{i}")
     result = sync(Refuses(), queue)
     assert len(calls) <= 24 and result["waiting"] == 300 and queue.rejected() == 0
+
+
+def test_several_bad_rows_still_make_progress_every_sync() -> None:
+    from botrbac_cli.api import ApiError
+
+    bad = {f"github/t{i}" for i in (10, 200, 390, 480)}
+
+    class Api:
+        stored: list = []
+
+        def send_audit(self, body):
+            if any(r["tool"] in bad for r in body["rows"]):
+                raise ApiError(422, "x")
+            Api.stored += [r["tool"] for r in body["rows"]]
+            return {}
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    queue = AuditQueue()
+    for i in range(500):
+        queue.add(decision="allow", tool=f"github/t{i}")
+    waiting = [queue.waiting()]
+    for _ in range(10):
+        sync(Api(), queue)
+        waiting.append(queue.waiting())
+        if not waiting[-1]:
+            break
+    assert waiting[-1] == 0
+    assert all(b < a for a, b in zip(waiting, waiting[1:], strict=False))  # always progress
+    assert queue.rejected() == 4 and len(Api.stored) == 496
+
+
+def test_a_refused_tool_report_is_dropped(capsys) -> None:
+    from botrbac_cli.api import ApiError
+
+    class Api:
+        def send_audit(self, body):
+            if "tools" in body:
+                raise ApiError(400, "x")
+            return {}
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    state.note_seen(tools=["github/get_issue"])
+    sync(Api(), AuditQueue())
+    assert "tools" not in (state.read_json("state.json") or {})

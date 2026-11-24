@@ -1,6 +1,7 @@
 """Terminal, phase 3: device-code login, terminal tokens and the Terminals page."""
 
 import hashlib
+import json
 
 import pytest
 
@@ -317,3 +318,16 @@ def test_touch_after_disconnect_writes_nothing() -> None:
     t.revoke(ME, terminal.id)
     t.touch(terminal.id, last_seen=1.0)
     assert t.store.get(f"term:terminal:{terminal.id}:seen") is None
+
+
+def test_update_only_edits_name_and_role() -> None:
+    t = _terminals()
+    started = t.start({})
+    terminal = t.approve(ME, started["user_code"], "full", "x")
+    t.touch(terminal.id, last_seen=9.0)
+    with pytest.raises(ValueError):
+        t.update(ME, terminal.id, created_at=0.0)
+    t.update(ME, terminal.id, name="y")
+    raw = json.loads(t.store.get(f"term:terminal:{terminal.id}"))
+    assert raw["last_seen"] == 0.0  # check-ins stay in their own key
+    assert t.get(terminal.id).last_seen == 9.0

@@ -21,6 +21,7 @@ POLL_INTERVAL = 5
 ACCESS_TTL = 3600
 REFRESH_TTL = 90 * 24 * 3600
 MAX_TERMINALS = 50
+EDITABLE = frozenset({"name", "role_id"})
 _USER_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # no vowels: codes never spell words
 _META_MAX = 80
 
@@ -301,11 +302,16 @@ class Terminals:
         return out
 
     def update(self, email: str, terminal_id: str, **changes: Any) -> Terminal | None:
+        """The person's own edits: name and role only."""
+        bad = set(changes) - EDITABLE
+        if bad:
+            raise ValueError(f"not editable: {', '.join(sorted(bad))}")
         terminal = self.owned(email, terminal_id)
         if terminal is None:
             return None
+        # Saved without what the terminal reports about itself (touch keeps that apart).
         updated = replace(terminal, **changes)
-        self._save(updated)
+        self._save(replace(updated, last_seen=0.0, queued=0, unguarded=[]))
         if not self._live(updated):
             # Disconnected while this edit was in flight: don't leave the record behind.
             self.store.delete(f"term:terminal:{terminal_id}")
