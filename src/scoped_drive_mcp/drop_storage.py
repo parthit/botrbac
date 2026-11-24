@@ -217,7 +217,9 @@ class BlobParts:
         return b"\x01" + nonce + self._aead.encrypt(nonce, data, path.encode())
 
     def _open(self, path: str, raw: bytes) -> bytes | None:
-        if raw[:1] == b"\x00":
+        # Unencrypted pieces only when no key is set: with a key, a plain piece is one
+        # someone else wrote to the store.
+        if raw[:1] == b"\x00" and self._aead is None:
             return raw[1:]
         if raw[:1] == b"\x01" and self._aead is not None:
             try:
@@ -256,6 +258,8 @@ class BlobParts:
 # ---- staying inside the free Blob tier ------------------------------------------
 
 BUDGET_PREFIX = "drops:blob:"
+# The longest a dashboard upload may take (drops.UPLOAD_SECONDS), in hours.
+UPLOAD_HOURS = 1
 # How often an upload may trigger a sweep of expired pieces.
 SWEEP_EVERY_SECONDS = 6 * 3600
 
@@ -286,7 +290,8 @@ class BlobBudget:
         self.parts = parts
         self.monthly_uploads = monthly_uploads
         self.held_pieces = max(1, held_bytes // PIECE_BYTES)
-        hours = hold_hours + SWEEP_EVERY_SECONDS // 3600 + 1
+        # Pieces may wait the hold, the longest upload, and a sweep interval.
+        hours = hold_hours + SWEEP_EVERY_SECONDS // 3600 + UPLOAD_HOURS + 1
         self.window_days = -(-hours // 24) + 1
         self.clock = clock
 
@@ -309,14 +314,19 @@ class BlobBudget:
         )
         return {"month_uploads": self._count(self._month_key(now)), "recent_pieces": held}
 
+    def allows(self, pieces: int) -> bool:
+        """Whether `pieces` more uploads fit under both caps now (counts nothing)."""
+        use = self.usage()
+        return (
+            use["month_uploads"] + pieces <= self.monthly_uploads
+            and use["recent_pieces"] + pieces <= self.held_pieces
+        )
+
     def reserve(self, pieces: int) -> bool:
         """Count `pieces` uploads, or return False (and count nothing) when they would
         pass a cap."""
         now = self.clock()
-        use = self.usage()
-        if use["month_uploads"] + pieces > self.monthly_uploads:
-            return False
-        if use["recent_pieces"] + pieces > self.held_pieces:
+        if not self.allows(pieces):
             return False
         for _ in range(pieces):
             self.store.incr(self._month_key(now), 40 * 86400)

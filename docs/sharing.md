@@ -130,7 +130,9 @@ needs nothing on the recipient's Sharing list, and the sender gets no access to 
   runs at most every 6 hours, on a send, deletes the rest. Without Blob they go to the key-value store, where
   every piece carries the expiry, so the store deletes it even if nothing else runs. To stay inside the free
   Blob tier (2,000 uploads a month, 1 GB), sends are refused with `storage_full` past
-  `DROP_BLOB_MONTHLY_UPLOADS` or `DROP_BLOB_STORAGE_MB`. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
+  `DROP_BLOB_MONTHLY_UPLOADS` or `DROP_BLOB_STORAGE_MB`. Each piece is counted as it arrives and can
+  arrive only once, so an upload that is started and never sent costs nothing; uploads in progress count
+  toward the recipient's waiting-files cap. The hold starts when the last piece arrives. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
   it they are stored unencrypted (still deleted at the end of the hold) and the server logs a warning at
   startup. One person can send another at most 20 files an hour, counted before the file is stored, so a
   send that fails to store still counts. One recipient can have about 50 unsaved files (100 MB) waiting:
