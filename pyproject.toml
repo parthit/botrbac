@@ -26,6 +26,9 @@ dependencies = [
     "vercel-blob>=0.6.2",
 ]
 
+[project.scripts]
+botrbac = "botrbac_cli.main:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
