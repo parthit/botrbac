@@ -139,14 +139,17 @@ Code's `Bash`, Codex's `shell` and Gemini CLI's `run_shell_command` (`SHELL_TOOL
 never count as `cmd/` patterns.
 
 The command is read conservatively. It is split on `;`, `&&`, `||`, `|`, `&` and new lines; each part's
-program is its first word after `VAR=value` assignments and `sudo`, `env`, `time`, `nohup`, `xargs`,
-`command` or `exec`, and `/usr/bin/gh` counts as `gh`. The call is **blocked** when the command uses `$(…)`,
-backticks, `<(…)`, `>(…)`, `eval`, `bash -c`/`sh -c`, a `( … )` subshell, a variable as the program, or
-anything else it cannot read; the reason says why. Heredocs are read as commands too, so a role with `cmd/`
+program is its first word after `VAR=value` assignments, and `/usr/bin/gh` counts as `gh`. A wrapper
+(`sudo`, `env`, `time`, `nohup`, `xargs`, `command`, `exec`) must be allowed itself **and** so must the
+program it runs: `sudo gh` needs `cmd/sudo` and `cmd/gh`. The call is **blocked** when the command uses
+`$(…)`, backticks, `<(…)`, `>(…)`, `eval`, `bash -c`/`sh -c`, a `( … )` subshell, shell control flow
+(`if`, `for`, `while`, `case`, `!` …), a variable as the program, or anything else it cannot read; the
+reason says why. Heredocs are read as commands too, so a role with `cmd/`
 patterns blocks most of them. Only program names are logged, never the command.
 
 This protects against the agent, not the computer's owner, and goes by name: a program that starts others
-(`make`, `npm run`, `find -exec`, git aliases, scripts) runs whatever it runs.
+(`make`, `npm run`, `find -exec`, `timeout`, `nice`, git aliases, scripts) runs whatever it runs, so
+allowing `cmd/timeout` allows anything `timeout` can start.
 
 For another agent with pre-tool hooks, make the hook run `botrbac check --agent <name>` with the tool call
 as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with

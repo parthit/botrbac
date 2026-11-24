@@ -23,7 +23,14 @@ SHELL_TOOLS: dict[str, frozenset[str]] = {
 }
 
 # Programs that run the next word as the program: `sudo gh`, `env X=1 gh`, `xargs gh`.
+# Both must be allowed: `sudo gh` needs cmd/sudo and cmd/gh.
 WRAPPERS = frozenset({"sudo", "env", "time", "nohup", "xargs", "command", "exec"})
+# Shell control flow: the commands inside `if …; then …; fi` or `for … do …` would read
+# as arguments of the keyword, so they are refused rather than left unchecked.
+KEYWORDS = frozenset(
+    {"if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case",
+     "esac", "select", "function", "!", "{", "}", "[[", "]]", "coproc"}
+)  # fmt: skip
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "ash"})
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SEPARATOR_CHARS = set(";&|\n")
@@ -121,6 +128,7 @@ def programs(command: str) -> list[str]:
                 continue
             if set(word) <= _SEPARATOR_CHARS:
                 expect_program, in_wrapper, shell_running = True, False, None
+                skip_next = False
                 continue
             raise CommandError("botrbac could not read this command")
         if skip_next:
@@ -128,6 +136,11 @@ def programs(command: str) -> list[str]:
             continue
         if word == "eval":
             raise CommandError("botrbac does not run commands that use eval")
+        if word in KEYWORDS:
+            raise CommandError(
+                "botrbac does not check shell control flow (if, for, while …): "
+                "run the commands one by one"
+            )
         if shell_running and _is_c_flag(word):
             raise CommandError(
                 f"botrbac does not run {shell_running} -c: the script inside is not checked"
@@ -142,7 +155,10 @@ def programs(command: str) -> list[str]:
         if "$" in word or not _PROGRAM.fullmatch(name):
             raise CommandError("botrbac cannot tell which program this command runs")
         if name in WRAPPERS:
-            in_wrapper = True  # checked as the program it runs, not as itself
+            # Checked itself (cmd/sudo) and as the program it runs.
+            if name not in found:
+                found.append(name)
+            in_wrapper = True
             continue
         if name not in found:
             found.append(name)

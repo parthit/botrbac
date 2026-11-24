@@ -81,10 +81,12 @@ def test_bare_word_says_use_cmd() -> None:
         ("gh pr list", ["gh"]),
         ("git status && gh pr view 3", ["git", "gh"]),
         ("FOO=1 gh pr list", ["gh"]),
-        ("sudo rm -rf /", ["rm"]),
+        ("sudo rm -rf /", ["sudo", "rm"]),
+        ("sudo", ["sudo"]),
         ("/usr/bin/gh api x", ["gh"]),
         ("ls | grep x; cat a > out.txt", ["ls", "grep", "cat"]),
-        ("env -i A=1 xargs -n1 gh", ["gh"]),
+        ("env -i A=1 xargs -n1 gh", ["env", "xargs", "gh"]),
+        ("gh > out.txt ; rm x", ["gh", "rm"]),
         ("git log || echo none & wait", ["git", "echo", "wait"]),
         ("git status\ngh pr list", ["git", "gh"]),
         ('echo "a; b" 2>&1', ["echo"]),
@@ -111,7 +113,11 @@ def test_programs(command, found) -> None:
         ("$CMD x", "which program"),
         ('echo "unclosed', "quotes"),
         ("", "no program"),
-        ("sudo", "no program"),
+        ("if gh; then rm -rf /; fi", "control flow"),
+        ("for f in *; do rm $f; done", "control flow"),
+        ("while true; do gh x; done", "control flow"),
+        ("! rm x", "control flow"),
+        ("case x in a) rm y;; esac", "control flow|subshell"),
     ],
 )
 def test_unreadable_commands_are_refused(command, why) -> None:
@@ -162,6 +168,12 @@ def test_hook_logs_program_names_never_the_command() -> None:
     assert "gh" in rows[0]["reason"] and "cmd/curl" in rows[1]["reason"]
     assert all(secret not in json.dumps(r) for r in rows)
     assert all(r["tool"] == "claude-code/Bash" for r in rows)
+
+
+def test_wrappers_must_be_allowed_too() -> None:
+    """cmd/gh alone does not allow `sudo gh`; the wrapper needs its own pattern."""
+    assert not check("claude-code", _bash("sudo gh pr list"), None, False)[0]
+    assert not check("claude-code", _bash("if gh; then rm -rf /; fi"), None, False)[0]
 
 
 def test_shell_tool_itself_must_be_allowed() -> None:
