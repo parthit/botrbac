@@ -11,42 +11,58 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from . import __version__, policy, state
 from .api import Api, ApiError, NotLoggedIn
-from .patterns import normalize_server
+from .patterns import COMMAND_SERVER, normalize_server
 from .queue import AuditQueue
+
+DEFAULT_SERVER = "https://botrbac.com"
 
 
 def _api(args: argparse.Namespace) -> Api:
     return Api(getattr(args, "server", None) or os.environ.get("BOTRBAC_SERVER"))
 
 
+def _say(*lines: str) -> None:
+    """Printed and flushed at once: an agent running `botrbac login` reads the link and
+    code while the command is still waiting."""
+    for line in lines:
+        print(line, flush=True)
+
+
 def cmd_login(args: argparse.Namespace) -> int:
-    api = _api(args)
-    if not api.server:
-        print("Give the website's address: botrbac login --server https://…", file=sys.stderr)
-        return 2
+    server = args.server or os.environ.get("BOTRBAC_SERVER") or DEFAULT_SERVER
+    api = Api(server)
     started = api.start_login(socket.gethostname(), f"{platform.system()} {platform.release()}")
-    print(f"Open {started['verification_uri']} and enter the code {started['user_code']}")
-    print(f"  (or open {started['verification_uri_complete']})")
+    _say(
+        "To connect this computer, open this link and approve the code:",
+        f"Link: {started['verification_uri_complete']}",
+        f"Code: {started['user_code']}",
+        "Waiting for approval…",
+    )
     interval = int(started.get("interval") or 5)
     deadline = time.time() + int(started.get("expires_in") or 600)
     while time.time() < deadline:
         time.sleep(interval)
         result = api.poll_login(started["device_code"])
         if isinstance(result, dict):
-            fresh = policy.refresh(api)
-            role = (fresh or {}).get("role", {}).get("name", "?")
-            print(f"Logged in. This terminal's role: {role}")
+            fresh = policy.refresh(api) or {}
+            role = fresh.get("role", {}).get("name", "?")
+            _say(f"Logged in as {fresh.get('email', '?')}, role {role}")
             return 0
         if result == "slow_down":
             interval += 5
         elif result == "rate_limited":
             time.sleep(60)
+        elif result == "access_denied":
+            print("Login refused on the website. Run botrbac login again.", file=sys.stderr)
+            return 1
         elif result != "authorization_pending":
             print(f"Login did not complete: {result}", file=sys.stderr)
             return 1
-    print("The code expired. Run botrbac login again.", file=sys.stderr)
+    print("The code expired before it was approved. Run botrbac login again.", file=sys.stderr)
     return 1
 
 
@@ -62,7 +78,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     cached = policy.load_cached()
     queue = AuditQueue()
     if not creds:
-        print("Not logged in. Run: botrbac login --server <url>")
+        print("Not logged in. Run: botrbac login")
         return 1
     online = policy.refresh(_api(args)) is not None
     cached = policy.load_cached() or cached
@@ -282,6 +298,11 @@ def cmd_servers(args: argparse.Namespace) -> int:
             print(f"{name:<16} {target}")
         return 0
     name = normalize_server(args.name or "")
+    if args.action == "add" and name == COMMAND_SERVER:
+        print(
+            f"{name!r} is reserved for cmd/<program> patterns. Pick another name.", file=sys.stderr
+        )
+        return 2
     if args.action == "remove":
         servers.pop(name, None)
         save_servers(servers)
@@ -306,7 +327,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("login", help="connect this computer to your Bot RBAC account")
-    p.add_argument("--server", help="the website's address (or BOTRBAC_SERVER)")
+    p.add_argument(
+        "--server",
+        help=f"the website's address (default: BOTRBAC_SERVER, else {DEFAULT_SERVER})",
+    )
     p.set_defaults(fn=cmd_login)
     sub.add_parser("logout", help="forget this computer's login").set_defaults(fn=cmd_logout)
     sub.add_parser("status", help="login, role, policy age, rows waiting").set_defaults(
@@ -390,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except ApiError as exc:
         print(f"The server refused that: {exc}", file=sys.stderr)
+        return 1
+    except httpx.HTTPError as exc:
+        print(f"Could not reach the Bot RBAC website: {type(exc).__name__}", file=sys.stderr)
         return 1
 
 

@@ -72,7 +72,7 @@ class Api:
     def _token(self, force_refresh: bool = False) -> str:
         creds = _creds()
         if not creds.get("refresh_token"):
-            raise NotLoggedIn("Not logged in. Run: botrbac login --server <url>")
+            raise NotLoggedIn("Not logged in. Run: botrbac login")
         if not force_refresh and time.time() < float(creds.get("expires_at") or 0):
             return str(creds["access_token"])
         # Several gateways (one per agent) share these credentials, and each refresh
