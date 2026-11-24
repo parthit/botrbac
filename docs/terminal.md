@@ -23,8 +23,12 @@ browser.
 - **Paste into your terminal:**
   `curl -fsSL https://botrbac.com/terminal/install.sh | sh -s -- --agent claude-code` (or `cursor`, `codex`,
   `gemini`). The script installs botrbac with uv or pipx (installing uv first only when neither is there),
-  runs `botrbac login`, adds the gateway to that agent and runs `botrbac doctor`. It never uses sudo and can be
-  run again. Read it first at the same address: `https://botrbac.com/terminal/install.sh`.
+  runs `botrbac login`, adds the gateway to that agent and runs `botrbac doctor`. For Claude Code it also adds
+  the hook (`botrbac hooks install claude-code --user --allow-unguarded`), so Claude's own shell and file
+  edits follow the role as well; `--no-hook` leaves it out and `botrbac hooks remove claude-code --user`
+  undoes it. A new computer starts as Read-only, so with the hook Claude can read but not edit or run
+  commands until you give it a wider role. It never uses sudo and can be run again. Read it first at the
+  same address: `https://botrbac.com/terminal/install.sh`.
 - **Paste into your agent:** `Set up Bot RBAC Terminal for me by following https://botrbac.com/terminal/setup.md`.
   The agent follows [terminal-agent-setup.md](terminal-agent-setup.md) (the same text the site serves).
 - **Step by step:**

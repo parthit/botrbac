@@ -197,3 +197,31 @@ def test_odd_hooks_shapes_are_left_alone(home, hooks) -> None:
     with pytest.raises(ValueError, match="left as it is"):
         install_claude_code(settings)
     assert settings.read_text() == text
+
+
+def test_hooks_remove_takes_out_only_ours(home, monkeypatch, capsys) -> None:
+    from botrbac_cli.hooks import remove_claude_code
+
+    monkeypatch.chdir(home)
+    mine = {"matcher": "Bash", "hooks": [{"type": "command", "command": "mine"}]}
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"model": "x", "hooks": {"PreToolUse": [mine]}}))
+    assert main(["hooks", "install", "claude-code"]) == 0
+    assert main(["hooks", "remove", "claude-code"]) == 0
+    data = json.loads(settings.read_text())
+    assert data == {"model": "x", "hooks": {"PreToolUse": [mine]}}
+    assert not remove_claude_code(settings)["changed"]  # nothing left to remove
+    assert main(["hooks", "remove", "claude-code"]) == 0
+    assert "No botrbac hook" in capsys.readouterr().out
+
+
+def test_hooks_remove_cleans_up_an_emptied_section(home) -> None:
+    from botrbac_cli.hooks import remove_claude_code
+
+    settings = home / "s" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text("{}")
+    install_claude_code(settings)
+    remove_claude_code(settings)
+    assert json.loads(settings.read_text()) == {}

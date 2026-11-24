@@ -40,6 +40,31 @@ def _ours(entry: Any) -> bool:
     return False
 
 
+def remove_claude_code(path: Path) -> dict[str, Any]:
+    """Take out the hook `install_claude_code` added, leaving everything else."""
+    if not path.exists():
+        return {"file": str(path), "backup": None, "changed": False}
+    before = path.read_text()
+    try:
+        data = json.loads(before or "{}")
+    except ValueError as exc:
+        raise ValueError(f"{path} is not valid JSON; it was left as it is") from exc
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    existing = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    if not isinstance(existing, list) or not any(_ours(e) for e in existing):
+        return {"file": str(path), "backup": None, "changed": False}
+    kept = [e for e in existing if not _ours(e)]
+    if kept:
+        hooks["PreToolUse"] = kept
+    else:
+        del hooks["PreToolUse"]
+        if not hooks:
+            del data["hooks"]
+    backup = backup_file(path)
+    write_atomic(path, json.dumps(data, indent=2) + "\n")
+    return {"file": str(path), "backup": backup, "changed": True}
+
+
 def install_claude_code(path: Path, block_unguarded: bool = True) -> dict[str, Any]:
     """Add (or update) the hook. Writes, and backs up, only when something changes."""
     data: dict[str, Any] = {}

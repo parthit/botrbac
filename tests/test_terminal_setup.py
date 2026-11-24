@@ -135,6 +135,9 @@ def test_install_sh_runs_install_login_and_mcp_add_in_order(tmp_path) -> None:
     assert names.index("uv tool") < names.index("botrbac login") < names.index("claude mcp")
     assert f"botrbac login --server {BASE_URL}" in calls
     assert any(c.startswith("claude mcp add --scope user botrbac -- ") for c in calls)
+    assert "botrbac hooks install claude-code --user --allow-unguarded" in calls
+    assert names.index("claude mcp") < names.index("botrbac hooks")
+    assert "starts as Read-only" in first.stdout
     assert "Done. Restart Claude Code to load Bot RBAC." in first.stdout
     assert "Code: ABCD-EFGH" in first.stdout
 
@@ -146,11 +149,19 @@ def test_install_sh_runs_install_login_and_mcp_add_in_order(tmp_path) -> None:
     assert any(c.startswith("uv tool install --upgrade") for c in again)
 
 
+def test_install_sh_no_hook(tmp_path) -> None:
+    env, log = _stubs(tmp_path, ["uv", "botrbac", "claude"])
+    r = _run(env, "--no-hook")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "hooks install" not in log.read_text()
+
+
 def test_install_sh_other_agents_use_add_gateway(tmp_path) -> None:
     env, log = _stubs(tmp_path, ["uv", "botrbac"])
     r = _run(env, "--agent", "cursor")
     assert r.returncode == 0, r.stderr
     assert "botrbac add-gateway --agent cursor" in log.read_text()
+    assert "hooks install" not in log.read_text()
     assert "Restart Cursor" in r.stdout
 
 

@@ -30,7 +30,7 @@
         {{ copy_line("cmd-install-" ~ a, install_cmds[a], "Install for " ~ label) }}
         {% endfor %}
       </details>
-      <p class="muted small"><a href="/terminal/install.sh">Read the script</a> before you run it.</p>
+      <p class="muted small">With Claude Code, its own shell and file edits follow the role too. A new computer starts as Read-only, so give it a wider role here once it shows up. <a href="/terminal/install.sh">Read the script</a> before you run it.</p>
     </div>
     <div class="term-way" id="way-agent">
       <h3><span class="term-badge" aria-hidden="true">B</span> Paste into your agent</h3>
@@ -54,8 +54,8 @@
       </li>
       <li>
         <b>Add Bot RBAC to your agent</b>
-        {{ copy_line("cmd-add", "claude mcp add botrbac -- botrbac gateway", "Add to Claude Code") }}
-        <p class="muted small">That is for Claude Code. Restart the agent so it loads the new server.</p>
+        {{ copy_line("cmd-add", "claude mcp add botrbac -- botrbac gateway && botrbac hooks install claude-code --user --allow-unguarded", "Add to Claude Code") }}
+        <p class="muted small">That is for Claude Code: it adds the gateway, and a hook so Claude's shell and file edits follow the role too. Restart the agent so it loads the new server.</p>
         <details class="how term-more">
           <summary>Using another agent?</summary>
           <p class="small"><code>botrbac add-gateway --agent cursor</code> (or <code>codex</code>, <code>gemini</code>) adds it to that agent's file and keeps a backup. Or add it by hand, keeping the servers already there:</p>
@@ -80,7 +80,7 @@ args = ["gateway", "--agent", "codex"]</pre>
       <dt>Move every server in a config file</dt>
       <dd>When an agent already has several MCP servers. <code>botrbac wrap claude-code</code> (or <code>cursor</code>, <code>gemini</code>, <code>codex</code>) moves them all and keeps a backup; add <code>--dry-run</code> to see the changes first.</dd>
       <dt>Check the agent's own tools</dt>
-      <dd>When shell commands and file edits should follow the role too, including <code>cmd/gh</code>-style patterns. <code>botrbac hooks install claude-code</code>.</dd>
+      <dd>The one-line setup already does this for Claude Code, so shell commands and file edits follow the role (including <code>cmd/gh</code>-style patterns). To turn it off: <code>botrbac hooks remove claude-code --user</code>.</dd>
       <dt>A narrower role for one run</dt>
       <dd>When one session should do less than the computer's role. Add <code>eval "$(botrbac shell-init)"</code> to your shell's startup file, then <code>claude --botrbac --role reviewer</code>.</dd>
       <dt>Check the setup</dt>

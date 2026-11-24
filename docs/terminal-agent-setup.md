@@ -70,6 +70,17 @@ To add it for every project rather than this one, check that `claude mcp add --h
 then use `claude mcp add --scope user botrbac -- botrbac gateway`. Check with
 `claude mcp list`.
 
+Then add the hook, so Claude Code's own tools (its shell and file edits) follow the role too. Without
+it, Bot RBAC only sees MCP tools, and `cmd/gh`-style rules have no effect:
+
+```sh
+botrbac hooks install claude-code --user --allow-unguarded
+```
+
+Tell the person: a new computer starts as **Read-only**, so Claude can read but not edit files or run
+commands until they give this computer a wider role on https://botrbac.com/terminal. Undo the hook with
+`botrbac hooks remove claude-code --user`. Skip this step only if the person says so.
+
 ### Cursor: `~/.cursor/mcp.json`
 
 Merge this entry into the `mcpServers` object. If the file does not exist, create it with exactly this:
@@ -149,9 +160,6 @@ role at any time.
   `botrbac servers add NAME -- <the server's command and arguments>` for each one the person names, or
   `botrbac wrap claude-code` (also `cursor`, `gemini`, `codex`), which moves every server in that file
   and keeps a `.botrbac-backup-<time>` copy. Run with `--dry-run` first and show the person the result.
-- **Check the agent's own tools too** (shell, file edits): `botrbac hooks install claude-code`
-  (this project) or `botrbac hooks install claude-code --user` (every project). The role then needs
-  patterns such as `claude-code/Read` or `claude-code/*`.
 - **Limit shell commands such as gh:** with the hook installed, a role can list programs with
   `cmd/<program>` patterns, for example `cmd/gh` and `cmd/git`. The person edits roles on
   https://botrbac.com/terminal/roles.
