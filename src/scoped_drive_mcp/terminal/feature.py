@@ -406,6 +406,26 @@ class TerminalFeature:
                 },
             )
 
+        async def session_page(request: Request) -> Response:
+            tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
+            if tree is None:
+                return render(request, "error.html", 404, message="Session not found.")
+            return render(request, "terminal_session.html", tree=tree)
+
+        async def session_revoke(request: Request, _form: Any) -> Response:
+            sid = request.path_params["session_id"]
+            if await _run(self.activity.session, _me(), sid) is None:
+                return render(request, "error.html", 404, message="Session not found.")
+            await _run(self.activity.revoke_session, _me(), sid)
+            audit_owner("terminal_session_revoked", session=sid)
+            kit.flash(
+                request,
+                "ok",
+                "Session revoked. It and everything started under it are blocked the next "
+                "time the terminal checks in (within about a minute while online).",
+            )
+            return RedirectResponse(f"/terminal/sessions/{sid}", status_code=303)
+
         own = kit.owner_only
         csrf = kit.csrf_protected
         return [
@@ -416,6 +436,8 @@ class TerminalFeature:
             Route("/terminal/roles", own(roles_page), methods=["GET"]),
             Route("/terminal/activity", own(activity_page), methods=["GET"]),
             Route("/terminal/activity/export", own(activity_export), methods=["GET"]),
+            Route("/terminal/sessions/{session_id}", own(session_page), methods=["GET"]),
+            Route("/terminal/sessions/{session_id}/revoke", csrf(session_revoke), methods=["POST"]),
             Route("/terminal/roles/new", own(role_edit), methods=["GET"]),
             Route("/terminal/roles/save", csrf(role_save), methods=["POST"]),
             Route("/terminal/roles/{role_id}", own(role_edit), methods=["GET"]),
