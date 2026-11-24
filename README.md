@@ -32,7 +32,8 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
 - **Terminal: roles for agents on your own computers.** The `botrbac` CLI puts Claude Code, Codex, Cursor or
   Gemini CLI behind roles you define on the website, works offline and syncs its audit log when it can.
   `claude --botrbac --role reviewer` starts an agent with a narrower role that its subagents inherit.
-  See [docs/terminal.md](docs/terminal.md).
+  See [docs/terminal.md](docs/terminal.md); a coding agent can set it up from
+  [docs/terminal-agent-setup.md](docs/terminal-agent-setup.md).
 
 ## Get started (hosted)
 

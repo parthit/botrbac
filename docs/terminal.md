@@ -1,7 +1,8 @@
 # Bot RBAC Terminal
 
 Roles defined on the website, enforced on your own computers by the `botrbac` CLI, for any agent that
-speaks MCP: Claude Code, Codex, Cursor, Gemini CLI and others. It sits next to the hosted Drive server and
+speaks MCP: Claude Code, Codex, Cursor, Gemini CLI and others. Coding agents setting it up: follow
+[terminal-agent-setup.md](terminal-agent-setup.md). It sits next to the hosted Drive server and
 does not change `/mcp`, the existing dashboard pages or existing connections.
 
 ```
@@ -16,18 +17,35 @@ your MCP servers (GitHub, filesystem, …)
 
 ## Set up
 
-1. **Install:** `uv tool install git+https://github.com/parthit/botrbac` (puts `botrbac` on your PATH).
-2. **Log in:** `botrbac login --server https://<your Bot RBAC site>`. Open the link it prints, check the
-   code matches, pick a role and approve. The computer appears on the **Terminal** page.
-3. **Put your agent's MCP servers behind Bot RBAC:**
-   - `botrbac wrap claude-code` (the project's `.mcp.json`; add `--user` for `~/.claude.json`, including
-     servers set for one project), `botrbac wrap cursor`, `botrbac wrap gemini`,
-     `botrbac wrap codex`, or `botrbac wrap other --file path/to/config.json`. The original file is kept as
-     `<name>.botrbac-backup-<time>`. Add `--dry-run` to see what would change.
-   - Or add servers yourself, `botrbac servers add github -- npx -y @modelcontextprotocol/server-github`
-     or `botrbac servers add notes --url https://…/mcp`, and add `botrbac gateway` to your agent as an
-     MCP server.
-4. **Check:** `botrbac doctor` lists anything that still bypasses Bot RBAC.
+The **Terminal** page on the website offers three ways. Each ends with you approving one code in the
+browser.
+
+- **Paste into your terminal:**
+  `curl -fsSL https://botrbac.com/terminal/install.sh | sh -s -- --agent claude-code` (or `cursor`, `codex`,
+  `gemini`). The script installs botrbac with uv or pipx (installing uv first only when neither is there),
+  runs `botrbac login`, adds the gateway to that agent and runs `botrbac doctor`. It never uses sudo and can be
+  run again. Read it first at the same address: `https://botrbac.com/terminal/install.sh`.
+- **Paste into your agent:** `Set up Bot RBAC Terminal for me by following https://botrbac.com/terminal/setup.md`.
+  The agent follows [terminal-agent-setup.md](terminal-agent-setup.md) (the same text the site serves).
+- **Step by step:**
+  1. `uv tool install git+https://github.com/parthit/botrbac` (or `pipx install git+…`).
+  2. `botrbac login`. Open the link it prints, check the code matches, pick a role and approve. It connects
+     to `https://botrbac.com` unless you give `--server URL` or set `BOTRBAC_SERVER`; the page shows the
+     right command for the site you are on.
+  3. `claude mcp add botrbac -- botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
+     (also `codex`, `gemini`), which adds the gateway to that agent's file in your home directory, keeps the
+     other servers and a backup, and does nothing when it is already there.
+
+Then put MCP servers behind the gateway so their tools follow the role:
+
+- `botrbac servers add github -- npx -y @modelcontextprotocol/server-github` or
+  `botrbac servers add notes --url https://…/mcp`, one server at a time; or
+- `botrbac wrap claude-code` (the project's `.mcp.json`; add `--user` for `~/.claude.json`, including
+  servers set for one project), `botrbac wrap cursor`, `botrbac wrap gemini`, `botrbac wrap codex`, or
+  `botrbac wrap other --file path/to/config.json`, which moves every server in the file. The original is kept
+  as `<name>.botrbac-backup-<time>`. Add `--dry-run` to see what would change.
+
+`botrbac doctor` lists anything that still bypasses Bot RBAC.
 
 Tools appear to the agent as `<server>__<tool>`. Tools the role does not allow are not listed, and calling
 one anyway returns an error that names the role.
@@ -43,10 +61,12 @@ one anyway returns an error that names the role.
 | `github/get_*` | tools on a server whose names start with `get_` |
 | `*/read*` | tools on any server whose names start with `read` |
 | `*` | everything |
+| `cmd/gh` | the `gh` program in an agent's shell (`cmd/git*`, `cmd/*` work the same way) |
 
 Tools are named `<server>/<tool>`. Server names are the names in `botrbac servers list`. An agent's own
 tools (see [hooks](#an-agents-own-tools-hooks)) use the agent's name: `claude-code/Bash`, `codex/shell`.
-Once a terminal syncs, the tools it saw are offered as tick boxes on the role page.
+Once a terminal syncs, the tools it saw are offered as tick boxes on the role page. A bare word such as
+`gh` is refused with a hint: to allow the gh command, use `cmd/gh`.
 
 Built-in roles: **Read-only**, **Full access** and **No tools**. A terminal whose role is deleted gets **No
 tools** until you give it another role. Each role also sets an **offline grace** (1–30 days, below).
@@ -101,6 +121,33 @@ tool call. The call is checked as `claude-code/<Tool>`, so give roles the tools 
 come through `botrbac gateway` are blocked; pass `--allow-unguarded` to check them as `<server>/<tool>`
 instead.
 
+### Shell commands: `cmd/<program>`
+
+An agent runs `gh pr list` through its shell tool, which the hook sees as one call to `claude-code/Bash`:
+all of the shell or none of it. To allow some programs only, add `cmd/` patterns to the role:
+
+```
+claude-code/Bash
+cmd/git
+cmd/gh
+```
+
+When any role in force has a `cmd/` pattern, a shell call is allowed only if the shell tool itself is
+allowed **and** every program in the command is allowed as `cmd/<program>`. The shell tools are Claude
+Code's `Bash`, Codex's `shell` and Gemini CLI's `run_shell_command` (`SHELL_TOOLS` in
+`src/botrbac_cli/shellcmd.py`). A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
+never count as `cmd/` patterns.
+
+The command is read conservatively. It is split on `;`, `&&`, `||`, `|`, `&` and new lines; each part's
+program is its first word after `VAR=value` assignments and `sudo`, `env`, `time`, `nohup`, `xargs`,
+`command` or `exec`, and `/usr/bin/gh` counts as `gh`. The call is **blocked** when the command uses `$(…)`,
+backticks, `<(…)`, `>(…)`, `eval`, `bash -c`/`sh -c`, a `( … )` subshell, a variable as the program, or
+anything else it cannot read; the reason says why. Heredocs are read as commands too, so a role with `cmd/`
+patterns blocks most of them. Only program names are logged, never the command.
+
+This protects against the agent, not the computer's owner, and goes by name: a program that starts others
+(`make`, `npm run`, `find -exec`, git aliases, scripts) runs whatever it runs.
+
 For another agent with pre-tool hooks, make the hook run `botrbac check --agent <name>` with the tool call
 as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with
 the reason on stderr; any error inside the check also exits 2. `--format json` prints
@@ -139,7 +186,8 @@ arguments.
 
 | Command | |
 | --- | --- |
-| `botrbac login --server URL` | Connect this computer (device code approved on the website) |
+| `botrbac login [--server URL]` | Connect this computer (device code approved on the website; default `https://botrbac.com`) |
+| `botrbac add-gateway --agent A` | Add the gateway to Cursor's, Codex's or Gemini CLI's config (others kept, backed up) |
 | `botrbac status` | Account, role, policy age, rows waiting, current session |
 | `botrbac servers add/remove/list` | The MCP servers the gateway sits in front of |
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
@@ -159,6 +207,8 @@ Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json
 
 | Endpoint | Auth | |
 | --- | --- | --- |
+| `GET /terminal/setup.md` | none | Setup steps for a coding agent, with this site's address |
+| `GET /terminal/install.sh` | none | The install script, with this site's address |
 | `POST /api/terminal/device` | none, rate-limited per address | Start a device login (RFC 8628) |
 | `POST /api/terminal/token` | device code or refresh token | Tokens: `brt_at_…` (1 hour), `brt_rt_…` (90 days, rotated) |
 | `GET /api/terminal/policy` | terminal access token | Role, roles, revoked sessions, version |

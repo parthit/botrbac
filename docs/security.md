@@ -311,3 +311,17 @@ the variable. The hook adapter fails closed on any error (exit 2), but an agent 
 `botrbac` program at all usually lets the call through. Read-only and other name-based patterns limit
 which tools run, not which files a tool such as Claude Code's Read can open.
 
+`cmd/<program>` patterns limit which programs an agent's shell tool runs (`src/botrbac_cli/shellcmd.py`). When a
+role in force has any, the hook reads the command and blocks it unless every program in it is allowed; a
+command it cannot follow (command or process substitution, backticks, `eval`, `sh -c`/`bash -c`, subshells,
+a variable as the program, unbalanced quotes) is blocked, and only program names are logged. This too
+protects against the agent, not the machine's owner, and it goes by name: a file called `gh` anywhere counts
+as `gh`, and a program that starts others (`make`, `npm run`, `find -exec`, `git` aliases, a script) runs
+what it runs. Allow such programs only when that is acceptable. A role without `cmd/` patterns leaves the
+shell tool all or nothing, as before.
+
+`/terminal/setup.md` and `/terminal/install.sh` are public and hold no secrets. The site address baked into
+them must match a plain `http(s)://host[:port][/path]` shape, else `https://botrbac.com` is used, so a
+forged Host header cannot put shell syntax into the script. The install script never uses sudo, prints each
+command before running it, and is wrapped in a function so a download cut short runs nothing.
+
