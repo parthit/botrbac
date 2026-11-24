@@ -26,11 +26,10 @@ runs again.
 * Files up to `max_bytes` (DROP_MAX_MB, 20 MB by default). The dashboard sends one in
   pieces (`begin`, `put_piece`, `finish`), each under Vercel's 4.5 MB request limit, and
   the recipient's browser downloads it the same way (`piece`). With the Blob signer
-  (drop_storage.BlobSigner), `begin` hands out a presigned PUT per piece instead, the
-  browser uploads to Blob itself, and `finish` checks each piece's size there; downloads
-  use `piece_url`. Those pieces rely on Blob's encryption at rest, not ENCRYPTION_KEY.
-  An assistant's send_file carries the whole file in one call, so it keeps upload_file's
-  MAX_BYTES limit.
+  (drop_storage.BlobSigner), `begin` hands out a presigned PUT per piece and a key for
+  the file instead: the browser encrypts each piece and uploads it to Blob itself, and
+  `finish` checks each piece's size there; downloads use `piece_link`. An assistant's
+  send_file carries the whole file in one call, so it keeps upload_file's MAX_BYTES limit.
 * Ada's own assistants see drops (`list_drops`, `read_drop`, `download_drop`) marked
   `untrusted_peer`: the name and contents are Eve's. A saved copy is stamped with Eve as
   its writer, so it keeps that mark wherever Ada's assistants see it in Drive.
@@ -51,6 +50,8 @@ from .auth import current_actor, current_principal
 from .drive_client import FOLDER_MIME, BotNotConnectedError, DriveClient, DriveNotFoundError
 from .drop_storage import (
     BLOB_AT_REST,
+    ENC_CLIENT,
+    SEAL_OVERHEAD,
     BlobBudget,
     BlobParts,
     BlobSigner,
@@ -176,11 +177,12 @@ class DropBox:
 
     @property
     def direct(self) -> bool:
-        """Browsers may upload to and download from Blob directly."""
-        return self.signer is not None and self.blob is not None
+        """Browsers upload to and download from Blob directly. Needs ENCRYPTION_KEY too:
+        each file's key is kept encrypted with it."""
+        return self.signer is not None and self.blob is not None and self.blob.can_wrap
 
     def _signer(self) -> BlobSigner | None:
-        if self.signer is None or self.blob is None:
+        if not self.direct:
             return None
         if self._signer_off_until is not None and self.clock() < self._signer_off_until:
             return None
@@ -289,6 +291,10 @@ class DropBox:
         count = piece_count(int(row["size"]))
         return step if n < count - 1 else int(row["size"]) - step * (count - 1)
 
+    def _stored_size(self, row: dict[str, Any], n: int) -> int:
+        """Bytes Blob holds for piece `n` of a file the browser sealed."""
+        return self._piece_size(row, n) + SEAL_OVERHEAD
+
     def _piece(self, row: dict[str, Any], n: int) -> bytes:
         try:
             data = self._parts(row).get_piece(row, n)
@@ -323,23 +329,33 @@ class DropBox:
             raise SharedAccessError("not_found", "No such piece.")
         return row, self._piece(row, n)
 
-    def piece_url(self, drop_id: str, n: int) -> str | None:
-        """For the recipient's browser: a presigned Blob URL for piece `n`, valid a few
-        minutes, or None when it should fetch the piece from this app (`piece`). Only
-        pieces the browser uploaded directly: the others are encrypted here."""
+    def piece_link(self, drop_id: str, n: int) -> dict[str, str] | None:
+        """For the recipient's browser: where piece `n` is in Blob (`url`, presigned and
+        valid a few minutes) and what opens it (`key`, and `path`, its associated data),
+        or None when it should fetch the piece from this app (`piece`). Only pieces a
+        browser uploaded: the others are sealed with this app's own key."""
         row = self._get(drop_id)
         self._check_held(row)
         if not isinstance(n, int) or not 0 <= n < self.pieces(row):
             raise SharedAccessError("not_found", "No such piece.")
         signer = self._signer()
-        if row.get("enc") != BLOB_AT_REST or signer is None:
+        enc = row.get("enc")
+        if enc not in {ENC_CLIENT, BLOB_AT_REST} or signer is None or self.blob is None:
             return None
+        link: dict[str, str] = {}
+        if enc == ENC_CLIENT:
+            key = self.blob.key_of(row)
+            if key is None:
+                raise SharedAccessError("not_found", "That file could not be read.")
+            link["key"] = base64.b64encode(key).decode()
         path = BlobParts.path(str(row["id"]), int(row["exp"]), n)
         try:
-            return signer.sign_get(path, DIRECT_GET_SECONDS)
+            link["url"] = signer.sign_get(path, DIRECT_GET_SECONDS)
         except Exception as exc:
             self._signer_failed(exc)
             return None
+        link["path"] = path
+        return link
 
     def dismiss(self, drop_id: str) -> None:
         """Delete a drop from the list now (a saved copy in Drive stays)."""
@@ -478,6 +494,7 @@ class DropBox:
         # Mark it saved before deleting the held pieces. If the pieces are not deleted,
         # they expire on their own; the other order could lose track of the Drive copy.
         saved = {**row, "saved_file_id": created["id"], "parts": 0}
+        saved.pop("key", None)
         self.store.hset(DROPS_INDEX_KEY, row["id"], json.dumps(saved, separators=(",", ":")))
         self._drop_parts(row)
         principal = current_principal.get()
@@ -673,24 +690,24 @@ class DropBox:
         return them, row
 
     def _presign_puts(self, row: dict[str, Any]) -> list[dict[str, Any]] | None:
-        """One presigned PUT per piece, each for exactly that piece's size at most, or None
-        (no signer, or it failed: the pieces then come through `put_piece`)."""
+        """One presigned PUT per piece, each for at most that piece's sealed size, or None
+        (no signer, or it failed: the pieces then come through `put_piece`). `path` is
+        the piece's pathname: the browser seals the piece with it as associated data."""
         signer = self._signer()
         if signer is None or row.get("store") != "blob":
             return None
+        puts: list[dict[str, Any]] = []
         try:
-            return [
-                signer.sign_put(
-                    BlobParts.path(str(row["id"]), int(row["exp"]), n),
-                    self._piece_size(row, n),
-                    DIRECT_PUT_SECONDS,
-                    self.ttl_days,
+            for n in range(piece_count(int(row["size"]))):
+                path = BlobParts.path(str(row["id"]), int(row["exp"]), n)
+                signed = signer.sign_put(
+                    path, self._stored_size(row, n), DIRECT_PUT_SECONDS, self.ttl_days
                 )
-                for n in range(piece_count(int(row["size"])))
-            ]
+                puts.append({"url": signed["url"], "headers": signed["headers"], "path": path})
         except Exception as exc:
             self._signer_failed(exc)
             return None
+        return puts
 
     def begin(
         self,
@@ -707,8 +724,9 @@ class DropBox:
         bytes arrive; the hourly limit and the storage budget count it now.
 
         With the Blob signer (and `direct`), the answer carries a presigned PUT for each
-        piece and the browser uploads to Blob itself; `finish` then checks every piece is
-        there with the right size."""
+        piece and the file's key: the browser seals each piece and uploads it to Blob
+        itself; `finish` then checks every piece is there with the right size. `direct`
+        is False when the page cannot do that (no Web Crypto, or Blob out of reach)."""
         you, them = self._pair(caller, to, via)
         try:
             name, mime_type = self.service.check_upload_meta(name, mime_type)
@@ -727,7 +745,8 @@ class DropBox:
                 "mime_type": mime_type,
             }
             puts = self._presign_puts(row) if direct else None
-            if puts is not None:
+            key: bytes | None = None
+            if puts is not None and self.blob is not None:
                 # One signed PUT per piece, claimed as it is issued, like put_piece's
                 # claim; it lasts as long as the URL can be used. Claimed before the
                 # budget is charged, so a refused claim charges nothing.
@@ -754,7 +773,10 @@ class DropBox:
                     )
                     full = self._storage_full()
                     raise SharedAccessError(full.code, full.message, to=them)
-                row["enc"] = BLOB_AT_REST
+                # The file's own key: the sender's page seals with it, the row keeps it
+                # encrypted, and it reaches no one else but the recipient.
+                key, row["key"] = self.blob.new_key()
+                row["enc"] = ENC_CLIENT
             pending = {"size": size, "until": int(self.clock().timestamp()) + UPLOAD_SECONDS}
             self.store.hset(DROPS_PENDING_KEY, row["id"], json.dumps(pending))
             self.store.set(
@@ -768,8 +790,9 @@ class DropBox:
             "piece_bytes": drop_storage.PIECE_BYTES,
             "pieces": piece_count(size),
         }
-        if puts is not None:
+        if key is not None:
             started["direct"] = puts
+            started["key"] = base64.b64encode(key).decode()
         return started
 
     def put_piece(self, caller: str, upload_id: str, n: int, data: bytes) -> dict[str, Any]:
@@ -777,9 +800,9 @@ class DropBox:
         PIECE_BYTES."""
         you = normalize_email(caller)
         them, row = self._upload(you, upload_id)
-        if row.get("enc") == BLOB_AT_REST:
-            # Its pieces go straight to Blob, unencrypted here; never mix in a piece
-            # this app would have to store the same way.
+        if row.get("enc"):
+            # Its pieces go straight to Blob, sealed with the file's own key; a piece
+            # stored here would be sealed with another.
             raise SharedAccessError(
                 "invalid_input", "This upload goes straight to storage. Send the file again."
             )
@@ -853,7 +876,7 @@ class DropBox:
             raise SharedAccessError(
                 "drops_off", f"{them} is not accepting files from you now.", to=them
             )
-        if row.get("enc") == BLOB_AT_REST:
+        if row.get("enc"):
             self._check_direct(row, upload_id)
         for n in range(piece_count(int(row["size"]))):
             if not self.store.get(f"{DROP_UPLOAD_PREFIX}{upload_id}:{n}"):
@@ -872,8 +895,10 @@ class DropBox:
 
     def _check_direct(self, row: dict[str, Any], upload_id: str) -> None:
         """Under the finish lock: every piece the browser uploaded to Blob is there, with
-        exactly its size (one HEAD each, a simple operation). Each verified piece gets the
-        same `stored` marker `put_piece` sets after storing one."""
+        exactly its sealed size (one HEAD each, a simple operation). Each verified piece
+        gets the same `stored` marker `put_piece` sets after storing one. What is in a
+        piece is checked when it is opened: one that was not sealed with the file's key
+        for that pathname does not open."""
         if self.blob is None:
             raise SharedAccessError("unavailable", "The file could not be stored.")
         for n in range(piece_count(int(row["size"]))):
@@ -887,7 +912,7 @@ class DropBox:
                 raise SharedAccessError(
                     "unavailable", "The file could not be checked right now. Try again."
                 ) from None
-            if stored != self._piece_size(row, n):
+            if stored != self._stored_size(row, n):
                 raise SharedAccessError(
                     "invalid_input", "Some of the file did not arrive. Send it again."
                 )

@@ -14,13 +14,17 @@ Two places:
 
 Both encrypt with a key derived from ENCRYPTION_KEY when it is set.
 
-**Direct uploads** (`BlobSigner`; only with DROP_DIRECT_UPLOADS, off by default): on
-Vercel, a small Node function (`api/blob-sign.mjs`) signs Blob URLs with `@vercel/blob`,
-which the Python SDK cannot do. Python decides who may send or read what and asks the
-function for one presigned URL per piece; the browser moves the bytes to and from Blob
-itself. Those pieces never pass through this code, so they cannot be encrypted with
-ENCRYPTION_KEY: rows marked `"enc": BLOB_AT_REST` rely on Blob's own encryption at rest.
-Without the signer, uploads go through Python as before.
+**Direct transfers** (`BlobSigner`): on Vercel, with a Blob store and ENCRYPTION_KEY, a
+small Node function (`api/blob-sign.mjs`) signs Blob URLs with `@vercel/blob`, which the
+Python SDK cannot do. Python decides who may send or read what and asks the function for
+one presigned URL per piece; the browser moves the bytes to and from Blob itself.
+
+Those pieces never pass through this code, so the browser encrypts them: `begin` makes a
+random AES-256 key for the file, gives it to the sender's page, and keeps it in the row
+(`"enc": ENC_CLIENT`, `"key"`: the key encrypted with a key derived from ENCRYPTION_KEY).
+A stored piece has the same form as one this code seals, `0x01 | nonce | AES-GCM(piece)`
+with the pathname as associated data, so Blob holds only ciphertext and a piece that was
+changed, moved or swapped does not open. Without the signer, uploads go through Python.
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .errors import report_exception
 from .store import KeyValueStore, purpose_fernet
@@ -207,8 +211,14 @@ class VercelBlobApi:
             return None
 
 
-# A row whose pieces the browser uploaded straight to Blob (see BlobSigner).
+# A row whose pieces the browser encrypted and uploaded straight to Blob (see BlobSigner):
+# sealed with the row's own key, which is in the row as `key`, itself encrypted.
+ENC_CLIENT = "client"
+# Rows an earlier version wrote: pieces uploaded straight to Blob with no encryption here.
+# Read only, until the last of them expires (DROP_HOLD_HOURS); nothing writes this now.
 BLOB_AT_REST = "blob-at-rest"
+# Bytes sealing adds to a piece: the 0x01 mark, a 12-byte nonce and the 16-byte tag.
+SEAL_OVERHEAD = 1 + 12 + 16
 
 
 def _blob_key(encryption_key: str) -> bytes:
@@ -228,10 +238,35 @@ class BlobParts:
     def __init__(self, api: BlobApi, encryption_key: str | None):
         self.api = api
         self._aead: Any = None
+        # Encrypts the per-file keys of pieces the browser sealed (ENC_CLIENT rows).
+        self._wrap: Any = None
         if encryption_key:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
             self._aead = AESGCM(_blob_key(encryption_key))
+            self._wrap = purpose_fernet(encryption_key, "drop file keys")
+
+    @property
+    def can_wrap(self) -> bool:
+        """Per-file keys can be kept (ENCRYPTION_KEY is set)."""
+        return self._wrap is not None
+
+    def new_key(self) -> tuple[bytes, str]:
+        """A new AES-256 key for one file the browser will seal: the key, and the form
+        of it kept in the row."""
+        key = secrets.token_bytes(32)
+        return key, self._wrap.encrypt(key).decode()
+
+    def key_of(self, row: dict[str, Any]) -> bytes | None:
+        """The key of an ENC_CLIENT row, or None when it does not open."""
+        wrapped = row.get("key")
+        if self._wrap is None or not isinstance(wrapped, str):
+            return None
+        try:
+            key = self._wrap.decrypt(wrapped.encode())
+        except Exception:
+            return None
+        return key if len(key) == 32 else None
 
     @staticmethod
     def path(drop_id: str, exp: int, n: int) -> str:
@@ -243,17 +278,32 @@ class BlobParts:
         nonce = secrets.token_bytes(12)
         return b"\x01" + nonce + self._aead.encrypt(nonce, data, path.encode())
 
+    @staticmethod
+    def _unseal(aead: Any, path: str, raw: bytes) -> bytes | None:
+        if raw[:1] != b"\x01" or len(raw) < SEAL_OVERHEAD:
+            return None
+        try:
+            return bytes(aead.decrypt(raw[1:13], raw[13:], path.encode()))
+        except Exception:
+            return None
+
     def _open(self, path: str, raw: bytes) -> bytes | None:
         # Unencrypted pieces only when no key is set: with a key, a plain piece is one
         # someone else wrote to the store.
         if raw[:1] == b"\x00" and self._aead is None:
             return raw[1:]
-        if raw[:1] == b"\x01" and self._aead is not None:
-            try:
-                return self._aead.decrypt(raw[1:13], raw[13:], path.encode())
-            except Exception:
-                return None
+        if self._aead is not None:
+            return self._unseal(self._aead, path, raw)
         return None
+
+    def _open_client(self, row: dict[str, Any], path: str, raw: bytes) -> bytes | None:
+        """A piece the browser sealed with the row's own key."""
+        key = self.key_of(row)
+        if key is None:
+            return None
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        return self._unseal(AESGCM(key), path, raw)
 
     def put_piece(self, drop_id: str, exp: int, n: int, data: bytes) -> None:
         path = self.path(drop_id, exp, n)
@@ -264,9 +314,12 @@ class BlobParts:
         raw = self.api.get(path)
         if raw is None:
             return None
-        # The browser put these bytes straight into Blob: no framing, no encryption here.
-        # Only for rows this app marked so at `begin`; every other row opens as before.
-        if row.get("enc") == BLOB_AT_REST:
+        # The row says how its pieces were sealed; this app wrote the row at `begin`, and
+        # nothing the browser sends can change it.
+        enc = row.get("enc")
+        if enc == ENC_CLIENT:
+            return self._open_client(row, path, raw)
+        if enc == BLOB_AT_REST:
             return raw
         return self._open(path, raw)
 
@@ -398,8 +451,10 @@ def blob_configured() -> bool:
 
 SIGNER_PATH = "/api/blob-sign"
 SIGNER_TIMEOUT_SECONDS = 5
-# Hosts a presigned URL may point at: the Blob API (uploads) and a private store (reads).
-_SIGNED_HOSTS = re.compile(r"vercel\.com|[a-z0-9-]{1,64}\.private\.blob\.vercel-storage\.com")
+# Where a presigned URL may point: the Blob API (uploads) and a private store (reads).
+BLOB_API_HOST = "vercel.com"
+BLOB_API_PATH = "/api/blob/"
+_STORE_HOST = re.compile(r"[a-z0-9-]{1,64}\.private\.blob\.vercel-storage\.com")
 # What the browser sends with a presigned PUT (the SDK's own upload headers).
 _PUT_HEADERS = frozenset(
     {"x-vercel-blob-access", "x-api-version", "x-vercel-blob-store-id", "x-content-type"}
@@ -426,13 +481,39 @@ def signer_headers(key: bytes, body: bytes, now: int) -> dict[str, str]:
     return {"x-botrbac-timestamp": str(now), "x-botrbac-signature": mac}
 
 
-def _checked_url(value: Any) -> str:
-    if not isinstance(value, str):
+def _checked_url(value: Any, op: str, pathname: str) -> str:
+    """The signer's URL, only if it is what was asked for: an upload to the Blob API or a
+    read from a private store, for exactly `pathname`. It goes to a browser, so an answer
+    that points anywhere else is refused."""
+    if not isinstance(value, str) or len(value) > 8192:
         raise SignerError("no url")
-    parts = urlsplit(value)
-    if parts.scheme != "https" or not _SIGNED_HOSTS.fullmatch(parts.hostname or ""):
-        raise SignerError("unexpected url host")
+    try:
+        parts = urlsplit(value)
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        raise SignerError("unexpected url") from None
+    if parts.scheme != "https" or port not in {None, 443} or parts.username or parts.password:
+        raise SignerError("unexpected url")
+    if op == "put":
+        ok = (
+            host == BLOB_API_HOST
+            and parts.path == BLOB_API_PATH
+            and parse_qs(parts.query).get("pathname") == [pathname]
+        )
+    else:
+        ok = bool(_STORE_HOST.fullmatch(host)) and parts.path == "/" + pathname
+    if not ok:
+        raise SignerError("unexpected url")
     return value
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The signer answers directly. A redirect (Deployment Protection sends one to a
+    sign-in page) would carry this request's signature and bypass secret to another
+    host, so it is an error instead."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 class BlobSigner(Protocol):
@@ -469,6 +550,7 @@ class HttpBlobSigner:
         self._bypass = bypass
         self.timeout = timeout
         self.clock = clock
+        self._opener = urllib.request.build_opener(_NoRedirect)
 
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload, separators=(",", ":")).encode()
@@ -481,7 +563,7 @@ class HttpBlobSigner:
         # S310: the scheme is checked in __init__ (https, or http to localhost).
         request = urllib.request.Request(self.url, data=body, headers=headers, method="POST")  # noqa: S310
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
+            with self._opener.open(request, timeout=self.timeout) as response:
                 data = json.loads(response.read(64 * 1024))
         except urllib.error.HTTPError as exc:
             raise SignerError(f"signer answered {exc.code}") from None
@@ -509,18 +591,17 @@ class HttpBlobSigner:
             for k, v in (raw.items() if isinstance(raw, dict) else [])
             if str(k).lower() in _PUT_HEADERS
         }
-        return {"url": _checked_url(data.get("url")), "headers": headers}
+        return {"url": _checked_url(data.get("url"), "put", pathname), "headers": headers}
 
     def sign_get(self, pathname: str, valid_for: int) -> str:
         data = self._call({"op": "get", "pathname": pathname, "validForSeconds": valid_for})
-        return _checked_url(data.get("url"))
+        return _checked_url(data.get("url"), "get", pathname)
 
 
 def signer_url_from_env(app_base_url: str | None) -> str | None:
-    """Where api/blob-sign.mjs answers, or None when there is no signer. Used only when
-    DROP_DIRECT_UPLOADS is on: a URL alone never turns direct transfers on.
+    """Where api/blob-sign.mjs answers, or None when there is no signer.
 
-    BLOB_SIGNER_URL wins ("off" turns direct uploads off). Otherwise only on Vercel: a
+    BLOB_SIGNER_URL wins ("off" sends every piece through this app). Otherwise only on Vercel: a
     production deployment calls APP_BASE_URL (normally a custom domain, outside
     Deployment Protection); any other deployment calls its own URL (VERCEL_URL), so a
     preview signs with its own code."""

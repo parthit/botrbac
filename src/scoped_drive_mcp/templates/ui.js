@@ -696,9 +696,44 @@
 // response bodies over 4.5 MB, so a file goes up, and comes back down, in pieces of at
 // most 4 MB. When the server hands out presigned Blob URLs ("direct"), the browser moves
 // each piece to and from Vercel Blob itself; the server still decides who may do what.
-// If Blob cannot be reached, the send starts again through the server. Without
-// JavaScript the plain form still sends files up to 4 MB.
+// Such a piece is encrypted here first, with the file's key from the server, so Blob
+// holds only ciphertext. If this browser cannot encrypt, or Blob cannot be reached, the
+// send goes through the server, which encrypts it. Without JavaScript the plain form
+// still sends files up to 4 MB.
 (function () {
+  var subtle = window.crypto && window.crypto.subtle;
+  var canSeal = !!(subtle && window.TextEncoder && window.Blob && Blob.prototype.arrayBuffer);
+
+  function importKey(base64) {
+    var raw = Uint8Array.from(atob(base64), function (c) { return c.charCodeAt(0); });
+    return subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  }
+
+  // A stored piece is 0x01 | 12-byte nonce | AES-GCM(piece), with the piece's pathname
+  // as associated data (drop_storage.BlobParts): it opens only as that piece of that file.
+  function seal(key, path, piece) {
+    var nonce = window.crypto.getRandomValues(new Uint8Array(12));
+    return piece.arrayBuffer().then(function (plain) {
+      var how = { name: "AES-GCM", iv: nonce, additionalData: new TextEncoder().encode(path) };
+      return subtle.encrypt(how, key, plain);
+    }).then(function (sealed) {
+      return new Blob([new Uint8Array([1]), nonce, sealed], { type: "application/octet-stream" });
+    });
+  }
+
+  function unseal(key, path, piece) {
+    var unreadable = function () { throw new Error("The file could not be read. Ask for it to be sent again."); };
+    return piece.arrayBuffer().then(function (stored) {
+      var bytes = new Uint8Array(stored);
+      if (bytes.length < 29 || bytes[0] !== 1) return unreadable();
+      var how = { name: "AES-GCM", iv: bytes.subarray(1, 13), additionalData: new TextEncoder().encode(path) };
+      return subtle.decrypt(how, key, bytes.subarray(13)).then(
+        function (plain) { return new Blob([plain]); },
+        unreadable
+      );
+    });
+  }
+
   function fail(response) {
     return response.json().then(
       function (body) { throw new Error((body && body.message) || "Something went wrong. Try again."); },
@@ -754,15 +789,19 @@
       return post("/shared/send/start", start).then(function (begun) {
         var base = "/shared/send/" + encodeURIComponent(begun.upload_id);
         var slice = function (n) { return file.slice(n * begun.piece_bytes, (n + 1) * begun.piece_bytes); };
+        var key = begun.direct ? importKey(begun.key) : null;
         var putPiece = function (n) {
           if (begun.direct) {
             var signed = begun.direct[n];
-            return retried(function () {
-              return fetch(signed.url, {
-                method: "PUT",
-                body: slice(n),
-                headers: signed.headers || {},
-                credentials: "omit",
+            return key.then(function (k) { return seal(k, signed.path, slice(n)); }).then(function (sealed) {
+              return retried(function () {
+                return fetch(signed.url, {
+                  method: "PUT",
+                  body: sealed,
+                  headers: signed.headers || {},
+                  credentials: "omit",
+                  referrerPolicy: "no-referrer",
+                });
               });
             }).then(
               function (response) {
@@ -806,10 +845,10 @@
         if (err && err.blob) return sendFile(file, csrf, false);
         throw err;
       };
-      sendFile(file, csrf, true)
+      sendFile(file, csrf, canSeal)
         .catch(function (err) {
           // Once: a second refusal is shown, not retried.
-          if (err && err.restart) return sendFile(file, csrf, true).catch(fallback);
+          if (err && err.restart) return sendFile(file, csrf, canSeal).catch(fallback);
           return fallback(err);
         })
         .then(function () { window.location.assign("/sharing?tab=with-me"); })
@@ -820,22 +859,30 @@
     });
   }
 
-  // One piece: ask this app where to fetch it (a short-lived Blob URL, or its own route),
-  // then fetch it. A Blob URL that cannot be reached falls back to the app's route.
+  // One piece: ask this app where to fetch it (a short-lived Blob URL and the key that
+  // opens it, or its own route), then fetch it. A Blob URL that cannot be reached, or a
+  // browser that cannot decrypt, falls back to the app's route, which decrypts.
   function fetchPiece(id, n) {
     var own = "/drops/" + id + "/piece/" + n;
     var get = function (url, direct) {
-      return fetch(url, { credentials: direct ? "omit" : "same-origin" })
+      var how = direct ? { credentials: "omit", referrerPolicy: "no-referrer" } : { credentials: "same-origin" };
+      return fetch(url, how)
         .then(function (response) { return response.ok ? response.blob() : fail(response); });
     };
     return fetch(own + "/url", { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (response) { return response.ok ? response.json() : fail(response); })
       .then(function (where) {
-        if (!where.direct) return get(own, false);
-        return get(where.url, true).catch(function (err) {
-          if (err instanceof TypeError) return get(own, false);
-          throw err;
-        });
+        if (!where.direct || (where.key && !canSeal)) return get(own, false);
+        return get(where.url, true).then(
+          function (stored) {
+            if (!where.key) return stored;
+            return importKey(where.key).then(function (k) { return unseal(k, where.path, stored); });
+          },
+          function (err) {
+            if (err instanceof TypeError) return get(own, false);
+            throw err;
+          }
+        );
       });
   }
 

@@ -165,20 +165,35 @@
   unless you save it. The sender cannot read, list or change it afterwards. Your assistants see it marked
   `untrusted_peer`. You can stop one person's files without ending the pairing. See
   [sharing.md](sharing.md#sending-a-file-to-a-paired-person).
-- **Direct transfers trade app encryption for speed (off by default).** With `DROP_DIRECT_UPLOADS=true`
-  (and a Blob store and `ENCRYPTION_KEY`), the browser uploads a dashboard send straight to Blob and
-  downloads it from there, with URLs the Node function `api/blob-sign.mjs` signs. Those files are **not**
-  encrypted with `ENCRYPTION_KEY`, because their bytes never reach this app: they rely only on Vercel
-  Blob's own encryption at rest and on the store being private. Leave it off to keep every held file
-  encrypted by the app. When it is on:
-  - Records of such files are marked `"enc": "blob-at-rest"`; only marked records are read as raw bytes,
-    and every other record must still decrypt.
+- **Files sent from the dashboard go straight to Blob, encrypted in the browser.** On Vercel, with a
+  Blob store and `ENCRYPTION_KEY`, the browser uploads a dashboard send to Blob and the recipient's
+  browser downloads it from there, with URLs the Node function `api/blob-sign.mjs` signs. There is
+  nothing to turn on. The bytes never reach this app, so the page encrypts them:
+  - The server makes a random AES-256 key for each file. The sender's page gets it once, encrypts every
+    4 MB piece with AES-GCM (the piece's pathname is the associated data) and uploads only ciphertext.
+    The file's record keeps the key encrypted with a key derived from `ENCRYPTION_KEY`. Only the
+    recipient's page is given it again, with each download URL. Someone who can read or write the Blob
+    store but has no `ENCRYPTION_KEY` cannot read a held file, change one, or swap pieces: a piece that
+    is not the one sealed for that place does not open, here or in the browser.
+  - The server never sees the content before the recipient opens it, so the only check at **Finish**
+    is that every piece is in Blob with exactly its size. A sender can upload bytes that do not open;
+    the recipient then gets an error, not a file. The content was the sender's to choose anyway, and
+    is marked `untrusted_peer`.
   - The signer is not public. It answers only requests signed with HMAC-SHA256 (key derived from
-    `ENCRYPTION_KEY`) over the body and a timestamp less than 60 seconds old, and signs only held-file
-    piece pathnames, each upload capped at that piece's exact size. A request replayed within those 60
+    `ENCRYPTION_KEY`) over the body and a timestamp less than 60 seconds old. It signs only held-file
+    piece pathnames whose expiry has not passed: an upload is for that one pathname, at most that
+    piece's sealed size, as `application/octet-stream`, never over an existing blob, and with Blob's
+    own expiry. Its token can sign uploads and reads, not deletes. A request replayed within those 60
     seconds only signs the same URL again; that is accepted.
-  - Python decides who may upload or download; the signer only signs. Upload URLs last 15 minutes and are
-    issued once per piece; download URLs last 5 minutes and are given only to the recipient.
+  - Python decides who may upload or download; the signer only signs, and Python refuses an answer
+    that is not a Blob URL for the pathname it asked for. It does not follow redirects from the signer.
+    Upload URLs last 15 minutes and are issued once per piece; download URLs last 5 minutes and are
+    given only to the recipient. Only Sharing → Shared with me may connect to Blob (`connect-src`: the
+    Blob upload path and private store hosts).
+  - What is left: an upload URL still works until it expires even if the file was saved or deleted in
+    the meantime, so a sender can put a piece back for up to 15 minutes. Nobody can read it (no record
+    points at it), and Blob's expiry and the sweep delete it. A browser without Web Crypto, or one
+    that cannot reach Blob, sends through the app, which encrypts with `ENCRYPTION_KEY` as before.
 - **Paired people's writes.** A paired person's assistant can write only inside items you marked
   editable for them, and only create, upload, update and rename (never trash, move or share). Inside an
   editable folder it can't rename anything on your Sharing list, on your own assistants' Access list or

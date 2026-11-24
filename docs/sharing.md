@@ -124,22 +124,22 @@ needs nothing on the recipient's Sharing list, and the sender gets no access to 
   `upload_file`. Vercel refuses request and response bodies over 4.5 MB, so the page sends a file in 4 MB
   pieces and the recipient's page downloads it the same way. Without JavaScript the form sends up to 4 MB,
   and a larger file can still be saved to Drive.
-- **Straight to Blob (opt-in, off by default):** with `DROP_DIRECT_UPLOADS=true` on Vercel, a Blob store
-  and `ENCRYPTION_KEY`, a small Node.js function (`api/blob-sign.mjs`) signs Blob URLs, which the Python
-  SDK cannot. Turning it on is a choice: it trades this app's encryption of held files for transfers that
-  skip the Python function. The send form then says so. The server makes every check
-  first (pairing, size, type, hourly limit, storage budget), then gives the page one upload URL per 4 MB piece:
-  valid 15 minutes, for that exact pathname, at most that piece's size, no overwriting, and with a Blob
-  expiry that outlasts the hold and the upload window (2 days for a 24-hour hold), so Blob deletes the piece even if nothing here
-  runs. The page uploads each piece to Blob itself, and **Finish** checks with Blob that every piece is
-  there with exactly the right size before the file is listed. Downloads work the same way: the page asks
-  for each piece's URL (valid 5 minutes, only for the recipient) and fetches it from Blob. These pieces
-  never pass through Bot RBAC, so **they are not encrypted with `ENCRYPTION_KEY`; they rely on Vercel Blob's
-  own encryption at rest** (the store is private, and a URL works only while it is valid). If the signer is
-  not set up or fails, or the browser cannot reach Blob, the send goes through the server as before and its
-  pieces are encrypted with `ENCRYPTION_KEY`. Each piece's upload URL is issued once and counts against the
-  Blob budget when it is issued (an upload that is started and abandoned is still counted). After a signer
-  error, each server instance skips the signer for 5 minutes (best effort, per instance).
+- **Straight to Blob:** on Vercel, with a Blob store and `ENCRYPTION_KEY`, a small Node.js function
+  (`api/blob-sign.mjs`) signs Blob URLs, which the Python SDK cannot, and files sent from the dashboard
+  skip the Python function. There is nothing to turn on. The server makes every check first (pairing,
+  size, type, hourly limit, storage budget), then gives the page a key for the file and one upload URL
+  per 4 MB piece: valid 15 minutes, for that exact pathname, at most that piece's size, no overwriting,
+  and with a Blob expiry that outlasts the hold and the upload window (2 days for a 24-hour hold), so
+  Blob deletes the piece even if nothing here runs. The page encrypts each piece (AES-GCM) and uploads
+  it to Blob itself, and **Finish** checks with Blob that every piece is there with exactly the right
+  size before the file is listed. Downloads work the same way: the page asks for each piece's URL
+  (valid 5 minutes, only for the recipient) and the file's key, fetches the piece from Blob and
+  decrypts it. Blob holds only ciphertext; the key is kept with the file's record, encrypted with a key
+  derived from `ENCRYPTION_KEY`. If the signer is not set up or fails, or the browser cannot encrypt or
+  reach Blob, the send goes through the server and its pieces are encrypted there. Each piece's upload
+  URL is issued once and counts against the Blob budget when it is issued (an upload that is started
+  and abandoned is still counted). After a signer error, each server instance skips the signer for 5
+  minutes (best effort, per instance).
 - **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (24 by
   default, 24 to 168) and then deleted. With a Vercel Blob store connected (a private one), the pieces go
   there, named with their expiry; expired ones are deleted when someone opens their list, and a sweep that

@@ -10,15 +10,21 @@
 // needed. Older than 60 seconds is refused. The body is JSON:
 //   {op: "put", pathname, maxBytes, validForSeconds, ttlDays}
 //   {op: "get", pathname, validForSeconds}
-// and only pathnames of held-file pieces (drops/<expiry>/<id>/<n>) are signed.
+// and only pathnames of held-file pieces (drops/<expiry>/<id>/<n>) whose expiry has not
+// passed are signed. An upload URL is for that one pathname, at most maxBytes, as
+// application/octet-stream, and never over a blob that is already there.
 // The answer is {url} (plus {headers} the browser sends with a PUT).
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export const PATHNAME = /^drops\/\d+\/[A-Za-z0-9_-]{1,64}\/\d{1,4}$/;
+// The same shape as drop_storage._BLOB_PATH; the first number is the drop's expiry.
+export const PATHNAME = /^drops\/(\d{1,12})\/[A-Za-z0-9_-]{1,64}\/\d{1,4}$/;
 export const MAX_AGE_SECONDS = 60;
-// One piece (drop_storage.PIECE_BYTES).
-export const MAX_PIECE_BYTES = 4 * 1024 * 1024;
+// One sealed piece (drop_storage.PIECE_BYTES + SEAL_OVERHEAD).
+export const MAX_PIECE_BYTES = 4 * 1024 * 1024 + 29;
+const CONTENT_TYPE = "application/octet-stream";
+// Blob's CDN may keep a piece this long after it is deleted (the least Blob allows).
+const CACHE_SECONDS = 60;
 export const MAX_VALID_SECONDS = 15 * 60;
 export const MAX_TTL_DAYS = 30;
 const MAX_BODY_BYTES = 4096;
@@ -57,7 +63,7 @@ export function authError(headers, body, encryptionKey, nowSeconds) {
 }
 
 /** The checked request, or a string saying what is wrong with it. */
-export function parseRequest(body) {
+export function parseRequest(body, nowSeconds) {
   let req;
   try {
     req = JSON.parse(body);
@@ -67,12 +73,17 @@ export function parseRequest(body) {
   if (!req || typeof req !== "object" || Array.isArray(req)) return "invalid request";
   const { op, pathname, validForSeconds } = req;
   if (op !== "put" && op !== "get") return "invalid op";
-  if (typeof pathname !== "string" || !PATHNAME.test(pathname)) return "invalid pathname";
+  const match = typeof pathname === "string" ? PATHNAME.exec(pathname) : null;
+  if (!match) return "invalid pathname";
+  // Nothing for a file whose hold has ended, and no upload held longer than Blob keeps it.
+  const expiry = Number(match[1]);
+  if (expiry <= nowSeconds) return "expired pathname";
   if (!isInt(validForSeconds, 1, MAX_VALID_SECONDS)) return "invalid validForSeconds";
   if (op === "get") return { op, pathname, validForSeconds };
   const { maxBytes, ttlDays } = req;
   if (!isInt(maxBytes, 1, MAX_PIECE_BYTES)) return "invalid maxBytes";
   if (!isInt(ttlDays, 1, MAX_TTL_DAYS)) return "invalid ttlDays";
+  if (expiry > nowSeconds + ttlDays * 86400) return "invalid pathname";
   return { op, pathname, validForSeconds, maxBytes, ttlDays };
 }
 
@@ -115,12 +126,14 @@ export function makeHandler({ blob, env = process.env, now = () => Date.now() })
 
   async function token() {
     if (!cached || cached.validUntil - now() < TOKEN_REFRESH_MS) {
-      // Scoped to every pathname: its signing key never leaves this function, and each
-      // URL is signed for one checked pathname only.
+      // A token is for one pathname or for all of them (Blob has no prefix scope), so
+      // this one is for all: its signing key never leaves this function, and each URL
+      // is signed for one checked pathname only. No delete, no head, one piece at most.
       cached = await blob.issueSignedToken({
         pathname: "*",
         operations: ["put", "get"],
         validUntil: now() + TOKEN_LIFETIME_MS,
+        maximumSizeInBytes: MAX_PIECE_BYTES,
       });
     }
     return cached;
@@ -134,10 +147,11 @@ export function makeHandler({ blob, env = process.env, now = () => Date.now() })
     if (length > MAX_BODY_BYTES) return reply(413, { error: "too large" });
     const body = await readCapped(request, MAX_BODY_BYTES);
     if (body === null) return reply(413, { error: "too large" });
-    const denied = authError(request.headers, body, env.ENCRYPTION_KEY, Math.floor(now() / 1000));
+    const nowSeconds = Math.floor(now() / 1000);
+    const denied = authError(request.headers, body, env.ENCRYPTION_KEY, nowSeconds);
     if (denied === "not configured") return reply(503, { error: denied });
     if (denied) return reply(401, { error: denied });
-    const req = parseRequest(body);
+    const req = parseRequest(body, nowSeconds);
     if (typeof req === "string") return reply(400, { error: req });
     try {
       const signed = await token();
@@ -157,15 +171,17 @@ export function makeHandler({ blob, env = process.env, now = () => Date.now() })
         access: "private",
         validUntil,
         maximumSizeInBytes: req.maxBytes,
+        allowedContentTypes: [CONTENT_TYPE],
         addRandomSuffix: false,
         allowOverwrite: false,
+        cacheControlMaxAge: CACHE_SECONDS,
         ttlDays: req.ttlDays,
       });
       // What @vercel/blob's own upload sends along with a presigned URL.
       const headers = {
         "x-vercel-blob-access": "private",
         "x-api-version": BLOB_API_VERSION,
-        "x-content-type": "application/octet-stream",
+        "x-content-type": CONTENT_TYPE,
       };
       const storeId = storeIdOf(signed.delegationToken || "");
       if (storeId) headers["x-vercel-blob-store-id"] = storeId;
