@@ -90,6 +90,15 @@ class Gateway:
         for tool in upstream.tools:
             exposed = f"{upstream.name}{SEPARATOR}{safe_tool(tool.name)}"[:128]
             tool_id = f"{upstream.name}/{safe_tool(tool.name)}"
+            if exposed in self.routes:
+                # Two names that clean up the same ("a b" and "a_b"): keep the first, so
+                # a role written for one never quietly applies to the other.
+                print(
+                    f"botrbac: skipped {upstream.name} tool {tool.name!r}: its name clashes "
+                    f"with another tool as {exposed}",
+                    file=sys.stderr,
+                )
+                continue
             self.routes[exposed] = Route(upstream, tool, tool_id)
         state.note_seen(tools=[r.tool_id for r in self.routes.values()])
 
@@ -116,6 +125,14 @@ class Gateway:
     async def call(self, exposed: str, arguments: dict[str, Any]) -> types.CallToolResult:
         route = self.routes.get(exposed)
         if route is None:
+            self.queue.add(
+                decision="deny",
+                reason="unknown tool",
+                tool=f"unknown/{safe_tool(exposed)}",
+                agent=self.agent or "mcp-client",
+                via="gateway",
+                **policy.session_fields(),
+            )
             return _error(f"Unknown tool {exposed!r}.")
         decision = self.enforcer.decide(route.tool_id)
         row = {
@@ -231,7 +248,8 @@ async def serve(agent: str | None, api: Any) -> None:
                 await app.run(read, write, app.create_initialization_options())
         finally:
             syncer.cancel()
-            with contextlib.suppress(Exception):
+            if api is not None:
                 from .sync import sync
 
-                await asyncio.to_thread(sync, api, gateway.queue)
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(sync, api, gateway.queue)

@@ -52,7 +52,6 @@ class Terminal:
     last_seen: float = 0.0
     queued: int = 0
     unguarded: list[str] = field(default_factory=list)
-    refresh_hash: str = ""
 
 
 class DeviceError(Exception):
@@ -114,9 +113,13 @@ class Terminals:
         if found is None:
             return None
         digest, record = found
-        if len(self.store.hgetall(f"term:terminals:{email}")) >= MAX_TERMINALS:
-            raise ValueError(f"You can connect at most {MAX_TERMINALS} terminals.")
+        if not self.signed_in(email):
+            return None
         role = self.roles.get(email, role_id)
+        if role is None:
+            raise ValueError("Pick one of your roles for this terminal.")
+        if len(self.for_person(email)) >= MAX_TERMINALS:
+            raise ValueError(f"You can connect at most {MAX_TERMINALS} terminals.")
         terminal = Terminal(
             id="t_" + secrets.token_hex(8),
             email=email,
@@ -124,7 +127,7 @@ class Terminals:
             hostname=record.get("hostname", ""),
             os=record.get("os", ""),
             version=record.get("version", ""),
-            role_id=role.id if role else DEFAULT_ROLE,
+            role_id=role.id,
             created_at=self.clock(),
         )
         self._save(terminal)
@@ -156,7 +159,10 @@ class Terminals:
             self.store.delete(key)
             raise DeviceError("access_denied")
         if status == "approved":
-            self.store.delete(key)  # one use
+            # One use, even when two polls arrive together: the first to claim wins.
+            if not self.store.set_if_absent(f"{key}:claimed", "1", ex=DEVICE_TTL):
+                raise DeviceError("expired_token")
+            self.store.delete(key)
             terminal = self.get(str(record.get("terminal_id")))
             if terminal is None:
                 raise DeviceError("access_denied")
@@ -179,9 +185,12 @@ class Terminals:
             ex=ACCESS_TTL,
         )
         self.store.set(f"term:rt:{_sha(refresh)}", terminal.id, ex=REFRESH_TTL)
-        if terminal.refresh_hash:
-            self.store.delete(f"term:rt:{terminal.refresh_hash}")
-        self._save(replace(terminal, refresh_hash=_sha(refresh)))
+        # The live refresh token is kept apart from the terminal record, so issuing
+        # tokens never rewrites (and so never undoes) a role change or a rename.
+        previous = self.store.get(self._rt_key(terminal.id))
+        self.store.set(self._rt_key(terminal.id), _sha(refresh), ex=REFRESH_TTL)
+        if previous and previous != _sha(refresh):
+            self.store.delete(f"term:rt:{previous}")
         return {
             "access_token": access,
             "refresh_token": refresh,
@@ -196,10 +205,14 @@ class Terminals:
         digest = _sha(refresh_token)
         terminal_id = self.store.get(f"term:rt:{digest}")
         terminal = self.get(terminal_id) if terminal_id else None
-        if terminal is None or terminal.refresh_hash != digest:
+        if terminal is None or self.store.get(self._rt_key(terminal.id)) != digest:
             return None
         if not self.signed_in(terminal.email):
             return None
+        # Each refresh token works once, even for two requests at the same moment.
+        if not self.store.set_if_absent(f"term:rt:{digest}:used", "1", ex=REFRESH_TTL):
+            return None
+        self.store.delete(f"term:rt:{digest}")
         return self._issue(terminal)
 
     def resolve(self, access_token: str) -> Terminal | None:
@@ -217,6 +230,10 @@ class Terminals:
         return terminal
 
     # ---- terminal records ------------------------------------------------------
+
+    @staticmethod
+    def _rt_key(terminal_id: str) -> str:
+        return f"term:terminal:{terminal_id}:rt"
 
     def _save(self, terminal: Terminal) -> None:
         self.store.set(f"term:terminal:{terminal.id}", json.dumps(asdict(terminal)))
@@ -254,8 +271,10 @@ class Terminals:
         terminal = self.owned(email, terminal_id)
         if terminal is None:
             return False
-        if terminal.refresh_hash:
-            self.store.delete(f"term:rt:{terminal.refresh_hash}")
+        live = self.store.get(self._rt_key(terminal_id))
+        if live:
+            self.store.delete(f"term:rt:{live}")
+        self.store.delete(self._rt_key(terminal_id))
         self.store.delete(f"term:terminal:{terminal_id}")
         self.store.hdel(f"term:terminals:{email}", terminal_id)
         return True

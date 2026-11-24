@@ -72,6 +72,44 @@ def test_enforcer_fails_closed() -> None:
         del os.environ[policy.SESSION_ENV]
 
 
+def test_clock_moved_back_blocks() -> None:
+    _cache(["*"], age=-3600)  # fetched an hour "in the future"
+    decision = policy.Enforcer().decide("github/get_issue")
+    assert not decision.allowed and "clock" in decision.reason
+
+
+def test_name_clashes_keep_the_first_tool(capsys) -> None:
+    from mcp import types
+
+    from botrbac_cli.gateway import Upstream
+
+    _cache(["*"])
+    gateway = Gateway(policy.Enforcer(), AuditQueue())
+    schema = {"type": "object"}
+    tools = [
+        types.Tool(name="a b", inputSchema=schema),
+        types.Tool(name="a_b", inputSchema=schema),
+    ]
+    gateway.add(Upstream("srv", session=None, tools=tools))  # type: ignore[arg-type]
+    assert gateway.routes["srv__a_b"].tool.name == "a b"
+    assert "clashes" in capsys.readouterr().err
+
+
+def test_policy_is_fetched_even_when_upload_fails() -> None:
+    class Api:
+        def send_audit(self, body):
+            raise RuntimeError("500")
+
+        def policy(self):
+            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
+
+    queue = AuditQueue()
+    queue.add(decision="allow", tool="github/get_issue")
+    result = sync(Api(), queue)
+    assert result["waiting"] == 1 and result["policy"] is True
+    assert policy.load_cached()["policy"]["role"]["id"] == "r"
+
+
 def test_queue_round_trip(botrbac_home) -> None:
     queue = AuditQueue()
     a = queue.add(decision="allow", tool="github/get_issue")
@@ -105,6 +143,7 @@ async def test_gateway_filters_and_blocks() -> None:
     assert [(r["tool"], r["decision"]) for r in rows] == [
         ("github/get_issue", "allow"),
         ("github/delete_repo", "deny"),
+        ("unknown/nope__x", "deny"),
     ]
     assert all(r["agent"] == "test-agent" and "number" not in r for r in rows)
     seen = state.read_json("state.json")["tools"]
@@ -199,6 +238,16 @@ def test_login_offline_and_sync_end_to_end(world, memstore, oauth) -> None:
     assert state.read_json("credentials.json")["access_token"] != creds["access_token"]
     assert oct((state.home() / "credentials.json").stat().st_mode & 0o777) == "0o600"
 
+    # Another gateway refreshed first (its refresh token is now spent): use its tokens.
+    stale = state.read_json("credentials.json")
+    other = Api(BASE_URL, client=api.client)
+    stale_expired = {**stale, "expires_at": 0}
+    state.write_json("credentials.json", stale_expired, private=True)
+    assert other.policy()["role"]["id"] == "read-only"  # other process refreshes
+    rotated = state.read_json("credentials.json")
+    assert rotated["refresh_token"] != stale["refresh_token"]
+    assert api._token(force_refresh=True)  # picks up a fresh token, not "disconnected"
+
     # Disconnected on the website: the CLI says so.
     browser.post(
         f"/terminal/t/{terminal.id}/revoke", data={"csrf": dash.csrf(browser, "/terminal")}
@@ -219,3 +268,22 @@ def test_servers_command(capsys) -> None:
     main(["servers", "list"])
     assert "my-github" in capsys.readouterr().out
     assert main(["status"]) == 1  # not logged in
+
+
+def test_refresh_uses_what_another_process_just_got(monkeypatch) -> None:
+    """Process A read the old credentials; B refreshed and saved new ones while A waited
+    for the lock. A must use B's tokens, not spend the old refresh token."""
+    from botrbac_cli import api as api_module
+
+    old = {"refresh_token": "brt_rt_old", "access_token": "a-old", "expires_at": 0}
+    new = {"refresh_token": "brt_rt_new", "access_token": "a-new", "expires_at": time.time() + 600}
+    reads = iter([old, new])
+    monkeypatch.setattr(api_module, "_creds", lambda: next(reads))
+
+    def no_network(request):
+        raise AssertionError("must not refresh again")
+
+    client = Api(
+        "https://x.example", client=httpx.Client(transport=httpx.MockTransport(no_network))
+    )
+    assert client._token() == "a-new"

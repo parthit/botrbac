@@ -37,14 +37,14 @@ def tool_id(server: str, tool: str) -> str:
 
 
 def is_tool_id(value: str) -> bool:
-    return bool(_TOOL_ID.match(value))
+    return bool(_TOOL_ID.fullmatch(value))
 
 
 def validate(pattern: str) -> str:
     value = pattern.strip()
     if value == "*":
         return value
-    if not _PATTERN.match(value):
+    if not _PATTERN.fullmatch(value):
         raise PatternError(
             f"{value[:80]!r} is not a tool pattern. Use server/tool, server/*, server/prefix* or *."
         )

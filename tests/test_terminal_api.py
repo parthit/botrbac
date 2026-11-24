@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from scoped_drive_mcp.store import MemoryStore
 from scoped_drive_mcp.terminal.ingest import BATCH_MAX, TerminalActivity, clean_row
 from tests import dash
@@ -162,3 +164,63 @@ def test_activity_is_per_person(world, memstore, oauth) -> None:
     c = dash.client(app)
     dash.login(c)
     assert "x/secret" not in c.get("/terminal/activity").text
+
+
+def test_csv_export_leaves_empty_cells_empty(world, memstore, oauth) -> None:
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    issued = connect_terminal(c)
+    c.post(
+        "/api/terminal/audit",
+        json={"rows": [_row(reason="", agent="-cmd", role="")]},
+        headers=_auth(issued),
+    )
+    lines = c.get("/terminal/activity/export").text.splitlines()
+    assert ",'-cmd," in lines[1]
+    assert "'" not in lines[1].replace("'-cmd", "")  # empty cells stay empty
+
+
+def test_audit_body_limits(world, memstore, oauth, monkeypatch) -> None:
+    from scoped_drive_mcp.terminal import feature
+
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    headers = _auth(connect_terminal(c))
+    odd = c.post(
+        "/api/terminal/audit",
+        content=b"{}",
+        headers={**headers, "content-length": "lots", "content-type": "application/json"},
+    )
+    assert odd.status_code in (400, 413)  # never a 500
+    monkeypatch.setattr(feature, "MAX_BODY", 50)
+
+    def chunks():
+        yield b'{"rows": ['
+        yield b" " * 100
+        yield b"]}"
+
+    chunked = c.post("/api/terminal/audit", content=chunks(), headers=headers)
+    assert chunked.status_code == 413
+    assert c.post("/api/terminal/audit", content=b"[1]", headers=headers).status_code == 400
+
+
+def test_future_timestamps_are_not_believed() -> None:
+    log = TerminalActivity(MemoryStore(), clock=lambda: NOW)
+    log.add("a@x.com", "t_1", "laptop", [_row(ts=NOW + 10**8), _row(ts=NOW - 60)])
+    assert sorted(r["ts"] for r in log.recent("a@x.com")) == [NOW - 60, NOW]
+
+
+def test_failed_store_write_is_not_marked_seen() -> None:
+    store = MemoryStore()
+    log = TerminalActivity(store, clock=lambda: NOW)
+    row = _row()
+    original = store.lpush
+
+    def broken(key, value):
+        raise RuntimeError("store down")
+
+    store.lpush = broken
+    with pytest.raises(RuntimeError):
+        log.add("a@x.com", "t_1", "laptop", [row])
+    store.lpush = original
+    assert log.add("a@x.com", "t_1", "laptop", [row])["accepted"] == 1

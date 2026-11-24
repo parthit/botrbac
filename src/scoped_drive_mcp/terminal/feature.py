@@ -57,9 +57,13 @@ def _me() -> str:
     return email
 
 
-# Unauthenticated API calls (device codes, token polls) per address.
-API_LIMIT = 60
 API_WINDOW = 600
+# Per address, per 10 minutes. A login polls every 5 seconds for up to 10 minutes
+# (120 polls), so token calls get room for a few logins behind one address.
+DEVICE_LIMIT = 30
+TOKEN_LIMIT = 600
+# Per signed-in person, per 10 minutes: approving or refusing codes on /device.
+APPROVE_LIMIT = 30
 # Calls by one signed-in terminal (policy checks and audit batches).
 TERMINAL_LIMIT = 240
 MAX_BODY = 2 * 1024 * 1024
@@ -80,8 +84,35 @@ async def _body(request: Request) -> dict[str, Any]:
         return {}
 
 
+async def _read_capped(request: Request, limit: int) -> bytes | None:
+    """The body, or None when it is (or claims to be) larger than `limit`. Counted while
+    streaming, so a chunked request without Content-Length is capped too."""
+    try:
+        if int(request.headers.get("content-length") or 0) > limit:
+            return None
+    except ValueError:
+        return None
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _oauth_error(code: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"error": code}, status_code=status, headers={"cache-control": "no-store"})
+
+
+def _too_many() -> JSONResponse:
+    # Not RFC 8628's slow_down: that tells a client to poll more slowly, not to wait.
+    return JSONResponse(
+        {"error": "rate_limited"},
+        status_code=429,
+        headers={"cache-control": "no-store", "retry-after": "60"},
+    )
 
 
 @dataclass
@@ -118,14 +149,12 @@ class TerminalFeature:
     # ---- API (no cookies; mounted outside the dashboard) -----------------------
 
     def api_routes(self) -> list[Route]:
-        def limited(request: Request) -> bool:
-            return not allow(
-                self.store, "termapi", ip_identity(request.scope), API_LIMIT, API_WINDOW
-            )
+        def limited(request: Request, name: str, limit: int) -> bool:
+            return not allow(self.store, name, ip_identity(request.scope), limit, API_WINDOW)
 
         async def device(request: Request) -> Response:
-            if limited(request):
-                return _oauth_error("slow_down", 429)
+            if limited(request, "termdevice", DEVICE_LIMIT):
+                return _too_many()
             data = await _body(request)
             started = await _run(self.terminals.start, data)
             base = (self.base_url or str(request.base_url)).rstrip("/")
@@ -134,8 +163,8 @@ class TerminalFeature:
             return JSONResponse(started, headers={"cache-control": "no-store"})
 
         async def token(request: Request) -> Response:
-            if limited(request):
-                return _oauth_error("slow_down", 429)
+            if limited(request, "termtoken", TOKEN_LIMIT):
+                return _too_many()
             data = await _body(request)
             grant = str(data.get("grant_type") or "")
             if grant == "urn:ietf:params:oauth:grant-type:device_code":
@@ -176,9 +205,15 @@ class TerminalFeature:
             terminal = await caller(request)
             if isinstance(terminal, Response):
                 return terminal
-            if int(request.headers.get("content-length") or 0) > MAX_BODY:
+            raw = await _read_capped(request, MAX_BODY)
+            if raw is None:
                 return JSONResponse({"error": "too_large"}, status_code=413)
-            data = await _body(request)
+            try:
+                data = json.loads(raw or b"{}")
+            except ValueError:
+                data = None
+            if not isinstance(data, dict):
+                return JSONResponse({"error": "invalid_request"}, status_code=400)
             try:
                 result = await _run(
                     self.activity.add, terminal.email, terminal.id, terminal.name, data.get("rows")
@@ -239,9 +274,14 @@ class TerminalFeature:
             action = request.path_params["action"]
             if action not in ("approve", "deny"):
                 return render(request, "error.html", 404, message="Page not found.")
+            if not allow(self.store, "termapprove", email, APPROVE_LIMIT, API_WINDOW):
+                kit.flash(request, "error", "Too many codes tried. Wait a few minutes.")
+                return RedirectResponse("/device", status_code=303)
             if action == "deny":
-                await _run(self.terminals.deny, code)
-                kit.flash(request, "ok", "Login refused. The terminal was not connected.")
+                if await _run(self.terminals.deny, code):
+                    kit.flash(request, "ok", "Login refused. The terminal was not connected.")
+                else:
+                    kit.flash(request, "error", "That code has expired or was already used.")
                 return RedirectResponse("/terminal", status_code=303)
             try:
                 terminal = await _run(
@@ -339,7 +379,12 @@ class TerminalFeature:
             role_id = request.path_params["role_id"]
             if await _run(self.roles.delete, _me(), role_id):
                 audit_owner("terminal_role_deleted", role=role_id)
-                kit.flash(request, "ok", "Role deleted. Terminals that used it are now read-only.")
+                kit.flash(
+                    request,
+                    "ok",
+                    "Role deleted. Terminals that used it now have no tools until you give "
+                    "them a role.",
+                )
             else:
                 kit.flash(request, "error", "That role cannot be deleted.")
             return RedirectResponse("/terminal/roles", status_code=303)
@@ -393,7 +438,7 @@ class TerminalFeature:
                 for r in rows:
                     # A cell starting with = + - @ would run as a formula in a spreadsheet.
                     writer.writerow(
-                        {k: ("'" + v if isinstance(v, str) and v[:1] in "=+-@" else v)
+                        {k: ("'" + v if isinstance(v, str) and v and v[0] in "=+-@\t\r" else v)
                          for k, v in r.items()}
                     )  # fmt: skip
                 text, kind, ext = out.getvalue(), "text/csv", "csv"
