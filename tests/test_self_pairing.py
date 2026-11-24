@@ -5,7 +5,6 @@ import pytest
 from scoped_drive_mcp.auth import Principal
 from scoped_drive_mcp.bridge import Assistant, Mailbox, MailboxError, as_assistant
 from scoped_drive_mcp.config import Role
-from scoped_drive_mcp.flags import EdgeConfigFlags, self_pairing_allowed
 from scoped_drive_mcp.store import MemoryStore
 from tests.conftest import OWNER_EMAIL
 from tests.dash import client, csrf, login
@@ -17,13 +16,12 @@ CURSOR = Assistant("grant-cursor", "Cursor")
 EVE = "eve@example.com"
 
 
-def _box(allowed: bool = True) -> Mailbox:
+def _box() -> Mailbox:
     store = MemoryStore(clock=lambda: 1_700_000_000.0)
     return Mailbox(
         store,
         base_url="https://drive-test.example.com",
         clock=store._clock,
-        self_pairing=lambda _email: allowed,
     )
 
 
@@ -160,70 +158,6 @@ def test_cross_person_links_share_documents_but_carry_no_mail() -> None:
     assert box.active_peers(EVE) == [OWNER_EMAIL]
 
 
-def test_self_pairing_off_for_domain_blocks_join_and_send() -> None:
-    state = {"on": True}
-    store = MemoryStore(clock=lambda: 1_700_000_000.0)
-    box = Mailbox(store, clock=store._clock, self_pairing=lambda _e: state["on"])
-    link_id = _self_pair(box)
-    with as_assistant(GROK):
-        box.send_message(OWNER_EMAIL, link_id, "before")
-    state["on"] = False
-    with as_assistant(CLAUDE):
-        with pytest.raises(MailboxError) as exc:
-            box.send_message(OWNER_EMAIL, link_id, "after")
-        assert exc.value.code == "self_pairing_off"
-        # Mail already delivered stays readable until it expires.
-        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 1
-    link = box.list_links(OWNER_EMAIL)["links"][0]
-    assert link["disabled_by_org"] is True
-    with as_assistant(GROK):
-        fresh = box.request_link(OWNER_EMAIL, new_invite=True)
-    with as_assistant(CURSOR), pytest.raises(MailboxError) as exc:
-        box.request_link(OWNER_EMAIL, fresh["invite_code"])
-    assert exc.value.code == "self_pairing_off"
-
-
-def test_self_pairing_rules() -> None:
-    assert self_pairing_allowed(None, "a@acme.com") is True
-    assert self_pairing_allowed({"enabled": True}, "a@acme.com") is True
-    assert self_pairing_allowed({"enabled": False}, "a@acme.com") is False
-    rule = {"enabled": True, "off_for_domains": ["ACME.com", "@other.org"]}
-    assert self_pairing_allowed(rule, "a@acme.com") is False
-    assert self_pairing_allowed(rule, "b@other.org") is False
-    assert self_pairing_allowed(rule, "c@fine.io") is True
-    assert self_pairing_allowed("garbage", "c@fine.io") is False
-
-
-def test_self_pairing_flag_defaults_on_without_edge_config() -> None:
-    def fetch(_key: str) -> None:
-        raise AssertionError("no network call without EDGE_CONFIG")
-
-    assert EdgeConfigFlags(None, fetch=fetch).self_pairing_enabled("a@acme.com") is True
-
-
-def test_flag_fetch_error_uses_cache_then_fails_closed() -> None:
-    now = {"t": 0.0}
-    calls = {"n": 0, "fail": False}
-
-    def fetch(_key: str) -> dict:
-        calls["n"] += 1
-        if calls["fail"]:
-            raise OSError("down")
-        return {"enabled": True, "off_for_domains": ["acme.com"]}
-
-    url = "https://edge-config.vercel.com/ecfg_x?token=t"
-    flags = EdgeConfigFlags(url, fetch, lambda: now["t"])
-    assert flags.self_pairing_enabled("a@fine.io") is True
-    assert flags.self_pairing_enabled("a@acme.com") is False
-    assert calls["n"] == 1  # cached
-    now["t"] = 100.0
-    calls["fail"] = True
-    assert flags.self_pairing_enabled("a@fine.io") is True  # last good value
-
-    cold = EdgeConfigFlags("https://edge-config.vercel.com/ecfg_x?token=t", fetch, lambda: 0.0)
-    assert cold.self_pairing_enabled("a@fine.io") is False
-
-
 # ---- wiring ------------------------------------------------------------------------
 
 
@@ -300,34 +234,6 @@ def test_account_send_cap_counts_both_assistants_together() -> None:
     assert box.store.get(f"bridge:rate:{OWNER_EMAIL}:{bucket}") == "2"
 
 
-def test_flag_outage_costs_one_fetch_per_window() -> None:
-    now = {"t": 0.0}
-    calls = {"n": 0}
-
-    def fetch(_key: str) -> dict:
-        calls["n"] += 1
-        raise OSError("down")
-
-    flags = EdgeConfigFlags("https://edge-config.vercel.com/e?token=t", fetch, lambda: now["t"])
-    for _ in range(5):
-        assert flags.self_pairing_enabled("a@fine.io") is False
-    assert calls["n"] == 1
-    now["t"] = 31.0
-    flags.self_pairing_enabled("a@fine.io")
-    assert calls["n"] == 2
-
-
-def test_disabled_pending_pairing_can_still_be_ended(p2_app) -> None:
-    box = p2_app.state.mailbox
-    link_id = _self_pair(box, approve=False)
-    box.self_pairing = lambda _email: False
-    owner = client(p2_app)
-    login(owner)
-    page = owner.get("/sharing?tab=people")
-    assert "Turned off by your organisation" in page.text
-    assert f"/bridge/{link_id}/revoke" in page.text
-
-
 # ---- wake-ups: one slot per app ------------------------------------------------------
 
 HOOK = "https://api2.cursor.sh/automations/webhook/"
@@ -344,7 +250,6 @@ def _wake_box(posts: list[dict]) -> Mailbox:
         base_url="https://drive-test.example.com",
         clock=store._clock,
         wake=WakeSettings(
-            enabled=True,
             kek=base64.b64decode(base64.b64encode(b"k" * 32)),
             allowlist=("api2.cursor.sh",),
             lookup=lambda _host: ["8.8.8.8"],

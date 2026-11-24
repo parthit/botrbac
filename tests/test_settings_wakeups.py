@@ -15,7 +15,6 @@ HOOK = "https://api2.cursor.sh/hook/"
 def _setup(world, memstore, oauth, names=("Claude", "Cursor")):
     app = _app(world, memstore, oauth)
     app.state.mailbox.wake = WakeSettings(
-        enabled=True,
         kek=b"k" * 32,
         allowlist=("api2.cursor.sh",),
         lookup=lambda _host: ["8.8.8.8"],

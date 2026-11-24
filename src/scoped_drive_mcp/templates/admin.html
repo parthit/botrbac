@@ -56,9 +56,9 @@
 <section class="card">
   <h2>Signed records</h2>
   {% if signing.required %}
-  <p>Allowlist, app and pairing records are signed, and an unsigned one is ignored (<code>REQUIRE_SIGNED_RECORDS</code> is on).</p>
+  <p>Allowlist, app and pairing records are signed, and an unsigned one is ignored (the default).</p>
   {% else %}
-  <p>Allowlist, app and pairing records are signed when they are saved. Ones saved before that are still accepted. Sign them all here, soon after deploying: it signs whatever is stored now, so look over Allowed, Sharing and your connected apps first. When it reports that every record is signed, set <code>REQUIRE_SIGNED_RECORDS=1</code> so an unsigned record is ignored.</p>
+  <p><code>REQUIRE_SIGNED_RECORDS=0</code> is set, so records saved before signing existed are still accepted. Sign them all here: it signs whatever is stored now, so look over Allowed, Sharing and your connected apps first. When it reports that every record is signed, remove <code>REQUIRE_SIGNED_RECORDS</code> so an unsigned record is ignored again.</p>
   <form method="post" action="/admin/sign-records">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit">Sign existing records</button>

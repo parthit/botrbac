@@ -103,16 +103,13 @@ class Settings(BaseSettings):
     # OAuth redirects. No supported assistant uses them, and any program on the approver's
     # computer could be listening there, so they are off unless you run such a client.
     oauth_loopback_callback: bool = False
-    webhooks_enabled: bool = False
+    # Wake-up pings to paired assistants are on whenever WEBHOOK_KEK is set.
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"
     # Optional: Notion as a second connection (a public OAuth "developer connection").
     # Notion is offered on Settings only when both are set.
     notion_oauth_client_id: SecretStr | None = None
     notion_oauth_client_secret: SecretStr | None = None
-    # Vercel Edge Config connection string (set when an Edge Config is connected to the
-    # project). Holds server-side switches such as `self_pairing`; see flags.py.
-    edge_config: SecretStr | None = None
 
     redis_rest_url: str | None = Field(
         default=None,
@@ -165,9 +162,9 @@ class Settings(BaseSettings):
     login_rate_limit: int = Field(default=30, ge=1, le=10_000)
     login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
     mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)
-    # Off: an unsigned allowlist, app or pairing record is accepted and signed when read.
-    # On: it is ignored. Turn on once the records from before signing have been signed.
-    require_signed_records: bool = False
+    # On (the default): an unsigned allowlist, app or pairing record is ignored. Set it
+    # to 0 only on an older deployment, until /admin has signed the records from before.
+    require_signed_records: bool = True
     # Access requests one connected app may have waiting for the person at once.
     max_pending_requests: int = Field(default=50, ge=1, le=300)
     mcp_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
@@ -408,8 +405,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _signing_needs_a_key(self) -> "Settings":
         # Records are signed with a key made from ENCRYPTION_KEY. Without it nothing is
-        # signed or checked, so asking for signed records must not quietly do nothing.
-        if self.require_signed_records and self.encryption_key is None:
+        # signed or checked, so asking for signed records explicitly must not quietly do
+        # nothing. The default (on) applies only once a key is set.
+        if (
+            self.require_signed_records
+            and "require_signed_records" in self.model_fields_set
+            and self.encryption_key is None
+        ):
             raise ValueError("REQUIRE_SIGNED_RECORDS needs ENCRYPTION_KEY to be set")
         return self
 

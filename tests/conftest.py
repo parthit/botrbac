@@ -270,6 +270,15 @@ def p2_settings() -> Settings:
     return make_settings(root_folder_id=None, allowlist_cache_ttl=0)
 
 
+# A deployment with records saved before signing existed, run with
+# REQUIRE_SIGNED_RECORDS=0 until /admin has signed them. Apply to a test that uses p2_app.
+before_signing = pytest.mark.parametrize(
+    "p2_settings",
+    [make_settings(root_folder_id=None, allowlist_cache_ttl=0, require_signed_records=False)],
+    ids=["unsigned-accepted"],
+)
+
+
 @pytest.fixture
 def p2_app(world: FakeDrive, p2_settings: Settings, memstore: MemoryStore, oauth: FakeOAuth):
     owner_tokens: list[str] = []

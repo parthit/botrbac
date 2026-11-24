@@ -36,7 +36,6 @@ DEFAULT_ALLOWLIST = ("api2.cursor.sh", CLAUDE_ROUTINE_HOST)
 
 @dataclass(frozen=True)
 class WakeSettings:
-    enabled: bool = False
     kek: bytes | None = None
     allowlist: tuple[str, ...] = DEFAULT_ALLOWLIST
     timeout: float = 4.0
@@ -45,7 +44,7 @@ class WakeSettings:
 
     @property
     def ready(self) -> bool:
-        return self.enabled and self.kek is not None
+        return self.kek is not None
 
 
 def decode_kek(value: str | None) -> bytes | None:

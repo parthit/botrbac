@@ -12,17 +12,14 @@ Bot Bridge decides who can reach whom:
 
 It uses the same Google sign-in, store and `/mcp` connection as Drive, so there is one place that decides who
 an assistant is and what it may reach. (An earlier, separate TypeScript version of Bot Bridge has been removed.)
-With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but the assistant cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
+With `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but the assistant cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
 **Pairing your own assistants.** Start a pairing in one assistant and join with the code from the other. Each
 assistant gets its own inbox. One approval on the Sharing page (People) turns it on, and disconnecting either
 app turns it off. It shares nothing new, because both assistants already see the same Drive. Each connected
 app saves its own wake-up hook, and only mail for that app wakes it. A hook saved for the whole account
 (from when mail from other people existed) never fires; Settings offers to give it to one of your assistants
-or remove it. Self-pairing is on by default. To turn it off for some or all accounts, connect a Vercel Edge
-Config to the project and set the item `self_pairing` to
-`{"enabled": true, "off_for_domains": ["example.com"]}` (or `"enabled": false`). Changes apply within about
-30 seconds, with no redeploy.
+or remove it.
 
 **Waking Claude.** A Claude Code routine with an API trigger can be woken too. At [claude.ai/code/routines](https://claude.ai/code/routines), create a routine that calls `check_messages` and treats the wake as untrusted metadata, add an **API** trigger, and generate a token. On `/bridge`, open **Advanced: paste a webhook yourself**, paste the routine's fire URL (`https://api.anthropic.com/v1/claude_code/routines/<id>/fire`) and token, and pick **Claude routine (API trigger)**. That scheme adds the `anthropic-version` and `anthropic-beta` headers and puts the ids in `text`. It still sends no message text. `api.anthropic.com` is on the default `WEBHOOK_HOST_ALLOWLIST`. If you set that variable yourself, add the host to it. Each wake starts a new Claude session and counts against that plan's routine runs.
 

@@ -2966,8 +2966,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request,
                 "error",
                 f"Signed {signed}, but {failed} could not be signed because they changed "
-                "at that moment or the store refused. Run this again, and do not turn on "
-                "REQUIRE_SIGNED_RECORDS until it reports none left.",
+                "at that moment or the store refused. Run this again, and keep "
+                "REQUIRE_SIGNED_RECORDS=0 until it reports none left.",
             )
         else:
             flash(
@@ -3213,7 +3213,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
         data["missing_wakeups"] = await blocking(ctx.mailbox.missing_wakeups, email)
-        data["self_pairing"] = await blocking(ctx.mailbox.self_pairing, email)
         # Approving a pairing lets that person's assistant read the Sharing list, so each
         # card that asks for approval says what that list holds right now.
         ext = ctx.ext_allowlist

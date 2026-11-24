@@ -127,12 +127,15 @@
   the two minutes between Allow and the redirect, is encrypted as well. A Drive sign-in copied into another account's slot is
   refused too, because the encrypted record names its account (a sign-in saved before that was written into
   the record is covered once that person reconnects Google Drive).
-  - **Turning it on.** Records saved before signing existed are still accepted until
-    `REQUIRE_SIGNED_RECORDS=1`. Open **People** (`/admin`) and choose **Sign existing records**. It signs
-    each one with a compare-and-swap, so a change made at the same moment is never undone, and it tells you
-    if any are left. When it reports none, set the variable. It signs whatever is stored at that moment,
-    so do it soon after deploying, and look over Allowed, Sharing and connected apps first. Until it is on, an unsigned record written
-    straight into the store is still accepted. The variable is refused without `ENCRYPTION_KEY`.
+  - **Only with `ENCRYPTION_KEY`.** The signing key is made from `ENCRYPTION_KEY`, so without it nothing is
+    signed or checked, whatever `REQUIRE_SIGNED_RECORDS` says.
+  - **On by default.** An unsigned record is ignored. A deployment with records saved before signing
+    existed sets `REQUIRE_SIGNED_RECORDS=0` before upgrading, opens **People** (`/admin`) and chooses
+    **Sign existing records**. It signs each one with a compare-and-swap, so a change made at the same
+    moment is never undone, and it tells you if any are left. When it reports none, remove the variable.
+    It signs whatever is stored at that moment, so look over Allowed, Sharing and connected apps first.
+    While it is `0`, an unsigned record written straight into the store is still accepted. Setting it to
+    `1` explicitly is refused without `ENCRYPTION_KEY`.
   - **Deleting a record adds nothing.** With the variable on, a missing record is never read as
     permission. A pairing approval names the person who had joined, so replacing who joined does not carry
     the approval over, and the Approve button approves only the account its page showed. An approval also

@@ -3,7 +3,7 @@
 import json
 
 from scoped_drive_mcp.mcp_oauth import GRANTS_KEY
-from tests.conftest import OWNER_EMAIL, unsealed
+from tests.conftest import OWNER_EMAIL, before_signing, unsealed
 from tests.dash import MCP_HEADERS, csrf, post
 from tests.test_mcp_oauth import (
     DONE,
@@ -106,6 +106,7 @@ def test_changing_the_role_applies_on_the_next_call(owner_c, memstore) -> None: 
     assert WRITE_TOOLS <= tool_names(owner_c, token)
 
 
+@before_signing
 def test_apps_connected_before_roles_keep_full_access(owner_c, memstore) -> None:  # noqa: F811
     token = _connect(owner_c)
     grant = _grant_id(memstore)
@@ -150,6 +151,7 @@ def test_disconnecting_an_app_drops_its_role(owner_c, memstore) -> None:  # noqa
     assert OWNER_EMAIL  # the owner made every change above
 
 
+@before_signing
 def test_settings_flags_apps_that_are_full_only_because_they_are_old(owner_c, memstore) -> None:  # noqa: F811
     _connect(owner_c)
     grant = _grant_id(memstore)
@@ -161,6 +163,7 @@ def test_settings_flags_apps_that_are_full_only_because_they_are_old(owner_c, me
     assert "connected before you could choose" in owner_c.get("/settings").text
 
 
+@before_signing
 def test_lowering_an_old_app_sticks_even_if_its_role_key_is_lost(owner_c, memstore) -> None:  # noqa: F811
     token = _connect(owner_c)
     grant = _grant_id(memstore)

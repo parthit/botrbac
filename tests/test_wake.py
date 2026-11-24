@@ -29,7 +29,6 @@ def _box(posts: list[dict[str, str]], status: int = 200) -> Mailbox:
         base_url="https://drive-test.example.com",
         clock=store._clock,
         wake=WakeSettings(
-            enabled=True,
             kek=base64.b64decode(KEK),
             allowlist=("api2.cursor.sh",),
             lookup=lambda host: ["8.8.8.8"] if host == "api2.cursor.sh" else ["127.0.0.1"],
@@ -94,7 +93,6 @@ def test_private_address_and_other_hosts_are_rejected() -> None:
         box.set_webhook(EVE, "https://example.com/hook", sender_key=SECRET)
     assert other.value.code == "webhook_host_not_allowed"
     box.wake = WakeSettings(
-        enabled=True,
         kek=base64.b64decode(KEK),
         allowlist=("api2.cursor.sh", "evil.example"),
         lookup=lambda host: ["10.1.2.3"] if host == "evil.example" else ["8.8.8.8"],
@@ -116,7 +114,6 @@ def test_a_failed_ping_does_not_restore_an_old_webhook() -> None:
         raise ValueError("http_500")
 
     box.wake = WakeSettings(
-        enabled=True,
         kek=base64.b64decode(KEK),
         allowlist=("api2.cursor.sh",),
         lookup=lambda _host: ["8.8.8.8"],
@@ -145,7 +142,6 @@ def test_a_successful_ping_clears_the_previous_error() -> None:
         base_url="https://drive-test.example.com",
         clock=store._clock,
         wake=WakeSettings(
-            enabled=True,
             kek=base64.b64decode(KEK),
             allowlist=("api2.cursor.sh",),
             lookup=lambda _host: ["8.8.8.8"],
@@ -191,7 +187,6 @@ def _claude_box(posts: list[dict[str, str]]) -> Mailbox:
         base_url="https://drive-test.example.com",
         clock=store._clock,
         wake=WakeSettings(
-            enabled=True,
             kek=base64.b64decode(KEK),
             allowlist=("api2.cursor.sh", "api.anthropic.com"),
             lookup=lambda _host: ["8.8.8.8"],
