@@ -11,7 +11,7 @@ prompt yours. Messages only go between one person's own assistants.
 A same-account link pairs two assistants of one person (say Grok and Claude, both
 signed in with the same Google account). Its sides are OAuth grants, not emails: mail
 is addressed to `email#grant_id`, so each assistant has its own inbox. The human
-approves it once. `self_pairing` (see flags.py) can turn the feature off.
+approves it once.
 """
 
 import hashlib
@@ -64,7 +64,6 @@ _INJECTION = re.compile(
     re.IGNORECASE,
 )
 
-SELF_PAIRING_OFF = "Pairing your own assistants is turned off for your organisation."
 PEER_MAIL_OFF = (
     "Messages only go between your own assistants. A pairing with another person shares "
     "documents, not messages: put what they need on your Sharing list instead."
@@ -143,14 +142,11 @@ class Mailbox:
         clock: Any = None,
         encryption_key: str | None = None,
         wake: WakeSettings | None = None,
-        self_pairing: Callable[[str], bool] | None = None,
         strict: bool = False,
     ) -> None:
         self.store = store
         # REQUIRE_SIGNED_RECORDS is on: an approval has to name the person who joined.
         self.strict = strict
-        # Whether this person may pair two of their own assistants (Edge Config switch).
-        self.self_pairing = self_pairing or (lambda _email: True)
         self.base_url = base_url.rstrip("/")
         self.clock = clock or time.time
         self._lock = threading.Lock()
@@ -545,8 +541,6 @@ class Mailbox:
                 status=status,
             )
         if link.get("same_account"):
-            if not self.self_pairing(you):
-                raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
             # One person, one click: approving covers both of their assistants.
             for both in ("a", "b"):
                 self.store.hset(f"bridge:appr:{link['link_id']}", both, self._approval(link, peer))
@@ -657,8 +651,6 @@ class Mailbox:
         assistant = current_assistant.get()
         assert assistant is not None
         link_id = link["link_id"]
-        if not self.self_pairing(you):
-            raise MailboxError("self_pairing_off", SELF_PAIRING_OFF)
         if self._revoked(link_id):
             self._charge_attempt(you)
             raise MailboxError(
@@ -1196,8 +1188,6 @@ class Mailbox:
         peer = self._other(link, you)
         sender = self._addr(link, you)
         if link.get("same_account"):
-            if not self.self_pairing(you):
-                raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
             if sender is None:
                 raise MailboxError(
                     "not_found",
@@ -1532,15 +1522,12 @@ class Mailbox:
         other = {"a": "b", "b": "a"}.get(side or "", "b")
         status = self._status(link)
         ended = self._ended(link["link_id"]) if status == "revoked" else None
-        allowed = self.self_pairing(you)
         approved = self._approved(link["link_id"], "a", link=link)
         page = self._page()
-        needs_you = status == "pending_approval" and not approved and allowed
+        needs_you = status == "pending_approval" and not approved
         you_label = str(link.get(f"label_{side}") or link.get("label_a") or "") if side else None
         peer_label = str(link.get(f"label_{other}") or "your other assistant")
-        if not allowed and status != "revoked":
-            step = SELF_PAIRING_OFF
-        elif status == "pending_approval":
+        if status == "pending_approval":
             step = "Approve on the Sharing page (People) to connect your two assistants."
         elif status == "active":
             step = (
@@ -1568,7 +1555,6 @@ class Mailbox:
             "assistants": [link.get("label_a") or "Assistant", link.get("label_b") or "Assistant"],
             "grant_ids": [link.get("grant_a"), link.get("grant_b")],
             "created_by_you": side in (None, "a"),
-            **({"disabled_by_org": True} if not allowed else {}),
             **({"approval_url": page} if needs_you else {}),
             **(
                 {

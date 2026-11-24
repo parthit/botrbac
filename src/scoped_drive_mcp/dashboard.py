@@ -3207,7 +3207,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
         data["missing_wakeups"] = await blocking(ctx.mailbox.missing_wakeups, email)
-        data["self_pairing"] = await blocking(ctx.mailbox.self_pairing, email)
         # Approving a pairing lets that person's assistant read the Sharing list, so each
         # card that asks for approval says what that list holds right now.
         ext = ctx.ext_allowlist

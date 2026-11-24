@@ -98,7 +98,6 @@ def test_existing_pairings_take_the_new_name() -> None:
         store,
         base_url="https://drive-test.example.com",
         clock=store._clock,
-        self_pairing=lambda _email: True,
     )
     grok = Assistant("grant-grok", "Cursor")
     claude = Assistant("grant-claude", "Claude")
@@ -144,7 +143,6 @@ def _box_on(store: MemoryStore) -> Mailbox:
         store,
         base_url="https://drive-test.example.com",
         clock=store._clock,
-        self_pairing=lambda _email: True,
     )
 
 

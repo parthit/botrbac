@@ -110,9 +110,6 @@ class Settings(BaseSettings):
     # Notion is offered on Settings only when both are set.
     notion_oauth_client_id: SecretStr | None = None
     notion_oauth_client_secret: SecretStr | None = None
-    # Vercel Edge Config connection string (set when an Edge Config is connected to the
-    # project). Holds server-side switches such as `self_pairing`; see flags.py.
-    edge_config: SecretStr | None = None
 
     redis_rest_url: str | None = Field(
         default=None,

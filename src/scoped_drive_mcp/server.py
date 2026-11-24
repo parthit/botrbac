@@ -73,7 +73,6 @@ from .drop_storage import (
 )
 from .drops import DropBox, drop_partition
 from .external import ExternalShares, SharedAccessError, acting_as
-from .flags import EdgeConfigFlags
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .notion import NotionService
 from .notion_client import HttpNotionApi, NotionApi, NotionOAuth
@@ -929,13 +928,9 @@ def build_app(
         )
         or DEFAULT_ALLOWLIST
     )
-    flags = EdgeConfigFlags(
-        settings.edge_config.get_secret_value() if settings.edge_config else None
-    )
     mailbox = Mailbox(
         kv,
         base_url=settings.app_base_url or "",
-        self_pairing=flags.self_pairing_enabled,
         strict=isinstance(kv, SignedStore) and kv.require,
         encryption_key=enc_key,
         wake=WakeSettings(
