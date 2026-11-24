@@ -32,6 +32,7 @@ src/scoped_drive_mcp/
   extract_worker.py           runs extract.py in a child process with memory, CPU and time limits
   service.py                  tool implementations
   server.py                   FastMCP tools + build_app()
+  terminal/                   Bot RBAC Terminal (docs/terminal.md): roles for local agents, `term:` keys only
 tests/                        pytest suite with a fake Drive (owner and bot views) and in-memory store
 tests/node/                   node --test suite for api/blob-sign.mjs (Blob SDK faked)
 ```

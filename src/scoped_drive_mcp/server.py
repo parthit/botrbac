@@ -98,6 +98,7 @@ from .store import (
     build_store,
     signing_key,
 )
+from .terminal import TerminalFeature
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
 logger = logging.getLogger(__name__)
@@ -1197,6 +1198,7 @@ def build_app(
         sharer_of=shares.sharer_of,
         notion=notion,
         drops=drop_box,
+        terminal=TerminalFeature(),
     )
     dashboard = build_dashboard(ctx)
 

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Terminal{% endblock %}
+{% block content %}
+<h1>Terminal</h1>
+<p class="muted">Control what AI agents on your computers can do. Works with any agent that supports MCP: Claude Code, Codex, Cursor, Gemini CLI and others.</p>
+
+<section class="card" aria-labelledby="get-started">
+  <h2 id="get-started">Get started</h2>
+  <ol>
+    <li>Install: <code>uv tool install botrbac</code></li>
+    <li>Log in: <code>botrbac login</code>, then approve the code on this site.</li>
+    <li>Add <code>botrbac gateway</code> to your agent as an MCP server.</li>
+  </ol>
+  <p class="muted">Bot RBAC only controls tool calls that go through it. It stops an agent from going around your rules; it cannot stop someone who owns the computer from removing it.</p>
+</section>
+
+<h2>Your terminals</h2>
+{% if terminals %}
+<table class="cards">
+  <thead><tr><th>Name</th><th>Role</th><th>Last seen</th><th>Offline queue</th></tr></thead>
+  <tbody>
+  {% for t in terminals %}
+  <tr><td>{{ t.name }}</td><td>{{ t.role }}</td><td>{{ t.last_seen | when }}</td><td>{{ t.queue }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted" id="no-terminals">No terminals yet. Run <code>botrbac login</code> on a computer to add one.</p>
+{% endif %}
+{% endblock %}
