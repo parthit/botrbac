@@ -20,6 +20,7 @@ writes to Notion. Page text is untrusted data, wrapped in markers like shared fi
 """
 
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -29,6 +30,7 @@ from .notion_client import (
     PAGE,
     NotionApi,
     NotionApiError,
+    NotionForbiddenError,
     NotionNotFoundError,
     NotionOAuth,
     NotionOAuthError,
@@ -56,6 +58,8 @@ DATABASE_ROWS = 100
 # Notion search result pages, and parent lookups across all results, for one search.
 SEARCH_PAGES = 3
 SEARCH_LOOKUPS = 60
+# Wall-clock limit for one search, so a busy workspace cannot hold a worker for long.
+SEARCH_SECONDS = 15.0
 # Pages one "From Notion" listing on the dashboard may page through.
 LIST_PAGES = 5
 
@@ -96,7 +100,9 @@ class NotionAccess:
                 obj = self.api.get_block(object_id)
             else:
                 obj = self.api.get_page(object_id)
-        except NotionNotFoundError:
+        except (NotionNotFoundError, NotionForbiddenError):
+            # Not shared, gone, or restricted: all the same to the caller. Rate limits and
+            # server errors still raise.
             obj = None
         self._objects[key] = obj
         return obj
@@ -197,7 +203,7 @@ class NotionService:
         if not record:
             raise self._not_connected()
         try:
-            return fn(self.api_factory(record["t"]))
+            return self._call(fn, record["t"])
         except NotionUnauthorizedError:
             refresh = record.get("r")
             if not refresh or self.oauth is None:
@@ -210,7 +216,7 @@ class NotionService:
                 latest = vault.notion()
                 if latest and latest.get("t") and latest.get("t") != record["t"]:
                     try:
-                        return fn(self.api_factory(latest["t"]))
+                        return self._call(fn, latest["t"])
                     except NotionUnauthorizedError:
                         pass
                 raise self._reconnect() from None
@@ -222,9 +228,19 @@ class NotionService:
                 tokens.workspace_name or record.get("workspace_name", ""),
             )
             try:
-                return fn(self.api_factory(tokens.access_token))
+                return self._call(fn, tokens.access_token)
             except NotionUnauthorizedError:
                 raise self._reconnect() from None
+
+    def _call[T](self, fn: Callable[[NotionApi], T], token: str) -> T:
+        """Run `fn` with a client for `token`, and close the client afterwards."""
+        api = self.api_factory(token)
+        try:
+            return fn(api)
+        finally:
+            close = getattr(api, "close", None)
+            if callable(close):
+                close()
 
     def _reconnect(self) -> PayloadToolError:
         return PayloadToolError(
@@ -296,7 +312,7 @@ class NotionService:
             if kind == DATABASE:
                 text, truncated = self._database_text(api, obj)
             else:
-                text, truncated = self._page_text(api, obj)
+                text, truncated = self._page_text(api, obj, access)
             return {
                 "id": object_id,
                 "title": title_of(obj),
@@ -323,7 +339,11 @@ class NotionService:
             results: list[dict[str, Any]] = []
             cursor: str | None = None
             incomplete = False
+            deadline = time.monotonic() + SEARCH_SECONDS
             for _ in range(SEARCH_PAGES):
+                if time.monotonic() > deadline:
+                    incomplete = True
+                    break
                 page = api.search(query, cursor)
                 for obj in page.get("results") or []:
                     if not isinstance(obj, dict) or not isinstance(obj.get("id"), str):
@@ -356,7 +376,9 @@ class NotionService:
 
     # ---- text ----------------------------------------------------------------------
 
-    def _page_text(self, api: NotionApi, page: dict[str, Any]) -> tuple[str, bool]:
+    def _page_text(
+        self, api: NotionApi, page: dict[str, Any], access: NotionAccess
+    ) -> tuple[str, bool]:
         lines: list[str] = [f"# {title_of(page)}"]
         props = page.get("properties")
         if isinstance(props, dict):
@@ -368,7 +390,7 @@ class NotionService:
         lines.append("")
         budget = [READ_CALL_BUDGET]
         size = [sum(len(x) + 1 for x in lines)]
-        truncated = self._blocks(api, str(page["id"]), 0, lines, budget, size)
+        truncated = self._blocks(api, str(page["id"]), 0, lines, budget, size, access)
         return "\n".join(lines), truncated
 
     def _blocks(
@@ -379,6 +401,7 @@ class NotionService:
         out: list[str],
         budget: list[int],
         size: list[int],
+        access: NotionAccess,
     ) -> bool:
         """Append the text of `block_id`'s children. True when something was left out."""
         cursor: str | None = None
@@ -399,6 +422,11 @@ class NotionService:
                     out.append(text)
                     size[0] += len(text) + 1
                 kind = block.get("type")
+                if kind == "synced_block" and not self._synced_source_allowed(block, access):
+                    # A copy of a synced block shows content that lives on another page.
+                    # It is read only when that page is allowed too.
+                    out.append(indent + "[synced content from a page that is not allowed]")
+                    continue
                 # Child pages and databases are their own items (read them by id).
                 if (
                     block.get("has_children")
@@ -407,11 +435,23 @@ class NotionService:
                 ):
                     if depth + 1 >= READ_DEPTH:
                         continue
-                    if self._blocks(api, block["id"], depth + 1, out, budget, size):
+                    if self._blocks(api, block["id"], depth + 1, out, budget, size, access):
                         return True
             if not page.get("has_more") or not page.get("next_cursor"):
                 return False
             cursor = str(page["next_cursor"])
+
+    @staticmethod
+    def _synced_source_allowed(block: dict[str, Any], access: NotionAccess) -> bool:
+        body = block.get("synced_block")
+        source = body.get("synced_from") if isinstance(body, dict) else None
+        if not source:
+            return True  # the original: its content is on this page
+        source_id = source.get("block_id") if isinstance(source, dict) else None
+        if not isinstance(source_id, str) or not source_id:
+            return False
+        source_id = normalize_notion_id(source_id) or source_id
+        return access.covering(BLOCK, source_id) is not None
 
     def _database_text(self, api: NotionApi, db: dict[str, Any]) -> tuple[str, bool]:
         lines = [f"# {title_of(db)} (database)", ""]
@@ -489,7 +529,7 @@ class NotionService:
             for kind in (PAGE, DATABASE):
                 try:
                     obj = api.get_page(object_id) if kind == PAGE else api.get_database(object_id)
-                except NotionNotFoundError:
+                except (NotionNotFoundError, NotionForbiddenError):
                     continue
                 if obj.get("archived") or obj.get("in_trash"):
                     return None
@@ -515,6 +555,13 @@ class NotionService:
         )
         self.allowlist.add(entry)
         return entry
+
+    def clear(self) -> int:
+        """Empty the person's Notion allowlist (on disconnect, or a different workspace)."""
+        ids = list(self.allowlist.entries())
+        for object_id in ids:
+            self.allowlist.remove(object_id)
+        return len(ids)
 
     def remove(self, page_id: str) -> AllowEntry | None:
         object_id = normalize_notion_id(page_id)

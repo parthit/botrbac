@@ -288,6 +288,9 @@ def test_normalize_notion_id_accepts_ids_and_urls() -> None:
     assert normalize_notion_id(plain) == dashed
     assert normalize_notion_id(dashed.upper()) == dashed
     assert normalize_notion_id(f"https://www.notion.so/acme/Team-wiki-{plain}?pvs=4") == dashed
+    # A slug made of hex letters must not merge into the id.
+    assert normalize_notion_id(f"https://www.notion.so/Bad-Face-Dad-{plain}") == dashed
+    assert normalize_notion_id(f"https://www.notion.so/acme/Bad-Face-Dad-{dashed}") == dashed
     # Notion's newer link format (June 2026), with a dashed id.
     assert normalize_notion_id(f"https://app.notion.com/p/{dashed}") == dashed
     assert normalize_notion_id("not an id") is None
@@ -617,3 +620,84 @@ def test_token_exchange_sends_what_notion_documents(monkeypatch) -> None:
         "nrt_r",
         "Acme",
     )
+
+
+def test_restricted_parent_reads_as_not_allowed(allowed, notion) -> None:
+    """A 403 restricted_resource in the parent walk is answered like not found."""
+    from scoped_drive_mcp.notion_client import NotionForbiddenError
+
+    real_get_page = FakeNotionApi.get_page
+
+    def restricted(self, page_id):
+        if page_id == TOP:
+            raise NotionForbiddenError(403, "restricted_resource")
+        return real_get_page(self, page_id)
+
+    FakeNotionApi.get_page = restricted
+    try:
+        out = result(allowed, "notion_read_page", page_id=CHILD)
+    finally:
+        FakeNotionApi.get_page = real_get_page
+    assert out["structuredContent"]["error"] == "not_allowed"
+
+
+def test_synced_copy_of_a_page_that_is_not_allowed_is_not_shown(allowed, notion) -> None:
+    source = nid(20)  # original synced block, on the private diary
+    notion.objects[source] = {
+        "object": "block",
+        "id": source,
+        "type": "synced_block",
+        "parent": {"type": "page_id", "page_id": OTHER},
+        "synced_block": {"synced_from": None},
+    }
+    notion.shared.add(source)
+    copy = {
+        "object": "block",
+        "id": nid(21),
+        "type": "synced_block",
+        "has_children": True,
+        "synced_block": {"synced_from": {"type": "block_id", "block_id": source}},
+    }
+    notion.shared.add(nid(21))
+    notion.children[nid(21)] = [para("diary text mirrored")]
+    notion.children[CHILD] = [*notion.children[CHILD], copy]
+    out = result(allowed, "notion_read_page", page_id=CHILD)["structuredContent"]["content"]
+    assert "diary text mirrored" not in out
+    assert "synced content from a page that is not allowed" in out
+    # Once the source page is allowed, the copy is read.
+    allow(allowed, OTHER)
+    out = result(allowed, "notion_read_page", page_id=CHILD)["structuredContent"]["content"]
+    assert "diary text mirrored" in out
+
+
+def test_disconnect_clears_the_notion_list(allowed, memstore) -> None:
+    token = csrf(allowed, "/settings")
+    allowed.post("/connect/notion/disconnect", data={"csrf": token})
+    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
+
+
+def test_connecting_another_workspace_clears_the_list(allowed, memstore, notion_oauth) -> None:
+    real = notion_oauth.exchange_code
+
+    def other_workspace(code):
+        t = real(code)
+        return NotionTokens(t.access_token, t.refresh_token, "ws-2", "Other", "bot-2")
+
+    notion_oauth.exchange_code = other_workspace
+    connect_notion(allowed)
+    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
+
+
+def test_reconnecting_the_same_workspace_keeps_the_list(allowed, memstore) -> None:
+    connect_notion(allowed)
+    assert TOP in memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}")
+
+
+def test_tool_closes_its_notion_client(allowed, notion) -> None:
+    closed = []
+    FakeNotionApi.close = lambda self: closed.append(1)
+    try:
+        result(allowed, "notion_read_page", page_id=TOP)
+    finally:
+        del FakeNotionApi.close
+    assert closed == [1]

@@ -31,7 +31,13 @@ PAGE = "page"
 DATABASE = "database"
 BLOCK = "block"
 
-_HEX32 = re.compile(r"[0-9a-fA-F]{32}")
+_HEX = "[0-9a-fA-F]"
+# An id ending the segment, not glued to a hex character before it (a slug's own dash
+# before the id is fine: the groups have fixed widths, so slug letters cannot join in).
+_DASHED_ID_AT_END = re.compile(
+    rf"(?<![0-9a-fA-F])({_HEX}{{8}}-{_HEX}{{4}}-{_HEX}{{4}}-{_HEX}{{4}}-{_HEX}{{12}})$"
+)
+_HEX32_AT_END = re.compile(rf"(?<![0-9a-fA-F])({_HEX}{{32}})$")
 
 
 class NotionOAuthError(Exception):
@@ -51,6 +57,10 @@ class NotionNotFoundError(NotionApiError):
     """Not found, or not shared with this connection (Notion answers 404 for both)."""
 
 
+class NotionForbiddenError(NotionApiError):
+    """403 restricted_resource: this connection may not read it."""
+
+
 class NotionUnauthorizedError(NotionApiError):
     """The access token is no longer valid (revoked in Notion, or expired)."""
 
@@ -58,15 +68,18 @@ class NotionUnauthorizedError(NotionApiError):
 def normalize_notion_id(raw: object) -> str | None:
     """A Notion id in its dashed form, from a dashed or undashed id or a Notion URL.
 
-    None when `raw` holds no id. The last 32-hex run wins, which is where Notion URLs keep
-    the page id (`.../My-page-1a2b...`)."""
+    None when `raw` holds no id. Only an id at the end of the last path segment counts,
+    which is where Notion links keep it (`.../My-page-1a2b...`, `.../p/<id>`). The slug
+    is never merged into it, so a slug made of hex letters ("Bad-Face") cannot change
+    which id is read."""
     if not isinstance(raw, str) or len(raw) > 500:
         return None
-    text = raw.strip().split("?", 1)[0].split("#", 1)[0].replace("-", "")
-    found = _HEX32.findall(text)
-    if not found:
+    text = raw.strip().split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    segment = text.rsplit("/", 1)[-1]
+    match = _DASHED_ID_AT_END.search(segment) or _HEX32_AT_END.search(segment)
+    if not match:
         return None
-    h = found[-1].lower()
+    h = match.group(1).replace("-", "").lower()
     return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
@@ -200,6 +213,9 @@ class HttpNotionApi:
             timeout=timeout,
         )
 
+    def close(self) -> None:
+        self._client.close()
+
     def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         resp = self._client.request(method, path, **kwargs)
         if resp.status_code == 200:
@@ -214,6 +230,8 @@ class HttpNotionApi:
             raise NotionNotFoundError(404, code)
         if resp.status_code == 401:
             raise NotionUnauthorizedError(401, code)
+        if resp.status_code == 403:
+            raise NotionForbiddenError(403, code)
         raise NotionApiError(resp.status_code, code)
 
     def search(self, query: str, cursor: str | None = None, page_size: int = 100) -> dict[str, Any]:

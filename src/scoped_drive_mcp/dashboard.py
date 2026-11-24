@@ -1389,6 +1389,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 message=f"Connecting Notion failed: {exc}.",
                 actions=retry_actions,
             )
+        previous = await blocking(ctx.notion_record)
+        if previous and previous.get("workspace_id") != tokens.workspace_id:
+            # Another workspace: the old list names pages that are not there.
+            await blocking(ctx.notion.clear)
         await blocking(
             ctx.vault.set_notion,
             tokens.access_token,
@@ -1408,6 +1412,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def notion_disconnect(request: Request) -> Response:
         record = await blocking(ctx.notion_record)
         await blocking(ctx.vault.clear_notion)
+        # The list belongs to that connection's workspace; a later connection starts empty.
+        await blocking(ctx.notion.clear)
         confirmed = True
         # Notion revokes one token per call: the access token, then the refresh token.
         for key in ("t", "r"):
@@ -1478,7 +1484,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 back,
                 changed=False,
             )
-        audit_owner("notion_allow", file_id=None, page_id=entry.id, name=entry.name)
+        audit_owner("notion_allow", page_id=entry.id, name=entry.name)
         return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
 
     async def notion_remove(request: Request, form: dict[str, str]) -> Response:

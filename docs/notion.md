@@ -17,13 +17,17 @@ There are two gates, both checked on every call:
 To share more pages with Bot RBAC, use **Pick pages in Notion** on the same tab. That reopens Notion's
 screen.
 
+Disconnecting Notion clears the list of allowed Notion pages, and so does connecting a different
+workspace. A copy of a synced block shows content from another page; it is read only when that page is
+allowed too.
+
 ## Tools
 
 | Tool | What it does |
 |---|---|
 | `notion_list_pages` | The allowed pages and databases |
 | `notion_read_page` | Text of an allowed page (or rows of a database). Takes an id or a Notion URL |
-| `notion_search` | Notion search, filtered to what is allowed |
+| `notion_search` | Notion's search (titles only), filtered to what is allowed |
 
 All three are read-only and available to every app role. They are registered only when Notion is
 configured on the server.

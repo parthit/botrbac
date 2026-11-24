@@ -232,7 +232,9 @@ Notion's consent screen limits what the server can see, and the person's Notion 
 like the Drive allowlist) limits what assistants can read. Every tool call fetches the requested item
 fresh and walks its parent chain (pages, databases and blocks, capped in depth) until it reaches an
 allowed item or the top of the workspace; anything else, including items that do not exist, gets the
-same `not_allowed` answer. Search results pass the same check. A trashed allowed page does not keep
+same `not_allowed` answer (including items Notion answers 403 `restricted_resource` for). Search results
+pass the same check. A copy of a synced block inside an allowed page shows content stored elsewhere, so it
+is read only when its original block is itself under an allowed item. A trashed allowed page does not keep
 its children readable. The tools are read-only and page text is wrapped in untrusted-content markers.
 The Notion token is encrypted with `ENCRYPTION_KEY` and names the account it belongs to. The connect
 flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
