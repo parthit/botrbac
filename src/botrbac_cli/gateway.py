@@ -24,6 +24,7 @@ from mcp.server.stdio import stdio_server
 
 from . import __version__, policy, state
 from .patterns import normalize_server
+from .protect import refusal
 from .queue import AuditQueue
 
 logger = logging.getLogger("botrbac.gateway")
@@ -142,6 +143,10 @@ class Gateway:
             "via": "gateway",
             **policy.session_fields(),
         }
+        guarded = refusal(route.tool_id, arguments)
+        if guarded:
+            self.queue.add(decision="deny", reason="protected file", **row)
+            return _error(f"Blocked by Bot RBAC: {route.tool_id}: {guarded}.")
         if not decision.allowed:
             self.queue.add(decision="deny", reason=decision.reason, **row)
             return _error(

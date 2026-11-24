@@ -169,7 +169,7 @@ that the server called `botrbac` in the agent's config is the gateway (`botrbac 
 ## Offline
 
 The policy (role, roles you may narrow to, revoked sessions) is cached on the computer with the time it was
-fetched. Without internet the cached policy is used for the role's offline grace, then **every tool is
+fetched, signed by the site (see [below](#what-it-can-and-cannot-guarantee)). Without internet the cached policy is used for the role's offline grace, then **every tool is
 blocked** until the terminal checks in again. A computer with no cached policy blocks everything.
 
 Every decision is written to `~/.config/botrbac/audit.db` and sent when the site can be reached: every
@@ -181,9 +181,29 @@ sent later.
 
 Bot RBAC Terminal sees only tool calls that go through `botrbac gateway` or a hook that calls
 `botrbac check`. It stops an **agent** from going around your rules. It cannot stop the **person who owns
-the computer**: they can edit the agent's config, remove the hook or delete the cached policy. Where an
-agent supports settings an administrator controls (for example Claude Code's managed settings), put the
-gateway and hook there so they cannot be removed from the computer itself.
+the computer**: they can edit the agent's config, remove the hook or delete the cached policy.
+
+An agent could try to switch Bot RBAC off from inside, by editing the files it depends on. These layers
+cover that, from strongest to weakest:
+
+- **Signed role.** The site signs every policy it sends, and botrbac remembers the site's key from login.
+  If the cached role on the computer is edited, every tool is blocked until `botrbac sync` fetches a fresh
+  one. The offline grace counts from when the site issued the policy, so editing the saved fetch time does
+  not stretch it. (Needs `ENCRYPTION_KEY` on the server; computers logged in before this pick up the key at
+  their next token refresh.)
+- **Protected files.** Whatever the role, a tool call that would change Claude Code's settings
+  (`.claude/settings.json`, `.claude/settings.local.json`), `~/.claude.json` or botrbac's own folder is
+  refused, as is one that mentions `disableAllHooks` or `botrbac hooks remove`. Paths are followed through
+  symlinks and `..`. Reading those files is allowed, except botrbac's login file, which holds its tokens.
+  This reads the call's text, so it is a speed bump: a path built at run time (variables, a script written
+  elsewhere) gets past it.
+- **Noticing.** `botrbac doctor` says when the hook is missing or switched off by `disableAllHooks`, and each
+  sync tells the site, which marks the computer "hook off" on the Terminal page.
+
+Extras for stricter setups, outside botrbac: put the hook and gateway in Claude Code's **managed settings**
+(an administrator's file the user and agent cannot override, including `disableAllHooks`); add
+`permissions.deny` rules for `Edit(~/.claude/**)` and `Edit(~/.config/botrbac/**)`; and run the agent in
+Claude Code's sandbox, which keeps its shell from writing its own settings.
 
 Audit rows hold identifiers and decisions only: the tool name, agent, role, session, and allow or block.
 Never tool arguments, results or file contents. A session start records the program's name, never its

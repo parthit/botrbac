@@ -263,6 +263,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         problems += 1
     servers = load_servers()
     print(f"✓ {len(servers)} server(s) behind the gateway" if servers else "! no servers yet")
+    from .hooks import hook_report
+
+    for agent, status in hook_report().items():
+        if status == "installed":
+            print(f"✓ {agent} hook is installed")
+            continue
+        problems += 1
+        what = "switched off (disableAllHooks)" if status == "disabled" else "missing"
+        print(f"✗ {agent} hook is {what}: its own tools are not checked")
+        print(f"    fix: botrbac hooks install {agent} --user --allow-unguarded")
     found = unguarded()
     for config, name in found:
         print(f"✗ {config.agent}: {name} in {config.path} is not behind botrbac")
@@ -280,7 +290,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_hooks(args: argparse.Namespace) -> int:
     from pathlib import Path
 
-    from .hooks import install_claude_code, remove_claude_code
+    from .hooks import expect_hook, install_claude_code, remove_claude_code
 
     if args.agent != "claude-code":
         print(
@@ -292,6 +302,7 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     settings = base / ".claude" / "settings.json"
     if args.action == "remove":
         removed = remove_claude_code(settings)
+        expect_hook("claude-code", False)
         if removed["changed"]:
             print(f"Removed the botrbac hook from {removed['file']}")
             print(f"Backup: {removed['backup']}")
@@ -299,6 +310,7 @@ def cmd_hooks(args: argparse.Namespace) -> int:
             print(f"No botrbac hook in {removed['file']}")
         return 0
     result = install_claude_code(settings, not args.allow_unguarded)
+    expect_hook("claude-code", True)
     if not result["changed"]:
         print(f"Already set up: {result['file']}")
         return 0

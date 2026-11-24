@@ -65,6 +65,8 @@ class Api:
                 "refresh_token": issued["refresh_token"],
                 "expires_at": time.time() + int(issued.get("expires_in") or 3600) - 60,
                 "terminal_id": issued.get("terminal_id"),
+                # Pinned at login: later policies must be signed with its private half.
+                "policy_key": issued.get("policy_key") or _creds().get("policy_key"),
             },
             private=True,
         )

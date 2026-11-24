@@ -23,6 +23,7 @@ from typing import Any
 from . import policy
 from .gateway import safe_tool
 from .patterns import normalize_server
+from .protect import refusal
 from .queue import AuditQueue
 from .shellcmd import CommandError, command_text, is_shell_tool, programs
 
@@ -70,6 +71,11 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
         "via": "hook",
         **policy.session_fields(),
     }
+    tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
+    guarded = refusal(tool, tool_input if tool_input is not None else payload)
+    if guarded:
+        _record(decision="deny", reason="protected file", role="", **row)
+        return False, f"Blocked by Bot RBAC: {tool_id}: {guarded}."
     if bypass and block_unguarded:
         reason = "MCP servers must go through botrbac gateway (run: botrbac wrap)"
         _record(decision="deny", reason=reason, role="", **row)

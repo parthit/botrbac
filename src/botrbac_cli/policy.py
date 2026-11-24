@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import state
+from . import signing, state
 from .patterns import chain_allows, chain_allows_command, has_command_rules
 
 SESSION_ENV = "BOTRBAC_SESSION"
@@ -65,8 +65,19 @@ class Enforcer:
         if cached is None:
             return None, "no policy yet: run botrbac login"
         policy = cached["policy"]
+        pinned = (state.read_json("credentials.json", {}) or {}).get("policy_key")
+        if pinned and not signing.verify(pinned, policy):
+            return None, (
+                "botrbac's saved role was changed on this computer, so every tool is "
+                "blocked: run botrbac sync"
+            )
         days = int(policy.get("role", {}).get("offline_days") or 7)
         age = self.clock() - float(cached.get("fetched_at") or 0)
+        if pinned:
+            # The fetch time is not signed, so editing it could stretch the offline
+            # grace. The server's issue time is signed: count from it too, allowing a
+            # day for this computer's clock being off.
+            age = max(age, self.clock() - float(policy.get("issued_at") or 0) - 86400)
         if age > days * 86400:
             return None, f"offline for more than {days} days: connect to the internet"
         if age < -CLOCK_SKEW:

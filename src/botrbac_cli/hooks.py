@@ -10,6 +10,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from . import state
 from .coverage import backup_file, write_atomic
 from .shell import botrbac_command
 
@@ -97,3 +98,57 @@ def install_claude_code(path: Path, block_unguarded: bool = True) -> dict[str, A
     backup = backup_file(path) if before is not None else None
     write_atomic(path, text)
     return {"file": str(path), "backup": backup, "changed": True}
+
+
+# ---- is the hook still there? -----------------------------------------------------
+
+
+def claude_code_settings_files(cwd: Path | None = None) -> list[Path]:
+    """Every Claude Code settings file that can hold (or switch off) hooks here."""
+    here = cwd or Path.cwd()
+    home = Path.home() / ".claude"
+    return [
+        home / "settings.json",
+        home / "settings.local.json",
+        here / ".claude" / "settings.json",
+        here / ".claude" / "settings.local.json",
+    ]
+
+
+def claude_code_hook_status(cwd: Path | None = None) -> str:
+    """ "installed", "missing" or "disabled" (hooks switched off with disableAllHooks)."""
+    found = False
+    for path in claude_code_settings_files(cwd):
+        try:
+            data = json.loads(path.read_text() or "{}")
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("disableAllHooks") is True:
+            return "disabled"
+        hooks = data.get("hooks")
+        entries = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+        if isinstance(entries, list) and any(_ours(e) for e in entries):
+            found = True
+    return "installed" if found else "missing"
+
+
+def expect_hook(agent: str, expected: bool) -> None:
+    """Remember that this computer should have the hook, so doctor and the website can
+    say when it goes missing. Uninstalling with `hooks remove` clears it."""
+    data = state.read_json("state.json", {}) or {}
+    agents = set(data.get("hooks_expected") or [])
+    agents = agents | {agent} if expected else agents - {agent}
+    data["hooks_expected"] = sorted(agents)
+    state.write_json("state.json", data)
+
+
+def hook_report(cwd: Path | None = None) -> dict[str, str]:
+    """{agent: status} for every agent botrbac installed a hook for."""
+    data = state.read_json("state.json", {}) or {}
+    report: dict[str, str] = {}
+    for agent in data.get("hooks_expected") or []:
+        if agent == "claude-code":
+            report[agent] = claude_code_hook_status(cwd)
+    return report

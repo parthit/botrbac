@@ -108,6 +108,7 @@ args = ["gateway", "--agent", "codex"]</pre>
   <tr id="terminal-{{ t.id }}">
     <td data-label="Name"><div class="term-name"><b>{{ t.name }}</b>
       <span class="muted small">{{ t.hostname }}{% if t.os %} · {{ t.os }}{% endif %}{% if t.version %} · botrbac {{ t.version }}{% endif %}</span>
+      {% if t.hook_missing %}<span class="pill pending" title="Its own tools (shell, file edits) are no longer checked. Run botrbac doctor on that computer.">{{ t.hook_missing | join(", ") }} hook off</span>{% endif %}
       {% if t.unguarded %}<span class="pill pending" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>{% endif %}</div></td>
     <td data-label="Role">
       <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/role">

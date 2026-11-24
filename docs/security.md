@@ -304,6 +304,15 @@ CSV export prefixes cells that would start a spreadsheet formula.
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
 owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
 a policy older than the role's offline grace, an unknown session or a revoked session all block every tool.
+Policies are signed with Ed25519 (a key derived from `ENCRYPTION_KEY`; `src/botrbac_cli/signing.py`). The
+public key comes with the tokens and is pinned in the login file; once pinned, a cached policy that does
+not verify blocks every tool, and the offline grace is measured from the signed `issued_at` (allowing a day
+of clock difference) as well as the local fetch time. A replayed older signed policy is still accepted
+until its own grace runs out. Changing `ENCRYPTION_KEY` changes the key: terminals block until their next
+token refresh (at most an hour, when online) brings the new one. Whatever the role, the CLI refuses tool calls that would change Claude Code's settings files,
+`~/.claude.json` or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
+(`src/botrbac_cli/protect.py`; text and resolved paths, so a path built at run time gets past it). A missing
+or disabled hook is reported by `botrbac doctor` and shown on the Terminal page.
 A session can only narrow the terminal's role (the check is the intersection of every role in the chain).
 The CLI trusts the computer's user: session files and `BOTRBAC_SESSION` are not signed, so an agent that can
 run shell commands can drop back to the terminal's own role (never above it) by starting a gateway without

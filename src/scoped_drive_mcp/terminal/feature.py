@@ -17,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from botrbac_cli import signing
 from botrbac_cli.api import DEFAULT_SERVER
 
 from ..audit import audit_owner
@@ -164,11 +165,16 @@ class TerminalFeature:
     store: Any
     base_url: str | None = None
     signed_in: Callable[[str], bool] = lambda _email: True
+    # ENCRYPTION_KEY: policies are signed with a key derived from it. None: unsigned.
+    signing_secret: str | None = None
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
     activity: TerminalActivity = field(init=False)
 
     def __post_init__(self) -> None:
+        self._signing_key = (
+            signing.key_from_secret(self.signing_secret) if self.signing_secret else None
+        )
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
         self.activity = TerminalActivity(self.store)
@@ -191,7 +197,18 @@ class TerminalFeature:
         digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
         body["version"] = digest[:16]
         body["issued_at"] = time.time()
+        if self._signing_key is not None:
+            # The CLI checks this against the key it pinned at login, so an edited
+            # policy cache on the computer blocks every tool instead of widening a role.
+            body["signature"] = signing.sign(self._signing_key, body)
         return body
+
+    @property
+    def policy_key(self) -> str | None:
+        """The public key the CLI pins at login, or None when policies are not signed."""
+        if self._signing_key is None:
+            return None
+        return signing.public_key_text(self._signing_key)
 
     # ---- API (no cookies; mounted outside the dashboard) -----------------------
 
@@ -225,6 +242,8 @@ class TerminalFeature:
                     return _oauth_error("invalid_grant")
             else:
                 return _oauth_error("unsupported_grant_type")
+            if self.policy_key:
+                issued["policy_key"] = self.policy_key
             return JSONResponse(issued, headers={"cache-control": "no-store"})
 
         async def caller(request: Request) -> Terminal | Response:
@@ -274,6 +293,13 @@ class TerminalFeature:
             queued = data.get("queued")
             if isinstance(queued, int) and queued >= 0:
                 changes["queued"] = min(queued, 10**9)
+            hooks = data.get("hooks")
+            if isinstance(hooks, dict):
+                changes["hook_missing"] = sorted(
+                    str(agent)[:40]
+                    for agent, status in list(hooks.items())[:10]
+                    if status in ("missing", "disabled")
+                )
             unguarded = data.get("unguarded")
             if isinstance(unguarded, list):
                 changes["unguarded"] = sorted(
