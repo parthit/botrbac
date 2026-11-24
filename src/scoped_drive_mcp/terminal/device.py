@@ -104,9 +104,19 @@ class Terminals:
         if not raw:
             return None
         record = json.loads(raw)
-        if record.get("status") != "pending" or record.get("user_code") != code:
+        if record.get("user_code") != code or self.store.get(f"term:device:{digest}:decision"):
             return None
         return digest, record
+
+    def _decide(self, digest: str, code: str, decision: dict[str, Any]) -> bool:
+        """Record approve or refuse, once per code: two people (or two tabs) deciding at
+        the same moment can't both win. The device record itself is never rewritten, so
+        a poll in flight can't undo the decision."""
+        if not self.store.set_if_absent(f"term:usercode:{code}:claim", "1", ex=DEVICE_TTL):
+            return False
+        self.store.set(f"term:device:{digest}:decision", json.dumps(decision), ex=DEVICE_TTL)
+        self.store.delete(f"term:usercode:{code}")
+        return True
 
     def approve(self, email: str, user_code: str, role_id: str, name: str) -> Terminal | None:
         found = self.pending(user_code)
@@ -130,11 +140,13 @@ class Terminals:
             role_id=role.id,
             created_at=self.clock(),
         )
+        # Saved before the decision, so a poll that sees "approved" always finds it.
         self._save(terminal)
+        decision = {"status": "approved", "terminal_id": terminal.id}
+        if not self._decide(digest, record["user_code"], decision):
+            self.store.delete(f"term:terminal:{terminal.id}")  # someone else decided first
+            return None
         self.store.hset(f"term:terminals:{email}", terminal.id, "1")
-        record.update(status="approved", terminal_id=terminal.id)
-        self.store.set(f"term:device:{digest}", json.dumps(record), ex=DEVICE_TTL)
-        self.store.delete(f"term:usercode:{record['user_code']}")
         return terminal
 
     def deny(self, user_code: str) -> bool:
@@ -142,10 +154,7 @@ class Terminals:
         if found is None:
             return False
         digest, record = found
-        record["status"] = "denied"
-        self.store.set(f"term:device:{digest}", json.dumps(record), ex=DEVICE_TTL)
-        self.store.delete(f"term:usercode:{record['user_code']}")
-        return True
+        return self._decide(digest, record["user_code"], {"status": "denied"})
 
     def poll(self, device_code: str) -> dict[str, Any]:
         """Tokens once approved; otherwise raises DeviceError with the RFC 8628 code."""
@@ -154,24 +163,28 @@ class Terminals:
         if not raw:
             raise DeviceError("expired_token")
         record = json.loads(raw)
-        status = record.get("status")
-        if status == "denied":
+        decided = self.store.get(f"{key}:decision")
+        decision = json.loads(decided) if decided else {}
+        if decision.get("status") == "denied":
             self.store.delete(key)
             raise DeviceError("access_denied")
-        if status == "approved":
+        if decision.get("status") == "approved":
             # One use, even when two polls arrive together: the first to claim wins.
             if not self.store.set_if_absent(f"{key}:claimed", "1", ex=DEVICE_TTL):
                 raise DeviceError("expired_token")
             self.store.delete(key)
-            terminal = self.get(str(record.get("terminal_id")))
+            terminal = self.get(str(decision.get("terminal_id")))
             if terminal is None:
                 raise DeviceError("access_denied")
             return self._issue(terminal)
+        # The last poll time has its own key, so polling never rewrites the record.
         now = self.clock()
-        too_soon = now - float(record.get("last_poll") or 0) < POLL_INTERVAL
-        record["last_poll"] = now
+        last = float(self.store.get(f"{key}:poll") or 0)
+        # A second of slack: a client polling every 5 seconds lands a little early now
+        # and then, and slow_down would make it wait 5 seconds longer from then on.
+        too_soon = now - last < POLL_INTERVAL - 1
         remaining = max(1, int(DEVICE_TTL - (now - float(record.get("created") or now))))
-        self.store.set(key, json.dumps(record), ex=remaining)
+        self.store.set(f"{key}:poll", str(now), ex=remaining)
         raise DeviceError("slow_down" if too_soon else "authorization_pending")
 
     # ---- tokens ----------------------------------------------------------------
@@ -238,14 +251,27 @@ class Terminals:
     def _save(self, terminal: Terminal) -> None:
         self.store.set(f"term:terminal:{terminal.id}", json.dumps(asdict(terminal)))
 
+    def touch(self, terminal_id: str, **seen: Any) -> None:
+        """What the terminal itself reports (last_seen, queued, unguarded). Kept apart from
+        the record the person edits, so a terminal checking in can never undo a role
+        change or a rename made on the website at the same moment."""
+        allowed = {k: v for k, v in seen.items() if k in ("last_seen", "queued", "unguarded")}
+        raw = self.store.get(f"term:terminal:{terminal_id}:seen")
+        current = json.loads(raw) if raw else {}
+        current.update(allowed)
+        self.store.set(f"term:terminal:{terminal_id}:seen", json.dumps(current))
+
     def get(self, terminal_id: str | None) -> Terminal | None:
-        if not terminal_id or not terminal_id.startswith("t_"):
+        if not terminal_id or not terminal_id.startswith("t_") or ":" in terminal_id:
             return None
         raw = self.store.get(f"term:terminal:{terminal_id}")
         if not raw:
             return None
         try:
             data = json.loads(raw)
+            seen = self.store.get(f"term:terminal:{terminal_id}:seen")
+            if seen:
+                data.update(json.loads(seen))
             return Terminal(**{k: v for k, v in data.items() if k in Terminal.__dataclass_fields__})
         except (ValueError, TypeError):
             return None
@@ -275,6 +301,7 @@ class Terminals:
         if live:
             self.store.delete(f"term:rt:{live}")
         self.store.delete(self._rt_key(terminal_id))
+        self.store.delete(f"term:terminal:{terminal_id}:seen")
         self.store.delete(f"term:terminal:{terminal_id}")
         self.store.hdel(f"term:terminals:{email}", terminal_id)
         return True

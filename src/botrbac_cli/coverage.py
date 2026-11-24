@@ -191,6 +191,10 @@ def _wrap_codex(config: AgentConfig, dry_run: bool) -> dict[str, Any]:
         "backup": None,
         "delete_tables": [f"[mcp_servers.{name}]" for name, _ in moved],
     }
+    if GATEWAY_NAME in servers and not is_gateway(servers[GATEWAY_NAME]):
+        # A table of the person's own already uses the gateway's name: say so rather
+        # than silently leave Codex without the gateway.
+        result["name_taken"] = True
     if dry_run:
         return result
     if GATEWAY_NAME not in servers:
