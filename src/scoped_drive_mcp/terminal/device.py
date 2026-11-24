@@ -140,13 +140,16 @@ class Terminals:
             role_id=role.id,
             created_at=self.clock(),
         )
-        # Saved before the decision, so a poll that sees "approved" always finds it.
+        # Saved and listed before the decision, so a poll that sees "approved" always
+        # finds a terminal the person can see and disconnect.
         self._save(terminal)
+        self.store.hset(f"term:terminals:{email}", terminal.id, "1")
         decision = {"status": "approved", "terminal_id": terminal.id}
         if not self._decide(digest, record["user_code"], decision):
-            self.store.delete(f"term:terminal:{terminal.id}")  # someone else decided first
+            # Someone else decided first: this terminal never existed.
+            self.store.hdel(f"term:terminals:{email}", terminal.id)
+            self.store.delete(f"term:terminal:{terminal.id}")
             return None
-        self.store.hset(f"term:terminals:{email}", terminal.id, "1")
         return terminal
 
     def deny(self, user_code: str) -> bool:
@@ -174,7 +177,7 @@ class Terminals:
                 raise DeviceError("expired_token")
             self.store.delete(key)
             terminal = self.get(str(decision.get("terminal_id")))
-            if terminal is None:
+            if terminal is None or not self._live(terminal):
                 raise DeviceError("access_denied")
             return self._issue(terminal)
         # The last poll time has its own key, so polling never rewrites the record.
@@ -218,7 +221,9 @@ class Terminals:
         digest = _sha(refresh_token)
         terminal_id = self.store.get(f"term:rt:{digest}")
         terminal = self.get(terminal_id) if terminal_id else None
-        if terminal is None or self.store.get(self._rt_key(terminal.id)) != digest:
+        if terminal is None or not self._live(terminal):
+            return None
+        if self.store.get(self._rt_key(terminal.id)) != digest:
             return None
         if not self.signed_in(terminal.email):
             return None
@@ -238,9 +243,14 @@ class Terminals:
             terminal = self.get(str(json.loads(raw).get("terminal_id")))
         except ValueError:
             return None
-        if terminal is None or not self.signed_in(terminal.email):
+        if terminal is None or not self._live(terminal) or not self.signed_in(terminal.email):
             return None
         return terminal
+
+    def _live(self, terminal: Terminal) -> bool:
+        """Still on the person's list. Disconnecting removes it from the list first, so
+        a record written back by an edit racing the disconnect still grants nothing."""
+        return self.store.hget(f"term:terminals:{terminal.email}", terminal.id) is not None
 
     # ---- terminal records ------------------------------------------------------
 
@@ -259,7 +269,8 @@ class Terminals:
         raw = self.store.get(f"term:terminal:{terminal_id}:seen")
         current = json.loads(raw) if raw else {}
         current.update(allowed)
-        self.store.set(f"term:terminal:{terminal_id}:seen", json.dumps(current))
+        # Expires on its own, so a check-in racing a disconnect leaves nothing behind.
+        self.store.set(f"term:terminal:{terminal_id}:seen", json.dumps(current), ex=REFRESH_TTL)
 
     def get(self, terminal_id: str | None) -> Terminal | None:
         if not terminal_id or not terminal_id.startswith("t_") or ":" in terminal_id:
@@ -291,17 +302,22 @@ class Terminals:
             return None
         updated = replace(terminal, **changes)
         self._save(updated)
+        if not self._live(updated):
+            # Disconnected while this edit was in flight: don't leave the record behind.
+            self.store.delete(f"term:terminal:{terminal_id}")
+            return None
         return updated
 
     def revoke(self, email: str, terminal_id: str) -> bool:
         terminal = self.owned(email, terminal_id)
         if terminal is None:
             return False
+        # Off the list first: from this moment no token for it resolves (see _live).
+        self.store.hdel(f"term:terminals:{email}", terminal_id)
         live = self.store.get(self._rt_key(terminal_id))
         if live:
             self.store.delete(f"term:rt:{live}")
         self.store.delete(self._rt_key(terminal_id))
         self.store.delete(f"term:terminal:{terminal_id}:seen")
         self.store.delete(f"term:terminal:{terminal_id}")
-        self.store.hdel(f"term:terminals:{email}", terminal_id)
         return True

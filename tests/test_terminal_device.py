@@ -275,3 +275,36 @@ def test_terminal_check_ins_do_not_undo_role_changes() -> None:
     t.touch(terminal.id, last_seen=5.0, queued=3, role_id="full")  # role_id is ignored
     after = t.get(terminal.id)
     assert after.role_id == "none" and after.last_seen == 5.0 and after.queued == 3
+
+
+def test_an_edit_racing_a_disconnect_does_not_bring_the_terminal_back() -> None:
+    t = _terminals()
+    started = t.start({})
+    terminal = t.approve(ME, started["user_code"], "full", "x")
+    issued = t.poll(started["device_code"])
+    # The edit read the record, then the disconnect ran, then the edit saved.
+    stale = t.get(terminal.id)
+    t.revoke(ME, terminal.id)
+    t._save(stale)
+    assert t.resolve(issued["access_token"]) is None
+    assert t.refresh(issued["refresh_token"]) is None
+    assert t.update(ME, terminal.id, name="y") is None
+    assert t.store.get(f"term:terminal:{terminal.id}") is None
+
+
+def test_a_lost_approval_leaves_nothing_listed() -> None:
+    t = _terminals()
+    started = t.start({})
+    t.store.set_if_absent(f"term:usercode:{started['user_code']}:claim", "1", ex=60)
+    assert t.approve(ME, started["user_code"], "full", "x") is None
+    assert t.store.hgetall(f"term:terminals:{ME}") == {}
+
+
+def test_device_lookups_are_throttled(world, memstore, oauth, monkeypatch) -> None:
+    from scoped_drive_mcp.terminal import feature
+
+    monkeypatch.setattr(feature, "LOOKUP_LIMIT", 1)
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    c.get("/device?code=BCDF-GHJK")
+    assert "Too many codes" in c.get("/device?code=BCDF-GHJK").text
