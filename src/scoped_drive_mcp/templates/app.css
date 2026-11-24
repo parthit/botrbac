@@ -1267,3 +1267,4 @@ header { view-transition-name: site-header; }
   inset: 0 !important;
   margin: auto !important;
 }
+.safari-note { font-size: 14px; margin: 4px 0 16px; }

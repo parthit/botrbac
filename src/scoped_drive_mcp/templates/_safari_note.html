@@ -1,0 +1,4 @@
+{#- Safari blocks Google's cookies inside the picker's frame while "Prevent cross-site
+    tracking" is on, and Google then shows "Can't access your Google Account". This page
+    can't see inside that frame, so ui.js shows the note to every Safari visitor. -#}
+<p class="muted safari-note" data-safari-note hidden>Using Safari? Google’s file picker can’t load while Safari’s <b>Prevent cross-site tracking</b> is on. Turn it off in Safari → Settings → Privacy while you pick, then turn it back on: files you’ve picked stay picked. Or use another browser.</p>

@@ -538,6 +538,16 @@
   if (!pickButtons.length) return;
   var pick = pickButtons[0];
 
+  // Safari (desktop, and every iOS browser since they all use WebKit) blocks Google's
+  // cookies in the picker's frame while cross-site tracking prevention is on.
+  var ua = navigator.userAgent;
+  var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/.test(ua);
+  if (webkitOnly) {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
+      note.hidden = false;
+    });
+  }
+
   function loadPicker() {
     return new Promise(function (resolve, reject) {
       if (window.google && google.picker) { resolve(); return; }

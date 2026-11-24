@@ -11,6 +11,7 @@
 {% if needs_pick %}
 <div class="warn" role="status" id="needs-pick">Google hasn’t opened {{ needs_pick | length }} of these {{ "item" if needs_pick | length == 1 else "items" }} to Bot RBAC yet, so assistants can’t use {{ "it" if needs_pick | length == 1 else "them" }}. Bot RBAC only gets the files you pick in Google’s file picker. Choose <b>Pick again</b> on each one marked below.</div>
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
+{% if picker_ready %}{% include "_safari_note.html" %}{% endif %}
 {% endif %}
 {% if rows or root_folder_id %}
 <table class="cards" data-list>

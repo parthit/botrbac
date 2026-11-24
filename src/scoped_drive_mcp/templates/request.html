@@ -70,6 +70,7 @@
     {% if picker_ready %}
     <p><button type="button" class="primary" id="pick-drive" data-next="/requests/{{ req.id }}" data-request="{{ req.id }}">Choose the file to approve</button></p>
     <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
+    {% include "_safari_note.html" %}
     {% else %}
     <p class="muted">Google’s file picker isn’t set up on this server, so the file can’t be chosen here. Ask whoever runs it to set <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code>.</p>
     {% endif %}
