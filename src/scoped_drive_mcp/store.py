@@ -484,6 +484,8 @@ _SIGNED_PREFIXES = (
     "term:revoked:",
     # Whether commands are recorded: a store writer must not be able to switch it on.
     "term:settings:",
+    # A request from a paired person (peer_requests.py): it names who would get access.
+    "peerreq:",
 )
 _TENANT_PREFIX = re.compile(r"^u:[^:]+:")
 # A tenant email becomes part of `u:{email}:`, so it may not hold the ':' delimiter (the

@@ -216,6 +216,17 @@
     the meantime, so a sender can put a piece back for up to 15 minutes. Nobody can read it (no record
     points at it), and Blob's expiry and the sweep delete it. A browser without Web Crypto, or one
     that cannot reach Blob, sends through the app, which encrypts with `ENCRYPTION_KEY` as before.
+- **Requests between people stay between people.** A paired person can ask you for something from their
+  dashboard ([sharing.md](sharing.md#asking-a-paired-person-for-something)). Those requests are kept apart
+  from assistants' access requests and no MCP tool reads them, so another person's words never reach your
+  assistant this way. A described request takes text only, and the answer to sending one never changes, so
+  it cannot be used to learn what is in your Drive; a request about an item is accepted only for an item the
+  person can already read. The record is signed (it names who would get access) and its text is encrypted
+  with a key derived from `ENCRYPTION_KEY`. Only the person asked can decide it, with the usual session,
+  CSRF and same-origin checks; the form names the requester the page showed, the pairing is checked again,
+  and a decided request cannot be decided twice. Approving shares one item from the approver's own Drive
+  through the same grant checks as the Sharing page. One person can file 3 a day with each person they are
+  paired with, and a request expires after 14 days.
 - **Paired people's writes.** A paired person's assistant can write only inside items you marked
   editable for them, and only create, upload, update and rename (never trash, move or share). Inside an
   editable folder it can't rename anything on your Sharing list, on your own assistants' Access list or
