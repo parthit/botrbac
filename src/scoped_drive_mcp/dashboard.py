@@ -56,7 +56,7 @@ from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
 from .config import Settings
-from .connections import CONNECTIONS, Connection, get_connection
+from .connections import CONNECTIONS, NOTION_WITH_CREATE, Connection, get_connection
 from .drive_client import (
     FOLDER_MIME,
     SHORTCUT_MIME,
@@ -90,9 +90,15 @@ from .mcp_oauth import (
 )
 from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
+from .onedrive import can_write as onedrive_can_write
+from .onedrive_client import READ_SCOPES as ONEDRIVE_READ_SCOPES
+from .onedrive_client import SCOPES as ONEDRIVE_SCOPES
+from .onedrive_client import WRITE_SCOPE as ONEDRIVE_WRITE_SCOPE
 from .onedrive_client import OneDriveApiError, OneDriveOAuthError
 from .onedrive_client import normalize_item_id as normalize_onedrive_id
+from .onedrive_client import normalize_scopes as normalize_onedrive_scopes
 from .onedrive_client import scopes_acceptable as onedrive_scopes_acceptable
+from .onedrive_client import scopes_can_write as onedrive_scopes_can_write
 from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
@@ -277,6 +283,9 @@ class DashboardContext:
     hidden: Any = None
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
+    # NOTION_ALLOW_CREATE: assistants that may edit can add Notion pages. Changes only
+    # what the pages say about Notion; the tool itself is registered in server.py.
+    notion_create: bool = False
     # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
     onedrive: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
@@ -410,6 +419,8 @@ class DashboardContext:
                 if record and record.get("workspace_name"):
                     detail = f"Workspace: {record['workspace_name']}"
                 needs_upgrade = False
+                if self.notion_create:
+                    conn = NOTION_WITH_CREATE
             elif conn.provider == "microsoft":
                 if self.onedrive is None:
                     continue
@@ -680,6 +691,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
     ctx.setdefault("onedrive_tab", getattr(request.state, "onedrive_tab", False))
     ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
+    ctx.setdefault("notion_create", getattr(request.app.state, "notion_create", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -711,8 +723,10 @@ async def terms_page(_: Request) -> Response:
     return render_plain("terms.html")
 
 
-async def privacy_page(_: Request) -> Response:
-    return render_plain("privacy.html")
+async def privacy_page(request: Request) -> Response:
+    return render_plain(
+        "privacy.html", notion_create=getattr(request.app.state, "notion_create", False)
+    )
 
 
 @functools.lru_cache(maxsize=16)
@@ -1336,7 +1350,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if connection.provider == "notion":
             return start_notion(request)
         if connection.provider == "microsoft":
-            return start_onedrive(request)
+            return start_onedrive(request, read_only=form.get("access") == "read")
         if connection.key == "google_drive":
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
@@ -1592,15 +1606,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- OneDrive (an optional connection, Microsoft's own OAuth) ----------------
 
-    def start_onedrive(request: Request) -> Response:
+    def start_onedrive(request: Request, *, read_only: bool = False) -> Response:
         """Send the signed-in person to Microsoft's sign-in and consent screen. The state
-        is signed, expires, is tied to this browser (nonce) and names the account."""
+        is signed, expires, is tied to this browser (nonce), names the account, and carries
+        whether they chose reading only (then only the read scopes are asked for)."""
         nonce = secrets.token_urlsafe(24)
         request.session["onedrive_nonce"] = nonce
+        access = "read" if read_only else "edit"
         state = serializer.dumps(
-            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or ""}
+            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or "", "access": access}
         )
-        return RedirectResponse(ctx.onedrive.oauth.authorization_url(state), status_code=303)
+        scopes = ONEDRIVE_READ_SCOPES if read_only else ONEDRIVE_SCOPES
+        return RedirectResponse(
+            ctx.onedrive.oauth.authorization_url(state, scopes), status_code=303
+        )
 
     async def onedrive_callback(request: Request) -> Response:
         if ctx.onedrive is None:
@@ -1623,8 +1642,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 message = (
                     "Your school or work account doesn’t let you connect apps like Bot RBAC "
                     "yourself. Ask your IT administrator to approve Bot RBAC for your "
-                    "organization, then try again. Nothing changed."
+                    "organization, then try again. Nothing changed. Some organizations let "
+                    "you approve reading but not editing: you can try Connect for reading "
+                    "only on Files → From OneDrive."
                 )
+                retry_actions = [
+                    {
+                        "label": "Connect for reading only",
+                        "href": "/files?tab=onedrive#onedrive-connect",
+                        "primary": True,
+                    },
+                    {"label": "Back to Settings", "href": "/settings#services"},
+                ]
             elif error == "access_denied":
                 title = "You didn’t connect OneDrive"
                 message = "You cancelled on Microsoft’s screen, so nothing changed."
@@ -1658,8 +1687,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         code = params.get("code")
         if not code:
             return render(request, "error.html", 400, message="Microsoft did not return a code.")
+        read_only = data.get("access") == "read"
         try:
-            tokens = await blocking(ctx.onedrive.oauth.exchange_code, code)
+            tokens = await blocking(
+                ctx.onedrive.oauth.exchange_code,
+                code,
+                ONEDRIVE_READ_SCOPES if read_only else ONEDRIVE_SCOPES,
+            )
         except OneDriveOAuthError as exc:
             return render(
                 request,
@@ -1679,9 +1713,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 400,
                 title="OneDrive isn’t connected",
                 message=(
-                    "Microsoft gave Bot RBAC different access than it asks for (read your "
-                    "files), so the connection was not kept. Try again, and keep the "
-                    "permission to read your files ticked."
+                    "Microsoft gave Bot RBAC different access than it asks for (read and "
+                    "edit your files), so the connection was not kept. Try again, and keep "
+                    "the permission to your files ticked."
                 ),
                 actions=retry_actions,
             )
@@ -1713,6 +1747,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # A list is kept only when the same drive reconnects. With no usable earlier
             # connection we can't tell which account the list was chosen for, so it goes.
             await blocking(ctx.onedrive.clear)
+        granted = normalize_onedrive_scopes(tokens.scopes)
+        if read_only:
+            # Reading only was chosen: the connection never writes, even when Microsoft's
+            # token lists Files.ReadWrite (approved once before). Refreshes keep it so.
+            granted.discard(ONEDRIVE_WRITE_SCOPE)
         await blocking(
             ctx.vault.set_onedrive,
             tokens.access_token,
@@ -1722,13 +1761,22 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             account.drive_id,
             account.name,
             account.drive_type,
+            " ".join(sorted(granted)),
         )
         audit_owner("onedrive_connect", connection="onedrive")
-        flash(
-            request,
-            "ok",
-            "OneDrive is connected. Now allow the files and folders your assistants may read.",
-        )
+        if onedrive_scopes_can_write(granted):
+            done = "OneDrive is connected. Now allow the files and folders your assistants may use."
+        elif read_only:
+            done = (
+                "OneDrive is connected for reading only. Now allow the files and folders "
+                "your assistants may read."
+            )
+        else:
+            done = (
+                "OneDrive is connected for reading only: Microsoft didn’t grant editing. "
+                "Now allow the files and folders your assistants may read."
+            )
+        flash(request, "ok", done)
         return RedirectResponse("/files?tab=onedrive", status_code=303)
 
     async def onedrive_disconnect(request: Request) -> Response:
@@ -1757,6 +1805,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
             out: dict[str, Any] = {
                 "onedrive_connected": record is not None,
+                "onedrive_can_write": onedrive_can_write(record),
                 "account": (record or {}).get("account") or "",
                 "allowed": allowed,
                 "listing": {"folder": None, "up": None, "items": []},
@@ -4153,6 +4202,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     )
     app.state.owner_email = settings.owner_email
     app.state.terminal_tab = ctx.terminal is not None
+    app.state.notion_create = ctx.notion_create
     # Mount("/") serves this app, so request.app is this app, not the outer one.
     app.state.dashboard = ctx
     return app

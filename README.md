@@ -111,7 +111,7 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/tools.md](docs/tools.md) | Every tool, which role may call it, and how files are read |
 | [docs/roles.md](docs/roles.md) | Named roles: give an agent or subagent only part of your allowed list |
 | [docs/notion.md](docs/notion.md) | Optional: let assistants read the Notion pages you allow |
-| [docs/onedrive.md](docs/onedrive.md) | Optional: let assistants read the OneDrive files and folders you allow |
+| [docs/onedrive.md](docs/onedrive.md) | Optional: let assistants read (and, if they may edit, add and change) the OneDrive files and folders you allow |
 | [docs/terminal.md](docs/terminal.md) | Bot RBAC Terminal: the `botrbac` CLI, roles for local agents, `--role` sessions, hooks |
 | [docs/sharing.md](docs/sharing.md) | Pairing assistants, the mailbox between your own assistants, sharing with other people |
 | [docs/security.md](docs/security.md) | Security notes and how the allowlist check works |

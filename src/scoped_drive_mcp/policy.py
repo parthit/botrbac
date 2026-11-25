@@ -34,6 +34,9 @@ GUEST_TOOLS: frozenset[str] = frozenset(
 
 # Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
 NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
+# Creating a new page under an allowed Notion page (notion.py). Never edits or deletes one.
+# Off unless the deployment sets NOTION_ALLOW_CREATE: see OPT_IN_TOOLS below.
+NOTION_WRITE_TOOLS: frozenset[str] = frozenset({"notion_create_page"})
 
 # Reading the person's own OneDrive, limited to what they allowed (onedrive.py). Read-only.
 ONEDRIVE_TOOLS: frozenset[str] = frozenset(
@@ -88,6 +91,16 @@ GUEST_WRITE_TOOLS: frozenset[str] = frozenset(
 UPLOAD_TOOLS: frozenset[str] = frozenset(
     {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 )
+# Changing the person's own OneDrive, inside what they allowed (onedrive.py). Like the
+# Drive writes: only for a connection allowed to edit. Nothing deletes, moves or shares.
+ONEDRIVE_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "onedrive_create_folder",
+        "onedrive_upload_file",
+        "onedrive_update_file",
+        "onedrive_rename_file",
+    }
+)
 # Sending one file to a paired person (drops.py), and saving one sent to this human into
 # their own Drive. Like the writes above, only for a connection allowed to edit.
 DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
@@ -97,6 +110,7 @@ EDITOR_TOOLS: frozenset[str] = (
     | GUEST_WRITE_TOOLS
     | DROP_TOOLS
     | UPLOAD_TOOLS
+    | ONEDRIVE_WRITE_TOOLS
     | {
         "create_folder",
         "create_doc",
@@ -135,6 +149,21 @@ AGENT_ROLE_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Tools that are not in the role sets above and exist only when a deployment turns them on
+# with a setting; server.py registers them only then. Until it does, there is no such tool
+# to list or call, whatever this says. Like create_doc, they are for connections that may
+# edit.
+OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
+    Role.EDITOR: NOTION_WRITE_TOOLS,
+    Role.ADMIN: NOTION_WRITE_TOOLS,
+}
+_OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
+
+# Tools whose result is a new item: its id goes into the audit record.
+NEW_ITEM_TOOLS: frozenset[str] = frozenset(
+    {"finish_upload", "save_export", "onedrive_create_folder", "onedrive_upload_file"}
+)
+
 _AUDITED_ID_ARGS = (
     "file_id",
     "folder_id",
@@ -142,6 +171,7 @@ _AUDITED_ID_ARGS = (
     "request_id",
     "owner",
     "page_id",
+    "parent_page_id",
     "upload_id",
 )
 
@@ -160,9 +190,10 @@ def is_allowed(role: Role | str | None, tool: str) -> bool:
     if role is None:
         return False
     try:
-        return tool in ROLE_TOOLS[Role(role)]
+        known = Role(role)
     except ValueError:
         return False
+    return tool in ROLE_TOOLS[known] or tool in OPT_IN_TOOLS.get(known, frozenset())
 
 
 def off_its_role(principal: Principal) -> bool:
@@ -233,7 +264,7 @@ def require(
     The wrapper keeps the original signature (via functools.wraps) so FastMCP still
     generates the right input schema.
     """
-    if tool not in ALL_TOOLS:
+    if tool not in ALL_TOOLS and tool not in _OPT_IN_NAMES:
         raise ValueError(f"tool {tool!r} is not in the role map")
 
     def decorator(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -323,11 +354,15 @@ def require(
                 ids["upload_id"] = uid if isinstance(uid, str) else None
                 if not ids.get("parent_id") and isinstance(result.get("parent_id"), str):
                     ids["parent_id"] = result["parent_id"]
-            if tool in ("finish_upload", "save_export") and isinstance(result, dict):
+            if tool in NEW_ITEM_TOOLS and isinstance(result, dict):
                 # The new file, so Activity can name what was written.
                 fid = result.get("id")
                 if isinstance(fid, str) and not ids.get("file_id"):
                     ids["file_id"] = fid
+            if tool == "notion_create_page" and isinstance(result, dict):
+                # The new page, next to the parent it was asked for (parent_page_id).
+                pid = result.get("id")
+                ids["page_id"] = pid if isinstance(pid, str) else None
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 

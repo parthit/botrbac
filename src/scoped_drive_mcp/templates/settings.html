@@ -104,6 +104,14 @@
       <input type="hidden" name="next" value="{{ next }}">
       <button class="primary" type="submit">{% if row.needs_upgrade %}Reconnect {{ conn.name }}{% else %}Connect {{ conn.name }}{% endif %}</button>
     </form>
+    {% if conn.key == "onedrive" %}
+    <form method="post" action="/connect/onedrive">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <input type="hidden" name="access" value="read">
+      <button type="submit">Connect for reading only</button>
+    </form>
+    {% endif %}
     {% endif %}
   </article>
   {% endfor %}
