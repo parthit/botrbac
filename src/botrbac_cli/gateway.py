@@ -26,6 +26,7 @@ from . import __version__, policy, state
 from .patterns import normalize_server
 from .protect import refusal
 from .queue import AuditQueue
+from .sealing import describe
 
 logger = logging.getLogger("botrbac.gateway")
 SEPARATOR = "__"
@@ -132,6 +133,7 @@ class Gateway:
                 tool=f"unknown/{safe_tool(exposed)}",
                 agent=self.agent or "mcp-client",
                 via="gateway",
+                command=describe(arguments),
                 **policy.session_fields(),
             )
             return _error(f"Unknown tool {exposed!r}.")
@@ -141,6 +143,7 @@ class Gateway:
             "agent": self.agent or "mcp-client",
             "role": decision.role,
             "via": "gateway",
+            "command": describe(arguments),
             **policy.session_fields(),
         }
         guarded = refusal(route.tool_id, arguments)

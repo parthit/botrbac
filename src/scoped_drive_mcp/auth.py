@@ -68,7 +68,9 @@ OAuthResolver = Callable[[str], Principal | None]
 
 
 def hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    # "surrogatepass": a string JSON let through but UTF-8 cannot hold (a lone surrogate)
+    # hashes to something no token has, instead of raising.
+    return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def verify_token(token: str, entries: Iterable[TokenEntry]) -> Principal | None:

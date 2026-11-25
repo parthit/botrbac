@@ -28,7 +28,7 @@ school account). The dashboard says so when they disconnect.
 | `onedrive_list_folder(folder_id?)` | No folder: the allowed files and folders. A folder: its contents, when it is allowed or inside one |
 | `onedrive_read_file(file_id)` | Text of an allowed file (same formats as `read_file`: Word, PDF, PowerPoint, Excel, RTF, text) |
 | `onedrive_download_file(file_id)` | Size-capped base64 of an allowed file |
-| `onedrive_search(query, max_results?)` | Microsoft's search (names and content), filtered to what is allowed |
+| `onedrive_search(query, max_results?)` | Microsoft's search (names and content) inside each allowed folder; an allowed single file is matched by name |
 
 All four are read-only and available to every app role. They are registered only when OneDrive is
 configured on the server. An item that is not allowed and one that does not exist get the same

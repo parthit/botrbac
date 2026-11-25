@@ -53,6 +53,13 @@ CLIENT_ID_PREFIX = "c1."
 MAX_CLIENT_ID = 2048
 # Approvals whose code was never exchanged that one approval may clean up.
 PRUNE_BATCH = 50
+# Connections one account may hold, counting approvals still waiting for their code. Every
+# page that lists connections reads all of them, for everyone, so one account must not be
+# able to add without end. Past this, approving a new one disconnects that account's
+# least recently used.
+MAX_GRANTS_PER_ACCOUNT = 25
+# The largest body /oauth/register and /oauth/token read. Real ones are a few hundred bytes.
+MAX_BODY = 64 * 1024
 # Clients registered before ids were signed are still read from here.
 CLIENTS_KEY = "oauth:clients"
 GRANTS_KEY = "oauth:grants"
@@ -701,6 +708,16 @@ class McpOAuth:
         )
 
     async def _limited(self, request: Request, name: str) -> JSONResponse | None:
+        # A page on another site can make a visitor's browser post here (a plain form
+        # needs no permission). It could never read the answer, and no real client is a
+        # page on another site, so such a request is refused before it is counted:
+        # otherwise that page could use up its visitor's allowance and lock their own
+        # apps out of this endpoint.
+        if _from_another_site(request, self.base_url):
+            return _oauth_error("invalid_request", "Requests from other sites are refused.", 403)
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > MAX_BODY:
+            return _oauth_error("invalid_request", "The request is too large.", 413)
         if self.rate_limit is None:
             return None
         limit, window = self.rate_limit
@@ -866,6 +883,11 @@ class McpOAuth:
                 except (ValueError, KeyError, TypeError):
                     continue
                 if grant.access_hashes or grant.refresh_hash or not grant.code_hash:
+                    # A connection whose refresh token ended, and with it (an hour later
+                    # at most) its last access token: nothing can use it again.
+                    ended = grant.refresh_until + ACCESS_TTL + 60
+                    if 0 < grant.refresh_until and ended < current and self.revoke(grant_id):
+                        removed += 1
                     continue
                 created = _timestamp(grant.created_at)
                 # A minute past the code's own end, so a slow exchange is never cut short.
@@ -877,6 +899,30 @@ class McpOAuth:
             # Clean-up must never stop an approval.
             logger.warning("OAuth clean-up failed", exc_info=True)
         return removed
+
+    def _make_room(self, email: str) -> None:
+        """Keep `email` under MAX_GRANTS_PER_ACCOUNT before one more is added: approvals
+        never redeemed go first, then the connection used longest ago. Only ever this
+        account's own."""
+        mine: list[OAuthGrant] = []
+        for raw in self.store.hgetall(GRANTS_KEY).values():
+            try:
+                grant = OAuthGrant.from_json(raw)
+            except (ValueError, KeyError, TypeError):
+                continue
+            if grant.email == email:
+                mine.append(grant)
+        excess = len(mine) - (MAX_GRANTS_PER_ACCOUNT - 1)
+        if excess <= 0:
+            return
+        mine.sort(
+            key=lambda g: (
+                bool(g.access_hashes or g.refresh_hash),
+                str(g.last_used or g.created_at),
+            )
+        )
+        for grant in mine[:excess]:
+            self.revoke(grant.id, email)
 
     # ---- authorize -------------------------------------------------------
 
@@ -996,6 +1042,7 @@ class McpOAuth:
             separators=(",", ":"),
         )
         grant.code_hash = digest
+        self._make_room(email)
         # The role first, so the grant is never visible without it.
         self.store.set(_role_key(grant.id), role)
         self._save_grant(grant)
@@ -1428,12 +1475,41 @@ def _oauth_error(error: str, description: str, status: int) -> JSONResponse:
     )
 
 
+def _from_another_site(request: Request, base_url: str) -> bool:
+    """Whether a browser says a page on another website made this request. Browsers send
+    `Origin` with every cross-site POST. Desktop apps that send some other kind of origin
+    (`vscode-file://`, `null`) are not websites and are left alone."""
+    origin = request.headers.get("origin", "").strip().rstrip("/").lower()
+    if not origin.startswith(("http://", "https://")):
+        return False
+    own = {base_url.rstrip("/").lower(), str(request.base_url).rstrip("/").lower()}
+    return origin not in own
+
+
+class _TooLarge(Exception):
+    pass
+
+
+async def _body(request: Request) -> bytes:
+    """The request body, read no further than MAX_BODY."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY:
+            raise _TooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _json_object(request: Request) -> dict[str, Any]:
     content_type = request.headers.get("content-type", "")
     if "application/json" not in content_type.lower():
         raise RegistrationError("invalid_client_metadata", "Content-Type must be application/json.")
     try:
-        payload = await request.json()
+        payload = json.loads(await _body(request))
+    except _TooLarge:
+        raise RegistrationError("invalid_client_metadata", "The request is too large.") from None
     except Exception:
         raise RegistrationError("invalid_client_metadata", "body must be JSON") from None
     if not isinstance(payload, dict):
@@ -1442,17 +1518,27 @@ async def _json_object(request: Request) -> dict[str, Any]:
 
 
 async def _token_form(request: Request) -> dict[str, str]:
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type.lower():
+    content_type = request.headers.get("content-type", "").lower()
+    try:
+        body = await _body(request)
+    except _TooLarge:
+        raise TokenError("invalid_request", "The request is too large.") from None
+    if "application/json" in content_type:
         try:
-            payload = await request.json()
+            payload = json.loads(body)
         except Exception:
             raise TokenError("invalid_request", "body must be JSON") from None
         if not isinstance(payload, dict):
             raise TokenError("invalid_request", "body must be an object")
         return {str(k): v for k, v in payload.items() if isinstance(v, str)}
-    form = await request.form()
-    return {str(k): v for k, v in form.items() if isinstance(v, str)}
+    if "multipart/" in content_type:
+        # Never parsed: a file part would be written to disk whatever its size.
+        raise TokenError("invalid_request", "Send the form as application/x-www-form-urlencoded.")
+    try:
+        pairs = parse_qsl(body.decode("utf-8"), keep_blank_values=True)
+    except UnicodeDecodeError:
+        raise TokenError("invalid_request", "body must be a form") from None
+    return dict(pairs)
 
 
 def _pkce_ok(verifier: str, challenge: str) -> bool:

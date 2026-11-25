@@ -450,7 +450,22 @@ _SIGNED_HASHES = frozenset(
         AGENT_ROLES_KEY,
     }
 )
+# Single records signed like the hashes above. `drops:folder` is the one folder a saved
+# held file may be written into: the whole allowlist of the save guard.
+_SIGNED_KEYS = frozenset({"drops:folder"})
+# Mail and held files: who a message is for, and which pieces are a held file. The text
+# and the pieces are encrypted, but the server decrypts them for whoever the record
+# names, so the record itself must be one a store writer cannot rewrite or copy to
+# another person's keys.
+_SIGNED_CONTENT_HASHES = frozenset({"drops:index"})
+_SIGNED_CONTENT_PREFIXES = ("bridge:msg:", "drops:part:")
+# Records of those kinds (and `drops:folder`) written before they were signed are read
+# until this moment even when REQUIRE_SIGNED_RECORDS is on, so mail and held files in
+# flight at the upgrade are not lost. Mail lives 14 days and a held file DROP_HOLD_HOURS,
+# so every such record has expired well before it. 2027-01-15T00:00:00Z.
+UNSIGNED_CONTENT_UNTIL = 1799971200
 _SIGNED_PREFIXES = (
+    *_SIGNED_CONTENT_PREFIXES,
     "oauth:",
     "bridge:link:",
     "bridge:appr:",
@@ -458,7 +473,7 @@ _SIGNED_PREFIXES = (
     "bridge:user:",
     "bridge:invite:",
     "bridge:selfclaim:",
-    # Bot RBAC Terminal: roles, terminals, their tokens and revoked sessions.
+    # Bot RBAC Terminal: roles, terminals, their tokens, revoked sessions, settings.
     "term:roles:",
     "term:terminal:",
     "term:terminals:",
@@ -467,6 +482,8 @@ _SIGNED_PREFIXES = (
     "term:at:",
     "term:rt:",
     "term:revoked:",
+    # Whether commands are recorded: a store writer must not be able to switch it on.
+    "term:settings:",
 )
 _TENANT_PREFIX = re.compile(r"^u:[^:]+:")
 # A tenant email becomes part of `u:{email}:`, so it may not hold the ':' delimiter (the
@@ -490,7 +507,25 @@ def tenant_prefix(email: str) -> str:
 def signs(key: str) -> bool:
     """Whether `key` (as seen below the `sdm:` prefix) holds a signed record."""
     name = _TENANT_PREFIX.sub("", key, count=1)
-    return name in _SIGNED_HASHES or name.startswith(_SIGNED_PREFIXES)
+    return (
+        name in _SIGNED_HASHES
+        or name in _SIGNED_KEYS
+        or name in _SIGNED_CONTENT_HASHES
+        or name.startswith(_SIGNED_PREFIXES)
+    )
+
+
+def _unsigned_still_read(key: str, now: float) -> bool:
+    """Whether an unsigned `key` is one of the kinds signed only since mail and held
+    files were, and the time for reading those unsigned has not run out."""
+    if now >= UNSIGNED_CONTENT_UNTIL:
+        return False
+    name = _TENANT_PREFIX.sub("", key, count=1)
+    return (
+        name in _SIGNED_KEYS
+        or name in _SIGNED_CONTENT_HASHES
+        or name.startswith(_SIGNED_CONTENT_PREFIXES)
+    )
 
 
 def signing_key(encryption_key: str) -> bytes:
@@ -566,7 +601,7 @@ class SignedStore:
             self.refused += 1
             logger.warning("stored record failed its signature check and was ignored")
             return None
-        if self.require:
+        if self.require and not _unsigned_still_read(key, time.time()):
             self.refused += 1
             logger.warning("unsigned stored record ignored (REQUIRE_SIGNED_RECORDS is on)")
             return None
@@ -704,6 +739,8 @@ def sign_existing_records(
         prefix = "" if email == admin_email else tenant_prefix(email)
         sign_hash(prefix + ALLOWLIST_KEY)
         sign_hash(prefix + EXTERNAL_ALLOWLIST_KEY)
+        for name in _SIGNED_KEYS:
+            sign(prefix + name)
         for link_id in sign_hash(f"bridge:user:{email}"):
             sign(f"bridge:link:{link_id}")
             sign_hash(f"bridge:appr:{link_id}")
@@ -1549,6 +1586,19 @@ class ActivityLog:
         guest = record.get("guest")
         if record.get("event") == "auth":
             parts = ["auth", str(record.get("reason"))]
+        elif (
+            record.get("event") == "owner"
+            and record.get("decision") == "deny"
+            and current_actor.get() is None
+        ):
+            # A refusal with nobody signed in (a sign-in by an account that is not let in)
+            # lands in the admin's list, and anyone can cause one: once an hour per kind.
+            parts = [
+                "nobody",
+                str(record.get("action")),
+                str(record.get("decision")),
+                str(record.get("reason")),
+            ]
         elif guest:
             allowed = record.get("decision") == "allow"
             parts = [
