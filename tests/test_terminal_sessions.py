@@ -1,4 +1,4 @@
-"""Terminal, phase 6: --role sessions, shell-init, wrap and doctor, the session page."""
+"""Terminal: --role sessions, shell-init, wrap and doctor, the session page."""
 
 import json
 import os
@@ -17,7 +17,7 @@ from botrbac_cli.main import main
 from botrbac_cli.queue import AuditQueue
 from tests import dash
 from tests.conftest import OWNER_EMAIL
-from tests.terminal_helpers import connect_terminal, terminal_app
+from tests.terminal_helpers import bearer, cache_policy, connect_terminal, terminal_app
 
 CLI = [sys.executable, "-m", "botrbac_cli"]
 BASH = shutil.which("bash")
@@ -40,17 +40,7 @@ def home(tmp_path, monkeypatch):
 
 
 def _cache(revoked=()):
-    state.write_json(
-        "policy.json",
-        {
-            "policy": {
-                "role": {"id": "dev", "name": "Dev", "patterns": ["github/*", "fs/*"]},
-                "roles": ROLES,
-                "revoked_sessions": list(revoked),
-            },
-            "fetched_at": time.time(),
-        },
-    )
+    cache_policy(["github/*", "fs/*"], name="Dev", role_id="dev", roles=ROLES, revoked=revoked)
 
 
 def _allowed(tool: str) -> bool:
@@ -115,33 +105,32 @@ def test_run_hands_the_session_to_child_processes(home, capfd) -> None:
     assert main(["run", "--role", "reviewer", "--", "/nonexistent/agent"]) == 127
 
 
-def _fake_agent(home: Path) -> Path:
+def _shell(home: Path, shell: str):
+    """Runs a line in `shell` with `botrbac shell-init` loaded and a fake `claude` that
+    prints its arguments and session."""
     bin_dir = home / "bin"
     bin_dir.mkdir()
     agent = bin_dir / "claude"
     agent.write_text('#!/bin/sh\necho "args:$*"\necho "session:${BOTRBAC_SESSION:-none}"\n')
     agent.chmod(0o755)
-    return bin_dir
+    init = subprocess.run(  # noqa: S603 - this repo's CLI
+        [*CLI, "shell-init", "--shell", Path(shell).name, "--agents", "claude"],
+        capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def run(line: str) -> subprocess.CompletedProcess:
+        return subprocess.run(  # noqa: S603 - the test's own script
+            [shell, "-c", f"{init}\n{line}"], capture_output=True, text=True, env=env
+        )
+
+    return run
 
 
 @pytest.mark.skipif(BASH is None, reason="bash not installed")
 def test_shell_init_bash(home) -> None:
     _cache()
-    bin_dir = _fake_agent(home)
-    init = subprocess.run(  # noqa: S603 - this repo's CLI
-        [*CLI, "shell-init", "--shell", "bash", "--agents", "claude"],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=os.environ,
-    ).stdout
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-
-    def bash(line: str) -> subprocess.CompletedProcess:
-        return subprocess.run(  # noqa: S603 - the test's own script
-            [BASH, "-c", f"{init}\n{line}"], capture_output=True, text=True, env=env
-        )
-
+    bash = _shell(home, BASH)
     wrapped = bash('claude --botrbac --role reviewer --model x "two words"')
     assert wrapped.returncode == 0, wrapped.stderr
     assert "args:--model x two words" in wrapped.stdout
@@ -154,20 +143,19 @@ def test_shell_init_bash(home) -> None:
     assert bash("claude --botrbac").returncode == 2
     assert bash("claude --role=reader --botrbac hi").stdout.startswith("args:hi")
 
+    # `--` ends the wrapper's own options.
+    plain = bash("claude -- --botrbac --role x")
+    assert "args:-- --botrbac --role x" in plain.stdout and "session:none" in plain.stdout
+    wrapped = bash("claude --botrbac --role reviewer -- --role keep")
+    assert "args:-- --role keep" in wrapped.stdout and "session:none" not in wrapped.stdout
+    missing = bash("claude --botrbac --role")
+    assert missing.returncode == 2 and "needs a value" in missing.stderr
+
 
 @pytest.mark.skipif(ZSH is None, reason="zsh not installed")
 def test_shell_init_zsh(home) -> None:
     _cache()
-    bin_dir = _fake_agent(home)
-    init = subprocess.run(  # noqa: S603 - this repo's CLI
-        [*CLI, "shell-init", "--shell", "zsh", "--agents", "claude"],
-        capture_output=True, text=True, check=True,
-    ).stdout  # fmt: skip
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    r = subprocess.run(  # noqa: S603 - the test's own script
-        [ZSH, "-c", f"{init}\nclaude --botrbac --role reviewer hi"],
-        capture_output=True, text=True, env=env,
-    )  # fmt: skip
+    r = _shell(home, ZSH)("claude --botrbac --role reviewer hi")
     assert "args:hi" in r.stdout and "session:none" not in r.stdout
 
 
@@ -248,7 +236,7 @@ def test_session_page_and_revoke(world, memstore, oauth) -> None:
         {"event_id": "g" * 16, "ts": time.time(), "decision": "deny", "session_id": child,
          "tool": "github/create_issue", "reason": "not in role Reader", "agent": "codex"},
     ]  # fmt: skip
-    headers = {"Authorization": f"Bearer {issued['access_token']}"}
+    headers = bearer(issued)
     c.post("/api/terminal/audit", json={"rows": rows}, headers=headers)
     page = c.get(f"/terminal/sessions/{root}")
     assert page.status_code == 200
@@ -265,20 +253,11 @@ def test_session_page_and_revoke(world, memstore, oauth) -> None:
 
 
 def test_ambiguous_role_name_is_an_error() -> None:
-    state.write_json(
-        "policy.json",
-        {
-            "policy": {
-                "role": {"id": "dev", "name": "Dev", "patterns": ["*"]},
-                "roles": [
-                    {"id": "r_1", "name": "Reviewer", "patterns": ["a/*"]},
-                    {"id": "r_2", "name": "reviewer", "patterns": ["b/*"]},
-                ],
-                "revoked_sessions": [],
-            },
-            "fetched_at": time.time(),
-        },
-    )
+    roles = [
+        {"id": "r_1", "name": "Reviewer", "patterns": ["a/*"]},
+        {"id": "r_2", "name": "reviewer", "patterns": ["b/*"]},
+    ]
+    cache_policy(["*"], name="Dev", role_id="dev", roles=roles)
     with pytest.raises(session.SessionError, match="r_1, r_2"):
         session.start("Reviewer", "claude")
     assert session.start("r_2", "claude")["role_id"] == "r_2"
@@ -289,29 +268,6 @@ def test_signal_exit_code(home) -> None:
     code = main(["run", "--role", "reviewer", "--", sys.executable, "-c",
                  "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"])  # fmt: skip
     assert code == 128 + 15
-
-
-@pytest.mark.skipif(BASH is None, reason="bash not installed")
-def test_shell_init_stops_at_double_dash(home) -> None:
-    _cache()
-    bin_dir = _fake_agent(home)
-    init = subprocess.run(  # noqa: S603 - this repo's CLI
-        [*CLI, "shell-init", "--shell", "bash", "--agents", "claude"],
-        capture_output=True, text=True, check=True,
-    ).stdout  # fmt: skip
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-
-    def bash(line: str) -> subprocess.CompletedProcess:
-        return subprocess.run(  # noqa: S603 - the test's own script
-            [BASH, "-c", f"{init}\n{line}"], capture_output=True, text=True, env=env
-        )
-
-    plain = bash("claude -- --botrbac --role x")
-    assert "args:-- --botrbac --role x" in plain.stdout and "session:none" in plain.stdout
-    wrapped = bash("claude --botrbac --role reviewer -- --role keep")
-    assert "args:-- --role keep" in wrapped.stdout and "session:none" not in wrapped.stdout
-    missing = bash("claude --botrbac --role")
-    assert missing.returncode == 2 and "needs a value" in missing.stderr
 
 
 def test_wrap_claude_user_file_with_projects(home) -> None:

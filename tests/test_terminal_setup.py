@@ -1,4 +1,4 @@
-"""Terminal setup: the install script, the agent instructions, add-gateway and the page."""
+"""Terminal setup: the install script, agent instructions, add-gateway, login and the page."""
 
 import json
 import stat
@@ -234,46 +234,87 @@ def test_add_gateway_leaves_broken_or_clashing_files(home, capsys) -> None:
 # ---- the CLI's login output and default server -------------------------------------------
 
 
-def test_login_defaults_to_botrbac_com_and_prints_plain_lines(home, monkeypatch, capsys) -> None:
+class _LoginApi:
+    """botrbac_cli.api.Api for `botrbac login`: answers each poll from `polls`."""
+
+    seen: dict = {}
+    polls: list = []
+
+    def __init__(self, server=None, client=None):
+        _LoginApi.seen["server"] = server
+        self.server = server
+
+    def start_login(self, hostname, os_name):
+        return {
+            "device_code": "d",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": f"{self.server}/device",
+            "verification_uri_complete": f"{self.server}/device?code=ABCD-EFGH",
+            "interval": 1,
+            "expires_in": 60,
+        }
+
+    def poll_login(self, device_code):
+        return _LoginApi.polls.pop(0) if _LoginApi.polls else {"access_token": "x"}
+
+    def policy(self):
+        return {"email": "me@example.com", "role": {"name": "Read-only"}}
+
+
+@pytest.fixture
+def login_api(home, monkeypatch):
     from botrbac_cli import main as cli
 
-    seen = {}
-
-    class FakeApi:
-        def __init__(self, server=None, client=None):
-            seen["server"] = server
-            self.server = server
-
-        def start_login(self, hostname, os_name):
-            return {
-                "device_code": "d",
-                "user_code": "ABCD-EFGH",
-                "verification_uri": f"{self.server}/device",
-                "verification_uri_complete": f"{self.server}/device?code=ABCD-EFGH",
-                "interval": 0,
-                "expires_in": 60,
-            }
-
-        def poll_login(self, device_code):
-            return {"access_token": "x"}
-
-        def policy(self):
-            return {"email": "me@example.com", "role": {"name": "Read-only"}}
-
+    sleeps: list = []
     monkeypatch.delenv("BOTRBAC_SERVER", raising=False)
-    monkeypatch.setattr(cli, "Api", FakeApi)
-    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(cli, "Api", _LoginApi)
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+    _LoginApi.polls = []
+    return sleeps
+
+
+def test_login_defaults_to_botrbac_com_and_prints_plain_lines(login_api, monkeypatch, capsys):
     assert main(["login"]) == 0
-    assert seen["server"] == "https://botrbac.com"
+    assert _LoginApi.seen["server"] == "https://botrbac.com"
     out = capsys.readouterr().out.splitlines()
     assert "Link: https://botrbac.com/device?code=ABCD-EFGH" in out
     assert "Code: ABCD-EFGH" in out
     assert out[-1] == "Logged in as me@example.com, role Read-only"
     monkeypatch.setenv("BOTRBAC_SERVER", "https://rbac.example.org")
-    assert main(["login"]) == 0 and seen["server"] == "https://rbac.example.org"
+    assert main(["login"]) == 0 and _LoginApi.seen["server"] == "https://rbac.example.org"
     assert main(["login", "--server", "http://localhost:8000"]) == 0
-    assert seen["server"] == "http://localhost:8000"
+    assert _LoginApi.seen["server"] == "http://localhost:8000"
     assert state.read_json("policy.json")
+
+
+def test_login_waits_politely(login_api) -> None:
+    """RFC 8628: slow_down adds five seconds to every later wait; rate_limited waits a
+    minute once."""
+    _LoginApi.polls = ["authorization_pending", "slow_down", "rate_limited", "slow_down"]
+    assert main(["login"]) == 0
+    assert login_api == [1, 1, 6, 60, 6, 11]
+
+
+@pytest.mark.parametrize(
+    ("polls", "message"),
+    [
+        (["authorization_pending", "access_denied"], "Login refused on the website"),
+        (["invalid_grant"], "Login did not complete: invalid_grant"),
+    ],
+)
+def test_login_that_does_not_finish_exits_1(login_api, capsys, polls, message) -> None:
+    _LoginApi.polls = polls
+    assert main(["login"]) == 1
+    assert message in capsys.readouterr().err
+    assert state.read_json("policy.json") is None
+
+
+def test_login_code_expiring_exits_1(login_api, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(_LoginApi, "start_login", lambda self, h, o: {
+        "device_code": "d", "user_code": "ABCD-EFGH", "verification_uri_complete": "x",
+        "expires_in": -1})  # fmt: skip
+    assert main(["login"]) == 1
+    assert "code expired" in capsys.readouterr().err
 
 
 def test_unreachable_server_is_one_line_and_exit_1(home, monkeypatch, capsys) -> None:
@@ -288,8 +329,14 @@ def test_unreachable_server_is_one_line_and_exit_1(home, monkeypatch, capsys) ->
 
 def test_terminal_page_leads_with_setup(world, memstore, oauth) -> None:
     c = dash.client(terminal_app(world, memstore, oauth))
+    assert c.get("/terminal").headers["location"].startswith("/login")  # signed out
     dash.login(c)
-    page = c.get("/terminal").text
+    assert 'href="/terminal"' in c.get("/").text  # in the nav
+    for other in ["/files", "/requests", "/sharing", "/activity", "/settings"]:
+        assert c.get(other).status_code == 200, other  # the rest of the site still answers
+    r = c.get("/terminal")
+    assert r.status_code == 200
+    page = r.text
     assert page.index('id="setup"') < page.index('id="no-terminals"')
     assert f"Set up Bot RBAC Terminal for me by following {BASE_URL}/terminal/setup.md" in page
     assert f"curl -fsSL {BASE_URL}/terminal/install.sh | sh -s -- --agent claude-code" in page

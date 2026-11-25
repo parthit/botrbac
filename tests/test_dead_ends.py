@@ -81,18 +81,27 @@ def test_reading_a_paired_persons_file_points_at_read_shared_file(world, memstor
     assert OWNER_EMAIL not in json.dumps(other)
 
 
+@pytest.mark.parametrize(
+    ("shared", "requested"),
+    [
+        ("loose-doc", "loose-doc"),
+        # The request page uses the same guest guard as read_file: a file inside a folder
+        # on the sharer's list counts as shared, not only the exact id that was shared.
+        ("proj", "proj-notes"),
+    ],
+)
 def test_old_request_for_a_paired_persons_file_says_it_is_not_in_your_drive(
-    world, memstore, oauth
+    world, memstore, oauth, shared, requested
 ) -> None:
     app = _app(world, memstore, oauth)
     owner, eve = client(app), client(app)
     login(owner)
     login(eve, "eve-code")
-    assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
+    assert post(owner, "/sharing/add", file_id=shared).status_code == 303
     _pair(app, OWNER_EMAIL, EVE)
     store = app.state.dashboard.directory.store_for(EVE)
     req, _ = AccessRequests(store).create(
-        tool="read_file", token_name="oauth:Grok_Eve", reason="r", file_id="loose-doc"
+        tool="read_file", token_name="oauth:Grok_Eve", reason="r", file_id=requested
     )
     page = eve.get(f"/requests/{req.id}").text
     assert "This file isn\u2019t in your Drive" in page
@@ -187,15 +196,6 @@ def test_pick_mode_does_not_offer_already_allowed_items(owner_c) -> None:
     assert "Already allowed" in loose and "Allow for this request" not in loose
     two = page[page.index("Second memo") :].split("</li>", 1)[0]
     assert "Allow for this request" in two
-
-
-def test_approved_request_names_the_item_for_the_assistant(owner_c) -> None:
-    rid = mcp_call(owner_c, "read_file", file_id="priv-secret")["structuredContent"]["request_id"]
-    post(owner_c, f"/requests/{rid}/approve", target_id="priv")
-    status = mcp_call(owner_c, "check_access_request", request_id=rid)["structuredContent"]
-    assert status["granted_name"] == "Private"
-    assert "\u201cPrivate\u201d (id priv)" in status["message"]
-    assert "list_folder" in status["message"]
 
 
 # ---- C. Cancelling on Google's screen ------------------------------------------------
@@ -428,26 +428,6 @@ def test_decided_request_headline_is_past_tense() -> None:
     assert request_headline(req).endswith("asked to use old notes.")
     req.tool, req.status = "read_file", "approved"
     assert request_headline(req).endswith("asked to read old notes.")
-
-
-def test_old_request_for_a_file_inside_a_shared_folder_names_the_sharer(
-    world, memstore, oauth
-) -> None:
-    """The request page uses the same guest guard as read_file: a file inside a folder on
-    the sharer's list counts as shared, not only the exact id that was shared."""
-    app = _app(world, memstore, oauth)
-    owner, eve = client(app), client(app)
-    login(owner)
-    login(eve, "eve-code")
-    assert post(owner, "/sharing/add", file_id="proj").status_code == 303
-    _pair(app, OWNER_EMAIL, EVE)
-    store = app.state.dashboard.directory.store_for(EVE)
-    req, _ = AccessRequests(store).create(
-        tool="read_file", token_name="oauth:Grok_Eve", reason="r", file_id="proj-notes"
-    )
-    page = eve.get(f"/requests/{req.id}").text
-    assert "This file isn’t in your Drive" in page
-    assert OWNER_EMAIL in page and "read_shared_file" in page
 
 
 def test_mailbox_refusals_are_not_blamed_on_drive() -> None:

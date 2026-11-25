@@ -36,7 +36,7 @@ def _guest_rows(memstore, guest: str) -> list[dict]:
 
 
 def test_someone_not_paired_is_logged_once_an_hour(setup, memstore) -> None:
-    _app_, _owner, _eve, (carol, token) = setup
+    _app_, owner, _eve, (carol, token) = setup
     for _ in range(3):
         result = _mcp(carol, token, "read_shared_file", owner=OWNER_EMAIL, file_id="loose-doc")
         assert _error(result)["error"] == "not_linked"
@@ -49,6 +49,7 @@ def test_someone_not_paired_is_logged_once_an_hour(setup, memstore) -> None:
     _mcp(carol, token, "list_shared_folder", owner=OWNER_EMAIL)
     tools = {r["tool"] for r in _guest_rows(memstore, CAROL) if r.get("reason") == "not_linked"}
     assert tools == {"read_shared_file", "list_shared_folder"}
+    assert "they aren’t paired with you" in owner.get("/activity").text
 
 
 def test_probing_an_address_with_no_account_writes_nothing(setup, memstore) -> None:
@@ -59,20 +60,27 @@ def test_probing_an_address_with_no_account_writes_nothing(setup, memstore) -> N
     assert not [k for k in memstore._values if f"u:{nobody}:" in k]  # noqa: SLF001
 
 
-def test_reading_your_own_share_as_a_guest_is_logged_on_your_log(setup, memstore) -> None:
+def test_refusals_about_the_caller_itself_go_on_the_callers_own_log(setup, memstore) -> None:
+    """Reading your own share as a guest, or naming a malformed owner, is nobody else's
+    business: it is logged for the caller, as the caller."""
     _app_, _owner, (eve, token), _carol = setup
     result = _mcp(eve, token, "read_shared_file", owner=EVE, file_id="loose-doc")
     assert _error(result)["error"] == "own_drive"
+    result = _mcp(eve, token, "read_shared_file", owner="not an email", file_id="loose-doc")
+    assert _error(result)["error"] == "invalid_input"
     eve_log = [json.loads(r) for r in memstore.lrange(f"{KEY_PREFIX}u:{EVE}:activity", 0, -1)]
     assert any(r.get("reason") == "own_drive" for r in eve_log)
+    row = next(r for r in eve_log if r.get("reason") == "invalid_input")
+    assert row["role"] != "guest" and row["token_name"]
 
 
 def test_listing_what_is_shared_with_you_is_logged_for_the_owner(setup, memstore) -> None:
-    _app_, _owner, (eve, token), _carol = setup
+    _app_, owner, (eve, token), _carol = setup
     listed = _mcp(eve, token, "list_shared_with_me")["structuredContent"]
     assert listed["people"][0]["owner"] == OWNER_EMAIL
     rows = [r for r in _guest_rows(memstore, EVE) if r["tool"] == "list_shared_with_me"]
     assert rows and rows[0]["decision"] == "allow"
+    assert "listed what you share with them" in owner.get("/activity").text
 
 
 def test_a_new_reader_shows_on_overview_once(setup) -> None:
@@ -100,24 +108,6 @@ def test_browsing_shared_with_me_yourself_is_not_a_new_reader(setup) -> None:
     assert opened.status_code == 200
     assert "memo beta" in opened.text  # the person really read it, on the dashboard
     assert "New readers" not in owner.get("/").text
-
-
-def test_activity_wording_for_refusals_and_listings(setup) -> None:
-    _app_, owner, (eve, eve_token), (carol, carol_token) = setup
-    _mcp(carol, carol_token, "read_shared_file", owner=OWNER_EMAIL, file_id="loose-doc")
-    _mcp(eve, eve_token, "list_shared_with_me")
-    page = owner.get("/activity").text
-    assert "they aren’t paired with you" in page
-    assert "listed what you share with them" in page
-
-
-def test_a_malformed_owner_is_logged_on_the_callers_own_log(setup, memstore) -> None:
-    _app_, _owner, (eve, token), _carol = setup
-    result = _mcp(eve, token, "read_shared_file", owner="not an email", file_id="loose-doc")
-    assert _error(result)["error"] == "invalid_input"
-    eve_log = [json.loads(r) for r in memstore.lrange(f"{KEY_PREFIX}u:{EVE}:activity", 0, -1)]
-    row = next(r for r in eve_log if r.get("reason") == "invalid_input")
-    assert row["role"] != "guest" and row["token_name"]
 
 
 def test_a_failed_first_read_notice_is_tried_again() -> None:

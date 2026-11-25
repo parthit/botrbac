@@ -2,7 +2,7 @@
 
 import pytest
 
-from scoped_drive_mcp.dashboard import safe_next
+from scoped_drive_mcp.dashboard import TEMPLATES_DIR, safe_next
 from tests.dash import client, csrf, login
 
 
@@ -12,29 +12,26 @@ def c(p2_app):
 
 
 @pytest.fixture
-def owner_c(p2_app):
-    c = client(p2_app)
+def owner_c(c):
     assert login(c).status_code == 303
     return c
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "expected"),
     [
-        "/\t/evil.example",
-        "/\n/evil.example",
-        "/\r/evil.example",
-        "/ /x",
-        "/a\x7fb",
-        "//evil.example",
+        # Paths a browser would rewrite to another site are dropped.
+        ("/\t/evil.example", "/"),
+        ("/\n/evil.example", "/"),
+        ("/\r/evil.example", "/"),
+        ("/ /x", "/"),
+        ("/a\x7fb", "/"),
+        ("//evil.example", "/"),
+        ("/browse?folder=abc&q=a%20b", "/browse?folder=abc&q=a%20b"),
     ],
 )
-def test_next_refuses_paths_a_browser_would_rewrite_offsite(value: str) -> None:
-    assert safe_next(value) == "/"
-
-
-def test_next_keeps_ordinary_paths() -> None:
-    assert safe_next("/browse?folder=abc&q=a%20b") == "/browse?folder=abc&q=a%20b"
+def test_next_refuses_paths_a_browser_would_rewrite_offsite(value: str, expected: str) -> None:
+    assert safe_next(value) == expected
 
 
 def test_connect_page_does_not_link_offsite(owner_c) -> None:
@@ -44,15 +41,13 @@ def test_connect_page_does_not_link_offsite(owner_c) -> None:
     assert "evil.example" not in page.text
 
 
-def test_signed_out_post_gets_a_page_with_a_way_back(c) -> None:
+def test_signed_out_post_gets_a_way_back_as_a_page_or_a_message(c) -> None:
     refused = c.post("/revoke", data={"file_id": "proj", "csrf": "x"})
     assert refused.status_code == 403
     assert "signed out" in refused.text
     assert 'href="/login"' in refused.text
     assert refused.headers["x-frame-options"] == "DENY"
-
-
-def test_signed_out_row_action_gets_a_message_it_can_show(c) -> None:
+    # A row action (fetch, wants JSON) gets a message it can show.
     refused = c.post(
         "/revoke", data={"file_id": "proj", "csrf": "x"}, headers={"Accept": "application/json"}
     )
@@ -62,15 +57,13 @@ def test_signed_out_row_action_gets_a_message_it_can_show(c) -> None:
     assert "signed out" in body["message"]
 
 
-def test_expired_form_token_gets_a_message_it_can_show(owner_c) -> None:
+def test_expired_or_odd_form_token_is_refused_with_a_message(owner_c) -> None:
     refused = owner_c.post(
         "/revoke", data={"file_id": "proj", "csrf": "stale"}, headers={"Accept": "application/json"}
     )
     assert refused.status_code == 403
     assert "reload the page" in refused.json()["message"]
-
-
-def test_non_ascii_form_token_is_refused_not_a_crash(owner_c) -> None:
+    # Non-ASCII is refused the same way, not a crash.
     assert owner_c.post("/revoke", data={"file_id": "proj", "csrf": "é"}).status_code == 403
 
 
@@ -116,9 +109,7 @@ def test_a_stale_page_link_falls_back_to_the_first_page(owner_c) -> None:
     assert owner_c.get(stale.headers["location"]).status_code == 200
 
 
-def test_final_decisions_ask_first(owner_c) -> None:
-    from scoped_drive_mcp.dashboard import TEMPLATES_DIR
-
+def test_final_decisions_ask_first() -> None:
     bridge = (TEMPLATES_DIR / "bridge.html").read_text()
     wakeups = (TEMPLATES_DIR / "settings.html").read_text()
     request = (TEMPLATES_DIR / "request.html").read_text()

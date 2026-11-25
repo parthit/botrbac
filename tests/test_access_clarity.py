@@ -75,37 +75,28 @@ def _pending_pairing(app) -> str:
 
 def test_pending_pairing_lists_what_approving_exposes(people) -> None:
     app, owner, _eve = people
+    link_id = _pending_pairing(app)
+
+    def card() -> str:
+        page = owner.get("/sharing?tab=people").text
+        assert "Approve pairing" in page
+        return page.split("data-exposure")[1].split("</div>")[0]
+
+    empty = card()
+    assert "You share nothing yet" in empty and "read 0 items" not in empty
+
     post(owner, "/sharing/add", file_id="loose-doc")
     post(owner, "/sharing/add", file_id="proj")
-    _pending_pairing(app)
-    page = owner.get("/sharing?tab=people").text
-    assert "Approve pairing" in page
-    card = page.split("data-exposure")[1].split("</div>")[0]
-    assert f"Approving lets <b>{EVE}</b>’s assistant read 2 items you share:" in card
-    assert "“Projects”" in card and "“Loose memo”" in card
-    assert 'href="/sharing?tab=by-me"' in card
+    two = card()
+    assert f"Approving lets <b>{EVE}</b>’s assistant read 2 items you share:" in two
+    assert "“Projects”" in two and "“Loose memo”" in two
+    assert 'href="/sharing?tab=by-me"' in two
 
-
-def test_pending_pairing_with_empty_sharing_list_says_nothing_is_exposed(people) -> None:
-    app, owner, _eve = people
-    _pending_pairing(app)
-    card = owner.get("/sharing?tab=people").text.split("data-exposure")[1].split("</div>")[0]
-    assert "You share nothing yet" in card
-    assert "read 0 items" not in card
-
-
-def test_pending_pairing_summarises_a_long_sharing_list(people) -> None:
-    app, owner, _eve = people
-    for file_id in ("loose-doc", "loose-two", "proj", "priv", "proj-notes", "priv-other"):
+    for file_id in ("loose-two", "priv", "proj-notes", "priv-other"):
         post(owner, "/sharing/add", file_id=file_id)
-    _pending_pairing(app)
-    card = owner.get("/sharing?tab=people").text.split("data-exposure")[1].split("</div>")[0]
-    assert "read 6 items" in card and "and 1 more" in card
+    long = card()
+    assert "read 6 items" in long and "and 1 more" in long
 
-
-def test_no_exposure_note_once_approved(people) -> None:
-    app, owner, _eve = people
-    link_id = _pending_pairing(app)
     app.state.mailbox.decide(OWNER_EMAIL, link_id, "approve")
     assert "data-exposure" not in owner.get("/sharing?tab=people").text
 
@@ -189,9 +180,7 @@ def test_browse_inside_allowed_folder_shows_state_not_allow_buttons(c) -> None:
     assert "Remove “Projects”" in deeper
     assert 'action="/grant"' not in _row(deeper, "Deep roadmap")
 
-
-def test_browse_row_granted_twice_explains_remove(c) -> None:
-    post(c, "/grant", file_id="proj")
+    # Granted twice: the row explains what removing its own entry does.
     post(c, "/grant", file_id="proj-notes")
     notes = _row(c.get("/files?folder=proj").text, "notes.txt")
     assert "Allowed via folder “Projects”" in notes
@@ -288,17 +277,10 @@ def test_owner_changing_access_ends_the_denial(c, p2_app) -> None:
     assert fresh["error"] == "access_required"
 
 
-def test_denial_never_grants_access(c) -> None:
-    _deny(c, "priv-secret")
-    for _ in range(3):
-        result = mcp_call(c, "read_file", file_id="priv-secret")
-        assert result["isError"] is True and "TOP SECRET" not in str(result)
-
-
 # ---- 4. search results show inherited state and where they live ------------------------
 
 
-def test_search_result_inside_allowed_folder_shows_inherited_state(c) -> None:
+def test_search_results_show_inherited_state_and_where_they_live(c) -> None:
     post(c, "/grant", file_id="proj")
     page = c.get("/files?q=notes").text
     row = _row(page, "notes.txt")
@@ -310,9 +292,6 @@ def test_search_result_inside_allowed_folder_shows_inherited_state(c) -> None:
     assert "Allowed via folder “Projects”" in deep
     assert "My Drive / Projects / Sub" in deep
 
-
-def test_search_result_outside_allowed_folders_is_not_allowed(c) -> None:
-    post(c, "/grant", file_id="proj")
     row = _row(c.get("/files?q=other").text, "other.txt")
     assert "Not allowed" in row and 'action="/grant"' in row
     assert "My Drive / Private" in row
@@ -323,8 +302,7 @@ def test_search_result_for_a_shortcut_shows_its_targets_state(c) -> None:
     row = _row(c.get("/files?q=link").text, "link to payroll")
     assert "Target allowed: payroll.txt (in Private, a different folder)" in _shown(row)
     assert 'data-access="on"' in row
-    page = c.get("/files?q=link").text
-    assert '<li class="file" data-row data-access="on"' in page
+    assert '<li class="file" data-row data-access="on"' in c.get("/files?q=link").text
 
 
 # ---- 5. shortcut rows follow their target ----------------------------------------------
@@ -418,12 +396,6 @@ def test_search_stops_guessing_when_the_lookup_budget_runs_out(c, monkeypatch) -
     assert "Open its folder to check" in row
     assert "Not allowed" not in row
 
-
-def test_shortcut_row_still_acts_on_its_target_when_lookups_run_out(c, monkeypatch) -> None:
-    import scoped_drive_mcp.dashboard as dashboard_module
-
-    assert post(c, "/grant", file_id="proj").status_code == 303
-    monkeypatch.setattr(dashboard_module, "SEARCH_LOOKUPS", 0)
     row = _row(c.get("/files?q=link").text, "link to payroll")
     # Not "Allowed via folder Projects" (the shortcut's own folder). Remove / Stop sharing
     # post the target's id (Allow / Share post the shortcut, which the server resolves).
@@ -431,6 +403,5 @@ def test_shortcut_row_still_acts_on_its_target_when_lookups_run_out(c, monkeypat
     assert "Open its folder to check" in row
     assert 'data-acts-on="priv-secret"' in row
     # Share / Stop sharing only appear once there is a pairing; Remove is always there.
-    for action in ("/revoke",):
-        form = row[row.index(f'action="{action}"') :].split("</form>", 1)[0]
-        assert 'name="file_id" value="priv-secret"' in form
+    form = row[row.index('action="/revoke"') :].split("</form>", 1)[0]
+    assert 'name="file_id" value="priv-secret"' in form

@@ -1,18 +1,21 @@
 """Sending a file to a paired person (drops.py): held for a while, saved to Drive on request."""
 
 import base64
+import logging
 import re
 from datetime import timedelta
 
 import pytest
 
+from scoped_drive_mcp import dashboard, drop_storage
 from scoped_drive_mcp import drops as drops_module
 from scoped_drive_mcp.drive_client import FOLDER_MIME
 from scoped_drive_mcp.external import acting_as
-from tests.conftest import EVE, OWNER_EMAIL
+from scoped_drive_mcp.server import build_app
+from tests.conftest import EVE, OWNER_EMAIL, make_settings
 from tests.dash import client, csrf, login, mcp_call, post
 from tests.test_external_sharing import _error, _pair
-from tests.test_multi_user import _app, _mcp
+from tests.test_multi_user import _app, _grok, _mcp
 from tests.test_peer_edit import _editor_app
 
 PDF_BYTES = b"%PDF-1.4 hello"
@@ -21,15 +24,21 @@ PDF = base64.b64encode(PDF_BYTES).decode()
 
 @pytest.fixture
 def setup(world, memstore, oauth):
+    """The owner and Eve, paired, with an editor app for Eve's assistant."""
     app = _app(world, memstore, oauth)
-    owner, eve, carol = client(app), client(app), client(app)
+    owner, eve = client(app), client(app)
     login(owner)
     login(eve, "eve-code")
-    login(carol, "carol-code")
-    eve_token = _editor_app(eve, "Grok Eve")
-    carol_token = _editor_app(carol, "Grok Carol")
     _pair(app, OWNER_EMAIL, EVE)
-    return app, owner, (eve, eve_token), (carol, carol_token)
+    return app, owner, (eve, _editor_app(eve, "Grok Eve"))
+
+
+@pytest.fixture
+def carol(setup):
+    """Carol, signed in with an editor app, and paired with no one."""
+    c = client(setup[0])
+    login(c, "carol-code")
+    return c, _editor_app(c, "Grok Carol")
 
 
 def _send(sender, to: str = OWNER_EMAIL, name: str = "resume.pdf", **extra) -> dict:
@@ -51,8 +60,8 @@ def _drop_folders(world) -> list[str]:
     ]
 
 
-def test_a_sent_file_is_held_not_written_to_drive(setup, world) -> None:
-    app, _owner, eve, _carol = setup
+def test_a_sent_file_is_held_encrypted_not_written_to_drive(setup, world, memstore) -> None:
+    app, _owner, eve = setup
     before = set(world.files)
     sent = _send(eve)
     assert sent["isError"] is False, sent
@@ -67,23 +76,18 @@ def test_a_sent_file_is_held_not_written_to_drive(setup, world) -> None:
     assert row["from"] == EVE and row["name"] == "resume.pdf" and row["size"] == len(PDF_BYTES)
     with acting_as(OWNER_EMAIL):
         assert app.state.drops.download(row["id"])[1] == PDF_BYTES
-
-
-def test_held_bytes_are_encrypted_and_expire_in_the_store(setup, memstore) -> None:
-    app, _owner, eve, _carol = setup
-    _send(eve)
-    [row] = _held(app)
+    # Held encrypted, with an expiry the store enforces by itself.
     parts = [k for k in memstore._values if f"drops:part:{row['id']}:" in k]
     assert parts
     for key in parts:
         expires, value = memstore._values[key]
-        assert expires is not None  # the store deletes it by itself
+        assert expires is not None
         assert "%PDF" not in str(value)
         assert PDF not in str(value)
 
 
 def test_an_unsaved_file_is_gone_after_the_hold(setup) -> None:
-    app, owner, eve, _carol = setup
+    app, owner, eve = setup
     _send(eve)
     box = app.state.drops
     real = box.clock
@@ -96,7 +100,7 @@ def test_an_unsaved_file_is_gone_after_the_hold(setup) -> None:
 
 
 def test_saving_copies_it_into_drive_and_deletes_the_held_copy(setup, world, memstore) -> None:
-    app, owner, eve, _carol = setup
+    app, owner, eve = setup
     _send(eve)
     [row] = _held(app)
     r = post(owner, f"/drops/{row['id']}/save")
@@ -122,7 +126,7 @@ def test_saving_copies_it_into_drive_and_deletes_the_held_copy(setup, world, mem
 
 
 def test_a_deleted_drop_folder_is_made_again_on_the_next_save(setup, world) -> None:
-    app, owner, eve, _carol = setup
+    app, owner, eve = setup
     _send(eve)
     post(owner, f"/drops/{_held(app)[0]['id']}/save")
     [first] = _drop_folders(world)
@@ -134,17 +138,8 @@ def test_a_deleted_drop_folder_is_made_again_on_the_next_save(setup, world) -> N
     assert _drop_folders(world) and _drop_folders(world) != [first]
 
 
-def test_the_recipient_deletes_a_file_now(setup, memstore) -> None:
-    app, owner, eve, _carol = setup
-    _send(eve)
-    [row] = _held(app)
-    assert post(owner, f"/drops/{row['id']}/dismiss").status_code == 303
-    assert _held(app) == []
-    assert not [k for k in memstore._values if "drops:part:" in k]
-
-
-def test_the_recipient_downloads_as_an_attachment(setup) -> None:
-    app, owner, eve, _carol = setup
+def test_the_recipient_downloads_as_an_attachment_and_deletes_it_now(setup, memstore) -> None:
+    app, owner, eve = setup
     _send(eve)
     [row] = _held(app)
     r = owner.get(f"/drops/{row['id']}/download")
@@ -152,10 +147,13 @@ def test_the_recipient_downloads_as_an_attachment(setup) -> None:
     assert r.content == PDF_BYTES
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["content-disposition"].startswith("attachment")
+    assert post(owner, f"/drops/{row['id']}/dismiss").status_code == 303
+    assert _held(app) == []
+    assert not [k for k in memstore._values if "drops:part:" in k]
 
 
-def test_only_the_recipient_can_reach_a_drop(setup) -> None:
-    app, _owner, eve, carol = setup
+def test_only_the_recipient_can_reach_a_drop(setup, carol) -> None:
+    app, _owner, eve = setup
     _send(eve)
     [row] = _held(app)
     for who in (eve, carol):
@@ -168,28 +166,21 @@ def test_only_the_recipient_can_reach_a_drop(setup) -> None:
     assert _held(app)[0].get("saved_file_id") is None
 
 
-def test_only_people_with_an_active_pairing_can_send(setup) -> None:
-    app, _owner, _eve, carol = setup
+def test_only_people_with_an_active_pairing_can_send(setup, carol) -> None:
+    app, _owner, eve = setup
     assert _error(_send(carol))["error"] == "not_linked"
-    assert _held(app) == []
-
-
-def test_sending_to_yourself_is_refused(setup) -> None:
-    _app_, _owner, eve, _carol = setup
     assert _error(_send(eve, to=EVE))["error"] == "own_drive"
-
-
-def test_ending_the_pairing_stops_sending(setup) -> None:
-    app, _owner, eve, _carol = setup
+    assert _held(app) == []
     assert _send(eve)["isError"] is False
     box = app.state.mailbox
     [link] = [x for x in box.list_links(OWNER_EMAIL)["links"] if x["peer_email"] == EVE]
     box.revoke(OWNER_EMAIL, link["link_id"])
     assert _error(_send(eve))["error"] == "not_linked"
+    assert len(_held(app)) == 1
 
 
 def test_the_recipient_turns_one_person_off_and_on(setup) -> None:
-    app, owner, eve, _carol = setup
+    app, owner, eve = setup
     assert f"{EVE} can send you files." in owner.get("/sharing?tab=people").text
     assert post(owner, "/drops/allow", person=EVE, on="0").status_code == 303
     assert f"{EVE} cannot send you files." in owner.get("/sharing?tab=people").text
@@ -200,7 +191,7 @@ def test_the_recipient_turns_one_person_off_and_on(setup) -> None:
 
 
 def test_one_person_can_send_at_most_so_many_an_hour(setup, monkeypatch) -> None:
-    _app_, _owner, eve, _carol = setup
+    _app_, _owner, eve = setup
     monkeypatch.setattr(drops_module, "DROPS_PER_HOUR", 2)
     assert _send(eve)["isError"] is False
     assert _send(eve)["isError"] is False
@@ -208,36 +199,29 @@ def test_one_person_can_send_at_most_so_many_an_hour(setup, monkeypatch) -> None
 
 
 def test_what_is_held_for_one_person_is_capped(setup, monkeypatch) -> None:
-    _app_, _owner, eve, _carol = setup
+    _app_, _owner, eve = setup
     monkeypatch.setattr(drops_module, "MAX_HELD", 1)
     assert _send(eve)["isError"] is False
     assert _error(_send(eve))["error"] == "inbox_full"
 
 
 def test_bad_input_is_refused_and_nothing_is_held(setup) -> None:
-    app, _owner, eve, _carol = setup
+    app, _owner, eve = setup
     assert _error(_send(eve, content_base64="not base64!!"))["error"] == "invalid_input"
     assert _error(_send(eve, content_text="x"))["error"] == "invalid_input"
     assert _held(app) == []
 
 
-def test_a_read_only_app_cannot_send(world, memstore, oauth) -> None:
-    from tests.test_multi_user import _grok
-
-    app = _app(world, memstore, oauth)
-    owner, eve = client(app), client(app)
-    login(owner)
-    login(eve, "eve-code")
-    viewer = _grok(eve, "Read-only Eve")
-    _pair(app, OWNER_EMAIL, EVE)
-    refused = _send((eve, viewer))
+def test_a_read_only_app_cannot_send(setup) -> None:
+    app, _owner, (eve, _token) = setup
+    refused = _send((eve, _grok(eve, "Read-only Eve")))
     assert refused["isError"] is True
     assert "not_linked" not in str(refused)  # refused by role, before any check
     assert _held(app) == []
 
 
 def test_the_recipients_assistant_lists_and_reads_drops_as_untrusted(setup) -> None:
-    _app_, owner, eve, _carol = setup
+    _app_, owner, eve = setup
     assert mcp_call(owner, "list_drops")["structuredContent"]["drops"] == []
     _send(
         eve,
@@ -265,7 +249,7 @@ def test_the_recipients_assistant_lists_and_reads_drops_as_untrusted(setup) -> N
 
 
 def test_the_recipient_sees_drops_on_the_dashboard_and_their_log(setup) -> None:
-    _app_, owner, eve, _carol = setup
+    _app_, owner, eve = setup
     _send(eve)
     page = owner.get("/sharing?tab=with-me").text
     assert "Sent to you" in page and "resume.pdf" in page and f"From {EVE}" in page
@@ -283,7 +267,7 @@ def _upload(c, to: str, name: str, data: bytes, mime: str = "application/pdf"):
 
 
 def test_a_person_sends_from_the_dashboard(setup) -> None:
-    app, _owner, eve, _carol = setup
+    app, _owner, eve = setup
     c, _token = eve
     page = c.get("/sharing?tab=with-me").text
     assert "Send a file" in page and f'<option value="{OWNER_EMAIL}">' in page
@@ -294,8 +278,8 @@ def test_a_person_sends_from_the_dashboard(setup) -> None:
     assert row["name"] == "photo.pdf" and row["via"] == "dashboard"
 
 
-def test_the_dashboard_refuses_someone_not_paired_and_a_missing_token(setup) -> None:
-    app, _owner, _eve, carol = setup
+def test_the_dashboard_refuses_someone_not_paired_and_a_missing_token(setup, carol) -> None:
+    app = setup[0]
     c, _token = carol
     r = _upload(c, OWNER_EMAIL, "x.pdf", b"%PDF")
     assert r.status_code == 303
@@ -308,9 +292,7 @@ def test_the_dashboard_refuses_someone_not_paired_and_a_missing_token(setup) -> 
 
 
 def test_the_dashboard_refuses_a_body_that_is_too_large(setup) -> None:
-    from scoped_drive_mcp import dashboard
-
-    _app_, _owner, eve, _carol = setup
+    _app_, _owner, eve = setup
     c, _token = eve
     token = csrf(c, "/sharing?tab=with-me")
     big = b"x" * (dashboard.DROP_UPLOAD_LIMIT + dashboard.DROP_FORM_OVERHEAD + 10)
@@ -319,9 +301,7 @@ def test_the_dashboard_refuses_a_body_that_is_too_large(setup) -> None:
 
 
 def test_a_large_file_is_held_in_pieces(setup, monkeypatch) -> None:
-    app, owner, eve, _carol = setup
-    from scoped_drive_mcp import drop_storage
-
+    app, owner, eve = setup
     monkeypatch.setattr(drop_storage, "KV_PART_BYTES", 4)
     _send(eve)
     [row] = _held(app)
@@ -332,7 +312,7 @@ def test_a_large_file_is_held_in_pieces(setup, monkeypatch) -> None:
 def test_a_save_marks_the_row_before_deleting_the_held_copy(setup, monkeypatch) -> None:
     """If deleting the pieces fails after the Drive copy exists, the list still says it
     was saved (the pieces expire on their own), and a retry does not save it twice."""
-    app, owner, eve, _carol = setup
+    app, owner, eve = setup
     _send(eve)
     [row] = _held(app)
     box = app.state.drops
@@ -351,7 +331,7 @@ def test_a_save_marks_the_row_before_deleting_the_held_copy(setup, monkeypatch) 
 
 
 def test_two_saves_at_once_make_one_copy(setup, world) -> None:
-    app, owner, eve, _carol = setup
+    app, owner, eve = setup
     _send(eve)
     [row] = _held(app)
     box = app.state.drops
@@ -371,17 +351,12 @@ def test_two_saves_at_once_make_one_copy(setup, world) -> None:
 
 
 def test_a_strange_drop_id_never_reaches_the_store(setup) -> None:
-    _app_, owner, _eve, _carol = setup
+    _app_, owner, _eve = setup
     bad = mcp_call(owner, "save_drop", role="editor", drop_id="x:" * 100)
     assert _error(bad)["error"] == "not_found"
 
 
 def test_without_an_encryption_key_the_server_warns(memstore, caplog) -> None:
-    import logging
-
-    from scoped_drive_mcp.server import build_app
-    from tests.conftest import make_settings
-
     with caplog.at_level(logging.WARNING, logger="scoped_drive_mcp.server"):
         build_app(make_settings(encryption_key=None), store=memstore)
     assert any("held unencrypted" in r.getMessage() for r in caplog.records)

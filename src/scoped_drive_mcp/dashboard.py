@@ -328,7 +328,6 @@ class DashboardContext:
             self.owner_drive,
             self.allowlist,
             self.requests,
-            None,
             on_change=self.on_allowlist_change,
         )
 
@@ -342,7 +341,6 @@ class DashboardContext:
             self.owner_drive,
             self.ext_allowlist,
             self.requests,
-            None,
             on_change=self.on_ext_change,
             audience=AUDIENCE_LINKED,
             audit_actions=("share_external", "unshare_external"),

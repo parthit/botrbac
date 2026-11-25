@@ -217,9 +217,17 @@ class HttpNotionApi:
         self._client.close()
 
     def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        resp = self._client.request(method, path, **kwargs)
+        # Every failure is a NotionApiError, which the tools and the dashboard report as
+        # "Notion didn't answer"; a raw network error would surface as a 500.
+        try:
+            resp = self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise NotionApiError(0, "unreachable") from exc
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                raise NotionApiError(200, "bad_response") from None
             if not isinstance(data, dict):
                 raise NotionApiError(resp.status_code, "bad_response")
             return data
@@ -358,7 +366,7 @@ def property_text(prop: dict[str, Any]) -> str:
     if kind in ("select", "status") and isinstance(value, dict):
         return str(value.get("name") or "")
     if kind == "multi_select" and isinstance(value, list):
-        return ", ".join(str(v.get("name") or "") for v in value if isinstance(v, dict))
+        return ", ".join(str(v["name"]) for v in value if isinstance(v, dict) and v.get("name"))
     if kind == "date" and isinstance(value, dict):
         start, end = value.get("start"), value.get("end")
         return f"{start} → {end}" if end else str(start or "")
@@ -367,7 +375,8 @@ def property_text(prop: dict[str, Any]) -> str:
     if kind in ("number", "url", "email", "phone_number") and value is not None:
         return str(value)
     if kind == "people" and isinstance(value, list):
-        return ", ".join(str(p.get("name") or "") for p in value if isinstance(p, dict))
+        # A person Notion won't name (a bot, or someone who left) is left out, not "Ada, ".
+        return ", ".join(str(p["name"]) for p in value if isinstance(p, dict) and p.get("name"))
     if kind == "formula" and isinstance(value, dict):
         inner = value.get(value.get("type")) if isinstance(value.get("type"), str) else None
         return "" if inner is None else str(inner)

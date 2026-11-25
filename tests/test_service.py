@@ -1,8 +1,11 @@
 import base64
+import json
 
 import pytest
 
 from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveExportTooLargeError
+from scoped_drive_mcp.extract import Extracted
+from scoped_drive_mcp.extract_worker import ExtractBusy
 from scoped_drive_mcp.scope import ForbiddenError, InvalidInputError
 from scoped_drive_mcp.service import (
     DOC_MIME,
@@ -21,6 +24,9 @@ from tests.office_files import (
     minimal_rtf,
     minimal_xlsx,
 )
+
+PDF_MIME = "application/pdf"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 def test_read_google_doc_exports_text(service: DriveService) -> None:
@@ -136,6 +142,33 @@ def test_read_single_tab_sheet_truncation_names_the_tab(drive, guard) -> None:
     assert "'Only'" in result["note"]
 
 
+def test_read_sheet_cut_short_by_the_work_allowance_says_rows_are_missing(drive, guard) -> None:
+    _booking_sheet(drive, **{XLSX_MIME: b"PK workbook"})
+    service = DriveService(drive, guard, make_settings(max_bytes=100_000))
+    service._workbook_tabs = lambda data: ([("Itinerary", "Day\tPlace")], True)
+    result = service.read_file("sheet-tabs")
+    assert result["content"] == "Day\tPlace"
+    assert result["truncated"] is True
+    assert "later rows are missing" in result["note"]
+
+
+def test_read_sheet_whose_workbook_fails_falls_back_to_first_tab(drive, guard) -> None:
+    _booking_sheet(drive, **{XLSX_MIME: b"PK not really a workbook"})
+    service = DriveService(drive, guard, make_settings(max_bytes=100_000))
+    result = service.read_file("sheet-tabs")
+    assert result["exported_as"] == "text/csv"
+    assert result["content"].startswith("Day,Place")
+    assert "could not be read whole" in result["note"]
+
+
+def test_google_file_without_a_text_export_returns_a_note(drive, service) -> None:
+    drive.add("form-1", "Survey", "application/vnd.google-apps.form", [ROOT])
+    result = service.read_file("form-1")
+    assert result["content"] is None
+    assert "cannot be exported as text" in result["note"]
+    assert drive.content_calls == []
+
+
 def test_read_text_file(service: DriveService) -> None:
     result = service.read_file("notes-txt")
     assert result["content"] == "plan notes inside"
@@ -150,51 +183,34 @@ def test_read_binary_not_returned(service: DriveService) -> None:
 
 
 def test_read_documents_nested_in_shared_folder(drive, guard) -> None:
-    service = DriveService(drive, guard, make_settings(max_bytes=100_000))
-    drive.add(
-        "resume-pdf",
-        "Parthit Patel Resume - AI Labs (1 page).docx (1).pdf",
-        "application/pdf",
-        ["sub-a-deep"],
-        minimal_pdf("AI Labs resume"),
-    )
-    drive.add(
-        "resume-docx",
-        "Parthit Patel Resume - AI Labs (1 page).docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ["sub-a"],
-        minimal_docx("AI Labs docx"),
-    )
-    drive.add(
-        "slides",
-        "deck.pptx",
-        "application/octet-stream",
-        ["sub-a-deep"],
-        minimal_pptx("Roadmap"),
-    )
-    drive.add(
-        "sheet",
-        "budget.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ["sub-a"],
-        minimal_xlsx([["Item", "Cost"], ["GPU", 12]]),
-    )
-    drive.add("notes-md", "README.md", "text/markdown", ["sub-a"], b"# Hello markdown")
-    drive.add("payload", "data.json", "application/json", ["sub-a"], b'{"ok": true}')
-    drive.add("legacy", "old.doc", "application/msword", ["sub-a-deep"], minimal_doc("legacy body"))
-    drive.add("letter", "letter.rtf", "application/rtf", ["sub-a"], minimal_rtf("rtf body"))
-    drive.add("table", "rows.csv", "text/csv", ["sub-a"], b"a,b\n1,2\n")
-
-    assert "AI Labs resume" in service.read_file("resume-pdf")["content"]
-    assert service.read_file("resume-pdf")["extracted_as"] == "text/plain"
-    assert "AI Labs docx" in service.read_file("resume-docx")["content"]
-    assert "Roadmap" in service.read_file("slides")["content"]
-    assert "GPU" in service.read_file("sheet")["content"]
-    assert service.read_file("notes-md")["content"] == "# Hello markdown"
-    assert service.read_file("payload")["content"] == '{"ok": true}'
-    assert service.read_file("legacy")["content"] == "legacy body"
-    assert "rtf body" in service.read_file("letter")["content"]
-    assert service.read_file("table")["content"] == "a,b\n1,2\n"
+    # In process: the child gives the same text (test_extract checks that), and a child
+    # per file would make this the slowest test here.
+    service = DriveService(drive, guard, make_settings(max_bytes=100_000, extract_isolation=False))
+    name = "Parthit Patel Resume - AI Labs (1 page).docx"
+    files = [
+        ("resume-pdf", f"{name} (1).pdf", PDF_MIME, "sub-a-deep", minimal_pdf("AI Labs resume")),
+        ("resume-docx", name, DOCX_MIME, "sub-a", minimal_docx("AI Labs docx")),
+        ("slides", "deck.pptx", "application/octet-stream", "sub-a-deep", minimal_pptx("Roadmap")),
+        ("sheet", "budget.xlsx", XLSX_MIME, "sub-a", minimal_xlsx([["Item", "Cost"], ["GPU", 12]])),
+        ("notes-md", "README.md", "text/markdown", "sub-a", b"# Hello markdown"),
+        ("payload", "data.json", "application/json", "sub-a", b'{"ok": true}'),
+        ("legacy", "old.doc", "application/msword", "sub-a-deep", minimal_doc("legacy body")),
+        ("letter", "letter.rtf", "application/rtf", "sub-a", minimal_rtf("rtf body")),
+        ("table", "rows.csv", "text/csv", "sub-a", b"a,b\n1,2\n"),
+    ]
+    for file_id, file_name, mime, parent, content in files:
+        drive.add(file_id, file_name, mime, [parent], content)
+    read = {file_id: service.read_file(file_id) for file_id, *_ in files}
+    assert read["resume-pdf"]["content"] == "AI Labs resume"
+    assert read["resume-pdf"]["extracted_as"] == "text/plain"
+    assert read["resume-docx"]["content"] == "AI Labs docx\ncell text"
+    assert read["slides"]["content"] == "Roadmap"
+    assert read["sheet"]["content"] == "Item\tCost\nGPU\t12"  # one tab: no header line
+    assert read["notes-md"]["content"] == "# Hello markdown"
+    assert read["payload"]["content"] == '{"ok": true}'
+    assert read["legacy"]["content"] == "legacy body"
+    assert read["letter"]["content"] == "rtf body\n"
+    assert read["table"]["content"] == "a,b\n1,2\n"
 
 
 def test_read_and_download_outside_share_are_refused(drive, service: DriveService) -> None:
@@ -202,14 +218,14 @@ def test_read_and_download_outside_share_are_refused(drive, service: DriveServic
     drive.add(
         "outside-pdf",
         "secret.pdf",
-        "application/pdf",
+        PDF_MIME,
         ["outside-folder"],
         minimal_pdf(secret),
     )
     drive.add(
         "outside-docx",
         "secret.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        DOCX_MIME,
         ["outside-folder"],
         minimal_docx(secret),
     )
@@ -232,7 +248,7 @@ def test_download_file_returns_bytes_and_caps_them(drive, service: DriveService)
     assert base64.b64decode(image["content_base64"]) == drive.files["image-png"].content
     assert image["truncated"] is False
     pdf = minimal_pdf("kept for bytes")
-    drive.add("resume-pdf", "resume.pdf", "application/pdf", ["sub-a-deep"], pdf)
+    drive.add("resume-pdf", "resume.pdf", PDF_MIME, ["sub-a-deep"], pdf)
     downloaded = service.download_file("resume-pdf")
     assert base64.b64decode(downloaded["content_base64"]) == pdf
 
@@ -252,25 +268,112 @@ def test_download_file_hard_cap_is_independent_of_a_large_max_bytes(drive, guard
     assert capped["byte_count"] == DOWNLOAD_BYTE_CAP
 
 
+# ---- document text ----------------------------------------------------------------
+
+
+def test_read_file_reads_a_pdf_in_the_child_process(drive, service) -> None:
+    assert service.extract_isolation  # the default
+    drive.add("plain-pdf", "plain.pdf", PDF_MIME, [ROOT], minimal_pdf("from the child"))
+    result = service.read_file("plain-pdf")
+    assert result["content"] == "from the child"
+    assert result["truncated"] is False
+
+
+def test_service_reads_in_process_when_isolation_is_off(monkeypatch) -> None:
+    from scoped_drive_mcp import service as service_module
+
+    def no_child(*args: object, **kwargs: object) -> None:
+        raise AssertionError("isolation is off")
+
+    monkeypatch.setattr(service_module, "extract_isolated", no_child)
+    off = DriveService(None, None, make_settings(extract_isolation=False))  # type: ignore[arg-type]
+    assert off._extract(minimal_pdf("in process"), "pdf").text == "in process"
+    on = DriveService(None, None, make_settings())  # type: ignore[arg-type]
+    with pytest.raises(AssertionError, match="isolation is off"):
+        on._extract(minimal_pdf("x"), "pdf")
+
+
 def test_extracted_text_respects_max_chars(drive, guard) -> None:
     service = DriveService(drive, guard, make_settings(max_bytes=100_000, max_chars=2000))
-    drive.add(
-        "long-docx",
-        "long.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        [ROOT],
-        minimal_docx("x" * 3000),
-    )
+    drive.add("long-docx", "long.docx", DOCX_MIME, [ROOT], minimal_docx("x" * 3000))
     result = service.read_file("long-docx")
     assert result["truncated"] is True
     assert len(result["content"]) == 2000
 
 
-def test_unreadable_pdf_returns_a_note(drive, service: DriveService) -> None:
-    drive.add("bad-pdf", "bad.pdf", "application/pdf", [ROOT], b"%PDF-1.4 nope")
-    result = service.read_file("bad-pdf")
+def test_read_file_marks_text_cut_short_by_the_work_allowance(drive, service) -> None:
+    drive.add("busy-pdf", "busy.pdf", PDF_MIME, [ROOT], minimal_pdf("start"))
+    service._extract = lambda data, kind: Extracted("start", truncated=True)
+    result = service.read_file("busy-pdf")
+    assert result["content"] == "start"
+    assert result["truncated"] is True
+    assert "too large or complex" in result["note"]
+
+
+def test_read_file_returns_rtf_with_unicode_escapes_that_are_surrogates(drive, service) -> None:
+    """RTF's \\u-10240? is a lone surrogate; read_file then failed whole with
+    "surrogates not allowed" when the reply was encoded."""
+    rtf = rb"{\rtf1\ansi lone \u-10240? pair \u-10179?\u-8704? end\par}"
+    drive.add("rtf-surrogate", "notes.rtf", "application/rtf", [ROOT], rtf)
+    result = service.read_file("rtf-surrogate")
+    assert result["content"] == "lone � pair \U0001f600 end\n"
+    json.dumps(result, ensure_ascii=False).encode("utf-8")
+
+
+def test_document_over_max_bytes_is_read_only_up_to_the_cap(drive, service) -> None:
+    """Only max_bytes + 1 bytes are fetched; a cut-off document says why it has no text."""
+    asked: list[int] = []
+    download = drive.download
+
+    def counting(file_id: str, max_bytes: int) -> bytes:
+        asked.append(max_bytes)
+        return download(file_id, max_bytes)
+
+    drive.download = counting
+    data = minimal_docx("x" * 5000)
+    assert len(data) > 4096  # the test byte cap
+    drive.add("big-docx", "big.docx", DOCX_MIME, [ROOT], data)
+    result = service.read_file("big-docx")
+    assert asked == [4097]
     assert result["content"] is None
-    assert "download_file" in result["note"]
+    assert result["truncated"] is True
+    assert "exceeds the 4096-byte limit" in result["note"]
+
+
+@pytest.mark.parametrize(
+    ("data", "outcome", "note"),
+    [
+        (b"%PDF-1.4 nope", None, "Use download_file for the bytes"),
+        (minimal_pdf(""), None, "no extractable text"),
+        (b"", ExtractBusy("the server is busy; try again"), "try again"),
+        # An unexpected failure must not show its message (it may quote the file).
+        (b"", RuntimeError("secret detail"), "text could not be extracted"),
+    ],
+    ids=["unreadable", "image-only", "busy", "crashed"],
+)
+def test_document_without_text_returns_a_note(drive, service, data, outcome, note) -> None:
+    if outcome is not None:
+
+        def fail(data: bytes, kind: str) -> Extracted:
+            raise outcome
+
+        service._extract = fail
+    drive.add("doc-pdf", "doc.pdf", PDF_MIME, [ROOT], data or minimal_pdf("x"))
+    result = service.read_file("doc-pdf")
+    assert result["content"] is None
+    assert note in result["note"]
+    assert "secret detail" not in json.dumps(result)
+
+
+def test_text_from_bytes_reads_what_read_file_would(service: DriveService) -> None:
+    """read_drop's text for a held file, which is not in Drive."""
+    docx = service.text_from_bytes(minimal_docx("held"), DOCX_MIME, "held.docx")
+    assert docx["content"] == "held\ncell text"
+    text = service.text_from_bytes(b"y" * 5000, "text/plain", "long.txt")
+    assert text["content"] == "y" * 2000 and text["truncated"] is True
+    assert service.text_from_bytes(b"a\x00b", "text/plain", "nul.txt")["content"] is None
+    binary = service.text_from_bytes(b"\x89PNG", "image/png", "photo.png")
+    assert binary["content"] is None and "binary" in binary["note"]
 
 
 def test_download_skips_google_files_shortcuts_and_folders(service: DriveService, drive) -> None:
@@ -285,14 +388,13 @@ def test_download_skips_google_files_shortcuts_and_folders(service: DriveService
     assert drive.content_calls == []
 
 
-def test_read_shortcut_not_followed(service: DriveService) -> None:
-    result = service.read_file("shortcut-1")
-    assert result["content"] is None
-
-
-def test_read_folder_rejected(service: DriveService) -> None:
+def test_read_skips_shortcuts_and_rejects_folders(service: DriveService, drive) -> None:
+    shortcut = service.read_file("shortcut-1")
+    assert shortcut["content"] is None
+    assert "not followed" in shortcut["note"]
     with pytest.raises(InvalidInputError):
         service.read_file("sub-a")
+    assert drive.content_calls == []
 
 
 def test_read_respects_max_bytes_and_chars(drive, service: DriveService) -> None:
@@ -383,18 +485,33 @@ def test_upload_file_variants(drive, service: DriveService) -> None:
     assert drive.files[r["id"]].content == b"\x00\x01"
     r = service.upload_file("b.txt", "text/plain", content_text="hi", parent_id="sub-a")
     assert drive.files[r["id"]].parents == ["sub-a"]
-    with pytest.raises(InvalidInputError):
-        service.upload_file("c.txt", "text/plain")
-    with pytest.raises(InvalidInputError):
-        service.upload_file("c.txt", "text/plain", content_text="a", content_base64="YQ==")
-    with pytest.raises(InvalidInputError):
-        service.upload_file("c.txt", "text/plain", content_base64="not base64!!")
-    with pytest.raises(InvalidInputError):
-        service.upload_file("c", "application/vnd.google-apps.shortcut", content_text="x")
-    with pytest.raises(InvalidInputError):
-        service.upload_file("c", "not a mime", content_text="x")
-    with pytest.raises(InvalidInputError):
-        service.upload_file("c.txt", "text/plain", content_text="x" * 5000)
+
+
+_TOO_BIG_B64 = base64.b64encode(b"x" * 4097).decode()  # within the length check, 1 byte over
+
+
+@pytest.mark.parametrize(
+    ("name", "mime", "content", "error"),
+    [
+        ("c.txt", "text/plain", {}, "exactly one"),
+        ("c.txt", "text/plain", {"content_text": "a", "content_base64": "YQ=="}, "exactly one"),
+        ("c.txt", "text/plain", {"content_base64": "not base64!!"}, "not valid base64"),
+        ("c.txt", "text/plain", {"content_base64": 5}, "must be a string"),
+        ("c", "application/vnd.google-apps.shortcut", {"content_text": "x"}, "create_doc"),
+        ("c", "not a mime", {"content_text": "x"}, "type/subtype"),
+        (5, "text/plain", {"content_text": "x"}, "must be a string"),
+        ("n" * 256, "text/plain", {"content_text": "x"}, "at most 255"),
+        # The byte cap holds whichever way the content comes.
+        ("c.txt", "text/plain", {"content_text": "x" * 5000}, "4096-byte limit"),
+        ("c.txt", "text/plain", {"content_base64": "A" * 6000}, "4096-byte limit"),
+        ("c.txt", "text/plain", {"content_base64": _TOO_BIG_B64}, "4096-byte limit"),
+    ],
+)
+def test_upload_file_refuses_bad_input(drive, service, name, mime, content, error) -> None:
+    before = set(drive.files)
+    with pytest.raises(InvalidInputError, match=error):
+        service.upload_file(name, mime, **content)
+    assert set(drive.files) == before
 
 
 def test_update_file_content(drive, service: DriveService) -> None:

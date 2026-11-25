@@ -3,7 +3,7 @@
 import pytest
 
 from scoped_drive_mcp.access import AccessRequests
-from scoped_drive_mcp.drive_client import FOLDER_MIME
+from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveNotFoundError
 from scoped_drive_mcp.grants import GrantError, GrantService
 from scoped_drive_mcp.scope import ForbiddenError, InvalidInputError, OutOfScopeError, ScopeGuard
 from scoped_drive_mcp.service import DriveService
@@ -39,7 +39,6 @@ def grants(owner, allowlist, kv, p2_guard) -> GrantService:
         lambda: owner,
         allowlist,
         AccessRequests(kv),
-        None,
         on_change=p2_guard.invalidate_allowlist,
     )
 
@@ -64,23 +63,34 @@ def test_grant_updates_the_allowlist_without_sharing(world, owner, grants, allow
     assert grants.grant("proj", request_id="other-request") == linked
 
 
-def test_revoke_removes_the_entry_and_an_old_share(world, owner, allowlist, kv) -> None:
+def test_revoke_removes_the_entry_and_an_old_share(world, owner, grants, allowlist) -> None:
+    """Entries from the old bot-account mode carry a Drive share; revoke removes it too."""
     pid = world.share("proj", "old-bot@example.com")
     allowlist.add(AllowEntry("proj", "Projects", FOLDER_MIME, pid))
-    grants = GrantService(lambda: owner, allowlist, AccessRequests(kv), None)
     grants.revoke("proj")
     assert owner.permission_calls[-1] == ("delete", "proj", pid)
     assert world.files["proj"].permissions == []
     assert allowlist.get("proj") is None
     with pytest.raises(GrantError):
         grants.revoke("proj")
-
-
-def test_revoke_when_permission_already_gone(world, grants, allowlist) -> None:
-    grants.grant("proj")
-    world.files["proj"].permissions.clear()
+    # The share is already gone in Drive: the entry still goes, quietly.
+    allowlist.add(AllowEntry("proj", "Projects", FOLDER_MIME, "gone-perm"))
     grants.revoke("proj")
     assert allowlist.get("proj") is None
+
+
+def test_revoke_says_when_google_keeps_an_old_share(world, owner, grants, allowlist) -> None:
+    pid = world.share("loose-doc", "old-bot@example.com")
+    allowlist.add(AllowEntry("loose-doc", "Loose memo", "text/plain", pid))
+
+    def refuse(file_id: str, permission_id: str) -> None:
+        raise RuntimeError("drive 500")
+
+    owner.delete_permission = refuse
+    with pytest.raises(GrantError, match="Share dialog"):
+        grants.revoke("loose-doc")
+    # The assistant loses access either way; only the old share is left for the person.
+    assert allowlist.get("loose-doc") is None
 
 
 def test_grant_refuses_missing_and_unowned(grants, allowlist) -> None:
@@ -98,31 +108,29 @@ def test_grant_shortcut_grants_target(grants, allowlist) -> None:
     assert allowlist.get("proj-shortcut") is None
 
 
-def test_nested_folders_in_scope(grants, p2_guard) -> None:
-    assert not p2_guard.is_in_scope("proj-deep-doc")
-    grants.grant("proj")
-    for fid in ("proj", "proj-sub", "proj-deep-doc", "proj-notes"):
+@pytest.mark.parametrize(
+    ("granted", "inside", "outside"),
+    [
+        (
+            "proj",
+            ("proj", "proj-sub", "proj-deep-doc", "proj-notes"),
+            ("priv", "priv-secret", "loose-doc", "owner-root", "stray-shared"),
+        ),
+        # A subfolder grant does not expose its parent or siblings.
+        ("proj-sub", ("proj-deep-doc",), ("proj-notes", "proj")),
+        ("loose-doc", ("loose-doc",), ("loose-two",)),
+    ],
+)
+def test_grant_scope(grants, p2_guard, granted, inside, outside) -> None:
+    assert not any(p2_guard.is_in_scope(fid) for fid in inside)
+    grants.grant(granted)
+    for fid in inside:
         assert p2_guard.is_in_scope(fid), fid
-    for fid in ("priv", "priv-secret", "loose-doc", "owner-root", "stray-shared"):
+    for fid in outside:
         assert not p2_guard.is_in_scope(fid), fid
 
 
-def test_subfolder_grant_does_not_expose_parent(grants, p2_guard) -> None:
-    grants.grant("proj-sub")
-    assert p2_guard.is_in_scope("proj-deep-doc")
-    assert not p2_guard.is_in_scope("proj-notes")
-    assert not p2_guard.is_in_scope("proj")
-
-
-def test_individual_file_grant(grants, p2_guard) -> None:
-    grants.grant("loose-doc")
-    assert p2_guard.is_in_scope("loose-doc")
-    assert not p2_guard.is_in_scope("loose-two")
-
-
 def test_file_outside_this_drive_is_refused(owner, p2_guard) -> None:
-    from scoped_drive_mcp.drive_client import DriveNotFoundError
-
     with pytest.raises(DriveNotFoundError):
         owner.get_file("stray-shared", "id")
     with pytest.raises(OutOfScopeError) as exc:
@@ -130,39 +138,29 @@ def test_file_outside_this_drive_is_refused(owner, p2_guard) -> None:
     assert exc.value.file_id == "stray-shared"
 
 
-def test_allowlisted_file_needs_no_drive_share(allowlist, p2_guard) -> None:
-    allowlist.add(AllowEntry("priv-secret", "payroll.txt", "text/plain", None))
-    assert p2_guard.is_in_scope("priv-secret")
-
-
-def test_revocation_takes_effect(grants, p2_service, p2_guard) -> None:
+def test_revocation_takes_effect(grants, p2_service, owner) -> None:
     grants.grant("proj")
     assert p2_service.read_file("proj-notes")["content"] == "project notes alpha"
+    created = p2_service.create_doc("note", "hi", parent_id="proj")
+    assert p2_service.read_file(created["id"])["content"] == "hi"
     grants.revoke("proj")
     with pytest.raises(OutOfScopeError):
         p2_service.read_file("proj-notes")
+    # A file the assistant itself made in the folder goes with it.
+    assert owner.get_file(created["id"], "id")
+    with pytest.raises(OutOfScopeError):
+        p2_service.read_file(created["id"])
 
 
-def test_revocation_on_other_instance_within_allowlist_ttl(owner, allowlist, kv) -> None:
+def test_revocation_on_other_instance_within_allowlist_ttl(owner, allowlist, grants) -> None:
     clock = FakeClock()
     other = ScopeGuard(owner, None, allowlist=allowlist.mime_map, allowlist_ttl=2, clock=clock)
-    grants = GrantService(lambda: owner, allowlist, AccessRequests(kv), None)
     grants.grant("loose-doc")
     assert other.is_in_scope("loose-doc")
     allowlist.remove("loose-doc")  # revoke recorded by another instance; share still present
     assert other.is_in_scope("loose-doc")  # cached for at most allowlist_ttl
     clock.advance(2.5)
     assert not other.is_in_scope("loose-doc")
-
-
-def test_file_created_in_a_revoked_folder_is_refused(grants, p2_service, owner) -> None:
-    grants.grant("proj")
-    created = p2_service.create_doc("note", "hi", parent_id="proj")
-    assert p2_service.read_file(created["id"])["content"] == "hi"
-    grants.revoke("proj")
-    assert owner.get_file(created["id"], "id")
-    with pytest.raises(OutOfScopeError):
-        p2_service.read_file(created["id"])
 
 
 def test_allowlisted_items_cannot_be_renamed_or_trashed(grants, p2_service, world) -> None:
@@ -229,24 +227,16 @@ def test_search_allowlisted_folders_and_files(grants, p2_service) -> None:
     assert ids == {"proj-deep-doc"}
 
 
-def test_grant_makes_a_folder_searchable_without_sharing(world, grants, p2_service) -> None:
+def test_grant_and_revoke_change_search_without_sharing(world, grants, p2_service) -> None:
     assert p2_service.search_files("roadmap", 10)["count"] == 0
     assert grants.grant("proj").permission_id is None
     assert world.files["proj"].permissions == []
-    assert p2_service.search_files("roadmap", 10)["count"] == 1
-
-
-def test_search_after_revoke(grants, p2_service) -> None:
-    grants.grant("proj")
     assert p2_service.search_files("roadmap", 10)["count"] == 1
     grants.revoke("proj")
     assert p2_service.search_files("roadmap", 10)["count"] == 0
 
 
-def test_root_folder_id_is_an_extra_root(drive, clock, kv) -> None:
-    allowlist = Allowlist(kv)
-    from scoped_drive_mcp.store import AllowEntry
-
+def test_root_folder_id_is_an_extra_root(drive, clock, allowlist) -> None:
     allowlist.add(AllowEntry("outside-folder", "Private", FOLDER_MIME, None))
     guard = ScopeGuard(drive, ROOT, allowlist=allowlist.mime_map, allowlist_ttl=0, clock=clock)
     assert guard.is_in_scope("notes-txt")  # via ROOT_FOLDER_ID

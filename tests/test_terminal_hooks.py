@@ -1,9 +1,8 @@
-"""Terminal, phase 7: `botrbac check` for agents' own tools, and hook installation."""
+"""Terminal: `botrbac check` for agents' own tools, and hook installation."""
 
 import io
 import json
 import sys
-import time
 
 import pytest
 
@@ -12,32 +11,26 @@ from botrbac_cli.check import check, classify, tool_name
 from botrbac_cli.hooks import install_claude_code
 from botrbac_cli.main import main
 from botrbac_cli.queue import AuditQueue
+from tests.terminal_helpers import cache_policy
 
 
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("BOTRBAC_HOME", str(tmp_path / "botrbac"))
     monkeypatch.delenv(policy.SESSION_ENV, raising=False)
-    state.write_json(
-        "policy.json",
-        {
-            "policy": {
-                "role": {
-                    "id": "r",
-                    "name": "Coder",
-                    "patterns": ["claude-code/Read", "claude-code/Bash", "github/get_*"],
-                },
-                "roles": [],
-                "revoked_sessions": [],
-            },
-            "fetched_at": time.time(),
-        },
-    )
+    cache_policy(["claude-code/Read", "claude-code/Bash", "github/get_*"], name="Coder")
     return tmp_path
 
 
 def _hook(name: str) -> str:
     return json.dumps({"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": {}})
+
+
+def _settings(home, folder: str, text: str = "{}"):
+    path = home / folder / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    return path
 
 
 def test_tool_name_shapes() -> None:
@@ -65,10 +58,20 @@ def test_check_decisions() -> None:
     assert not check("claude-code", "not json", None, False)[0]
     assert not check("claude-code", "{}", None, False)[0]
     assert check("codex", "", "Read", False)[0] is False  # codex/Read is not in the role
+    assert check("claude-code", "", "Read", False)[0]
+    assert not check("claude-code", "", "read", False)[0]  # tool names are case-sensitive
 
     rows = AuditQueue().pending()
     assert {r["via"] for r in rows} == {"hook"}
-    assert [r["decision"] for r in rows] == ["allow", "deny", "allow", "deny", "deny"]
+    assert [r["decision"] for r in rows] == [
+        "allow",
+        "deny",
+        "allow",
+        "deny",
+        "deny",
+        "allow",
+        "deny",
+    ]
 
 
 def test_check_command_exit_codes(monkeypatch, capsys) -> None:
@@ -87,9 +90,9 @@ def test_check_without_policy_blocks(home) -> None:
 
 
 def test_install_claude_code_hook(home) -> None:
-    settings = home / "proj" / ".claude" / "settings.json"
-    settings.parent.mkdir(parents=True)
-    settings.write_text(
+    settings = _settings(
+        home,
+        "proj",
         json.dumps(
             {
                 "permissions": {"allow": ["Bash(ls)"]},
@@ -99,11 +102,13 @@ def test_install_claude_code_hook(home) -> None:
                     ]
                 },
             }
-        )
+        ),
     )
     first = install_claude_code(settings)
-    assert first["backup"]
-    install_claude_code(settings)  # again: still one botrbac entry
+    assert first["changed"] and first["backup"]
+    second = install_claude_code(settings)  # again: still one entry, and no new backup
+    assert not second["changed"] and second["backup"] is None
+    assert len(list(settings.parent.glob("settings.json.botrbac-backup-*"))) == 1
     data = json.loads(settings.read_text())
     assert data["permissions"] == {"allow": ["Bash(ls)"]}
     entries = data["hooks"]["PreToolUse"]
@@ -148,52 +153,28 @@ def test_large_payload_is_read_whole(monkeypatch) -> None:
     assert main(["check", "--agent", "claude-code"]) == 0
 
 
-def test_tool_names_are_case_sensitive() -> None:
-    assert check("claude-code", "", "Read", False)[0]
-    assert not check("claude-code", "", "read", False)[0]
-
-
-def test_hook_install_user_scope_and_bad_file(home, monkeypatch) -> None:
+def test_hook_install_user_scope(home, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(home / "h"))
     (home / "h").mkdir()
     assert main(["hooks", "install", "claude-code", "--user"]) == 0
-    settings = home / "h" / ".claude" / "settings.json"
-    assert "check" in settings.read_text()
-
-    bad = home / "bad" / ".claude" / "settings.json"
-    bad.parent.mkdir(parents=True)
-    bad.write_text("{oops")
-    with pytest.raises(ValueError, match="left as it is"):
-        install_claude_code(bad)
-    assert bad.read_text() == "{oops"
-
-
-def test_hook_install_twice_makes_no_new_backup(home) -> None:
-    settings = home / "p" / ".claude" / "settings.json"
-    settings.parent.mkdir(parents=True)
-    settings.write_text("{}")
-    assert install_claude_code(settings)["changed"]
-    second = install_claude_code(settings)
-    assert not second["changed"] and second["backup"] is None
-    assert len(list(settings.parent.glob("settings.json.botrbac-backup-*"))) == 1
+    assert "check" in (home / "h" / ".claude" / "settings.json").read_text()
 
 
 def test_unrelated_hook_that_mentions_botrbac_is_kept(home) -> None:
-    settings = home / "q" / ".claude" / "settings.json"
-    settings.parent.mkdir(parents=True)
     mine = {"type": "command", "command": "echo botrbac check --agent is great"}
-    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [mine]}]}}))
+    text = json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [mine]}]}})
+    settings = _settings(home, "q", text)
     install_claude_code(settings)
     entries = json.loads(settings.read_text())["hooks"]["PreToolUse"]
     assert entries[0]["hooks"][0] == mine and len(entries) == 2
 
 
-@pytest.mark.parametrize("hooks", [[], {"PreToolUse": {"matcher": "*"}}])
-def test_odd_hooks_shapes_are_left_alone(home, hooks) -> None:
-    settings = home / "odd" / ".claude" / "settings.json"
-    settings.parent.mkdir(parents=True)
-    text = json.dumps({"hooks": hooks})
-    settings.write_text(text)
+@pytest.mark.parametrize(
+    "text",
+    ["{oops", json.dumps({"hooks": []}), json.dumps({"hooks": {"PreToolUse": {"matcher": "*"}}})],
+)
+def test_broken_or_odd_settings_are_left_alone(home, text) -> None:
+    settings = _settings(home, "odd", text)
     with pytest.raises(ValueError, match="left as it is"):
         install_claude_code(settings)
     assert settings.read_text() == text
@@ -219,9 +200,7 @@ def test_hooks_remove_takes_out_only_ours(home, monkeypatch, capsys) -> None:
 def test_hooks_remove_cleans_up_an_emptied_section(home) -> None:
     from botrbac_cli.hooks import remove_claude_code
 
-    settings = home / "s" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text("{}")
+    settings = _settings(home, "s")
     install_claude_code(settings)
     remove_claude_code(settings)
     assert json.loads(settings.read_text()) == {}

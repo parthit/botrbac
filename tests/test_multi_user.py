@@ -1,6 +1,8 @@
 """Two people: Grok Bot for one cannot read the other's files."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from scoped_drive_mcp.auth import current_actor
 from scoped_drive_mcp.drive_client import FOLDER_MIME
@@ -27,7 +29,17 @@ def _extend(world: FakeDrive) -> None:
     world.add(EVE_DOC, EVE_DOC_NAME, "text/plain", ["eve-root"], b"eve only text", owner=EVE)
 
 
-def _app(world, memstore, oauth, **extra):
+@contextmanager
+def as_actor(email: str | None) -> Iterator[None]:
+    """Run the block as `email` (the signed-in person a request acts for)."""
+    token = current_actor.set(email)
+    try:
+        yield
+    finally:
+        current_actor.reset(token)
+
+
+def _app(world, memstore, oauth, root_folder_id: str | None = None, **extra):
     _accounts(oauth)
     _extend(world)
 
@@ -36,7 +48,7 @@ def _app(world, memstore, oauth, **extra):
 
     app = build_app(
         make_settings(
-            root_folder_id=None,
+            root_folder_id=root_folder_id,
             google_oauth_refresh_token=None,
             allowlist_cache_ttl=0,
         ),
@@ -157,58 +169,24 @@ def test_root_folder_id_is_only_the_admins(world, memstore, oauth) -> None:
     drive.add("eve-child", "Eve note", "text/plain", ["eve-folder"], b"eve")
 
     def allow() -> dict[str, str]:
-        if current_actor.get() == EVE:
-            return {"eve-folder": FOLDER_MIME}
-        return {}
+        return {"eve-folder": FOLDER_MIME} if current_actor.get() == EVE else {}
 
     guard = ScopeGuard(
-        drive,
-        "admin-root",
-        allowlist=allow,
-        allowlist_ttl=0,
-        admin_email=OWNER_EMAIL,
+        drive, "admin-root", allowlist=allow, allowlist_ttl=0, admin_email=OWNER_EMAIL
     )
-    admin = current_actor.set(OWNER_EMAIL)
-    try:
-        assert guard.is_in_scope("admin-child")
-        assert guard.default_parent() == "admin-root"
-        assert "admin-root" in guard.allowed()
-    finally:
-        current_actor.reset(admin)
-    unset = current_actor.set(None)
-    try:
-        assert guard.is_in_scope("admin-child")
-        assert guard.default_parent() == "admin-root"
-    finally:
-        current_actor.reset(unset)
-    eve_actor = current_actor.set(EVE)
-    try:
+    for admin in (OWNER_EMAIL, None):  # no actor means the admin (stdio, scripts)
+        with as_actor(admin):
+            assert guard.is_in_scope("admin-child")
+            assert guard.default_parent() == "admin-root"
+            assert "admin-root" in guard.allowed()
+    with as_actor(EVE):
         assert not guard.is_in_scope("admin-child")
         assert guard.is_in_scope("eve-child")
         assert guard.default_parent() == "eve-folder"
         assert "admin-root" not in guard.allowed()
-    finally:
-        current_actor.reset(eve_actor)
 
-    _accounts(oauth)
-    _extend(world)
-
-    def drive_for(token: str) -> FakeDrive:
-        return world.as_user(token.removeprefix("rt-"))
-
-    app = build_app(
-        make_settings(
-            root_folder_id="admin-root",
-            google_oauth_refresh_token=None,
-            allowlist_cache_ttl=0,
-        ),
-        store=memstore,
-        owner_drive_factory=drive_for,
-        oauth=oauth,
-        bot_drive_factory=drive_for,
-    )
-    admin_page = client(app)
-    eve_page = client(app)
+    app = _app(world, memstore, oauth, root_folder_id="admin-root")
+    admin_page, eve_page = client(app), client(app)
     assert login(admin_page).status_code == 303
     assert login(eve_page, "eve-code").status_code == 303
     assert "admin-root" in admin_page.get("/files?tab=allowed").text
@@ -218,26 +196,16 @@ def test_root_folder_id_is_only_the_admins(world, memstore, oauth) -> None:
 
 
 def test_scope_cache_is_partitioned_by_actor() -> None:
-    def source() -> dict[str, str]:
-        actor = current_actor.get()
-        if actor == "a@example.com":
-            return {"a-file": "text/plain"}
-        if actor == "b@example.com":
-            return {"b-file": "text/plain"}
-        return {"shared-file": "text/plain"}
-
-    guard = ScopeGuard(FakeDrive(), None, allowlist=source, allowlist_ttl=60)
-    first = current_actor.set("a@example.com")
-    try:
-        assert set(guard.allowed()) == {"a-file"}
-    finally:
-        current_actor.reset(first)
-    second = current_actor.set("b@example.com")
-    try:
-        assert set(guard.allowed()) == {"b-file"}
-    finally:
-        current_actor.reset(second)
-    assert set(guard.allowed()) == {"shared-file"}
+    allowed = {"a@example.com": "a-file", "b@example.com": "b-file", None: "shared-file"}
+    guard = ScopeGuard(
+        FakeDrive(),
+        None,
+        allowlist=lambda: {allowed[current_actor.get()]: "text/plain"},
+        allowlist_ttl=60,
+    )
+    for actor, file_id in allowed.items():
+        with as_actor(actor):
+            assert set(guard.allowed()) == {file_id}
 
 
 def test_admin_revokes_every_old_full_drive_connection(world, memstore, oauth) -> None:

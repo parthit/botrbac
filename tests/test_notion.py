@@ -1,15 +1,26 @@
 """Notion: a second connection with its own OAuth, its own allowlist and read-only tools."""
 
+import base64
+import json
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
 from scoped_drive_mcp.notion_client import (
+    API_BASE,
+    HttpNotionApi,
+    NotionApiError,
+    NotionForbiddenError,
     NotionNotFoundError,
+    NotionOAuth,
     NotionOAuthError,
     NotionTokens,
     NotionUnauthorizedError,
+    block_line,
     normalize_notion_id,
+    property_text,
+    title_of,
 )
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import KEY_PREFIX, NOTION_ALLOWLIST_KEY, NOTION_TOKEN_KEY
@@ -137,8 +148,6 @@ class FakeNotionApi:
 
     def search(self, query: str, cursor=None, page_size: int = 100) -> dict:
         self._check()
-        from scoped_drive_mcp.notion_client import title_of
-
         hits = [
             o
             for oid, o in self.world.objects.items()
@@ -356,24 +365,22 @@ def test_connect_form_may_redirect_to_notion() -> None:
     assert b"https://api.notion.com" in STRICT_CSP
 
 
-def test_disconnect_removes_and_revokes_the_token(c, memstore, notion_oauth) -> None:
+def test_disconnect_removes_and_revokes_the_token_and_clears_the_list(
+    c, memstore, notion_oauth
+) -> None:
     connect_notion(c)
+    allow(c, TOP)
     token = csrf(c, "/settings")
     r = c.post("/connect/notion/disconnect", data={"csrf": token})
     assert r.status_code == 303
     assert memstore.get(f"{KEY_PREFIX}{NOTION_TOKEN_KEY}") is None
+    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
     assert notion_oauth.revoked == ["notion-access-1", "notion-refresh-1"]
     out = result(c, "notion_list_pages")
     assert out["structuredContent"]["error"] == "notion_not_connected"
 
 
 # ---- the From Notion tab ------------------------------------------------------------------
-
-
-def test_files_tab_offers_connect_until_connected(c) -> None:
-    page = c.get("/files?tab=notion")
-    assert page.status_code == 200
-    assert 'id="notion-connect"' in page.text
 
 
 def test_files_tab_lists_what_notion_shows_and_allows_one(c, memstore) -> None:
@@ -403,14 +410,6 @@ def test_cannot_allow_a_page_notion_does_not_show(c, memstore) -> None:
     allow(c, HIDDEN)
     assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
     assert "doesn’t show Bot RBAC that page" in c.get("/files?tab=notion").text
-
-
-def test_remove_takes_it_off_the_list(c, memstore) -> None:
-    connect_notion(c)
-    allow(c, TOP)
-    token = csrf(c, "/files?tab=notion")
-    c.post("/notion/remove", data={"csrf": token, "page_id": TOP})
-    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
 
 
 def test_allow_needs_csrf(c, memstore) -> None:
@@ -493,9 +492,11 @@ def test_search_returns_only_allowed_matches(allowed) -> None:
     assert hits == []
 
 
-def test_removed_page_is_unreadable_at_once(allowed) -> None:
+def test_removed_page_is_off_the_list_and_unreadable_at_once(allowed, memstore) -> None:
+    assert "secret onboarding" in str(result(allowed, "notion_read_page", page_id=CHILD))
     token = csrf(allowed, "/files?tab=notion")
     allowed.post("/notion/remove", data={"csrf": token, "page_id": TOP})
+    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
     out = result(allowed, "notion_read_page", page_id=CHILD)
     assert out["structuredContent"]["error"] == "not_allowed"
 
@@ -521,7 +522,13 @@ def test_a_revoked_connection_asks_to_reconnect(allowed, notion, notion_oauth) -
     assert out["structuredContent"]["error"] == "notion_reconnect"
 
 
-def test_another_persons_notion_is_separate(app, allowed) -> None:
+def test_the_tab_offers_connect_until_connected_and_each_person_has_their_own(app, c) -> None:
+    page = c.get("/files?tab=notion")
+    assert page.status_code == 200
+    assert 'id="notion-connect"' in page.text
+    connect_notion(c)
+    allow(c, TOP)
+    assert 'id="notion-connect"' not in c.get("/files?tab=notion").text
     eve = client(app)
     login(eve, "eve-code")
     page = eve.get("/files?tab=notion").text
@@ -569,9 +576,6 @@ def test_a_refresh_spent_by_another_call_uses_the_stored_token(allowed, notion, 
 def test_revoke_reads_notions_answer(monkeypatch, status, body, expected) -> None:
     """Per Notion's reference: 401 is invalid_client (nothing revoked), and 400
     invalid_grant means the token is already invalid."""
-    import httpx
-
-    from scoped_drive_mcp.notion_client import NotionOAuth
 
     def fake_post(url, **kwargs):
         assert url == "https://api.notion.com/v1/oauth/revoke"
@@ -584,12 +588,6 @@ def test_revoke_reads_notions_answer(monkeypatch, status, body, expected) -> Non
 
 
 def test_token_exchange_sends_what_notion_documents(monkeypatch) -> None:
-    import base64
-
-    import httpx
-
-    from scoped_drive_mcp.notion_client import NotionOAuth
-
     seen = {}
 
     def fake_post(url, **kwargs):
@@ -622,10 +620,8 @@ def test_token_exchange_sends_what_notion_documents(monkeypatch) -> None:
     )
 
 
-def test_restricted_parent_reads_as_not_allowed(allowed, notion) -> None:
+def test_restricted_parent_reads_as_not_allowed(allowed, monkeypatch) -> None:
     """A 403 restricted_resource in the parent walk is answered like not found."""
-    from scoped_drive_mcp.notion_client import NotionForbiddenError
-
     real_get_page = FakeNotionApi.get_page
 
     def restricted(self, page_id):
@@ -633,11 +629,8 @@ def test_restricted_parent_reads_as_not_allowed(allowed, notion) -> None:
             raise NotionForbiddenError(403, "restricted_resource")
         return real_get_page(self, page_id)
 
-    FakeNotionApi.get_page = restricted
-    try:
-        out = result(allowed, "notion_read_page", page_id=CHILD)
-    finally:
-        FakeNotionApi.get_page = real_get_page
+    monkeypatch.setattr(FakeNotionApi, "get_page", restricted)
+    out = result(allowed, "notion_read_page", page_id=CHILD)
     assert out["structuredContent"]["error"] == "not_allowed"
 
 
@@ -670,13 +663,12 @@ def test_synced_copy_of_a_page_that_is_not_allowed_is_not_shown(allowed, notion)
     assert "diary text mirrored" in out
 
 
-def test_disconnect_clears_the_notion_list(allowed, memstore) -> None:
-    token = csrf(allowed, "/settings")
-    allowed.post("/connect/notion/disconnect", data={"csrf": token})
-    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
+def test_reconnecting_keeps_the_list_only_for_the_same_workspace(
+    allowed, memstore, notion_oauth
+) -> None:
+    connect_notion(allowed)
+    assert TOP in memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}")
 
-
-def test_connecting_another_workspace_clears_the_list(allowed, memstore, notion_oauth) -> None:
     real = notion_oauth.exchange_code
 
     def other_workspace(code):
@@ -688,16 +680,217 @@ def test_connecting_another_workspace_clears_the_list(allowed, memstore, notion_
     assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
 
 
-def test_reconnecting_the_same_workspace_keeps_the_list(allowed, memstore) -> None:
-    connect_notion(allowed)
-    assert TOP in memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}")
-
-
-def test_tool_closes_its_notion_client(allowed, notion) -> None:
+def test_tool_closes_its_notion_client(allowed, monkeypatch) -> None:
     closed = []
-    FakeNotionApi.close = lambda self: closed.append(1)
-    try:
-        result(allowed, "notion_read_page", page_id=TOP)
-    finally:
-        del FakeNotionApi.close
+    monkeypatch.setattr(FakeNotionApi, "close", lambda self: closed.append(1), raising=False)
+    result(allowed, "notion_read_page", page_id=TOP)
     assert closed == [1]
+
+
+# ---- the HTTP client and Notion's block and property shapes -------------------------------
+
+
+def _http_api(handler) -> HttpNotionApi:
+    """The real client, with Notion answered by `handler` instead of the network."""
+    api = HttpNotionApi("ntn_secret")
+    headers = api._client.headers
+    api.close()
+    api._client = httpx.Client(
+        base_url=API_BASE, headers=headers, transport=httpx.MockTransport(handler)
+    )
+    return api
+
+
+def test_the_http_client_sends_reads_as_notion_documents_them() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"object": "list", "results": []})
+
+    api = _http_api(handler)
+    api.search("wiki", cursor="c1", page_size=500)
+    api.search("")
+    api.get_page(TOP)
+    api.get_database(DB)
+    api.get_block(COLUMN)
+    api.block_children(TOP, cursor="c2")
+    api.query_database(DB)
+    api.close()
+    for request in seen:
+        assert request.headers["authorization"] == "Bearer ntn_secret"
+        assert request.headers["notion-version"] == "2022-06-28"
+    calls = [(r.method, r.url.path, r.url.query.decode()) for r in seen]
+    assert calls == [
+        ("POST", "/v1/search", ""),
+        ("POST", "/v1/search", ""),
+        ("GET", f"/v1/pages/{TOP}", ""),
+        ("GET", f"/v1/databases/{DB}", ""),
+        ("GET", f"/v1/blocks/{COLUMN}", ""),
+        ("GET", f"/v1/blocks/{TOP}/children", "page_size=100&start_cursor=c2"),
+        ("POST", f"/v1/databases/{DB}/query", ""),
+    ]
+    # Page size is capped at Notion's 100; an empty query lists everything shared.
+    assert json.loads(seen[0].content) == {"page_size": 100, "query": "wiki", "start_cursor": "c1"}
+    assert json.loads(seen[1].content) == {"page_size": 100}
+    assert json.loads(seen[-1].content) == {"page_size": 100}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "error", "code"),
+    [
+        (404, {"code": "object_not_found"}, NotionNotFoundError, "object_not_found"),
+        (401, {"code": "unauthorized"}, NotionUnauthorizedError, "unauthorized"),
+        (403, {"code": "restricted_resource"}, NotionForbiddenError, "restricted_resource"),
+        (429, {"code": "rate_limited"}, NotionApiError, "rate_limited"),
+        (502, b"<html>bad gateway</html>", NotionApiError, ""),
+        (200, ["not", "an", "object"], NotionApiError, "bad_response"),
+        (200, b"<html>not json</html>", NotionApiError, "bad_response"),
+        # No answer at all: still a NotionApiError, which the tools and the dashboard
+        # report as Notion not answering, instead of a 500 or "Drive request failed".
+        (0, httpx.ConnectError("refused"), NotionApiError, "unreachable"),
+        (0, httpx.ReadTimeout("slow"), NotionApiError, "unreachable"),
+    ],
+)
+def test_the_http_client_maps_notions_errors(status, body, error, code) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if isinstance(body, Exception):
+            raise body
+        if isinstance(body, bytes):
+            return httpx.Response(status, content=body)
+        return httpx.Response(status, json=body)
+
+    with pytest.raises(error) as raised:
+        _http_api(handler).get_page(TOP)
+    assert type(raised.value) is error
+    assert (raised.value.status, raised.value.code) == (status, code)
+
+
+def test_the_oauth_flow_asks_for_a_user_owned_connection_and_refreshes(monkeypatch) -> None:
+    flow = NotionOAuth("cid", "csec", "https://x/cb")
+    url = urlparse(flow.authorization_url("st4te"))
+    assert f"{url.scheme}://{url.netloc}{url.path}" == "https://api.notion.com/v1/oauth/authorize"
+    assert parse_qs(url.query) == {
+        "client_id": ["cid"],
+        "response_type": ["code"],
+        "owner": ["user"],
+        "redirect_uri": ["https://x/cb"],
+        "state": ["st4te"],
+    }
+
+    answers: list = []
+    sent: list[dict] = []
+
+    def fake_post(_url, **kwargs):
+        sent.append(kwargs["json"])
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    answers.append(httpx.Response(200, json={"access_token": "ntn_b", "refresh_token": ""}))
+    tokens = flow.refresh("nrt_old")
+    assert sent[-1] == {"grant_type": "refresh_token", "refresh_token": "nrt_old"}
+    assert (tokens.access_token, tokens.refresh_token, tokens.workspace_id) == ("ntn_b", None, "")
+
+    for answer, message in (
+        (httpx.ConnectError("down"), "could not reach Notion"),
+        (httpx.Response(400, json={"error": "invalid_grant"}), "rejected"),
+        (httpx.Response(200, json={"access_token": ""}), "unexpected response"),
+        (httpx.Response(200, json=["no"]), "unexpected response"),
+        (httpx.Response(200, content=b"not json"), "unexpected response"),
+    ):
+        answers.append(answer)
+        with pytest.raises(NotionOAuthError, match=message):
+            flow.exchange_code("c0de")
+    answers.append(httpx.ConnectError("down"))
+    assert flow.revoke("tok") is False
+
+
+def _block(kind: str, **body) -> dict:
+    return {"object": "block", "id": "blk", "type": kind, kind: body}
+
+
+def _rich(text: str) -> list[dict]:
+    return [{"plain_text": text}]
+
+
+@pytest.mark.parametrize(
+    ("block", "line"),
+    [
+        (_block("heading_1", rich_text=_rich("Plan")), "# Plan"),
+        (_block("heading_3", rich_text=_rich("Detail")), "### Detail"),
+        (_block("bulleted_list_item", rich_text=_rich("one")), "- one"),
+        (_block("numbered_list_item", rich_text=_rich("two")), "1. two"),
+        (_block("quote", rich_text=_rich("said")), "> said"),
+        (_block("toggle", rich_text=_rich("more")), "▸ more"),
+        (_block("to_do", rich_text=_rich("open"), checked=False), "[ ] open"),
+        (_block("code", rich_text=_rich("x = 1"), language="python"), "```python\nx = 1\n```"),
+        (_block("child_page", title="Sub"), "[page] Sub (id blk)"),
+        (_block("child_database", title=""), "[database] Untitled (id blk)"),
+        (_block("divider"), "---"),
+        (_block("equation", expression="e=mc^2"), "e=mc^2"),
+        (_block("bookmark", url="https://example.com"), "<https://example.com>"),
+        (_block("embed"), None),
+        (_block("table_row", cells=[_rich("a"), _rich("b")]), "a | b"),
+        (_block("table_row"), None),
+        (_block("paragraph", rich_text=[]), None),
+        (_block("image", rich_text="not a list"), None),
+        ({"type": "paragraph", "paragraph": "not a dict"}, None),
+    ],
+)
+def test_blocks_read_as_markdown_like_lines(block, line) -> None:
+    assert block_line(block) == line
+
+
+@pytest.mark.parametrize(
+    ("prop", "text"),
+    [
+        ({"type": "rich_text", "rich_text": _rich("note")}, "note"),
+        ({"type": "select", "select": {"name": "High"}}, "High"),
+        ({"type": "status", "status": {"name": "Done"}}, "Done"),
+        ({"type": "select", "select": None}, ""),
+        ({"type": "multi_select", "multi_select": [{"name": "a"}, {"name": "b"}]}, "a, b"),
+        ({"type": "date", "date": {"start": "2026-11-01"}}, "2026-11-01"),
+        (
+            {"type": "date", "date": {"start": "2026-11-01", "end": "2026-11-03"}},
+            "2026-11-01 → 2026-11-03",
+        ),
+        ({"type": "checkbox", "checkbox": True}, "yes"),
+        ({"type": "checkbox", "checkbox": False}, "no"),
+        ({"type": "number", "number": 0}, "0"),
+        ({"type": "number", "number": None}, ""),
+        ({"type": "url", "url": "https://x"}, "https://x"),
+        ({"type": "people", "people": [{"name": "Ada"}, {"name": "Bo"}]}, "Ada, Bo"),
+        ({"type": "people", "people": [{"name": "Ada"}, {"id": "u2"}, {"name": None}]}, "Ada"),
+        ({"type": "multi_select", "multi_select": [{"name": ""}, {"name": "b"}]}, "b"),
+        ({"type": "formula", "formula": {"type": "number", "number": 3}}, "3"),
+        ({"type": "formula", "formula": {"type": "string", "string": None}}, ""),
+        ({"type": "relation", "relation": [{"id": "x"}]}, ""),
+        ({"type": None}, ""),
+    ],
+)
+def test_database_properties_read_as_short_text(prop, text) -> None:
+    assert property_text(prop) == text
+
+
+def test_a_page_reads_its_properties_and_nested_blocks(allowed, notion) -> None:
+    notion.objects[CHILD]["properties"]["Status"] = {"type": "status", "status": {"name": "Done"}}
+    notion.objects[CHILD]["properties"]["Empty"] = {"type": "rich_text", "rich_text": []}
+    notion.children[CHILD] = [
+        {
+            **_block("bulleted_list_item", rich_text=_rich("outer")),
+            "id": nid(30),
+            "has_children": True,
+        },
+        {**_block("child_page", title="Sub"), "id": nid(31), "has_children": True},
+    ]
+    notion.shared |= {nid(30), nid(31)}
+    notion.children[nid(30)] = [para("inner")]
+    notion.children[nid(31)] = [para("child page body, read by its own id")]
+    out = result(allowed, "notion_read_page", page_id=CHILD)["structuredContent"]["content"]
+    assert "# Onboarding\nStatus: Done\n" in out and "Empty:" not in out
+    assert "- outer\n  inner" in out
+    assert f"[page] Sub (id {nid(31)})" in out
+    assert "child page body" not in out

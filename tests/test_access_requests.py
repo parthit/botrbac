@@ -7,7 +7,7 @@ import pytest
 
 from scoped_drive_mcp.access import INDEX_MAX, PENDING_INDEX, REQUEST_TTL, AccessRequests
 from scoped_drive_mcp.store import MemoryStore, PrefixedStore
-from tests.conftest import BASE_URL, OWNER_EMAIL, FakeClock
+from tests.conftest import BASE_URL, OWNER_EMAIL, FakeClock, make_settings
 from tests.dash import client, login, mcp_call, post
 
 
@@ -104,18 +104,20 @@ def test_every_denying_tool_creates_a_request(c) -> None:
         assert result["structuredContent"]["error"] == "access_required", tool
 
 
-def test_role_denial_does_not_create_a_request(c, p2_app) -> None:
-    result = mcp_call(c, "trash_file", "viewer", file_id="priv-secret")
-    assert result["isError"] and "Permission denied" in result["content"][0]["text"]
-    result = mcp_call(c, "read_file", file_id="bad id!")
-    assert "Invalid input" in result["content"][0]["text"]
-    assert requests_of(p2_app).recent() == []
-
-
-def test_protected_item_is_not_an_access_request(c, p2_app) -> None:
+def test_refusals_that_approval_cannot_fix_file_no_request(c, p2_app) -> None:
+    """A role denial, a malformed id, a Drive alias (root, appDataFolder) and a protected
+    allowlisted item are refused outright: approving a request would not help."""
     post(c, "/grant", file_id="proj")
-    result = mcp_call(c, "rename_file", "editor", file_id="proj", new_name="x")
-    assert "Forbidden" in result["content"][0]["text"]
+    calls = [
+        ("trash_file", "viewer", {"file_id": "priv-secret"}, "Permission denied"),
+        ("read_file", "viewer", {"file_id": "bad id!"}, "Invalid input"),
+        ("read_file", "viewer", {"file_id": "root"}, "Invalid input"),
+        ("read_file", "viewer", {"file_id": "appDataFolder"}, "Invalid input"),
+        ("rename_file", "editor", {"file_id": "proj", "new_name": "x"}, "Forbidden"),
+    ]
+    for tool, role, args, text in calls:
+        result = mcp_call(c, tool, role, **args)
+        assert result["isError"] and text in result["content"][0]["text"], (tool, args)
     assert requests_of(p2_app).recent() == []
 
 
@@ -157,6 +159,12 @@ def test_approve_parent_folder(c, world) -> None:
     assert [p["emailAddress"] for p in world.files["priv"].permissions] == []
     assert mcp_call(c, "read_file", file_id="priv-secret")["isError"] is False
     assert mcp_call(c, "read_file", file_id="priv-other")["isError"] is False
+    # The assistant is told which item was allowed, and how to look inside a folder.
+    status = mcp_call(c, "check_access_request", request_id=payload["request_id"])
+    status = status["structuredContent"]
+    assert status["granted_name"] == "Private"
+    assert "\u201cPrivate\u201d (id priv)" in status["message"]
+    assert "list_folder" in status["message"]
 
 
 def test_approve_rejects_other_targets(c, world, p2_app) -> None:
@@ -166,13 +174,6 @@ def test_approve_rejects_other_targets(c, world, p2_app) -> None:
     assert world.files["proj"].permissions == []
     assert requests_of(p2_app).get(payload["request_id"]).status == "pending"
     assert "Pick the requested item" in c.get(path).text
-
-
-def test_drive_alias_does_not_open_an_access_request(c, p2_app) -> None:
-    for file_id in ("root", "appDataFolder"):
-        result = mcp_call(c, "read_file", file_id=file_id)
-        assert result["isError"] and "Invalid input" in result["content"][0]["text"]
-    assert requests_of(p2_app).recent() == []
 
 
 def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(
@@ -353,20 +354,11 @@ def test_pending_backfill_includes_requests_older_than_the_newest_page() -> None
         req, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id=f"n{i}")
         reqs.decide(req, "denied")
     assert older.id not in {item.id for item in reqs.recent(100)}
-    store.delete("requests:pending")
+    # A missing waiting list is rebuilt from the whole history, not just the newest page.
+    store.delete(PENDING_INDEX)
     store.delete("requests:pending_ready")
     assert reqs.pending_count() == 1
-    assert older.id in store.lrange("requests:pending", 0, -1)
-
-
-def test_pending_count_rebuilds_a_missing_waiting_list() -> None:
-    store = MemoryStore()
-    reqs = AccessRequests(store)
-    req, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id="f1")
-    store.delete("requests:pending")
-    store.delete("requests:pending_ready")
-    assert reqs.pending_count() == 1
-    assert store.lrange("requests:pending", 0, -1) == [req.id]
+    assert store.lrange(PENDING_INDEX, 0, -1) == [older.id]
 
 
 def test_requests_expire_after_7_days() -> None:
@@ -385,7 +377,6 @@ def test_requests_expire_after_7_days() -> None:
 
 def test_no_access_service_without_base_url(world) -> None:
     from scoped_drive_mcp.server import build_app
-    from tests.conftest import make_settings
 
     app = build_app(
         make_settings(root_folder_id=None, app_base_url=None),

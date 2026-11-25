@@ -1,10 +1,12 @@
 """Sign-in (step 1, identity only) is separate from connecting Google Drive (step 2)."""
 
 import pytest
+from itsdangerous import URLSafeTimedSerializer
 
+from scoped_drive_mcp.dashboard import STATE_SALT
 from scoped_drive_mcp.drive_client import DRIVE_SCOPE
 from scoped_drive_mcp.store import KEY_PREFIX, OWNER_TOKEN_KEY
-from tests.conftest import OWNER_EMAIL
+from tests.conftest import OWNER_EMAIL, SESSION_SECRET
 from tests.dash import client, connect_drive, csrf, sign_in, start_oauth
 from tests.test_mcp_oauth import DONE, auth_params, register
 
@@ -14,6 +16,10 @@ DRIVE_PAGES = ["/files", "/files?folder=proj"]
 @pytest.fixture
 def c(p2_app):
     return client(p2_app)
+
+
+def _disconnect(c):
+    return c.post("/connect/google_drive/disconnect", data={"csrf": csrf(c, "/settings")})
 
 
 @pytest.fixture
@@ -107,11 +113,6 @@ def test_unknown_connection_is_404(signed_in) -> None:
 
 def test_connect_state_cannot_be_replayed_as_sign_in(c) -> None:
     """A connect callback without a signed-in session stores nothing."""
-    from itsdangerous import URLSafeTimedSerializer
-
-    from scoped_drive_mcp.dashboard import STATE_SALT
-    from tests.conftest import SESSION_SECRET
-
     serializer = URLSafeTimedSerializer(SESSION_SECRET, STATE_SALT)
     nonce = serializer.loads(start_oauth(c))["nonce"]
     forged = serializer.dumps({"flow": "connect", "connection": "google_drive", "nonce": nonce})
@@ -122,8 +123,7 @@ def test_connect_state_cannot_be_replayed_as_sign_in(c) -> None:
 
 def test_disconnect_drops_the_token_and_keeps_the_session(signed_in, oauth, p2_app) -> None:
     connect_drive(signed_in)
-    token = csrf(signed_in, "/settings")
-    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    r = _disconnect(signed_in)
     assert r.status_code == 303 and r.headers["location"] == "/connect"
     assert p2_app.state.dashboard.vault.owner() is None
     assert f"rt-{OWNER_EMAIL}" in oauth.revoked
@@ -168,16 +168,6 @@ def test_declined_reconnect_leaves_no_old_token(signed_in, oauth, p2_app) -> Non
     assert r.status_code == 400
     assert old in oauth.revoked
     assert vault.owner() is None and vault.legacy_owner() is None
-
-
-def test_disconnect_revokes_an_old_full_drive_token(signed_in, oauth, p2_app) -> None:
-    old = _plant_old_full_drive_token(p2_app)
-    token = csrf(signed_in, "/settings")
-    oauth.revoked.clear()
-    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
-    assert r.status_code == 303
-    assert oauth.revoked == [old]
-    assert p2_app.state.dashboard.vault.legacy_owner() is None
 
 
 def test_wrong_account_connect_keeps_that_accounts_own_grant(c, oauth, p2_app) -> None:
@@ -229,22 +219,27 @@ def test_old_token_is_kept_when_google_does_not_confirm_the_revoke(
     assert vault.legacy_owner() is None and vault.owner() is not None
 
 
-def test_disconnect_keeps_an_old_token_google_did_not_revoke(signed_in, oauth, p2_app) -> None:
+def test_disconnect_revokes_an_old_full_drive_token_once_google_confirms(
+    signed_in, oauth, p2_app
+) -> None:
     old = _plant_old_full_drive_token(p2_app)
-    oauth.revoke_fails = True
-    token = csrf(signed_in, "/settings")
-    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
-    assert r.status_code == 303
     vault = p2_app.state.dashboard.vault
+    oauth.revoke_fails = True
+    assert _disconnect(signed_in).status_code == 303
+    # Not confirmed gone: kept so it can be revoked later, and still never used.
     assert vault.legacy_owner()["t"] == old and vault.owner() is None
     assert "Choose Disconnect again" in signed_in.get("/settings").text
+    oauth.revoke_fails = False
+    oauth.revoked.clear()
+    assert _disconnect(signed_in).status_code == 303
+    assert oauth.revoked == [old]
+    assert vault.legacy_owner() is None
 
 
 def test_disconnect_says_so_when_google_does_not_confirm(signed_in, oauth, p2_app) -> None:
     connect_drive(signed_in)
     oauth.revoke_fails = True
-    token = csrf(signed_in, "/settings")
-    r = signed_in.post("/connect/google_drive/disconnect", data={"csrf": token})
+    r = _disconnect(signed_in)
     assert r.status_code == 303
     assert p2_app.state.dashboard.vault.owner() is None
     assert "myaccount.google.com/permissions" in signed_in.get("/connect").text
