@@ -53,6 +53,8 @@ class Terminal:
     last_seen: float = 0.0
     queued: int = 0
     unguarded: list[str] = field(default_factory=list)
+    # Agents whose pre-tool hook was installed and is now missing or switched off.
+    hook_missing: list[str] = field(default_factory=list)
 
 
 class DeviceError(Exception):
@@ -268,7 +270,11 @@ class Terminals:
         """What the terminal itself reports (last_seen, queued, unguarded). Kept apart from
         the record the person edits, so a terminal checking in can never undo a role
         change or a rename made on the website at the same moment."""
-        allowed = {k: v for k, v in seen.items() if k in ("last_seen", "queued", "unguarded")}
+        allowed = {
+            k: v
+            for k, v in seen.items()
+            if k in ("last_seen", "queued", "unguarded", "hook_missing")
+        }
         if self.store.get(f"term:terminal:{terminal_id}") is None:
             return  # disconnected meanwhile: write nothing
         raw = self.store.get(f"term:terminal:{terminal_id}:seen")
@@ -311,7 +317,7 @@ class Terminals:
             return None
         # Saved without what the terminal reports about itself (touch keeps that apart).
         updated = replace(terminal, **changes)
-        self._save(replace(updated, last_seen=0.0, queued=0, unguarded=[]))
+        self._save(replace(updated, last_seen=0.0, queued=0, unguarded=[], hook_missing=[]))
         if not self._live(updated):
             # Disconnected while this edit was in flight: don't leave the record behind.
             self.store.delete(f"term:terminal:{terminal_id}")

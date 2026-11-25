@@ -5,6 +5,7 @@ from typing import Any
 
 from . import policy, state
 from .api import ApiError
+from .hooks import hook_report
 from .queue import SEND_BATCH, AuditQueue
 
 # Answers that will be the same however often the batch is sent again.
@@ -101,6 +102,9 @@ def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
             break
         meta: dict[str, Any] = {"queued": max(queue.waiting() - len(rows), 0)}
         if first:
+            hooks = hook_report()
+            if hooks:
+                meta["hooks"] = hooks
             meta["tools"] = extra.get("tools") or []
             if "unguarded" in extra:
                 meta["unguarded"] = extra["unguarded"]

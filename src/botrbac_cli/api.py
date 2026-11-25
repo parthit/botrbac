@@ -9,6 +9,8 @@ import httpx
 
 from . import __version__, state
 
+# What `botrbac login` connects to without --server or BOTRBAC_SERVER.
+DEFAULT_SERVER = "https://botrbac.com"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 TIMEOUT = 10.0
 
@@ -63,6 +65,8 @@ class Api:
                 "refresh_token": issued["refresh_token"],
                 "expires_at": time.time() + int(issued.get("expires_in") or 3600) - 60,
                 "terminal_id": issued.get("terminal_id"),
+                # Pinned at login: later policies must be signed with its private half.
+                "policy_key": issued.get("policy_key") or _creds().get("policy_key"),
             },
             private=True,
         )
@@ -72,7 +76,7 @@ class Api:
     def _token(self, force_refresh: bool = False) -> str:
         creds = _creds()
         if not creds.get("refresh_token"):
-            raise NotLoggedIn("Not logged in. Run: botrbac login --server <url>")
+            raise NotLoggedIn("Not logged in. Run: botrbac login")
         if not force_refresh and time.time() < float(creds.get("expires_at") or 0):
             return str(creds["access_token"])
         # Several gateways (one per agent) share these credentials, and each refresh

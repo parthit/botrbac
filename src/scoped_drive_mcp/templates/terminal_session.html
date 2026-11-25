@@ -5,7 +5,7 @@
 <li>
   <strong>{{ n.start.agent or n.start.program or "agent" }}</strong> as <strong>{{ n.start.role }}</strong>
   <span class="muted">· {{ n.calls }} call{{ "s" if n.calls != 1 }}{% if n.blocked %} · {{ n.blocked | length }} blocked{% endif %} · started {{ n.start.ts | epoch | when }}</span>
-  {% if n.revoked %}<span class="pill warn">revoked</span>{% endif %}
+  {% if n.revoked %}<span class="pill bad">revoked</span>{% endif %}
   {% if n.blocked %}<ul>{% for b in n.blocked[:10] %}<li class="muted">blocked <code>{{ b.tool }}</code>: {{ b.reason }}</li>{% endfor %}</ul>{% endif %}
   {% if n.children %}<ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>{% endif %}
 </li>
@@ -16,9 +16,9 @@
 <p class="muted">Started on {{ tree.start.terminal }} with <code>botrbac run --role {{ tree.start.role }}</code>. Everything started inside it can only use the same tools or fewer.{% if tree.start.parent_session_id %} It was itself started inside <a href="/terminal/sessions/{{ tree.start.parent_session_id }}">another session</a>.{% endif %}</p>
 <ul class="session-tree" id="session-tree">{{ node(tree) }}</ul>
 {% if not tree.revoked %}
-<form method="post" action="/terminal/sessions/{{ tree.start.session_id }}/revoke">
+<form class="term-form" method="post" action="/terminal/sessions/{{ tree.start.session_id }}/revoke" data-confirm="Revoke this session? Every tool in it and in everything started under it is blocked.">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <button type="submit" id="revoke-session">Revoke this session</button>
+  <button type="submit" class="danger" id="revoke-session">Revoke this session</button>
   <span class="muted">Blocks every tool in it and in everything started under it.</span>
 </form>
 {% endif %}

@@ -304,10 +304,37 @@ CSV export prefixes cells that would start a spreadsheet formula.
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
 owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
 a policy older than the role's offline grace, an unknown session or a revoked session all block every tool.
+Policies are signed with Ed25519 (a key derived from `ENCRYPTION_KEY`; `src/botrbac_cli/signing.py`). The
+public key comes with the tokens and is pinned in the login file; once pinned, a cached policy that does
+not verify blocks every tool, and the offline grace is measured from the signed `issued_at` (allowing a day
+of clock difference) as well as the local fetch time. A replayed older signed policy is still accepted
+until its own grace runs out. A cached policy with a signature but no pinned key blocks;
+removing both the pinned key and the signature makes it look unsigned, which only the protected-files
+check below and `botrbac doctor` stand against. Changing `ENCRYPTION_KEY` changes the key: terminals block until their next
+token refresh (at most an hour, when online) brings the new one. Whatever the role, the CLI refuses tool calls that would change Claude Code's settings files,
+`~/.claude.json` or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
+(`src/botrbac_cli/protect.py`; text and resolved paths, so a path built at run time gets past it). A missing
+or disabled hook is reported by `botrbac doctor` and shown on the Terminal page.
 A session can only narrow the terminal's role (the check is the intersection of every role in the chain).
 The CLI trusts the computer's user: session files and `BOTRBAC_SESSION` are not signed, so an agent that can
 run shell commands can drop back to the terminal's own role (never above it) by starting a gateway without
 the variable. The hook adapter fails closed on any error (exit 2), but an agent that cannot find the
 `botrbac` program at all usually lets the call through. Read-only and other name-based patterns limit
 which tools run, not which files a tool such as Claude Code's Read can open.
+
+`cmd/<program>` patterns limit which programs an agent's shell tool runs (`src/botrbac_cli/shellcmd.py`). When a
+role in force has any, the hook reads the command and blocks it unless every program in it is allowed; a
+command it cannot follow (command or process substitution, backticks, `eval`, `sh -c`/`bash -c`, subshells,
+shell control flow such as `if`/`for`/`while`, a variable as the program, unbalanced quotes) is blocked, and
+only program names are logged. Wrappers such as `sudo`, `env`, `xargs`, `nice` and `stdbuf` must be allowed themselves as well
+as the program they run. This too
+protects against the agent, not the machine's owner, and it goes by name: a file called `gh` anywhere counts
+as `gh`, and a program that starts others (`make`, `npm run`, `find -exec`, `timeout`, `git` aliases, a
+script) runs what it runs. Allow such programs only when that is acceptable. A role without `cmd/` patterns leaves the
+shell tool all or nothing, as before.
+
+`/terminal/setup.md` and `/terminal/install.sh` are public and hold no secrets. The site address baked into
+them must match a plain `http(s)://host[:port][/path]` shape, else `https://botrbac.com` is used, so a
+forged Host header cannot put shell syntax into the script. The install script never uses sudo, prints each
+command before running it, and is wrapped in a function so a download cut short runs nothing.
 

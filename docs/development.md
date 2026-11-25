@@ -33,7 +33,7 @@ src/scoped_drive_mcp/
   service.py                  tool implementations
   server.py                   FastMCP tools + build_app()
   terminal/                   Bot RBAC Terminal (docs/terminal.md), server side; `term:` keys only
-    feature.py                  dashboard pages and /api/terminal/* routes
+    feature.py                  dashboard pages, /api/terminal/*, /terminal/setup.md and install.sh
     roles.py                    per-person roles (tool patterns), built-ins, tools seen
     device.py                   device-code login, terminal tokens, terminal records
     ingest.py                   audit rows from terminals, sessions, revocation
@@ -44,7 +44,8 @@ src/botrbac_cli/              the `botrbac` CLI (also imported by the server for
   policy.py                   cached policy, offline grace, enforcement
   queue.py / sync.py          SQLite audit queue and sending it
   session.py / shell.py       `botrbac run --role`, `shell-init`
-  coverage.py / check.py / hooks.py   wrap, doctor, hook adapter, Claude Code hook install
+  coverage.py / check.py / hooks.py   wrap, add-gateway, doctor, hook adapter, Claude Code hook install
+  shellcmd.py                 programs in a shell command, for cmd/<program> patterns
 tests/                        pytest suite with a fake Drive (owner and bot views) and in-memory store
 tests/node/                   node --test suite for api/blob-sign.mjs (Blob SDK faked)
 ```

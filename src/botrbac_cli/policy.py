@@ -10,8 +10,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import state
-from .patterns import chain_allows
+from . import signing, state
+from .patterns import chain_allows, chain_allows_command, has_command_rules
 
 SESSION_ENV = "BOTRBAC_SESSION"
 REFRESH_AFTER = 300  # seconds before a gateway asks the server again
@@ -65,8 +65,20 @@ class Enforcer:
         if cached is None:
             return None, "no policy yet: run botrbac login"
         policy = cached["policy"]
+        pinned = (state.read_json("credentials.json", {}) or {}).get("policy_key")
+        # A signed policy with no key to check it against means the key was removed.
+        if (pinned or policy.get("signature")) and not signing.verify(pinned or "", policy):
+            return None, (
+                "botrbac's saved role was changed on this computer, so every tool is "
+                "blocked: run botrbac sync"
+            )
         days = int(policy.get("role", {}).get("offline_days") or 7)
         age = self.clock() - float(cached.get("fetched_at") or 0)
+        if pinned:
+            # The fetch time is not signed, so editing it could stretch the offline
+            # grace. The server's issue time is signed: count from it too, allowing a
+            # day for this computer's clock being off.
+            age = max(age, self.clock() - float(policy.get("issued_at") or 0) - 86400)
         if age > days * 86400:
             return None, f"offline for more than {days} days: connect to the internet"
         if age < -CLOCK_SKEW:
@@ -105,6 +117,22 @@ class Enforcer:
         if chain_allows(chain, tool):
             return Decision(True, "ok", name)
         return Decision(False, f"not in role {name!r}", name)
+
+    def limits_commands(self) -> bool:
+        """Whether any role in force has `cmd/` patterns (so a shell tool's command is
+        checked program by program). Without any, the shell tool is all or nothing."""
+        chain, _name, _why = self.chain()
+        return any(has_command_rules(patterns) for patterns in chain)
+
+    def decide_programs(self, programs: list[str]) -> Decision:
+        chain, name, why = self.chain()
+        if why:
+            return Decision(False, why, name)
+        refused = [p for p in programs if not chain_allows_command(chain, p)]
+        if refused:
+            listed = ", ".join(f"cmd/{p}" for p in refused[:5])
+            return Decision(False, f"running {listed} is not in role {name!r}", name)
+        return Decision(True, "ok", name)
 
 
 def session_fields() -> dict[str, Any]:

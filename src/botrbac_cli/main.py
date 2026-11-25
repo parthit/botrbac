@@ -11,9 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from . import __version__, policy, state
-from .api import Api, ApiError, NotLoggedIn
-from .patterns import normalize_server
+from .api import DEFAULT_SERVER, Api, ApiError, NotLoggedIn
+from .patterns import COMMAND_SERVER, normalize_server
 from .queue import AuditQueue
 
 
@@ -21,32 +23,44 @@ def _api(args: argparse.Namespace) -> Api:
     return Api(getattr(args, "server", None) or os.environ.get("BOTRBAC_SERVER"))
 
 
+def _say(*lines: str) -> None:
+    """Printed and flushed at once: an agent running `botrbac login` reads the link and
+    code while the command is still waiting."""
+    for line in lines:
+        print(line, flush=True)
+
+
 def cmd_login(args: argparse.Namespace) -> int:
-    api = _api(args)
-    if not api.server:
-        print("Give the website's address: botrbac login --server https://…", file=sys.stderr)
-        return 2
+    server = args.server or os.environ.get("BOTRBAC_SERVER") or DEFAULT_SERVER
+    api = Api(server)
     started = api.start_login(socket.gethostname(), f"{platform.system()} {platform.release()}")
-    print(f"Open {started['verification_uri']} and enter the code {started['user_code']}")
-    print(f"  (or open {started['verification_uri_complete']})")
+    _say(
+        "To connect this computer, open this link and approve the code:",
+        f"Link: {started['verification_uri_complete']}",
+        f"Code: {started['user_code']}",
+        "Waiting for approval…",
+    )
     interval = int(started.get("interval") or 5)
     deadline = time.time() + int(started.get("expires_in") or 600)
     while time.time() < deadline:
         time.sleep(interval)
         result = api.poll_login(started["device_code"])
         if isinstance(result, dict):
-            fresh = policy.refresh(api)
-            role = (fresh or {}).get("role", {}).get("name", "?")
-            print(f"Logged in. This terminal's role: {role}")
+            fresh = policy.refresh(api) or {}
+            role = fresh.get("role", {}).get("name", "?")
+            _say(f"Logged in as {fresh.get('email', '?')}, role {role}")
             return 0
         if result == "slow_down":
             interval += 5
         elif result == "rate_limited":
             time.sleep(60)
+        elif result == "access_denied":
+            print("Login refused on the website. Run botrbac login again.", file=sys.stderr)
+            return 1
         elif result != "authorization_pending":
             print(f"Login did not complete: {result}", file=sys.stderr)
             return 1
-    print("The code expired. Run botrbac login again.", file=sys.stderr)
+    print("The code expired before it was approved. Run botrbac login again.", file=sys.stderr)
     return 1
 
 
@@ -62,7 +76,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     cached = policy.load_cached()
     queue = AuditQueue()
     if not creds:
-        print("Not logged in. Run: botrbac login --server <url>")
+        print("Not logged in. Run: botrbac login")
         return 1
     online = policy.refresh(_api(args)) is not None
     cached = policy.load_cached() or cached
@@ -195,6 +209,33 @@ def cmd_wrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_add_gateway(args: argparse.Namespace) -> int:
+    from .coverage import GATEWAY_FILES, AgentConfig, add_gateway
+
+    relative, kind = GATEWAY_FILES[args.agent]
+    path = Path(args.file).expanduser() if args.file else Path.home() / relative
+    try:
+        result = add_gateway(AgentConfig(args.agent, path, kind), dry_run=args.dry_run)
+    except (OSError, ValueError) as exc:
+        print(f"botrbac: {exc}", file=sys.stderr)
+        return 1
+    if result.get("name_taken"):
+        print(
+            f"botrbac: {path} already has a server called botrbac that is not the gateway. "
+            "Rename it, then run this again.",
+            file=sys.stderr,
+        )
+        return 1
+    if not result["changed"]:
+        print(f"Already set up: {path}")
+        return 0
+    verb = "Would add" if args.dry_run else "Added"
+    print(f"{verb} botrbac gateway to {path}. Other servers were not changed.")
+    if result["backup"]:
+        print(f"Backup: {result['backup']}")
+    return 0
+
+
 def _wrap_hint(config: Any) -> str:
     if config.agent == "claude-code" and config.path.name == ".claude.json":
         return "botrbac wrap claude-code --user"
@@ -222,6 +263,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         problems += 1
     servers = load_servers()
     print(f"✓ {len(servers)} server(s) behind the gateway" if servers else "! no servers yet")
+    from .hooks import hook_report
+
+    for agent, status in hook_report().items():
+        if status == "installed":
+            print(f"✓ {agent} hook is installed")
+            continue
+        problems += 1
+        what = "switched off (disableAllHooks)" if status == "disabled" else "missing"
+        print(f"✗ {agent} hook is {what}: its own tools are not checked")
+        print(f"    fix: botrbac hooks install {agent} --user --allow-unguarded")
     found = unguarded()
     for config, name in found:
         print(f"✗ {config.agent}: {name} in {config.path} is not behind botrbac")
@@ -239,7 +290,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_hooks(args: argparse.Namespace) -> int:
     from pathlib import Path
 
-    from .hooks import install_claude_code
+    from .hooks import expect_hook, install_claude_code, remove_claude_code
 
     if args.agent != "claude-code":
         print(
@@ -248,7 +299,18 @@ def cmd_hooks(args: argparse.Namespace) -> int:
         )
         return 0
     base = Path.home() if args.user else Path.cwd()
-    result = install_claude_code(base / ".claude" / "settings.json", not args.allow_unguarded)
+    settings = base / ".claude" / "settings.json"
+    if args.action == "remove":
+        removed = remove_claude_code(settings)
+        expect_hook("claude-code", False)
+        if removed["changed"]:
+            print(f"Removed the botrbac hook from {removed['file']}")
+            print(f"Backup: {removed['backup']}")
+        else:
+            print(f"No botrbac hook in {removed['file']}")
+        return 0
+    result = install_claude_code(settings, not args.allow_unguarded)
+    expect_hook("claude-code", True)
     if not result["changed"]:
         print(f"Already set up: {result['file']}")
         return 0
@@ -282,6 +344,11 @@ def cmd_servers(args: argparse.Namespace) -> int:
             print(f"{name:<16} {target}")
         return 0
     name = normalize_server(args.name or "")
+    if args.action == "add" and name == COMMAND_SERVER:
+        print(
+            f"{name!r} is reserved for cmd/<program> patterns. Pick another name.", file=sys.stderr
+        )
+        return 2
     if args.action == "remove":
         servers.pop(name, None)
         save_servers(servers)
@@ -306,7 +373,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("login", help="connect this computer to your Bot RBAC account")
-    p.add_argument("--server", help="the website's address (or BOTRBAC_SERVER)")
+    p.add_argument(
+        "--server",
+        help=f"the website's address (default: BOTRBAC_SERVER, else {DEFAULT_SERVER})",
+    )
     p.set_defaults(fn=cmd_login)
     sub.add_parser("logout", help="forget this computer's login").set_defaults(fn=cmd_logout)
     sub.add_parser("status", help="login, role, policy age, rows waiting").set_defaults(
@@ -339,6 +409,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_wrap)
+    p = sub.add_parser(
+        "add-gateway", help="add botrbac gateway to an agent's MCP config (other servers kept)"
+    )
+    p.add_argument("--agent", required=True, choices=["cursor", "codex", "gemini"])
+    p.add_argument("--file", help="the config file (default: the agent's file in your home)")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_add_gateway)
     sub.add_parser("doctor", help="check login, policy and unguarded servers").set_defaults(
         fn=cmd_doctor
     )
@@ -352,8 +429,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--format", choices=["exit", "json"], default="exit")
     p.set_defaults(fn=cmd_check)
-    p = sub.add_parser("hooks", help="install the pre-tool hook for an agent")
-    p.add_argument("action", choices=["install"])
+    p = sub.add_parser("hooks", help="add or remove the pre-tool hook for an agent")
+    p.add_argument("action", choices=["install", "remove"])
     p.add_argument("agent")
     p.add_argument("--user", action="store_true", help="all projects (~/.claude/settings.json)")
     p.add_argument(
@@ -390,6 +467,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except ApiError as exc:
         print(f"The server refused that: {exc}", file=sys.stderr)
+        return 1
+    except httpx.HTTPError as exc:
+        print(f"Could not reach the Bot RBAC website: {type(exc).__name__}", file=sys.stderr)
         return 1
 
 

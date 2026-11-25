@@ -1176,6 +1176,7 @@ def build_app(
         kv,
         base_url,
         signed_in=lambda email: settings.sign_in_allowed(email) and directory.is_known_user(email),
+        signing_secret=enc_key,
     )
     ctx = DashboardContext(
         settings=settings,
