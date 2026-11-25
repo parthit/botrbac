@@ -149,7 +149,8 @@ program it runs: `sudo gh` needs `cmd/sudo` and `cmd/gh`. The call is **blocked*
 `$(…)`, backticks, `<(…)`, `>(…)`, `eval`, `bash -c`/`sh -c`, a `( … )` subshell, shell control flow
 (`if`, `for`, `while`, `case`, `!` …), a variable as the program, or anything else it cannot read; the
 reason says why. Heredocs are read as commands too, so a role with `cmd/`
-patterns blocks most of them. Only program names are logged, never the command.
+patterns blocks most of them. The row's reason names programs only; the command itself is recorded
+only with [Record commands](#record-commands) on, and then sealed.
 
 This protects against the agent, not the computer's owner, and goes by name: a program that starts others
 (`make`, `npm run`, `find -exec`, `timeout`, `nice`, git aliases, scripts) runs whatever it runs, so
@@ -205,9 +206,28 @@ Extras for stricter setups, outside botrbac: put the hook and gateway in Claude 
 `permissions.deny` rules for `Edit(~/.claude/**)` and `Edit(~/.config/botrbac/**)`; and run the agent in
 Claude Code's sandbox, which keeps its shell from writing its own settings.
 
-Audit rows hold identifiers and decisions only: the tool name, agent, role, session, and allow or block.
-Never tool arguments, results or file contents. A session start records the program's name, never its
-arguments.
+Audit rows hold identifiers and decisions: the tool name, agent, role, session, and allow or block. Tool
+results and the contents of files read are never recorded. Unless you turn on Record commands, neither is
+what was sent to a tool, and a session start records only the program's name.
+
+### Record commands
+
+Turn it on under **Terminal → Activity** to see the exact command each agent ran, secrets included: a
+shell tool's command line, another tool's input (for Write, the file it wrote), the MCP arguments the
+gateway passed on, and the whole `botrbac run` command line. Blocked calls are recorded too. Each one is
+cut at 8,000 characters. It is off until you turn it on, and applies to all your terminals.
+
+You can read it; the agents can't. The site's public key travels in the signed policy. The CLI seals each
+command to it (X25519, AES-GCM, bound to the row) before the row is written to `audit.db`, so the queue
+on the computer, `botrbac log` and anything else running as you see only ciphertext. Editing the key in
+the cached policy breaks its signature, which blocks every tool. The site stores the sealed text and opens
+it only to show it to you on the Activity page and in exports. The private key is derived from the
+site's `ENCRYPTION_KEY`; change that and earlier commands can no longer be opened.
+
+What this does not do: hide a command from the agent that ran it (it wrote it), or from whoever runs the
+site, which can open what it stores. Turning it off stops new commands at once on the site (a computer
+stops sealing them at its next check-in). Commands already recorded stay until they age out of the log
+(the newest 2,000 rows are kept).
 
 ## Commands
 

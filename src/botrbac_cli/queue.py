@@ -1,6 +1,8 @@
 """Audit rows kept on this computer until the website has them (SQLite).
 
-Rows hold identifiers and decisions only: never tool arguments or results.
+Rows hold identifiers and decisions. With "Record commands" on, a row also holds what
+the agent ran, sealed to the website's key (sealing.py): this file never has it as text.
+Tool results are never kept.
 """
 
 import functools
@@ -12,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import state
+from . import policy, sealing, state
 
 SEND_BATCH = 500
 KEEP_SENT = 5000
@@ -48,9 +50,19 @@ class AuditQueue:
             " sent INTEGER NOT NULL DEFAULT 0)"
         )
 
-    @_locked
-    def add(self, **fields: Any) -> dict[str, Any]:
+    def add(self, command: str | None = None, **fields: Any) -> dict[str, Any]:
+        """Queue a row. `command` (what the agent ran) is kept only sealed to the
+        website's key, and only when the person turned on "Record commands"; it is
+        never written to this file as text."""
         row = {"event_id": uuid.uuid4().hex, "ts": time.time(), **fields}
+        if command is not None:
+            key = policy.command_key()
+            if key:
+                row["command"] = sealing.seal(key, row["event_id"], command)
+        return self._insert(row)
+
+    @_locked
+    def _insert(self, row: dict[str, Any]) -> dict[str, Any]:
         self.db.execute(
             "INSERT INTO rows (event_id, ts, body) VALUES (?, ?, ?)",
             (row["event_id"], row["ts"], json.dumps(row)),
