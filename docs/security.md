@@ -335,23 +335,47 @@ flow uses a signed, expiring `state` bound to the browser session and the signed
 ## OneDrive
 
 OneDrive is an optional connection ([onedrive.md](onedrive.md)). Unlike Drive and Notion there is no outer
-gate: Microsoft's `Files.Read` reaches the person's whole drive, so the person's OneDrive allowlist (signed,
-like the Drive allowlist) is the only limit on assistants. Every tool call fetches the requested item fresh
-from `/me/drive` (so another person's drive is never addressed) and walks its `parentReference` chain, capped
-in depth, until it reaches an allowed item or the top of the drive; anything else, including items that do not
-exist, gets the same `onedrive_not_allowed` answer. The top of the drive can't be allowed, shortcuts to other
-people's items (`remoteItem`) are never followed, and a deleted allowed folder does not keep its contents
-readable. An assistant's search asks Microsoft to look inside each allowed folder only (at most 25 allowed
-items per search), never the whole drive, and matches an allowed single file by its name, so neither the
-answer nor the time it takes says whether some other file matches. Every hit still passes the same check. Item ids are checked against a strict pattern before they go
-into a Graph path, and Graph's paging links are followed only when they point back at Graph. Downloads follow
-Graph's redirect to a pre-authorized address without sending the access token. A token whose granted scopes
-are missing `Files.Read` or include anything beyond `Files.Read`, `User.Read`, `offline_access` and the
-OpenID scopes is refused and not stored, on connect and on every refresh. (Microsoft lists the
-scopes in every answer; a refresh answer with no list at all is taken as unchanged.) The tools are read-only and file
-text is wrapped in untrusted-content markers. The tokens are encrypted with `ENCRYPTION_KEY` and name the
-account they belong to. The connect flow uses a signed, expiring `state` bound to the browser session and
-the signed-in account.
+gate: Microsoft's `Files.ReadWrite` reaches the person's whole drive, so the person's OneDrive allowlist
+(signed, like the Drive allowlist) is the only limit on assistants, for reading and for writing. Every tool
+call fetches the requested item (or, for a new item, the target folder) fresh from `/me/drive` (so another
+person's drive is never addressed) and walks its `parentReference` chain, capped in depth, until it reaches
+an allowed item or the top of the drive; anything else, including items that do not exist, gets the same
+`onedrive_not_allowed` answer, and no write is sent. The top of the drive can't be allowed, shortcuts to
+other people's items (`remoteItem`) are never followed or written to, and a deleted allowed folder does not
+keep its contents reachable. An assistant's search asks Microsoft to look inside each allowed folder only
+(at most 25 allowed items per search), never the whole drive, and matches an allowed single file by its
+name, so neither the answer nor the time it takes says whether some other file matches. Every hit still
+passes the same check. Item ids are checked against a strict
+pattern before they go into a Graph path, and Graph's paging links are followed only when they point back at
+Graph. Downloads follow Graph's redirect to a pre-authorized address without sending the access token.
+
+Writes are limited to the editor and admin roles and to four operations: create a folder, upload a new file,
+replace a file's content, and rename. There is no delete, move, copy or share call in the client. New items
+use `conflictBehavior=fail`, so nothing is overwritten by name. A replace or rename sends the `eTag` that
+was checked as `If-Match`, so an item moved out of an allowed folder (or changed) between the check and the
+write is not written. Names are validated before any Graph call (no `/`, `\`, `:`, `%`, `#`, control
+characters or OneDrive's reserved names) and percent-encoded in the one path that carries a name; the
+item Graph returns must sit in the folder that was checked. An item the person allowed directly can't be
+renamed. Write requests don't follow redirects, so the token only goes to Graph. A write with no `eTag` to
+send is not made. A 401 during a write refreshes the token and runs the whole call again, allowlist check
+included.
+
+Known limit: `If-Match` pins only the item being changed. If the person moves a folder *above* it out of an
+allowed folder in the milliseconds between the check and the write, that one write still lands (and a new
+item is created in a folder the person just moved). It needs the person's own action at that moment and is
+not reachable by an assistant.
+
+A token whose granted scopes include neither `Files.Read` nor `Files.ReadWrite`, or anything beyond those,
+`User.Read`, `offline_access` and the OpenID scopes (for example any `.All` scope), is refused and not stored,
+on connect and on every refresh. (Microsoft lists the scopes in every answer; a refresh answer with no list at
+all is taken as unchanged.) The granted scopes are stored with the token; a connection without
+`Files.ReadWrite` (including every connection made before writing existed) is refused by the write tools
+before Graph is called, and is refreshed with only the read scopes it was granted. A person can also
+connect for reading only (only `Files.Read` is asked for; the choice is carried in the signed `state`); such
+a connection stores no write scope even if Microsoft lists one, and a refresh never adds the write scope to
+a connection that lacked it. File text is wrapped in
+untrusted-content markers. The tokens are encrypted with `ENCRYPTION_KEY` and name the account they belong to.
+The connect flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
 
 ## Terminal
 

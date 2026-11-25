@@ -50,12 +50,14 @@
 
   <h2>OneDrive data we access</h2>
   <p>Connecting OneDrive is optional, and only offered when this deployment has set it up.
-     Microsoft then asks you to let Bot RBAC read your OneDrive files and see your name.
-     Microsoft can’t limit that to some files, so this app lets an assistant read only the
-     OneDrive files and folders you allow on Files, and what is inside them, and never
-     edits OneDrive. Your name or address is used only to show which account is
-     connected. The OneDrive tokens are stored encrypted, like the Google refresh token.
-     File contents are read only to answer an assistant’s request and are not stored.
+     Microsoft then asks you to let Bot RBAC read and edit your OneDrive files and see
+     your name. Microsoft can’t limit that to some files, so this app lets an assistant
+     reach only the OneDrive files and folders you allow on Files, and what is inside
+     them. An assistant you let edit can add files and folders there and change or
+     rename what is inside; this app never deletes, moves or shares OneDrive items.
+     Your name or address is used only to show which account is connected. The OneDrive
+     tokens are stored encrypted, like the Google refresh token. File contents are read
+     or written only to carry out an assistant’s request and are not stored.
      Disconnect OneDrive in Settings to delete the tokens, and remove Bot RBAC at
      account.live.com/consent/Manage (personal account) or myapps.microsoft.com (work or
      school account) to end the permission at Microsoft.</p>

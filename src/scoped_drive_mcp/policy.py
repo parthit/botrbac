@@ -91,6 +91,16 @@ GUEST_WRITE_TOOLS: frozenset[str] = frozenset(
 UPLOAD_TOOLS: frozenset[str] = frozenset(
     {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 )
+# Changing the person's own OneDrive, inside what they allowed (onedrive.py). Like the
+# Drive writes: only for a connection allowed to edit. Nothing deletes, moves or shares.
+ONEDRIVE_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "onedrive_create_folder",
+        "onedrive_upload_file",
+        "onedrive_update_file",
+        "onedrive_rename_file",
+    }
+)
 # Sending one file to a paired person (drops.py), and saving one sent to this human into
 # their own Drive. Like the writes above, only for a connection allowed to edit.
 DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
@@ -100,6 +110,7 @@ EDITOR_TOOLS: frozenset[str] = (
     | GUEST_WRITE_TOOLS
     | DROP_TOOLS
     | UPLOAD_TOOLS
+    | ONEDRIVE_WRITE_TOOLS
     | {
         "create_folder",
         "create_doc",
@@ -127,6 +138,11 @@ OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
     Role.ADMIN: NOTION_WRITE_TOOLS,
 }
 _OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
+
+# Tools whose result is a new item: its id goes into the audit record.
+NEW_ITEM_TOOLS: frozenset[str] = frozenset(
+    {"finish_upload", "save_export", "onedrive_create_folder", "onedrive_upload_file"}
+)
 
 _AUDITED_ID_ARGS = (
     "file_id",
@@ -289,7 +305,7 @@ def require(
                 ids["upload_id"] = uid if isinstance(uid, str) else None
                 if not ids.get("parent_id") and isinstance(result.get("parent_id"), str):
                     ids["parent_id"] = result["parent_id"]
-            if tool in ("finish_upload", "save_export") and isinstance(result, dict):
+            if tool in NEW_ITEM_TOOLS and isinstance(result, dict):
                 # The new file, so Activity can name what was written.
                 fid = result.get("id")
                 if isinstance(fid, str) and not ids.get("file_id"):

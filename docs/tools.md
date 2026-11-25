@@ -37,6 +37,10 @@ What a connected assistant can call, by role. Pairing, the mailbox and sharing b
 | `onedrive_read_file(file_id)` | ✓ | ✓ | ✓ |
 | `onedrive_download_file(file_id)` | ✓ | ✓ | ✓ |
 | `onedrive_search(query, max_results?)` | ✓ | ✓ | ✓ |
+| `onedrive_create_folder(name, parent_id?)` |  | ✓ | ✓ |
+| `onedrive_upload_file(name, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
+| `onedrive_update_file(file_id, content_text \| content_base64)` |  | ✓ | ✓ |
+| `onedrive_rename_file(file_id, new_name)` |  | ✓ | ✓ |
 | `notion_create_page(parent_page_id, title, content?)` (only with `NOTION_ALLOW_CREATE=1`; new page under an allowed Notion page, [notion.md](notion.md#creating-a-page)) |  | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |

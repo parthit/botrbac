@@ -1,5 +1,5 @@
-"""OneDrive: an optional connection with Microsoft's OAuth, its own allowlist and
-read-only tools."""
+"""OneDrive: an optional connection with Microsoft's OAuth, its own allowlist, read
+tools for every role and write tools for editors and admins."""
 
 import io
 import time
@@ -9,13 +9,18 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from scoped_drive_mcp.onedrive_client import (
+    READ_SCOPES,
+    SCOPES,
     OneDriveAccount,
+    OneDriveApiError,
     OneDriveNotFoundError,
     OneDriveOAuthError,
     OneDriveTokens,
     OneDriveUnauthorizedError,
     normalize_item_id,
     scopes_acceptable,
+    scopes_can_write,
+    validate_item_name,
 )
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import KEY_PREFIX, ONEDRIVE_ALLOWLIST_KEY, ONEDRIVE_TOKEN_KEY
@@ -58,6 +63,7 @@ def item(iid: str, name: str, parent: str | None, *, folder=False, mime=None, **
         "name": name,
         "lastModifiedDateTime": "2026-11-20T10:00:00Z",
         "webUrl": f"https://onedrive.live.com/?id={iid}",
+        "eTag": f'"{iid},1"',
     }
     if parent:
         out["parentReference"] = {
@@ -103,8 +109,14 @@ class FakeOneDrive:
         self.tokens = {"ms-access-1"}
         self.calls: list[tuple[str, str | None]] = []
         self.drive_id = "drive-1"
+        self.next_id = 200
+        # Set to make the next conditional write find a newer version (412).
+        self.changed_meanwhile = False
         # True: Graph answers a folder search with matches from the whole drive.
         self.leaky = False
+
+    def writes(self) -> list[tuple[str, str | None]]:
+        return [c for c in self.calls if c[0] in WRITE_CALLS]
 
     def factory(self, token: str) -> "FakeOneDriveApi":
         return FakeOneDriveApi(self, token)
@@ -170,28 +182,80 @@ class FakeOneDriveApi:
         self._check("download", item_id)
         return self.world.content.get(item_id, b"")[:limit]
 
+    # Writes behave like Graph: a missing parent is 404, a taken name 409 and a stale
+    # If-Match 412.
+    def _new(self, parent_id: str, name: str, **kind) -> dict:
+        parent = self.world.items.get(parent_id)
+        if parent is None or "folder" not in parent:
+            raise OneDriveNotFoundError(404, "itemNotFound")
+        for i in self.world.items.values():
+            if (i.get("parentReference") or {}).get("id") == parent_id and i["name"] == name:
+                raise OneDriveApiError(409, "nameAlreadyExists")
+        self.world.next_id += 1
+        iid = f"D00D!{self.world.next_id}"
+        self.world.items[iid] = item(iid, name, parent_id, **kind)
+        return dict(self.world.items[iid])
+
+    def _match(self, item_id: str, if_match: str | None) -> dict:
+        if item_id not in self.world.items:
+            raise OneDriveNotFoundError(404, "itemNotFound")
+        current = self.world.items[item_id]
+        if self.world.changed_meanwhile or (if_match and if_match != current["eTag"]):
+            raise OneDriveApiError(412, "resourceModified")
+        version = int(current["eTag"].strip('"').split(",")[1]) + 1
+        current["eTag"] = f'"{item_id},{version}"'
+        return current
+
+    def create_folder(self, parent_id: str, name: str) -> dict:
+        self._check("create_folder", parent_id)
+        return self._new(parent_id, name, folder=True)
+
+    def upload_new(self, parent_id: str, name: str, data: bytes) -> dict:
+        self._check("upload_new", parent_id)
+        created = self._new(parent_id, name, mime="text/plain")
+        self.world.content[created["id"]] = data
+        return created
+
+    def replace_content(self, item_id: str, data: bytes, if_match: str | None) -> dict:
+        self._check("replace_content", item_id)
+        current = self._match(item_id, if_match)
+        self.world.content[item_id] = data
+        return dict(current)
+
+    def rename(self, item_id: str, name: str, if_match: str | None) -> dict:
+        self._check("rename", item_id)
+        current = self._match(item_id, if_match)
+        current["name"] = name
+        return dict(current)
+
 
 class FakeOneDriveOAuth:
     def __init__(self, world: FakeOneDrive) -> None:
         self.world = world
         self.states: list[str] = []
         self.refreshed: list[str] = []
-        self.scopes: tuple[str, ...] = ("Files.Read", "User.Read", "offline_access")
+        self.refresh_scopes: list[tuple[str, ...]] = []
+        self.asked: list[tuple[str, ...]] = []
+        self.exchanged: list[tuple[str, ...]] = []
+        self.scopes: tuple[str, ...] = ("Files.ReadWrite", "User.Read", "offline_access")
         self.expires_in = 3600
 
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scopes: tuple[str, ...] = SCOPES) -> str:
         self.states.append(state)
+        self.asked.append(scopes)
         return f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?state={state}"
 
-    def exchange_code(self, code: str) -> OneDriveTokens:
+    def exchange_code(self, code: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
+        self.exchanged.append(scopes)
         if code != "ms-code":
             raise OneDriveOAuthError("Microsoft rejected the connection code")
         return OneDriveTokens(
             "ms-access-1", "ms-refresh-1", time.time() + self.expires_in, self.scopes
         )
 
-    def refresh(self, refresh_token: str) -> OneDriveTokens:
+    def refresh(self, refresh_token: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
         self.refreshed.append(refresh_token)
+        self.refresh_scopes.append(scopes)
         self.world.tokens.add("ms-access-2")
         return OneDriveTokens("ms-access-2", "ms-refresh-2", time.time() + 3600, self.scopes)
 
@@ -226,16 +290,19 @@ def c(app):
     return c
 
 
-def start_connect(c) -> str:
+def start_connect(c, access: str | None = None) -> str:
     token = csrf(c, "/settings")
-    r = c.post("/connect/onedrive", data={"csrf": token, "next": "/settings"})
+    data = {"csrf": token, "next": "/settings"}
+    if access:
+        data["access"] = access
+    r = c.post("/connect/onedrive", data=data)
     assert r.status_code == 303, r.text
     assert r.headers["location"].startswith("https://login.microsoftonline.com/")
     return parse_qs(urlparse(r.headers["location"]).query)["state"][0]
 
 
-def connect(c, code: str = "ms-code"):
-    state = start_connect(c)
+def connect(c, code: str = "ms-code", access: str | None = None):
+    state = start_connect(c, access)
     return c.get("/connect/onedrive/callback", params={"code": code, "state": state})
 
 
@@ -261,6 +328,13 @@ ONEDRIVE_TOOLS = {
     "onedrive_download_file",
     "onedrive_search",
 }
+ONEDRIVE_WRITE_TOOLS = {
+    "onedrive_create_folder",
+    "onedrive_upload_file",
+    "onedrive_update_file",
+    "onedrive_rename_file",
+}
+WRITE_CALLS = {"create_folder", "upload_new", "replace_content", "rename"}
 
 
 # ---- configuration -----------------------------------------------------------------
@@ -286,7 +360,7 @@ def test_onedrive_is_hidden_when_not_configured(world, p2_settings, memstore, oa
         headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS['viewer']}"},
     )
     names = {t["name"] for t in listed.json()["result"]["tools"]}
-    assert not names & ONEDRIVE_TOOLS
+    assert not names & (ONEDRIVE_TOOLS | ONEDRIVE_WRITE_TOOLS)
 
 
 def test_placeholder_secret_does_not_turn_onedrive_on() -> None:
@@ -611,7 +685,7 @@ def test_a_rejected_token_is_refreshed_once(allowed, drive, ms_oauth) -> None:
 def test_a_revoked_connection_asks_to_reconnect(allowed, drive, ms_oauth) -> None:
     drive.tokens.clear()
 
-    def no_refresh(token):
+    def no_refresh(token, scopes=SCOPES):
         raise OneDriveOAuthError("revoked")
 
     ms_oauth.refresh = no_refresh
@@ -664,7 +738,7 @@ def test_microsoft_being_down_is_not_a_reconnect(allowed, drive, ms_oauth, memst
 
     drive.tokens.clear()
 
-    def down(token):
+    def down(token, scopes=SCOPES):
         raise OneDriveOAuthUnavailableError("could not reach Microsoft")
 
     ms_oauth.refresh = down
@@ -841,3 +915,587 @@ def test_activity_never_sends_onedrive_ids_to_google() -> None:
         {"tool": "read_file", "file_id": "google-file-1"},
     ]
     assert item_ids(records) == ["google-file-1"]
+
+
+# ---- writing (editors and admins) ------------------------------------------------------
+
+
+def write(c, tool: str, role: str = "editor", **args) -> dict:
+    return mcp_call(c, tool, role=role, **args)
+
+
+def error_of(out: dict) -> str | None:
+    return (out.get("structuredContent") or {}).get("error")
+
+
+def test_scopes_for_writing() -> None:
+    assert scopes_acceptable(["Files.ReadWrite", "User.Read", "offline_access"])
+    assert scopes_acceptable(["Files.Read", "Files.ReadWrite", "User.Read"])
+    assert scopes_can_write(["https://graph.microsoft.com/Files.ReadWrite"])
+    assert not scopes_can_write(["Files.Read", "User.Read"])
+    for wide in ("Files.ReadWrite.All", "Files.Read.All", "Sites.ReadWrite.All", "Mail.Send"):
+        assert not scopes_acceptable(["Files.ReadWrite", wide])
+    assert "Files.ReadWrite" in SCOPES and "Files.Read" in READ_SCOPES
+    assert not any(s.endswith(".All") for s in SCOPES + READ_SCOPES)
+
+
+def test_write_tools_are_for_editors_and_admins_only(c) -> None:
+    def listed(role: str) -> dict:
+        r = c.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS[role]}"},
+        )
+        return {t["name"]: t for t in r.json()["result"]["tools"]}
+
+    assert not set(listed("viewer")) & ONEDRIVE_WRITE_TOOLS
+    for role in ("editor", "admin"):
+        tools = listed(role)
+        assert ONEDRIVE_WRITE_TOOLS <= set(tools)
+        for name in ONEDRIVE_WRITE_TOOLS:
+            assert tools[name]["annotations"]["readOnlyHint"] is False
+    assert listed("editor")["onedrive_update_file"]["annotations"]["destructiveHint"] is True
+
+
+def test_a_viewer_cannot_write_even_by_name(allowed, drive) -> None:
+    out = write(allowed, "onedrive_upload_file", role="viewer", name="x.txt", content_text="x")
+    assert out["isError"] and "Permission denied" in out["content"][0]["text"]
+    out = write(allowed, "onedrive_update_file", role="viewer", file_id=ESSAY, content_text="x")
+    assert out["isError"]
+    assert drive.writes() == []
+    assert drive.content[ESSAY] == b"my essay about rivers"
+
+
+def test_editor_creates_uploads_updates_and_renames_inside_an_allowed_folder(allowed, drive):
+    folder = write(allowed, "onedrive_create_folder", name="Chemistry", parent_id=SCHOOL)
+    folder = folder["structuredContent"]
+    assert folder["type"] == "folder" and folder["name"] == "Chemistry"
+
+    made = write(
+        allowed,
+        "onedrive_upload_file",
+        name="lab.md",
+        content_text="# Lab\nacids",
+        parent_id=folder["id"],
+    )["structuredContent"]
+    assert made["name"] == "lab.md"
+    read = result(allowed, "onedrive_read_file", file_id=made["id"])["structuredContent"]
+    assert "acids" in read["content"]
+
+    out = write(allowed, "onedrive_update_file", file_id=NOTES, content_text="# Cells\nribosomes")
+    assert not out["isError"]
+    assert drive.content[NOTES] == b"# Cells\nribosomes"
+
+    out = write(allowed, "onedrive_rename_file", file_id=ESSAY, new_name="rivers.txt")
+    assert out["structuredContent"]["name"] == "rivers.txt"
+    assert drive.items[ESSAY]["parentReference"]["id"] == SCHOOL
+
+    out = write(
+        allowed,
+        "onedrive_upload_file",
+        name="pic.bin",
+        content_base64="AAEC",
+        parent_id=SCHOOL,
+    )
+    assert drive.content[out["structuredContent"]["id"]] == b"\x00\x01\x02"
+
+
+def test_admin_may_write_too(allowed, drive) -> None:
+    out = write(allowed, "onedrive_create_folder", role="admin", name="New", parent_id=SCHOOL)
+    assert not out["isError"]
+
+
+def test_writes_outside_the_list_are_refused_before_any_write(allowed, drive) -> None:
+    for tool, args in (
+        ("onedrive_create_folder", {"name": "x", "parent_id": ROOT}),
+        ("onedrive_upload_file", {"name": "x.txt", "content_text": "x", "parent_id": ROOT}),
+        ("onedrive_upload_file", {"name": "x.txt", "content_text": "x", "parent_id": SHORTCUT}),
+        ("onedrive_upload_file", {"name": "x.txt", "content_text": "x", "parent_id": "D00D!9"}),
+        ("onedrive_update_file", {"file_id": DIARY, "content_text": "gone"}),
+        ("onedrive_rename_file", {"file_id": DIARY, "new_name": "y.txt"}),
+        ("onedrive_rename_file", {"file_id": SHORTCUT, "new_name": "y"}),
+    ):
+        out = write(allowed, tool, **args)
+        assert error_of(out) == "onedrive_not_allowed", (tool, args, out)
+    assert drive.writes() == []
+    assert drive.content[DIARY] == b"dear diary"
+
+
+def test_a_removed_folder_is_not_writable_at_once(allowed, drive) -> None:
+    token = csrf(allowed, "/files?tab=onedrive")
+    allowed.post("/onedrive/remove", data={"csrf": token, "file_id": SCHOOL})
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_not_allowed"
+    assert drive.writes() == []
+
+
+def test_a_file_moved_out_is_not_writable(allowed, drive) -> None:
+    drive.items[ESSAY]["parentReference"] = {"id": ROOT, "path": "/drive/root:"}
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_not_allowed"
+    assert drive.writes() == []
+
+
+def test_an_allowed_item_itself_keeps_its_name(allowed, drive) -> None:
+    out = write(allowed, "onedrive_rename_file", file_id=SCHOOL, new_name="Mine")
+    assert error_of(out) == "invalid_input"
+    allow(allowed, DIARY)  # a file allowed directly may be updated, not renamed
+    out = write(allowed, "onedrive_rename_file", file_id=DIARY, new_name="d.txt")
+    assert error_of(out) == "invalid_input"
+    out = write(allowed, "onedrive_update_file", file_id=DIARY, content_text="new")
+    assert not out["isError"]
+    assert [w[0] for w in drive.writes()] == ["replace_content"]
+
+
+def test_wrong_kinds_are_invalid(allowed, drive) -> None:
+    out = write(allowed, "onedrive_update_file", file_id=SUB, content_text="x")
+    assert error_of(out) == "invalid_input"
+    out = write(allowed, "onedrive_upload_file", name="a.txt", content_text="x", parent_id=ESSAY)
+    assert error_of(out) == "invalid_input"
+    assert drive.writes() == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "   ", "../x", "a/b", "a\\b", "a:b", "a*b", "a?b", 'a"b', "a<b", "a|b", "a%2Fb",
+     "a#b", "x\x00y", "line\nbreak", "con", "CON.txt", "lpt1.md", "ends.", "~$lock.docx",
+     ".lock", "desktop.ini", "a_vti_b", "n" * 256, "c1\x85ctl"],
+)  # fmt: skip
+def test_bad_names_never_reach_graph(allowed, drive, bad) -> None:
+    for tool, args in (
+        ("onedrive_create_folder", {"name": bad, "parent_id": SCHOOL}),
+        ("onedrive_upload_file", {"name": bad, "content_text": "x", "parent_id": SCHOOL}),
+        ("onedrive_rename_file", {"file_id": ESSAY, "new_name": bad}),
+    ):
+        out = write(allowed, tool, **args)
+        assert error_of(out) == "invalid_input", (tool, bad)
+    assert drive.writes() == []
+
+
+def test_good_names_pass() -> None:
+    for good in ("notes.md", "Q3 report (final).docx", "été.txt", ".hidden", "a.b.c"):
+        assert validate_item_name(good) == good
+    assert validate_item_name("  padded.txt ") == "padded.txt"
+
+
+def test_a_taken_name_is_never_overwritten(allowed, drive) -> None:
+    out = write(
+        allowed, "onedrive_upload_file", name="essay.txt", content_text="over", parent_id=SCHOOL
+    )
+    assert error_of(out) == "name_taken"
+    out = write(allowed, "onedrive_create_folder", name="Biology", parent_id=SCHOOL)
+    assert error_of(out) == "name_taken"
+    assert drive.content[ESSAY] == b"my essay about rivers"
+
+
+def test_a_change_meanwhile_is_not_written_over(allowed, drive) -> None:
+    drive.changed_meanwhile = True
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_changed"
+    out = write(allowed, "onedrive_rename_file", file_id=ESSAY, new_name="x.txt")
+    assert error_of(out) == "onedrive_changed"
+    assert drive.content[ESSAY] == b"my essay about rivers"
+    assert drive.items[ESSAY]["name"] == "essay.txt"
+
+
+def test_the_checked_version_is_the_one_written(allowed, drive, monkeypatch) -> None:
+    seen: list[str | None] = []
+    real = FakeOneDriveApi.replace_content
+
+    def spy(self, item_id, data, if_match):
+        seen.append(if_match)
+        return real(self, item_id, data, if_match)
+
+    monkeypatch.setattr(FakeOneDriveApi, "replace_content", spy)
+    write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert seen == ['"D00D!103,1"']
+
+
+def test_content_rules(allowed, drive) -> None:
+    for args in (
+        {},
+        {"content_text": "a", "content_base64": "YQ=="},
+        {"content_base64": "not base64!"},
+    ):
+        out = write(allowed, "onedrive_upload_file", name="a.txt", parent_id=SCHOOL, **args)
+        assert error_of(out) == "invalid_input", args
+    assert drive.writes() == []
+
+
+def test_content_over_the_byte_limit_is_refused() -> None:
+    from scoped_drive_mcp.onedrive import OneDriveService
+    from scoped_drive_mcp.policy import PayloadToolError
+
+    svc = OneDriveService(lambda: None, None, None, max_bytes=4)  # type: ignore[arg-type]
+    assert svc._content("abcd", None) == b"abcd"
+    for args in (("abcde", None), (None, "YWJjZGU=")):
+        with pytest.raises(PayloadToolError):
+            svc._content(*args)
+
+
+def test_parent_defaults_to_the_only_allowed_folder(allowed, drive) -> None:
+    out = write(allowed, "onedrive_upload_file", name="todo.txt", content_text="milk")
+    made = out["structuredContent"]
+    assert drive.items[made["id"]]["parentReference"]["id"] == SCHOOL
+    allow(allowed, SUB)  # inside SCHOOL, but listed too: now two folders
+    out = write(allowed, "onedrive_upload_file", name="todo2.txt", content_text="eggs")
+    assert error_of(out) == "invalid_input"
+
+
+def test_a_read_only_connection_reads_but_never_writes(c, drive, ms_oauth) -> None:
+    ms_oauth.scopes = ("Files.Read", "User.Read", "offline_access")
+    r = connect(c)
+    assert r.status_code == 303
+    assert "reading only" in c.get("/files?tab=onedrive").text
+    allow(c, SCHOOL)
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+    page = c.get("/files?tab=onedrive").text
+    assert 'id="onedrive-read-only"' in page
+    # Reconnecting with editing approved keeps the list and allows writing.
+    ms_oauth.scopes = ("Files.ReadWrite", "User.Read", "offline_access")
+    connect(c)
+    assert 'id="onedrive-read-only"' not in c.get("/files?tab=onedrive").text
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert not out["isError"]
+
+
+def test_a_read_only_connection_is_refreshed_with_read_scopes(c, drive, ms_oauth) -> None:
+    ms_oauth.scopes = ("Files.Read", "User.Read", "offline_access")
+    connect(c)
+    allow(c, SCHOOL)
+    drive.tokens.clear()
+    result(c, "onedrive_read_file", file_id=ESSAY)
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+
+
+def test_a_write_connection_is_refreshed_with_write_scopes(allowed, drive, ms_oauth) -> None:
+    drive.tokens.clear()
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="after refresh")
+    assert not out["isError"]
+    assert ms_oauth.refresh_scopes == [SCOPES]
+    assert drive.content[ESSAY] == b"after refresh"
+
+
+def test_a_refresh_that_loses_editing_stops_writes(allowed, drive, ms_oauth) -> None:
+    drive.tokens.clear()
+    ms_oauth.scopes = ("Files.Read", "User.Read", "offline_access")
+    result(allowed, "onedrive_read_file", file_id=ESSAY)  # refreshes
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+
+
+def test_a_record_from_before_writing_is_read_only() -> None:
+    from scoped_drive_mcp.onedrive import can_write
+
+    assert not can_write({"t": "tok", "email": "a@b"})  # no "scp": made with Files.Read
+    assert not can_write(None)
+    assert can_write({"t": "tok", "scp": "files.readwrite offline_access user.read"})
+
+
+def test_writes_are_audited_with_the_new_item(allowed, drive, capsys) -> None:
+    import json as _json
+
+    capsys.readouterr()
+    out = write(allowed, "onedrive_upload_file", name="a.txt", content_text="x")
+    new_id = out["structuredContent"]["id"]
+    records = [
+        _json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{") and '"tool_call"' in line
+    ]
+    assert {"tool": "onedrive_upload_file", "file_id": new_id, "decision": "allow"}.items() <= (
+        records[-1].items()
+    )
+
+
+# ---- the Graph client's writes, over HTTP --------------------------------------------------
+
+
+def test_upload_new_encodes_the_name_and_never_overwrites() -> None:
+    import httpx
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json={"id": "N!1", "parentReference": {"id": "P!1"}})
+
+    api = _graph(handler)
+    api.upload_new("P!1", "Q3 report (final).docx", b"bytes")
+    req = seen[0]
+    assert req.method == "PUT"
+    assert req.url.raw_path.startswith(
+        b"/v1.0/me/drive/items/P!1:/Q3%20report%20%28final%29.docx:/content"
+    )
+    assert req.url.query == b"@microsoft.graph.conflictBehavior=fail"  # a literal "@"
+    assert req.headers["authorization"] == "Bearer tok-secret"
+    assert req.content == b"bytes"
+    with pytest.raises(ValueError):
+        api.upload_new("P!1", "../escape", b"x")
+    assert len(seen) == 1
+
+
+def test_writes_send_if_match_and_do_not_follow_redirects() -> None:
+    import httpx
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host != "graph.microsoft.com":
+            return httpx.Response(200, json={})
+        if request.method == "PATCH":
+            return httpx.Response(302, headers={"location": "https://evil.example/x"})
+        return httpx.Response(200, json={"id": "F!1"})
+
+    api = _graph(handler)
+    api.replace_content("F!1", b"new", '"F!1,3"')
+    assert seen[-1].headers["if-match"] == '"F!1,3"'
+    with pytest.raises(OneDriveApiError):
+        api.rename("F!1", "x.txt", '"F!1,4"')
+    assert all(r.url.host == "graph.microsoft.com" for r in seen)
+    api.create_folder("P!1", "New")
+    import json as _json
+
+    body = _json.loads(seen[-1].content)
+    assert body == {"name": "New", "folder": {}, "@microsoft.graph.conflictBehavior": "fail"}
+
+
+def test_graph_write_statuses_map_to_errors() -> None:
+    import httpx
+
+    from scoped_drive_mcp.onedrive_client import OneDriveForbiddenError
+
+    status = {"code": 409}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status["code"], json={"error": {"code": "x"}})
+
+    api = _graph(handler)
+    with pytest.raises(OneDriveApiError) as exc:
+        api.create_folder("P!1", "a")
+    assert exc.value.status == 409
+    status["code"] = 401
+    with pytest.raises(OneDriveUnauthorizedError):
+        api.create_folder("P!1", "a")
+    status["code"] = 403
+    with pytest.raises(OneDriveForbiddenError):
+        api.replace_content("F!1", b"x", None)
+
+
+def test_no_etag_means_no_write(allowed, drive) -> None:
+    del drive.items[ESSAY]["eTag"]
+    for tool, args in (
+        ("onedrive_update_file", {"file_id": ESSAY, "content_text": "x"}),
+        ("onedrive_rename_file", {"file_id": ESSAY, "new_name": "x.txt"}),
+    ):
+        out = write(allowed, tool, **args)
+        assert out["isError"], tool
+    assert drive.writes() == []
+
+
+def test_a_401_on_the_write_refreshes_and_checks_again(allowed, drive, ms_oauth, monkeypatch):
+    real = FakeOneDriveApi.replace_content
+    failed: list[bool] = []
+
+    def once_unauthorized(self, item_id, data, if_match):
+        if not failed:
+            failed.append(True)
+            raise OneDriveUnauthorizedError(401, "InvalidAuthenticationToken")
+        return real(self, item_id, data, if_match)
+
+    monkeypatch.setattr(FakeOneDriveApi, "replace_content", once_unauthorized)
+    drive.calls.clear()
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="second try")
+    assert not out["isError"]
+    assert ms_oauth.refreshed == ["ms-refresh-1"]
+    # The allowlist check ran again before the retried write.
+    assert [c[0] for c in drive.calls].count("get_item") >= 4
+    assert drive.content[ESSAY] == b"second try"
+
+
+def test_a_401_retry_does_not_write_outside_after_a_move(allowed, drive, monkeypatch) -> None:
+    real = FakeOneDriveApi.replace_content
+
+    def move_then_401(self, item_id, data, if_match):
+        if drive.items[ESSAY]["parentReference"]["id"] == SCHOOL:
+            drive.items[ESSAY]["parentReference"] = {"id": ROOT, "path": "/drive/root:"}
+            raise OneDriveUnauthorizedError(401, "InvalidAuthenticationToken")
+        return real(self, item_id, data, if_match)
+
+    monkeypatch.setattr(FakeOneDriveApi, "replace_content", move_then_401)
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_not_allowed"
+    assert drive.content[ESSAY] == b"my essay about rivers"
+
+
+def test_a_misplaced_write_is_reported_not_retried(allowed, drive, monkeypatch) -> None:
+    real = FakeOneDriveApi.upload_new
+
+    def misplaced(self, parent_id, name, data):
+        created = real(self, parent_id, name, data)
+        created["parentReference"] = {"id": ROOT}
+        return created
+
+    monkeypatch.setattr(FakeOneDriveApi, "upload_new", misplaced)
+    out = write(allowed, "onedrive_upload_file", name="a.txt", content_text="x")
+    assert error_of(out) == "onedrive_unexpected"
+    assert out["structuredContent"]["file_id"]
+
+
+def test_an_allowed_item_keeps_its_name_whatever_the_id_case(allowed, drive, monkeypatch):
+    real = FakeOneDriveApi.get_item
+    lower = SCHOOL.lower()
+
+    def case_insensitive(self, item_id):
+        return real(self, SCHOOL if item_id == lower else item_id)
+
+    monkeypatch.setattr(FakeOneDriveApi, "get_item", case_insensitive)
+    out = write(allowed, "onedrive_rename_file", file_id=lower, new_name="Mine")
+    assert out["isError"]
+    assert drive.items[SCHOOL]["name"] == "School"
+
+
+def test_locked_and_unreachable_writes_say_so(allowed, drive, monkeypatch) -> None:
+    for status, code, expected in (
+        (423, "locked", "onedrive_locked"),
+        (0, "unreachable", "onedrive_unavailable"),
+    ):
+
+        def fail(self, item_id, data, if_match, status=status, code=code):
+            raise OneDriveApiError(status, code)
+
+        monkeypatch.setattr(FakeOneDriveApi, "replace_content", fail)
+        out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+        assert error_of(out) == expected
+
+
+def test_a_connection_stored_before_writing_existed_keeps_working(c, drive, ms_oauth, monkeypatch):
+    """Every production connection today: stored with no scope list ("scp")."""
+    from scoped_drive_mcp.store import TokenVault
+
+    real = TokenVault.set_onedrive
+
+    def as_before(self, *args, **kwargs):
+        args = args[:7]  # what set_onedrive took before: no scopes
+        kwargs.pop("scopes", None)
+        return real(self, *args, **kwargs)
+
+    ms_oauth.scopes = ("Files.Read", "User.Read", "offline_access")
+    monkeypatch.setattr(TokenVault, "set_onedrive", as_before)
+    connect(c)
+    allow(c, SCHOOL)
+    monkeypatch.setattr(TokenVault, "set_onedrive", real)
+    drive.tokens.clear()  # the first call refreshes
+    listed = result(c, "onedrive_list_folder", folder_id=SCHOOL)["structuredContent"]
+    assert ESSAY in {i["id"] for i in listed["items"]}
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+    assert result(c, "onedrive_download_file", file_id=ESSAY)["structuredContent"]["byte_count"]
+    hits = result(c, "onedrive_search", query="essay")["structuredContent"]["results"]
+    assert ESSAY in {h["id"] for h in hits}
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+
+
+# ---- connecting for reading only ---------------------------------------------------------
+
+
+def test_connect_for_reading_only_asks_only_to_read(c, drive, ms_oauth, memstore) -> None:
+    ms_oauth.scopes = READ_SCOPES
+    r = connect(c, access="read")
+    assert r.status_code == 303
+    assert ms_oauth.asked == [READ_SCOPES] and ms_oauth.exchanged == [READ_SCOPES]
+    allow(c, SCHOOL)
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+    out = write(c, "onedrive_upload_file", name="a.txt", content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+    drive.tokens.clear()
+    result(c, "onedrive_read_file", file_id=ESSAY)
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+
+
+def test_editing_is_the_default_choice(c, ms_oauth) -> None:
+    connect(c)
+    assert ms_oauth.asked == [SCOPES]
+    for odd in ("edit", "READ", "write", "anything"):
+        connect(c, access=odd)
+    assert ms_oauth.asked == [SCOPES] * 5
+
+
+def test_reading_only_stays_so_when_microsoft_lists_readwrite(c, drive, ms_oauth) -> None:
+    # Someone who approved editing once and now chooses reading only: Microsoft may still
+    # list Files.ReadWrite on the token. Bot RBAC never writes for that connection, and a
+    # refresh does not turn writing on.
+    ms_oauth.scopes = ("Files.Read", "Files.ReadWrite", "User.Read", "offline_access")
+    connect(c, access="read")
+    allow(c, SCHOOL)
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    drive.tokens.clear()
+    result(c, "onedrive_read_file", file_id=ESSAY)  # refreshed; Microsoft lists ReadWrite
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+    assert 'id="onedrive-read-only"' in c.get("/files?tab=onedrive").text
+
+
+def test_reading_only_then_editing_keeps_the_list(c, drive, ms_oauth, memstore) -> None:
+    ms_oauth.scopes = READ_SCOPES
+    connect(c, access="read")
+    allow(c, SCHOOL)
+    ms_oauth.scopes = SCOPES
+    connect(c)
+    assert set(stored_allowlist(memstore)) == {SCHOOL}
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="edited")
+    assert not out["isError"]
+    # And back: choosing reading only again turns writing off, list kept.
+    connect(c, access="read")
+    assert set(stored_allowlist(memstore)) == {SCHOOL}
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="again")
+    assert error_of(out) == "onedrive_read_only"
+
+
+def test_the_choice_cannot_be_swapped_in_the_state(c, ms_oauth) -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveOAuth
+
+    state = start_connect(c, access="read")
+    forged = state[:-4] + ("AAAA" if not state.endswith("AAAA") else "BBBB")
+    r = c.get("/connect/onedrive/callback", params={"code": "ms-code", "state": forged})
+    assert r.status_code == 400
+    url = OneDriveOAuth("id", "secret", "https://x.example/cb").authorization_url("s", READ_SCOPES)
+    scope = parse_qs(urlparse(url).query)["scope"][0]
+    assert "Files.Read" in scope.split() and "Files.ReadWrite" not in scope
+
+
+def test_read_only_buttons_are_offered(c) -> None:
+    assert 'id="onedrive-connect-read-only"' in c.get("/files?tab=onedrive").text
+    settings = c.get("/settings").text
+    assert 'name="access" value="read"' in settings
+    assert "Connect for reading only" in settings
+
+
+def test_admin_consent_error_offers_reading_only(c) -> None:
+    start_connect(c)
+    r = c.get(
+        "/connect/onedrive/callback",
+        params={
+            "error": "access_denied",
+            "error_description": "AADSTS65001: The user or administrator has not consented.",
+            "state": "x",
+        },
+    )
+    assert "Connect for reading only" in r.text
+    assert "/files?tab=onedrive#onedrive-connect" in r.text

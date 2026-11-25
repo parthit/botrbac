@@ -95,12 +95,14 @@ ONEDRIVE = Connection(
     scopes=ONEDRIVE_SCOPES,
     required_scope=ONEDRIVE_REQUIRED_SCOPE,
     allowed_scopes=ONEDRIVE_ALLOWED_SCOPES,
-    summary="Only the OneDrive files and folders you allow, and only to read.",
+    summary="Only the OneDrive files and folders you allow.",
     disclosure=(
-        "Microsoft will ask you to let Bot RBAC read your OneDrive files and see your "
-        "name. Microsoft can't limit that to some files, so Bot RBAC holds "
-        "assistants to the files and folders you allow on Files. Bot RBAC never edits "
-        "OneDrive."
+        "Microsoft will ask you to let Bot RBAC read and edit your OneDrive files and see "
+        "your name. Microsoft can't limit that to some files, so Bot RBAC holds "
+        "assistants to the files and folders you allow on Files. Only assistants you let "
+        "edit can add files and folders there or change and rename what is inside; none "
+        "can delete, move or share anything. Connect for reading only to give Bot RBAC "
+        "read access alone."
     ),
 )
 
