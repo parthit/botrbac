@@ -25,6 +25,15 @@ school account). The dashboard says so when they disconnect.
 
 ### Read-only connections
 
+A person who doesn't want any assistant to add or change OneDrive files chooses **Connect for reading only**
+instead of **Connect OneDrive**. Microsoft is then asked for `Files.Read` instead of `Files.ReadWrite`, and
+the write tools answer `onedrive_read_only`. The choice travels in the signed `state`, the code is exchanged
+with the same scopes, and a token that comes back able to edit after reading only was chosen is not stored.
+Microsoft can answer that way when Bot RBAC was allowed to edit before; the person then removes Bot RBAC's
+permission at Microsoft (addresses above) and connects for reading only again. To switch later, connect
+again with the other choice: **Reconnect OneDrive** to allow editing, or **Connect for reading only** at the
+bottom of **Files → From OneDrive**. The same account keeps its allowed list.
+
 Connections made before writing existed were granted `Files.Read`. They keep working for reading, and are
 refreshed with the read scopes they were granted (a refresh can't ask for more than the person approved).
 The write tools answer `onedrive_read_only` until the person chooses **Reconnect OneDrive** (shown on
@@ -80,4 +89,6 @@ also usually blocks unverified multitenant apps for users of other organizations
 verification** (Branding & properties, with a Microsoft AI Cloud Partner Program ID) before offering
 OneDrive to schools. Personal Microsoft accounts need neither. An organization that lets people approve apps themselves only for
 low-risk permissions may allow `Files.Read` but not `Files.ReadWrite`; new connections there then need the
-administrator's consent too. Connections already made keep reading.
+administrator's consent too. Connections already made keep reading, and the person can still connect
+without the administrator by choosing **Connect for reading only**; the message shown when Microsoft refuses
+the read-and-edit request offers that button.

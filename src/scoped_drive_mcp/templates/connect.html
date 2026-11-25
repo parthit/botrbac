@@ -39,6 +39,7 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="next" value="{{ next }}">
       <button class="primary" type="submit">{% if row.needs_upgrade %}Reconnect {{ conn.name }}{% else %}Allow Bot RBAC to access {{ conn.name }}{% endif %}</button>
+      {% if conn.key == "onedrive" %}<button type="submit" name="access" value="read">Connect for reading only</button>{% endif %}
     </form>
     {% endif %}
   </article>

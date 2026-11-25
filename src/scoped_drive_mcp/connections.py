@@ -101,7 +101,8 @@ ONEDRIVE = Connection(
         "your name. Microsoft can't limit that to some files, so Bot RBAC holds "
         "assistants to the files and folders you allow on Files. Only assistants you let "
         "edit can add files and folders there or change and rename what is inside; none "
-        "can delete, move or share anything."
+        "can delete, move or share anything. Choose Connect for reading only and "
+        "Microsoft is asked for reading only, so no assistant can add or change files."
     ),
 )
 

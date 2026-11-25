@@ -90,6 +90,8 @@ from .mcp_oauth import (
 from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .onedrive import can_write as onedrive_can_write
+from .onedrive_client import READ_SCOPES as ONEDRIVE_READ_SCOPES
+from .onedrive_client import SCOPES as ONEDRIVE_SCOPES
 from .onedrive_client import OneDriveApiError, OneDriveOAuthError
 from .onedrive_client import normalize_item_id as normalize_onedrive_id
 from .onedrive_client import normalize_scopes as normalize_onedrive_scopes
@@ -1344,7 +1346,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if connection.provider == "notion":
             return start_notion(request)
         if connection.provider == "microsoft":
-            return start_onedrive(request)
+            return start_onedrive(request, read_only=form.get("access") == "read")
         if connection.key == "google_drive":
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
@@ -1600,15 +1602,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- OneDrive (an optional connection, Microsoft's own OAuth) ----------------
 
-    def start_onedrive(request: Request) -> Response:
+    def start_onedrive(request: Request, read_only: bool = False) -> Response:
         """Send the signed-in person to Microsoft's sign-in and consent screen. The state
-        is signed, expires, is tied to this browser (nonce) and names the account."""
+        is signed, expires, is tied to this browser (nonce) and names the account. It also
+        carries the choice (read and edit, or reading only), so the callback knows which
+        scopes were asked for without trusting anything else in the request."""
         nonce = secrets.token_urlsafe(24)
         request.session["onedrive_nonce"] = nonce
         state = serializer.dumps(
-            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or ""}
+            {
+                "flow": "onedrive",
+                "nonce": nonce,
+                "who": current_actor.get() or "",
+                "access": "read" if read_only else "edit",
+            }
         )
-        return RedirectResponse(ctx.onedrive.oauth.authorization_url(state), status_code=303)
+        scopes = ONEDRIVE_READ_SCOPES if read_only else ONEDRIVE_SCOPES
+        return RedirectResponse(
+            ctx.onedrive.oauth.authorization_url(state, scopes), status_code=303
+        )
 
     async def onedrive_callback(request: Request) -> Response:
         if ctx.onedrive is None:
@@ -1621,6 +1633,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ]
         error = params.get("error")
         if error:
+            # The state only decides what this message offers. Unless it says this try
+            # already asked for reading only, reading only is offered.
+            try:
+                tried = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+            except BadSignature:
+                tried = None
+            offer = ""
+            if not (isinstance(tried, dict) and tried.get("access") == "read"):
+                retry_actions.append(
+                    {
+                        "label": "Connect for reading only",
+                        "post": "/connect/onedrive",
+                        "fields": {"access": "read", "next": "/files?tab=onedrive"},
+                    }
+                )
+                offer = (
+                    " Asking for less may work: choose Connect for reading only, and "
+                    "assistants can read what you allow but not add or change files."
+                )
             # error_description is Microsoft's text; only its AADSTS code is looked at.
             description = params.get("error_description") or ""
             needs_admin = error in ("consent_required", "admin_consent_required") or any(
@@ -1640,7 +1671,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 title = "OneDrive isn’t connected"
                 message = "Microsoft didn’t finish connecting. Nothing changed."
             return render(
-                request, "error.html", 400, title=title, message=message, actions=retry_actions
+                request,
+                "error.html",
+                400,
+                title=title,
+                message=message + offer,
+                actions=retry_actions,
             )
         try:
             data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
@@ -1666,8 +1702,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         code = params.get("code")
         if not code:
             return render(request, "error.html", 400, message="Microsoft did not return a code.")
+        # Anything but a signed "edit" is the narrower choice, so a state without the choice
+        # can never end in a wider connection than the person asked for.
+        read_only = data.get("access") != "edit"
+        asked = ONEDRIVE_READ_SCOPES if read_only else ONEDRIVE_SCOPES
         try:
-            tokens = await blocking(ctx.onedrive.oauth.exchange_code, code)
+            tokens = await blocking(ctx.onedrive.oauth.exchange_code, code, asked)
         except OneDriveOAuthError as exc:
             return render(
                 request,
@@ -1690,6 +1730,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "Microsoft gave Bot RBAC different access than it asks for (read and "
                     "edit your files), so the connection was not kept. Try again, and keep "
                     "the permission to your files ticked."
+                ),
+                actions=retry_actions,
+            )
+        if read_only and onedrive_scopes_can_write(tokens.scopes):
+            # Wider than the person chose. Not stored, like the case above.
+            audit_owner("onedrive_connect", "deny", reason="scopes_wider_than_chosen")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="OneDrive isn’t connected",
+                message=(
+                    "Microsoft gave Bot RBAC different access than it asks for (reading "
+                    "only, but this also allows editing), so the connection was not kept "
+                    "and nothing changed. This happens when Bot RBAC was allowed to edit "
+                    "before. Remove Bot RBAC’s permission at Microsoft first, at "
+                    "account.live.com/consent/Manage (personal account) or "
+                    "myapps.microsoft.com (work or school account), then connect for "
+                    "reading only again."
                 ),
                 actions=retry_actions,
             )
@@ -1735,6 +1794,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         audit_owner("onedrive_connect", connection="onedrive")
         if onedrive_scopes_can_write(tokens.scopes):
             done = "OneDrive is connected. Now allow the files and folders your assistants may use."
+        elif read_only:
+            done = (
+                "OneDrive is connected for reading only. Now allow the files and folders "
+                "your assistants may read."
+            )
         else:
             done = (
                 "OneDrive is connected for reading only: Microsoft didn’t grant editing. "

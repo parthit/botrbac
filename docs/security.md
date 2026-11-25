@@ -349,6 +349,13 @@ passes the same check. Item ids are checked against a strict
 pattern before they go into a Graph path, and Graph's paging links are followed only when they point back at
 Graph. Downloads follow Graph's redirect to a pre-authorized address without sending the access token.
 
+The person chooses what Microsoft is asked for when connecting: read and edit (`Files.ReadWrite`, the
+default) or reading only (`Files.Read`). The choice is carried in the signed `state`, never in a callback
+parameter, and a state that doesn't say "edit" is treated as reading only. The code is exchanged with the
+scopes that were asked for, and a token that can edit after reading only was chosen is refused and not
+stored, like a token with wider scopes. A refused or failed attempt leaves an existing connection and its
+allowlist as they were.
+
 Writes are limited to the editor and admin roles and to four operations: create a folder, upload a new file,
 replace a file's content, and rename. There is no delete, move, copy or share call in the client. New items
 use `conflictBehavior=fail`, so nothing is overwritten by name. A replace or rename sends the `eTag` that

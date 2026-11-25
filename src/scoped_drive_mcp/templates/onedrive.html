@@ -13,7 +13,9 @@
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="next" value="/files?tab=onedrive">
     <button class="primary" type="submit">Connect OneDrive</button>
+    <button type="submit" name="access" value="read" id="onedrive-connect-read">Connect for reading only</button>
   </form>
+  <p class="muted small"><b>Connect OneDrive</b> asks Microsoft to let Bot RBAC read and edit your files. <b>Connect for reading only</b> asks for reading only, so no assistant can add or change anything. You can switch later.</p>
 </div>
 {% else %}
 {% if onedrive_can_write %}
@@ -95,6 +97,17 @@
 </table>
 {% else %}
 <p class="muted" id="onedrive-none-visible">{% if query %}Nothing in your OneDrive matches “{{ query }}”.{% else %}This folder is empty.{% endif %}</p>
+{% endif %}
+
+{% if onedrive_can_write %}
+<h2>Reading only</h2>
+<p class="muted">To stop every assistant adding or changing OneDrive files, connect again for reading only. Your allowed list is kept when you choose the same account.</p>
+<form method="post" action="/connect/onedrive" id="onedrive-switch-read">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="next" value="/files?tab=onedrive">
+  <input type="hidden" name="access" value="read">
+  <button type="submit">Connect for reading only</button>
+</form>
 {% endif %}
 
 <h2>Disconnect</h2>

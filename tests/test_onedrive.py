@@ -235,14 +235,18 @@ class FakeOneDriveOAuth:
         self.states: list[str] = []
         self.refreshed: list[str] = []
         self.refresh_scopes: list[tuple[str, ...]] = []
+        self.asked_scopes: list[tuple[str, ...]] = []
+        self.exchange_scopes: list[tuple[str, ...]] = []
         self.scopes: tuple[str, ...] = ("Files.ReadWrite", "User.Read", "offline_access")
         self.expires_in = 3600
 
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scopes: tuple[str, ...] = SCOPES) -> str:
         self.states.append(state)
+        self.asked_scopes.append(scopes)
         return f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?state={state}"
 
-    def exchange_code(self, code: str) -> OneDriveTokens:
+    def exchange_code(self, code: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
+        self.exchange_scopes.append(scopes)
         if code != "ms-code":
             raise OneDriveOAuthError("Microsoft rejected the connection code")
         return OneDriveTokens(
@@ -1397,3 +1401,300 @@ def test_a_connection_stored_before_writing_existed_keeps_working(c, drive, ms_o
     out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
     assert error_of(out) == "onedrive_read_only"
     assert drive.writes() == []
+
+
+# ---- choosing reading only when connecting -----------------------------------------------
+
+READ_GRANT = ("Files.Read", "User.Read", "offline_access")
+WRITE_GRANT = ("Files.ReadWrite", "User.Read", "offline_access")
+
+
+def start_connect_read(c, page: str = "/files?tab=onedrive") -> str:
+    token = csrf(c, page)
+    r = c.post(
+        "/connect/onedrive", data={"csrf": token, "next": "/files?tab=onedrive", "access": "read"}
+    )
+    assert r.status_code == 303, r.text
+    return parse_qs(urlparse(r.headers["location"]).query)["state"][0]
+
+
+def connect_read(c, ms_oauth, granted: tuple[str, ...] = READ_GRANT, **extra):
+    """The reading-only choice, with Microsoft granting `granted`."""
+    ms_oauth.scopes = granted
+    state = start_connect_read(c)
+    return c.get("/connect/onedrive/callback", params={"code": "ms-code", "state": state, **extra})
+
+
+def token_stored(memstore) -> bool:
+    return memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}") is not None
+
+
+@pytest.fixture
+def stored_scopes(monkeypatch) -> list[str]:
+    """The scope list ("scp") of each connection saved."""
+    from scoped_drive_mcp.store import TokenVault
+
+    seen: list[str] = []
+    real = TokenVault.set_onedrive
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs["scopes"] if "scopes" in kwargs else args[7])
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(TokenVault, "set_onedrive", spy)
+    return seen
+
+
+def test_the_connect_pages_offer_reading_only(c) -> None:
+    page = c.get("/files?tab=onedrive").text
+    assert 'id="onedrive-connect-read"' in page and "Connect for reading only" in page
+    assert 'class="primary" type="submit">Connect OneDrive<' in page  # still the default
+    assert "Connect for reading only" in c.get("/settings").text
+
+
+def test_the_authorize_url_asks_for_what_was_chosen() -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveOAuth
+
+    oauth = OneDriveOAuth("client-id", "client-secret", "https://example.test/callback")
+    asked = parse_qs(urlparse(oauth.authorization_url("st", READ_SCOPES)).query)["scope"][0].split()
+    assert "Files.Read" in asked and "Files.ReadWrite" not in asked
+    default = parse_qs(urlparse(oauth.authorization_url("st")).query)["scope"][0].split()
+    assert "Files.ReadWrite" in default
+
+
+def test_the_code_is_exchanged_with_the_scopes_that_were_asked_for(monkeypatch) -> None:
+    from scoped_drive_mcp import onedrive_client
+    from scoped_drive_mcp.onedrive_client import OneDriveOAuth
+
+    sent: list[str] = []
+
+    def post(url, data, timeout):
+        sent.append(data["scope"])
+        return onedrive_client.httpx.Response(
+            200, json={"access_token": "t", "scope": "Files.Read"}
+        )
+
+    monkeypatch.setattr(onedrive_client.httpx, "post", post)
+    oauth = OneDriveOAuth("client-id", "client-secret", "https://example.test/callback")
+    oauth.exchange_code("code", READ_SCOPES)
+    oauth.exchange_code("code")
+    assert sent == [" ".join(READ_SCOPES), " ".join(SCOPES)]
+
+
+def test_reading_only_connect_asks_for_and_stores_reading_only(
+    c, drive, ms_oauth, stored_scopes
+) -> None:
+    r = connect_read(c, ms_oauth)
+    assert r.status_code == 303 and r.headers["location"] == "/files?tab=onedrive"
+    assert ms_oauth.asked_scopes == [READ_SCOPES]
+    assert ms_oauth.exchange_scopes == [READ_SCOPES]
+    assert stored_scopes == ["files.read offline_access user.read"]
+    page = c.get("/files?tab=onedrive").text
+    assert "connected for reading only" in page
+    assert "didn’t grant editing" not in page  # the person chose this
+    assert 'id="onedrive-read-only"' in page
+
+    allow(c, SCHOOL)
+    listed = result(c, "onedrive_list_folder", folder_id=SCHOOL)["structuredContent"]
+    assert ESSAY in {i["id"] for i in listed["items"]}
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+    assert result(c, "onedrive_download_file", file_id=ESSAY)["structuredContent"]["byte_count"]
+    hits = result(c, "onedrive_search", query="essay")["structuredContent"]["results"]
+    assert ESSAY in {h["id"] for h in hits}
+
+    calls = {
+        "onedrive_create_folder": {"name": "Chemistry", "parent_id": SCHOOL},
+        "onedrive_upload_file": {"name": "lab.md", "content_text": "x", "parent_id": SCHOOL},
+        "onedrive_update_file": {"file_id": ESSAY, "content_text": "x"},
+        "onedrive_rename_file": {"file_id": ESSAY, "new_name": "rivers.txt"},
+    }
+    assert set(calls) == ONEDRIVE_WRITE_TOOLS
+    for tool, args in calls.items():
+        for role in ("editor", "admin"):
+            assert error_of(write(c, tool, role=role, **args)) == "onedrive_read_only", tool
+    assert drive.writes() == []
+
+
+def test_the_default_connect_still_asks_for_read_and_edit(c, ms_oauth, stored_scopes) -> None:
+    assert connect(c).status_code == 303
+    assert ms_oauth.asked_scopes == [SCOPES]
+    assert ms_oauth.exchange_scopes == [SCOPES]
+    assert stored_scopes == ["files.readwrite offline_access user.read"]
+
+
+def test_a_reading_only_choice_that_comes_back_with_editing_is_refused(
+    c, ms_oauth, memstore, stored_scopes
+) -> None:
+    for granted in (WRITE_GRANT, ("Files.Read", "Files.ReadWrite", "User.Read")):
+        r = connect_read(c, ms_oauth, granted)
+        assert r.status_code == 400
+        assert "different access" in r.text and "reading only" in r.text
+    assert not token_stored(memstore)
+    assert stored_scopes == []
+    assert error_of(result(c, "onedrive_list_folder")) == "onedrive_not_connected"
+
+
+def test_a_refused_reading_only_try_leaves_the_earlier_connection(c, ms_oauth, memstore) -> None:
+    connect(c)
+    allow(c, SCHOOL)
+    before = memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}")
+    assert connect_read(c, ms_oauth, WRITE_GRANT).status_code == 400
+    assert memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}") == before
+    assert stored_allowlist(memstore)
+
+
+def test_a_query_parameter_cannot_widen_a_reading_only_choice(c, ms_oauth, memstore) -> None:
+    r = connect_read(c, ms_oauth, WRITE_GRANT, access="edit")
+    assert r.status_code == 400 and "different access" in r.text
+    assert ms_oauth.exchange_scopes == [READ_SCOPES]
+    assert not token_stored(memstore)
+
+
+def test_a_reading_only_form_field_is_the_only_way_to_choose_it(c, ms_oauth) -> None:
+    # Anything but the exact value asks for the default, on Microsoft's own screen.
+    token = csrf(c, "/settings")
+    c.post("/connect/onedrive", data={"csrf": token, "next": "/settings", "access": "READ "})
+    assert ms_oauth.asked_scopes == [SCOPES]
+
+
+def test_a_tampered_state_is_refused(c, ms_oauth, memstore) -> None:
+    import base64
+    import json
+
+    state = start_connect_read(c)
+    payload, rest = state.split(".", 1)
+    data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    assert data["access"] == "read"
+    data["access"] = "edit"
+    forged = base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+    ms_oauth.scopes = WRITE_GRANT
+    r = c.get("/connect/onedrive/callback", params={"code": "ms-code", "state": f"{forged}.{rest}"})
+    assert r.status_code == 400
+    assert ms_oauth.exchange_scopes == []
+    assert not token_stored(memstore)
+
+
+def test_a_state_without_the_choice_is_treated_as_reading_only(c, ms_oauth, memstore) -> None:
+    from itsdangerous import URLSafeTimedSerializer
+
+    from scoped_drive_mcp.dashboard import STATE_SALT
+    from tests.conftest import SESSION_SECRET
+
+    serializer = URLSafeTimedSerializer(SESSION_SECRET, STATE_SALT)
+    for choice in (None, "", "write", ["edit"]):
+        data = serializer.loads(start_connect(c))
+        assert data.pop("access") == "edit"
+        if choice is not None:
+            data["access"] = choice
+        ms_oauth.exchange_scopes.clear()
+        r = c.get(
+            "/connect/onedrive/callback",
+            params={"code": "ms-code", "state": serializer.dumps(data)},
+        )
+        assert r.status_code == 400 and "different access" in r.text, choice
+        assert ms_oauth.exchange_scopes == [READ_SCOPES]
+        assert not token_stored(memstore)
+
+
+def test_read_and_edit_over_a_reading_only_connection_keeps_the_list(
+    c, drive, ms_oauth, memstore, stored_scopes
+) -> None:
+    connect_read(c, ms_oauth)
+    allow(c, SCHOOL)
+    listed = stored_allowlist(memstore)
+    assert listed
+    ms_oauth.scopes = WRITE_GRANT
+    assert connect(c).status_code == 303
+    assert stored_allowlist(memstore) == listed
+    assert stored_scopes[-1] == "files.readwrite offline_access user.read"
+    assert 'id="onedrive-read-only"' not in c.get("/files?tab=onedrive").text
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="now editable")
+    assert not out["isError"]
+    assert drive.content[ESSAY] == b"now editable"
+
+
+def test_switching_to_reading_only_keeps_the_list_and_stops_writes(
+    c, drive, ms_oauth, memstore
+) -> None:
+    connect(c)
+    allow(c, SCHOOL)
+    listed = stored_allowlist(memstore)
+    page = c.get("/files?tab=onedrive").text
+    assert 'id="onedrive-switch-read"' in page
+    assert connect_read(c, ms_oauth).status_code == 303
+    assert stored_allowlist(memstore) == listed
+    page = c.get("/files?tab=onedrive").text
+    assert 'id="onedrive-read-only"' in page and 'id="onedrive-switch-read"' not in page
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+    assert (
+        "my essay"
+        in (result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"])
+    )
+
+
+def test_reading_only_on_another_drive_clears_the_list(c, drive, ms_oauth, memstore) -> None:
+    connect(c)
+    allow(c, SCHOOL)
+    drive.drive_id = "drive-2"
+    assert connect_read(c, ms_oauth).status_code == 303
+    assert stored_allowlist(memstore) == {}
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"error": "access_denied"},
+        {"error": "consent_required"},
+        {"error": "access_denied", "error_description": "AADSTS90094: Admin consent is required."},
+        {"error": "server_error"},
+    ],
+)
+def test_a_failed_read_and_edit_try_offers_reading_only_and_changes_nothing(
+    c, drive, ms_oauth, memstore, params
+) -> None:
+    connect_read(c, ms_oauth)
+    allow(c, SCHOOL)
+    before = memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}")
+    listed = stored_allowlist(memstore)
+    state = start_connect(c)
+    r = c.get("/connect/onedrive/callback", params={**params, "state": state})
+    assert r.status_code == 400
+    assert "Connect for reading only" in r.text
+    assert 'action="/connect/onedrive"' in r.text
+    assert 'name="access" value="read"' in r.text
+    assert memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}") == before
+    assert stored_allowlist(memstore) == listed
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+
+
+def test_the_offered_reading_only_button_connects(c, ms_oauth, memstore) -> None:
+    import re
+
+    state = start_connect(c)
+    r = c.get("/connect/onedrive/callback", params={"error": "consent_required", "state": state})
+    token = re.search(r'name="csrf" value="([^"]+)"', r.text).group(1)
+    r = c.post("/connect/onedrive", data={"csrf": token, "access": "read", "next": "/files"})
+    assert r.status_code == 303
+    assert ms_oauth.asked_scopes[-1] == READ_SCOPES
+
+
+def test_a_failed_reading_only_try_does_not_offer_it_again(c, ms_oauth) -> None:
+    state = start_connect_read(c)
+    r = c.get("/connect/onedrive/callback", params={"error": "access_denied", "state": state})
+    assert r.status_code == 400
+    assert "You didn’t connect OneDrive" in r.text
+    assert "Connect for reading only" not in r.text
+
+
+def test_a_connection_made_reading_only_is_refreshed_with_read_scopes(c, drive, ms_oauth) -> None:
+    connect_read(c, ms_oauth)
+    allow(c, SCHOOL)
+    drive.tokens.clear()
+    result(c, "onedrive_read_file", file_id=ESSAY)
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
