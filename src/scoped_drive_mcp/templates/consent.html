@@ -30,6 +30,11 @@
 
   <h2>What it can do</h2>
   <p class="muted"><b>{{ platform.label[:1] | upper }}{{ platform.label[1:] }}</b> wants to act as {{ owner }} on this server. If you allow it, it can:</p>
+  {% if agent_role %}
+  <p id="consent-agent-role"><b>This connection is for your role “{{ agent_role.name }}” only.</b>
+    It reaches the {{ agent_role.items | length }} item{{ "" if agent_role.items | length == 1 else "s" }} that role lists and
+    never does more than the role allows, whatever you choose below. It does not work at any other address.</p>
+  {% endif %}
   <ul class="consent-can">
     <li><b>Use the items on your Access list,</b> as far as you choose below. <span class="muted">Anything not on that list is
       refused by this server, even though your connected Drive is visible to it. It can never change who a

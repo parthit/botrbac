@@ -2,6 +2,10 @@
 
 What a connected assistant can call, by role. Pairing, the mailbox and sharing between people are in [sharing.md](sharing.md).
 
+Through a named role's address (`/mcp/role/<role>`, see [roles.md](roles.md)) only the first five tools and the
+write tools for your own files (`create_folder`, `create_doc`, `upload_file`, `update_file_content`,
+`rename_file`, `trash_file`) are offered, at the lower of the connection's level and the role's.
+
 | Tool | viewer | editor | admin |
 | --- | :---: | :---: | :---: |
 | `search_files(query, max_results)` | ✓ | ✓ | ✓ |

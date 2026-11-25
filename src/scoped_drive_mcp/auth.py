@@ -14,6 +14,7 @@ The dashboard session cookie is not read here.
 import hashlib
 import hmac
 import json
+import re
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -23,6 +24,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .audit import audit_auth_failure
 from .config import Role, TokenEntry
+
+# `/mcp/role/<slug>` (agent_roles.py): the route parameter and what a slug looks like.
+ROLE_PATH_PARAM = "agent_role"
+ROLE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,12 @@ class Principal:
     # name. Lets one person's Grok and Claude be told apart in the mailbox.
     grant_id: str | None = None
     client_name: str | None = None
+    # Set when the call came in through a named role's address (agent_roles.py). `role`
+    # above is then already the lower of the connection's and the named role's.
+    agent_role: str | None = None
+    # OAuth only: the named role this connection was approved for, when it signed in
+    # through a role's address. It is then refused everywhere but that address.
+    bound_role: str | None = None
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)
@@ -111,6 +122,15 @@ class BearerAuthMiddleware:
         self.resource_metadata = resource_metadata
         self.owner_email = owner_email
 
+    def _metadata_for(self, scope: Scope) -> str | None:
+        """A role's address points at that role's metadata, so the app asks for a
+        connection to the role and not to the whole endpoint."""
+        slug = (scope.get("path_params") or {}).get(ROLE_PATH_PARAM)
+        if not self.resource_metadata or not isinstance(slug, str):
+            return self.resource_metadata
+        known = ROLE_SLUG.fullmatch(slug) is not None
+        return role_metadata_url(self.resource_metadata, slug if known else None)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in self.exempt_paths:
             await self.app(scope, receive, send)
@@ -130,7 +150,7 @@ class BearerAuthMiddleware:
         if principal is None:
             reason = "missing_token" if header is None else "invalid_token"
             audit_auth_failure(reason, scope.get("path", ""))
-            await _unauthorized(send, reason, self.resource_metadata)
+            await _unauthorized(send, reason, self._metadata_for(scope))
             return
         # Pre-shared API tokens are the admin's legacy bearer. OAuth already set email.
         if principal.email is None and self.owner_email:
@@ -145,6 +165,11 @@ class BearerAuthMiddleware:
         finally:
             current_actor.reset(reset_actor)
             current_principal.reset(reset)
+
+
+def role_metadata_url(resource_metadata: str, slug: str | None) -> str:
+    """A named role's address is its own protected resource, with its own metadata."""
+    return f"{resource_metadata}/role/{slug}" if slug else resource_metadata
 
 
 def www_authenticate(reason: str, resource_metadata: str | None) -> bytes:

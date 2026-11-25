@@ -19,6 +19,7 @@ src/scoped_drive_mcp/
   scope.py                    the allowlist scope guard and search query builder
   policy.py                   role → tool map and @require decorator (access_required errors)
   access.py                   access requests (storage, dedupe, request tools)
+  agent_roles.py              named roles: /mcp/role/<slug> narrows a call to part of the allowlist
   peer_requests.py            requests between paired people, for people only (no MCP tool reads them)
   peer_request_pages.py       their dashboard routes
   bridge.py                   pairings; mailbox between one person's own assistants

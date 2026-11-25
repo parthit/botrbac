@@ -33,7 +33,7 @@ Rules:
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -120,6 +120,8 @@ class FileRef:
 
 
 AllowlistSource = Callable[[], Mapping[str, str]]
+# Ids that must not be renamed or trashed even though they are not in `allowed()`.
+ProtectedSource = Callable[[], Collection[str]]
 
 
 class ScopeGuard:
@@ -155,6 +157,7 @@ class ScopeGuard:
         self.max_folders = max_folders
         self.parents_chunk_size = parents_chunk_size
         self.max_individual_files = max_individual_files
+        self._protected: ProtectedSource | None = None
         self._lock = threading.Lock()
         # Caches are partitioned by the actor email. An unset actor shares one cache so
         # single-tenant tests keep their current behavior. User A's allowlist must not
@@ -162,6 +165,20 @@ class ScopeGuard:
         self._ancestors: dict[str, dict[str, tuple[float, FileRef | None]]] = {}
         self._folders: dict[str, tuple[float, frozenset[str], tuple[str, ...]]] = {}
         self._allowed: dict[str, tuple[float, dict[str, str]]] = {}
+
+    def partition_by(
+        self, partition: Callable[[], str], *, protected: ProtectedSource | None = None
+    ) -> None:
+        """Cache per `partition()` instead of per actor, for a guard whose allowlist
+        source returns less for some calls (a named role sees part of the list).
+
+        `partition()` must return the actor itself when the call sees the whole list,
+        and `actor|...` otherwise, so the actor's own changes clear every part.
+        `protected` names ids that stay un-renamable and un-trashable for a call that
+        reaches them through a folder: under a role, a file the owner allowed on its own
+        is still protected when the role only lists the folder around it."""
+        self._partition = partition
+        self._protected = protected
 
     def _who(self) -> str:
         if self._partition is not None:
@@ -350,6 +367,8 @@ class ScopeGuard:
             return ref
         if not self._reaches_allowed(ref, allowed):
             raise OutOfScopeError(file_id)
+        if not allow_root and self._protected is not None and ref.id in self._protected():
+            raise ForbiddenError(PROTECTED)
         return ref
 
     def assert_not_above_allowed(self, folder_id: str) -> None:

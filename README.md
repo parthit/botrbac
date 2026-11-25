@@ -25,6 +25,8 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
   You approve or deny it in the dashboard.
 - **A role for each app.** Read only, read and edit, or full. An app only sees the tools its role allows.
   There are no tools to move, share or permanently delete files.
+- **Named roles for agents and subagents.** A role is a named part of your list with its own level. An agent
+  that connects to `/mcp/role/<role>` reaches only that role's files. See [docs/roles.md](docs/roles.md).
 - **An activity log.** Every call, grant, revoke and refusal, without file contents.
 - **Sharing with people you pair with.** Their assistants can read the items you put on a separate Sharing
   list, and edit only where you say so.
@@ -109,6 +111,7 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/self-hosting.md](docs/self-hosting.md) | Deploy your own copy, run it locally, every environment variable, troubleshooting |
 | [docs/agent-setup.md](docs/agent-setup.md) | Copy-paste prompts so a coding agent sets it up for you |
 | [docs/tools.md](docs/tools.md) | Every tool, which role may call it, and how files are read |
+| [docs/roles.md](docs/roles.md) | Named roles: give an agent or subagent only part of your allowed list |
 | [docs/notion.md](docs/notion.md) | Optional: let assistants read the Notion pages you allow |
 | [docs/onedrive.md](docs/onedrive.md) | Optional: let assistants read (and, if they may edit, add and change) the OneDrive files and folders you allow |
 | [docs/terminal.md](docs/terminal.md) | Bot RBAC Terminal: the `botrbac` CLI, roles for local agents, `--role` sessions, hooks |

@@ -49,6 +49,14 @@
   is still read for its 14 days, except a body that turns out to be a vault record. A wake-up's sender key
   (`WEBHOOK_KEK`) is sealed for the slot it was saved in, so a record copied to another person's or app's
   slot does not open. A key saved before that is sealed again for its slot the next time it is read.
+- **Named roles** (`/mcp/role/<role>`, [roles.md](roles.md)) only narrow a call: the files are the allowlist
+  entries the role lists, the level is the lower of the connection's and the role's, and only the tools for
+  your own Drive files are offered. Role records are signed like the allowlist, and a role that is missing or
+  unreadable refuses the call instead of falling back to the whole list. An app that signs in through a
+  role's address is bound to that role: the role is recorded on the connection at consent, its tokens are
+  refused on plain `/mcp` and on every other role, and it refreshes only for that address. A connection made
+  on plain `/mcp` is refused on a role's address. Pre-shared `API_TOKENS` are not connections and cannot be
+  bound: a role's address narrows them, and they still work on `/mcp`.
 - **Parent ids:** tool results only list parent folders that are themselves shared (or inside something shared),
   so an assistant never learns the ids of your other folders.
 - **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a

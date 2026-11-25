@@ -34,6 +34,7 @@ from starlette.types import Receive, Scope, Send
 
 from . import audit as audit_module
 from .access import OWNER_INDEX, REQUEST_TTL, AccessRequests, AccessService
+from .agent_roles import ROLE_PATH_PARAM, AgentRoleMiddleware, AgentRoles, current_agent_role
 from .audit import audit_owner
 from .auth import (
     BearerAuthMiddleware,
@@ -79,7 +80,7 @@ from .notion_client import HttpNotionApi, NotionApi, NotionOAuth
 from .oauth import GoogleOAuthClient, OAuthClient
 from .onedrive import OneDriveService
 from .onedrive_client import HttpOneDriveApi, OneDriveApi, OneDriveOAuth
-from .policy import PayloadToolError, is_allowed, require
+from .policy import PayloadToolError, may_call, require
 from .ratelimit import AuthFailureLimitApp, RateLimitApp
 from .scope import ScopeGuard
 from .service import DriveService
@@ -109,6 +110,8 @@ logger = logging.getLogger(__name__)
 
 
 MCP_PATH = "/mcp"
+# The same endpoint, narrowed to one of the caller's named roles (agent_roles.py).
+ROLE_MCP_PATH = f"{MCP_PATH}/role/{{{ROLE_PATH_PARAM}}}"
 HEALTH_PATH = "/health"
 
 INSTRUCTIONS = (
@@ -209,7 +212,7 @@ class ScopedFastMCP(FastMCP):
         tools = await super().list_tools()
         if principal is None:
             return []
-        return [t for t in tools if is_allowed(principal.role, t.name)]
+        return [t for t in tools if may_call(principal, t.name)]
 
 
 async def _run[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -1143,6 +1146,26 @@ def build_app(
     directory = TenantDirectory(kv, settings.owner_email, enc_key)
     actor_kv = directory.actor_store()
     allowlist = Allowlist(actor_kv)
+    agent_roles = AgentRoles(actor_kv)
+
+    def own_allowlist() -> dict[str, str]:
+        """The allowlist, or under a named role only the entries that role lists."""
+        items = allowlist.mime_map()
+        role = current_agent_role.get()
+        if role is None:
+            return items
+        return {fid: mime for fid, mime in items.items() if fid in role.items}
+
+    def own_partition() -> str:
+        actor = current_actor.get() or ""
+        role = current_agent_role.get()
+        return actor if role is None else guest_partition(actor, f"r:{role.slug}")
+
+    def own_protected() -> frozenset[str]:
+        # Under a role, items the owner allowed one by one keep their protection even
+        # when the role reaches them through a folder it lists.
+        return frozenset(allowlist.mime_map()) if current_agent_role.get() else frozenset()
+
     ext_allowlist = Allowlist(actor_kv, EXTERNAL_ALLOWLIST_KEY)
     vault = TokenVault(
         actor_kv, enc_key, expected=lambda: current_actor.get() or settings.owner_email
@@ -1192,12 +1215,14 @@ def build_app(
             routed,
             settings.root_folder_id,
             ttl=settings.scope_cache_ttl,
-            allowlist=allowlist.mime_map,
+            allowlist=own_allowlist,
             allowlist_ttl=settings.allowlist_cache_ttl,
             admin_email=settings.owner_email,
         )
     else:
-        guard = guard_factory(routed, settings, allowlist.mime_map)
+        guard = guard_factory(routed, settings, own_allowlist)
+    # A role sees part of the list, so it must not share the whole list's cache.
+    guard.partition_by(own_partition, protected=own_protected)
     service = DriveService(routed, guard, settings)
     webhook_hosts = (
         tuple(
@@ -1506,6 +1531,7 @@ def build_app(
         directory=directory,
         drive_router=routed,
         mailbox=mailbox,
+        agent_roles=agent_roles,
         ext_allowlist=ext_allowlist,
         on_ext_change=invalidate_ext_guards,
         shared_with_me=shared_with_me,
@@ -1528,7 +1554,7 @@ def build_app(
     mcp_endpoint = AuthFailureLimitApp(
         BearerAuthMiddleware(
             RateLimitApp(
-                StatelessMCPEndpoint(mcp),
+                AgentRoleMiddleware(StatelessMCPEndpoint(mcp), agent_roles),
                 kv,
                 name="mcp",
                 limit=settings.mcp_rate_limit,
@@ -1550,6 +1576,7 @@ def build_app(
     routes: list[Any] = [
         Route(HEALTH_PATH, health, methods=["GET"]),
         Route(MCP_PATH, mcp_endpoint),
+        Route(ROLE_MCP_PATH, mcp_endpoint),
     ]
     if mcp_oauth is not None:
         routes.extend(mcp_oauth.routes())

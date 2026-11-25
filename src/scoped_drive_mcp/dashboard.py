@@ -51,6 +51,7 @@ from .access import (
     AccessRequests,
     validate_request_id,
 )
+from .agent_roles import AgentRole, AgentRoleError
 from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
@@ -268,6 +269,8 @@ class DashboardContext:
     directory: Any = None
     drive_router: Any = None
     mailbox: Any = None
+    # This person's named roles (agent_roles.py). None hides the Roles section.
+    agent_roles: Any = None
     # The list other people's assistants may read (external.py). None disables Sharing.
     ext_allowlist: Allowlist | None = None
     on_ext_change: Callable[[], None] = lambda: None
@@ -3631,6 +3634,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return connect_redirect(request)
             # The form carries this id back, so Allow only ever approves the request this
             # page describes. A second authorize request in another tab replaces it.
+            # Signing in through a named role's address: say so, and refuse a role this
+            # person does not have instead of approving a connection that reaches nothing.
+            role_slug = ctx.mcp_oauth.bound_role(pending.resource)
+            agent_role = None
+            if role_slug:
+                if ctx.agent_roles is not None:
+                    agent_role = await blocking(ctx.agent_roles.get, role_slug)
+                if agent_role is None:
+                    return render(
+                        request,
+                        "error.html",
+                        404,
+                        message=f"You have no role named “{role_slug}”. Make it in Settings, "
+                        "under Roles, then connect again.",
+                    )
             consent_id = secrets.token_urlsafe(16)
             request.session["mcp_auth"] = {**pending.to_dict(), "consent_id": consent_id}
             await remember_pending(request)
@@ -3648,8 +3666,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return_host=return_host,
                 consent_id=consent_id,
                 switch_next=here,
-                mailbox_on=ctx.mailbox is not None,
-                shared_on=ctx.shared_with_me is not None,
+                agent_role=agent_role,
+                mailbox_on=ctx.mailbox is not None and agent_role is None,
+                shared_on=ctx.shared_with_me is not None and agent_role is None,
             )
         finally:
             current_actor.reset(reset)
@@ -3755,6 +3774,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "name": g.client_name,
                     "app_name": g.app_name or g.client_name,
                     "renamed": g.renamed,
+                    "agent_role": g.agent_role,
                     "created_at": g.created_at,
                     "last_used": g.last_used,
                     "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,
@@ -3804,9 +3824,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
 
         def gather() -> dict[str, Any]:
+            entries = ctx.allowlist.entries()
+            roles = ctx.agent_roles.all() if ctx.agent_roles is not None else []
             return {
                 "rows": ctx.connection_rows(),
                 **assistant_rows(email),
+                "roles_on": ctx.agent_roles is not None,
+                # Each role with the items it still reaches: one taken off the allowlist
+                # stays on the record but no longer counts.
+                "roles": [{"role": r, "live": [i for i in r.items if i in entries]} for r in roles],
+                "allowed_items": sorted(entries.values(), key=lambda e: e.name.lower()),
             }
 
         data = await blocking(gather)
@@ -3814,6 +3841,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "settings.html",
             mcp_url=f"{settings.app_base_url}/mcp",
+            role_url_base=f"{settings.app_base_url}/mcp/role/",
+            describe_mime=describe_mime,
             drive_connected=drive_row_connected(data["rows"]),
             next="/settings",
             missing=settings.missing_settings(),
@@ -4038,6 +4067,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )
 
+    async def role_save(request: Request, form: dict[str, str]) -> Response:
+        """The owner creates a named role, or replaces the one with the same name."""
+        back = "/settings#roles"
+        if ctx.agent_roles is None:
+            return action_done(request, "error", "Roles are not set up on this server.", back)
+        items = [str(v) for v in (await request.form()).getlist("item")]
+
+        def save() -> AgentRole:
+            return ctx.agent_roles.save(
+                form.get("name") or "", form.get("level") or "", items, ctx.allowlist.entries()
+            )
+
+        try:
+            role = await blocking(save)
+        except AgentRoleError as exc:
+            return action_done(request, "error", str(exc), back)
+        # The scope guard caches each role's part of the list.
+        ctx.on_allowlist_change()
+        audit_owner("role_save", name=role.name, level=role.level, count=str(len(role.items)))
+        return action_done(
+            request, "ok", f"Saved the role {role.name}. Its next call uses these files.", back
+        )
+
+    async def role_delete(request: Request, form: dict[str, str]) -> Response:
+        back = "/settings#roles"
+        slug = form.get("slug") or ""
+        role = None if ctx.agent_roles is None else await blocking(ctx.agent_roles.get, slug)
+        if role is None or not await blocking(ctx.agent_roles.delete, slug):
+            return action_done(request, "error", "That role was not found.", back)
+        ctx.on_allowlist_change()
+        audit_owner("role_delete", name=role.name)
+        return action_done(
+            request, "ok", "Deleted the role. Agents using its address are refused.", back
+        )
+
     async def oauth_grant_rename(request: Request, form: dict[str, str]) -> Response:
         """The owner gives one of their connected apps a name of their own ("Grok Bot"
         instead of the "Cursor" it registered as). Empty goes back to the app's name."""
@@ -4124,6 +4188,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
         Route("/first-reads/clear", csrf_protected(first_reads_clear), methods=["POST"]),
         Route("/oauth/grants/role", csrf_protected(oauth_grant_role), methods=["POST"]),
+        Route("/roles/save", csrf_protected(role_save), methods=["POST"]),
+        Route("/roles/delete", csrf_protected(role_delete), methods=["POST"]),
         Route("/oauth/grants/rename", csrf_protected(oauth_grant_rename), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
