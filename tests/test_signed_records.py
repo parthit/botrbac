@@ -564,3 +564,46 @@ def test_an_encrypted_parked_redirect_needs_the_key_and_a_plain_one_is_refused_w
     assert with_key.take_completion(ticket, OWNER_EMAIL) == url
     plain = without_key.park_completion(url, OWNER_EMAIL)
     assert with_key.take_completion(plain, OWNER_EMAIL) is None
+
+
+def test_mail_and_held_file_records_cannot_be_rewritten_or_moved(monkeypatch) -> None:
+    """The server decrypts mail and held files for whoever the record names, so a store
+    writer must not be able to re-address a message, copy a held file's row or pieces
+    into their own account, or point the save folder somewhere else."""
+    from scoped_drive_mcp import store as store_module
+    from scoped_drive_mcp.store import MemoryStore, SignedStore, signing_key, signs
+
+    for key in ("drops:folder", "drops:index", "drops:part:abc:0", "bridge:msg:m1"):
+        assert signs(key) and (key.startswith("bridge:") or signs(f"u:a@example.com:{key}"))
+    inner = MemoryStore()
+    signed = SignedStore(inner, signing_key("k" * 44), require=True)
+    signed.set("bridge:msg:m1", '{"to":"victim@example.com","body":"x"}', ex=60)
+    signed.hset("u:victim@example.com:drops:index", "d1", '{"id":"d1"}')
+    signed.set("u:victim@example.com:drops:part:d1:0", "ciphertext", ex=60)
+
+    # Re-addressed in place, and copied under another id or another person's keys.
+    raw = inner.get("bridge:msg:m1")
+    inner.set("bridge:msg:m1", raw.replace("victim@", "thief@"))
+    inner.set("bridge:msg:m2", raw)
+    assert signed.get("bridge:msg:m1") is None and signed.get("bridge:msg:m2") is None
+    inner.hset(
+        "u:thief@example.com:drops:index",
+        "d1",
+        inner.hget("u:victim@example.com:drops:index", "d1"),
+    )
+    inner.set(
+        "u:thief@example.com:drops:part:d1:0", inner.get("u:victim@example.com:drops:part:d1:0")
+    )
+    assert signed.hgetall("u:thief@example.com:drops:index") == {}
+    assert signed.get("u:thief@example.com:drops:part:d1:0") is None
+    assert signed.get("u:victim@example.com:drops:part:d1:0") == "ciphertext"
+
+    # Written before these were signed: read until the cut-off, never after it, and
+    # only these kinds (an unsigned allowlist entry is refused at any time).
+    inner.set("bridge:msg:old", '{"to":"a@example.com"}')
+    inner.hset("allowlist", "f1", '{"id":"f1"}')
+    monkeypatch.setattr(store_module.time, "time", lambda: store_module.UNSIGNED_CONTENT_UNTIL - 1)
+    assert signed.get("bridge:msg:old") == '{"to":"a@example.com"}'
+    assert signed.hgetall("allowlist") == {}
+    monkeypatch.setattr(store_module.time, "time", lambda: store_module.UNSIGNED_CONTENT_UNTIL + 1)
+    assert signed.get("bridge:msg:old") is None

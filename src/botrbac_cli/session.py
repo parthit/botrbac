@@ -9,6 +9,7 @@ and everything started under it at the next policy check.
 
 import contextlib
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -39,7 +40,9 @@ def find_role(pol: dict[str, Any], wanted: str) -> dict[str, Any] | None:
     return named[0] if named else None
 
 
-def start(role_name: str, program: str, agent: str | None = None) -> dict[str, Any]:
+def start(
+    role_name: str, program: str, agent: str | None = None, command: list[str] | None = None
+) -> dict[str, Any]:
     cached = policy.load_cached()
     if cached is None:
         raise SessionError("No policy on this computer yet. Run: botrbac login")
@@ -77,7 +80,8 @@ def start(role_name: str, program: str, agent: str | None = None) -> dict[str, A
     }
     if parent:
         row["parent_session_id"] = parent["id"]
-    AuditQueue().add(**row)
+    # The whole command line is recorded only sealed, with "Record commands" on.
+    AuditQueue().add(command=shlex.join(command) if command else None, **row)
     return session
 
 
@@ -86,7 +90,7 @@ def run(role_name: str, command: list[str], agent: str | None, api: Any) -> int:
         raise SessionError("Give the command to run after --, e.g. botrbac run --role X -- claude")
     if api is not None:
         policy.refresh(api)  # best effort: a fresh role list, or the cached one offline
-    session = start(role_name, command[0], agent)
+    session = start(role_name, command[0], agent, command)
     terminal_role = (policy.load_cached() or {}).get("policy", {}).get("role", {}).get("name")
     note = f" within this terminal's role {terminal_role!r}" if terminal_role else ""
     print(

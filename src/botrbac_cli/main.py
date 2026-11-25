@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -30,8 +31,22 @@ def _say(*lines: str) -> None:
         print(line, flush=True)
 
 
+def _safe_server(server: str) -> bool:
+    """https, or plain http to this computer itself (local development)."""
+    parts = urlsplit(server)
+    if parts.scheme == "https":
+        return bool(parts.hostname)
+    return parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1", "::1")
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     server = args.server or os.environ.get("BOTRBAC_SERVER") or DEFAULT_SERVER
+    if not _safe_server(server):
+        _say(
+            f"Refusing to sign in to {server}: it is not https.",
+            "This computer's sign-in would travel unencrypted. Use the https address.",
+        )
+        return 1
     api = Api(server)
     started = api.start_login(socket.gethostname(), f"{platform.system()} {platform.release()}")
     _say(

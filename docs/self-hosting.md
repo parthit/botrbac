@@ -230,8 +230,8 @@ uv run python scripts/make_secrets.py           # prints SESSION_SECRET and ENCR
 Edit `.env`: paste the two secrets, and set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
 `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER`, `OWNER_EMAIL` and
 `APP_BASE_URL=http://localhost:8000`. The picker key's website restriction must include
-`http://localhost:8000/*` and `https://docs.google.com/*`. Leave the Redis variables empty: locally the server
-uses an in-memory store, which is wiped on every restart.
+`http://localhost:8000/*` and `https://docs.google.com/*`. Leave the Redis variables empty: locally the
+server uses an in-memory store, which is wiped on every restart.
 
 ```bash
 uv run --env-file .env uvicorn api.index:app --reload --port 8000
