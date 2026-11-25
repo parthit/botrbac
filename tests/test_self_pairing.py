@@ -1,39 +1,23 @@
-"""Pairing two of one person's own assistants (say Grok and Claude), and its Edge Config switch."""
+"""Pairing two of one person's own assistants (say Grok and Claude): the only pairing that
+carries mail."""
 
 import pytest
 
-from scoped_drive_mcp.auth import Principal
-from scoped_drive_mcp.bridge import Assistant, Mailbox, MailboxError, as_assistant
-from scoped_drive_mcp.config import Role
+from scoped_drive_mcp.bridge import UNTRUSTED_START, Mailbox, MailboxError, as_assistant
 from scoped_drive_mcp.store import MemoryStore
 from tests.conftest import OWNER_EMAIL
-from tests.dash import client, csrf, login
-from tests.mail import legacy_peer_mail
+from tests.dash import client, csrf, login, post
+from tests.mail import READER, SENDER, THIRD, self_pair
+from tests.test_external_sharing import _error
+from tests.test_multi_user import _app, _grok, _mcp
 
-GROK = Assistant("grant-grok", "Grok")
-CLAUDE = Assistant("grant-claude", "Claude")
-CURSOR = Assistant("grant-cursor", "Cursor")
-EVE = "eve@example.com"
+GROK, CLAUDE, CURSOR = SENDER, READER, THIRD
+PEOPLE = "/sharing?tab=people"
 
 
 def _box() -> Mailbox:
     store = MemoryStore(clock=lambda: 1_700_000_000.0)
-    return Mailbox(
-        store,
-        base_url="https://drive-test.example.com",
-        clock=store._clock,
-    )
-
-
-def _self_pair(box: Mailbox, approve: bool = True) -> str:
-    with as_assistant(GROK):
-        created = box.request_link(OWNER_EMAIL)
-    with as_assistant(CLAUDE):
-        joined = box.request_link(OWNER_EMAIL, created["invite_code"])
-    assert joined["same_account"] is True
-    if approve:
-        box.decide(OWNER_EMAIL, created["link_id"], "approve")
-    return created["link_id"]
+    return Mailbox(store, base_url="https://drive-test.example.com", clock=store._clock)
 
 
 def test_two_assistants_on_one_account_can_pair_and_message() -> None:
@@ -43,8 +27,9 @@ def test_two_assistants_on_one_account_can_pair_and_message() -> None:
     with as_assistant(CLAUDE):
         joined = box.request_link(OWNER_EMAIL, created["invite_code"])
     assert joined["status"] == "pending_approval"
+    assert joined["same_account"] is True
     assert joined["peer_label"] == "Grok"
-    assert joined["approval_url"].endswith("/sharing?tab=people")
+    assert joined["approval_url"].endswith(PEOPLE)
 
     # One approval from the human turns it on.
     assert box.decide(OWNER_EMAIL, created["link_id"], "approve")["status"] == "active"
@@ -56,13 +41,17 @@ def test_two_assistants_on_one_account_can_pair_and_message() -> None:
         inbox = box.check_messages(OWNER_EMAIL)
         assert inbox["unread_count"] == 1
         assert inbox["latest_preview"][0]["from_assistant"] == "Claude"
-        box.reply(OWNER_EMAIL, "Q1: billing", msg_id=sent["msg_id"])
-        box.mark_read(OWNER_EMAIL, [sent["msg_id"]])
+        replied = box.reply(OWNER_EMAIL, "Q1: billing", msg_id=sent["msg_id"])
+        assert replied["thread_id"] == sent["thread_id"]
+        assert box.mark_read(OWNER_EMAIL, [sent["msg_id"]])["marked"] == 1
         assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
     with as_assistant(CLAUDE):
         messages = box.list_inbox(OWNER_EMAIL)["messages"]
         assert [m["from_assistant"] for m in messages] == ["Grok"]
         assert "Q1: billing" in messages[0]["body"]
+        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 1
+        assert box.mark_read(OWNER_EMAIL, [replied["msg_id"]])["marked"] == 1
+        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
     # A third assistant of the same person is not on this link.
     with as_assistant(CURSOR):
         assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
@@ -71,28 +60,58 @@ def test_two_assistants_on_one_account_can_pair_and_message() -> None:
         assert exc.value.code == "not_found"
 
 
-def test_same_assistant_joining_own_invite_still_returns_link() -> None:
+def test_own_assistants_pair_and_message_through_the_mcp_tools(world, memstore, oauth) -> None:
+    """The whole journey a person goes through: connect two assistants, pair them over
+    MCP, approve once on the dashboard, exchange mail, then disconnect one of them."""
+    app = _app(world, memstore, oauth)
+    owner = client(app)
+    assert login(owner).status_code == 303
+    grok, claude = _grok(owner, "Grok Ada"), _grok(owner, "Claude Ada")
+
+    created = _mcp(owner, grok, "request_link")["structuredContent"]
+    joined = _mcp(owner, claude, "request_link", invite_code=created["invite_code"])
+    assert joined["structuredContent"]["same_account"] is True
+    link_id = created["link_id"]
+    assert _error(_mcp(owner, grok, "send_message", link_id=link_id, body="x"))["error"] == (
+        "link_pending"
+    )
+
+    page = owner.get(PEOPLE).text
+    assert "Grok Ada ↔ Claude Ada" in page
+    assert "pair two of your own assistants" in page
+    assert page.count(f"/bridge/{link_id}/approve") == 1
+    done = owner.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, PEOPLE)})
+    assert done.status_code == 303
+
+    sent = _mcp(owner, grok, "send_message", link_id=link_id, body="what is on the roadmap?")
+    assert sent["isError"] is False, sent
+    checked = _mcp(owner, claude, "check_messages")["structuredContent"]
+    assert checked["unread_count"] == 1
+    assert checked["latest_preview"][0]["from_assistant"] == "Grok Ada"
+    [mail] = _mcp(owner, claude, "list_inbox")["structuredContent"]["messages"]
+    assert mail["body"].startswith(UNTRUSTED_START) and "roadmap" in mail["body"]
+    msg_id = sent["structuredContent"]["msg_id"]
+    replied = _mcp(owner, claude, "reply", msg_id=msg_id, body="Q1: billing")
+    assert replied["isError"] is False, replied
+    assert _mcp(owner, grok, "check_messages")["structuredContent"]["unread_count"] == 1
+
+    # Disconnecting Claude on Settings warns that, and does, end its pairing.
+    grok_grant, claude_grant = app.state.mailbox.list_links(OWNER_EMAIL)["links"][0]["grant_ids"]
+    settings = owner.get("/settings").text
+    assert f"its pairing with Grok Ada …{grok_grant[-5:]} ends" in settings
+    assert f"its pairing with Claude Ada …{claude_grant[-5:]} ends" in settings
+    assert post(owner, "/oauth/grants/revoke", grant_id=claude_grant).status_code == 303
+    after = _mcp(owner, grok, "send_message", link_id=link_id, body="still there?")
+    assert _error(after)["error"] == "link_revoked"
+
+
+def test_rejoining_your_own_invite_or_an_invite_without_an_assistant_does_not_pair() -> None:
     box = _box()
     with as_assistant(GROK):
         created = box.request_link(OWNER_EMAIL)
         again = box.request_link(OWNER_EMAIL, created["invite_code"])
     assert again["status"] == "awaiting_peer"
     assert "same_account" not in again
-
-
-def test_another_assistant_does_not_reuse_your_open_invite() -> None:
-    box = _box()
-    with as_assistant(GROK):
-        grok_invite = box.request_link(OWNER_EMAIL)
-    with as_assistant(CLAUDE):
-        claude_invite = box.request_link(OWNER_EMAIL)
-    assert claude_invite["link_id"] != grok_invite["link_id"]
-
-
-def test_legacy_token_or_old_invite_keeps_old_behaviour() -> None:
-    box = _box()
-    with as_assistant(GROK):
-        created = box.request_link(OWNER_EMAIL)
     # An API token (no grant) re-entering its account's code just gets the invite back.
     again = box.request_link(OWNER_EMAIL, created["invite_code"])
     assert again["status"] == "awaiting_peer"
@@ -105,9 +124,18 @@ def test_legacy_token_or_old_invite_keeps_old_behaviour() -> None:
     assert back["status"] == "awaiting_peer"
 
 
+def test_another_assistant_does_not_reuse_your_open_invite() -> None:
+    box = _box()
+    with as_assistant(GROK):
+        grok_invite = box.request_link(OWNER_EMAIL)
+    with as_assistant(CLAUDE):
+        claude_invite = box.request_link(OWNER_EMAIL)
+    assert claude_invite["link_id"] != grok_invite["link_id"]
+
+
 def test_second_join_by_a_third_assistant_is_refused_and_pair_is_unique() -> None:
     box = _box()
-    link_id = _self_pair(box)
+    link_id = self_pair(box)
     code = box._link(link_id)["invite_code"]
     with as_assistant(CURSOR), pytest.raises(MailboxError) as taken:
         box.request_link(OWNER_EMAIL, code)
@@ -119,68 +147,16 @@ def test_second_join_by_a_third_assistant_is_refused_and_pair_is_unique() -> Non
     assert exc.value.code == "already_paired"
 
 
-def test_same_account_link_shares_nothing() -> None:
+def test_same_account_link_shares_nothing_and_names_its_two_apps() -> None:
     box = _box()
-    _self_pair(box)
+    self_pair(box)
     with as_assistant(GROK):
         assert box.active_peers(OWNER_EMAIL) == []
     assert box.active_peers(OWNER_EMAIL) == []
-
-
-def test_revoking_an_assistant_ends_its_same_account_links() -> None:
-    box = _box()
-    link_id = _self_pair(box)
-    assert box.end_assistant_links(OWNER_EMAIL, CLAUDE.grant_id) == 1
-    with as_assistant(GROK), pytest.raises(MailboxError) as exc:
-        box.send_message(OWNER_EMAIL, link_id, "still there?")
-    assert exc.value.code == "link_revoked"
-
-
-def test_cross_person_links_share_documents_but_carry_no_mail() -> None:
-    box = _box()
-    with as_assistant(GROK):
-        created = box.request_link(OWNER_EMAIL)
-    with as_assistant(Assistant("grant-eve", "Muse")):
-        joined = box.request_link(EVE, created["invite_code"])
-    assert "same_account" not in joined
-    box.decide(OWNER_EMAIL, created["link_id"], "approve")
-    box.decide(EVE, created["link_id"], "approve")
-    # Whichever of the owner's assistants tries, another person's assistant is not reached.
-    for assistant in (GROK, CLAUDE, None):
-        with as_assistant(assistant), pytest.raises(MailboxError) as exc:
-            box.send_message(OWNER_EMAIL, created["link_id"], "hello eve")
-        assert exc.value.code == "peer_mail_off"
-    with as_assistant(Assistant("grant-eve", "Muse")), pytest.raises(MailboxError) as back:
-        box.send_message(EVE, created["link_id"], "hello owner")
-    assert back.value.code == "peer_mail_off"
-    assert box.check_messages(EVE)["unread_count"] == 0
-    assert box.active_peers(OWNER_EMAIL) == [EVE]
-    assert box.active_peers(EVE) == [OWNER_EMAIL]
-
-
-# ---- wiring ------------------------------------------------------------------------
-
-
-def test_oauth_principal_carries_grant() -> None:
-    principal = Principal("oauth:Grok", Role.ADMIN, OWNER_EMAIL, "g1", "Grok")
-    assert principal.grant_id == "g1"
-    assert principal.client_name == "Grok"
-
-
-def test_dashboard_shows_assistant_names_and_one_approve(p2_app) -> None:
-    box = p2_app.state.mailbox
-    link_id = _self_pair(box, approve=False)
-    owner = client(p2_app)
-    login(owner)
-    page = owner.get("/sharing?tab=people")
-    assert "Grok ↔ Claude" in page.text
-    assert "pair two of your own assistants" in page.text
-    assert page.text.count(f"/bridge/{link_id}/approve") == 1
-    done = owner.post(
-        f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/sharing?tab=people")}
-    )
-    assert done.status_code == 303
-    assert box.list_links(OWNER_EMAIL)["links"][0]["status"] == "active"
+    # The dashboard uses these to tell apart two connections with the same name.
+    link = box.list_links(OWNER_EMAIL)["links"][0]
+    assert link["grant_ids"] == [GROK.grant_id, CLAUDE.grant_id]
+    assert link["assistants"] == ["Grok", "Claude"]
 
 
 def test_a_join_that_stopped_halfway_can_be_retried() -> None:
@@ -197,23 +173,25 @@ def test_a_join_that_stopped_halfway_can_be_retried() -> None:
     assert box.decide(OWNER_EMAIL, link_id, "approve")["status"] == "active"
 
 
-def test_revoked_grant_ends_its_open_invites_and_pending_links_as_cancelled() -> None:
+def test_revoking_an_assistant_ends_its_links_and_open_invites() -> None:
     box = _box()
-    with as_assistant(GROK):
-        invite = box.request_link(OWNER_EMAIL)
-    pending = _self_pair(box, approve=False)
-    # Grok's first invite was reused by _self_pair, so make a separate open one.
-    with as_assistant(CURSOR):
-        cursor_invite = box.request_link(OWNER_EMAIL)
-    assert box.end_assistant_links(OWNER_EMAIL, CURSOR.grant_id) == 1
-    assert box.end_assistant_links(OWNER_EMAIL, CLAUDE.grant_id) == 1
+    active = self_pair(box)
+    pending = self_pair(box, GROK, CURSOR, approve=False)
+    with as_assistant(THIRD):
+        invite = box.request_link(OWNER_EMAIL, new_invite=True)
+    with as_assistant(CLAUDE):
+        open_invite = box.request_link(OWNER_EMAIL, new_invite=True)
+    assert box.end_assistant_links(OWNER_EMAIL, CLAUDE.grant_id) == 2
+    with as_assistant(GROK), pytest.raises(MailboxError) as exc:
+        box.send_message(OWNER_EMAIL, active, "still there?")
+    assert exc.value.code == "link_revoked"
+    assert box.end_assistant_links(OWNER_EMAIL, CURSOR.grant_id) == 2
     links = {x["link_id"]: x for x in box.list_links(OWNER_EMAIL)["links"]}
-    assert links[pending]["ended_reason"] == "cancelled"
-    assert links[cursor_invite["link_id"]]["ended_reason"] == "cancelled"
-    assert invite["link_id"] == pending
+    for ended in (pending, invite["link_id"], open_invite["link_id"]):
+        assert links[ended]["ended_reason"] == "cancelled"
 
 
-def test_oauth_revoke_calls_the_mailbox_hook() -> None:
+def test_an_unknown_grant_revoke_calls_no_mailbox_hook() -> None:
     from scoped_drive_mcp.mcp_oauth import McpOAuth
 
     seen: list[tuple[str, str]] = []
@@ -225,177 +203,10 @@ def test_oauth_revoke_calls_the_mailbox_hook() -> None:
 
 def test_account_send_cap_counts_both_assistants_together() -> None:
     box = _box()
-    link_id = _self_pair(box)
+    link_id = self_pair(box)
     with as_assistant(GROK):
         box.send_message(OWNER_EMAIL, link_id, "one")
     with as_assistant(CLAUDE):
         box.send_message(OWNER_EMAIL, link_id, "two")
     bucket = int(box._now()) // 3600
     assert box.store.get(f"bridge:rate:{OWNER_EMAIL}:{bucket}") == "2"
-
-
-# ---- wake-ups: one slot per app ------------------------------------------------------
-
-HOOK = "https://api2.cursor.sh/automations/webhook/"
-
-
-def _wake_box(posts: list[dict]) -> Mailbox:
-    import base64
-
-    from scoped_drive_mcp.wake import WakeSettings
-
-    store = MemoryStore(clock=lambda: 1_700_000_000.0)
-    return Mailbox(
-        store,
-        base_url="https://drive-test.example.com",
-        clock=store._clock,
-        wake=WakeSettings(
-            kek=base64.b64decode(base64.b64encode(b"k" * 32)),
-            allowlist=("api2.cursor.sh",),
-            lookup=lambda _host: ["8.8.8.8"],
-            poster=lambda request: posts.append(request) or 200,
-        ),
-    )
-
-
-def _urls(posts: list[dict]) -> list[str]:
-    return [f"https://{post['hostname']}{post['path']}" for post in posts]
-
-
-def test_each_app_saves_its_own_hook_and_only_its_mail_wakes_it() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    with as_assistant(CURSOR):
-        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
-    with as_assistant(CLAUDE):
-        assert box.get_webhook(OWNER_EMAIL)["configured"] is False  # not Cursor's
-        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
-    with as_assistant(CURSOR):
-        assert box.get_webhook(OWNER_EMAIL)["url"] == HOOK + "cursor"  # not replaced
-    assert box.webhook_apps(OWNER_EMAIL) == sorted([CLAUDE.grant_id, CURSOR.grant_id])
-
-    with as_assistant(CURSOR):
-        created = box.request_link(OWNER_EMAIL)
-    with as_assistant(CLAUDE):
-        box.request_link(OWNER_EMAIL, created["invite_code"])
-    box.decide(OWNER_EMAIL, created["link_id"], "approve")
-
-    with as_assistant(CURSOR):
-        box.send_message(OWNER_EMAIL, created["link_id"], "hi claude")
-    assert _urls(posts) == [HOOK + "claude"]
-    with as_assistant(CLAUDE):
-        box.send_message(OWNER_EMAIL, created["link_id"], "hi cursor")
-    assert _urls(posts) == [HOOK + "claude", HOOK + "cursor"]
-
-
-def test_another_person_can_wake_none_of_your_assistants() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    with as_assistant(CURSOR):
-        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
-    with as_assistant(CLAUDE):
-        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
-    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
-    created = box.request_link(EVE)
-    box.request_link(OWNER_EMAIL, created["invite_code"])
-    box.decide(OWNER_EMAIL, created["link_id"], "approve")
-    box.decide(EVE, created["link_id"], "approve")
-
-    with pytest.raises(MailboxError) as exc:
-        box.send_message(EVE, created["link_id"], "hello")
-    assert exc.value.code == "peer_mail_off"
-    assert posts == []
-    # Even an old message addressed to the account wakes nothing.
-    legacy_peer_mail(box, created["link_id"], EVE, OWNER_EMAIL, "from before")
-    assert posts == []
-    with as_assistant(CLAUDE):
-        assert box.check_messages(OWNER_EMAIL)["unread_count"] == 0
-
-
-def test_account_hook_never_wakes_for_one_apps_mail_and_can_be_moved() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    # A hook saved before apps had their own slots sits on the account.
-    box.set_webhook(OWNER_EMAIL, HOOK + "old", sender_key="old-key-12345")
-    link_id = _self_pair(box)
-    with as_assistant(GROK):
-        box.send_message(OWNER_EMAIL, link_id, "to claude")
-    assert posts == []  # it would have woken whoever saved it, maybe the sender
-
-    box.move_webhook(OWNER_EMAIL, GROK.grant_id)
-    assert box.get_webhook(OWNER_EMAIL, "")["configured"] is False
-    with as_assistant(GROK):
-        assert box.get_webhook(OWNER_EMAIL)["url"] == HOOK + "old"
-    with as_assistant(CLAUDE):
-        box.send_message(OWNER_EMAIL, link_id, "to grok")
-    assert _urls(posts) == [HOOK + "old"]
-
-
-def test_disconnecting_an_app_drops_its_hook() -> None:
-    box = _wake_box([])
-    with as_assistant(CLAUDE):
-        box.set_webhook(OWNER_EMAIL, HOOK + "claude", sender_key="claude-key-1234")
-    box.end_assistant_links(OWNER_EMAIL, CLAUDE.grant_id)
-    assert box.webhook_apps(OWNER_EMAIL) == []
-    with as_assistant(CLAUDE):
-        assert box.get_webhook(OWNER_EMAIL)["configured"] is False
-
-
-def test_move_refuses_to_overwrite_an_apps_hook() -> None:
-    box = _wake_box([])
-    box.set_webhook(OWNER_EMAIL, HOOK + "old", sender_key="old-key-12345")
-    with as_assistant(CURSOR):
-        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
-    with pytest.raises(MailboxError) as exc:
-        box.move_webhook(OWNER_EMAIL, CURSOR.grant_id)
-    assert exc.value.code == "invalid_state"
-    with as_assistant(CURSOR):
-        assert box.get_webhook(OWNER_EMAIL)["url"] == HOOK + "cursor"
-    assert box.get_webhook(OWNER_EMAIL, "")["url"] == HOOK + "old"
-
-
-def test_only_an_apps_own_slot_is_a_wake_target() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    _self_pair(box)
-    with as_assistant(GROK):
-        box.set_webhook(OWNER_EMAIL, HOOK + "grok", sender_key="grok-key-12345")
-    box.set_webhook(OWNER_EMAIL, HOOK + "account", sender_key="account-key-123", app="")
-    box.store.delete(f"bridge:hookapps:{OWNER_EMAIL}")  # saved before the index existed
-    grok = f"{OWNER_EMAIL}#{GROK.grant_id}"
-    assert [slot for slot, _ in box._wake_targets(grok)] == [grok]
-    assert box._wake_targets(f"{OWNER_EMAIL}#{CLAUDE.grant_id}") == []
-    # The account-wide address served mail from other people; it wakes nobody now.
-    assert box._wake_targets(OWNER_EMAIL) == []
-
-
-def test_same_account_link_names_its_two_apps() -> None:
-    # The dashboard uses these to tell apart two connections with the same name.
-    box = _box()
-    _self_pair(box)
-    link = box.list_links(OWNER_EMAIL)["links"][0]
-    assert link["grant_ids"] == [GROK.grant_id, CLAUDE.grant_id]
-    assert link["assistants"] == ["Grok", "Claude"]
-
-
-def test_there_is_no_primary_app_any_more() -> None:
-    box = _wake_box([])
-    assert not hasattr(box, "set_primary")
-    assert not hasattr(box, "get_primary")
-
-
-def test_move_a_hook_from_one_app_to_another() -> None:
-    posts: list[dict] = []
-    box = _wake_box(posts)
-    link_id = _self_pair(box)
-    with as_assistant(CURSOR):  # an older connection that is not paired
-        box.set_webhook(OWNER_EMAIL, HOOK + "cursor", sender_key="cursor-key-1234")
-    box.move_webhook(OWNER_EMAIL, GROK.grant_id, from_app=CURSOR.grant_id)
-    with as_assistant(CURSOR):
-        assert box.get_webhook(OWNER_EMAIL)["configured"] is False
-    assert CURSOR.grant_id not in box.webhook_apps(OWNER_EMAIL)
-    with as_assistant(CLAUDE):
-        box.send_message(OWNER_EMAIL, link_id, "wake grok")
-    assert _urls(posts) == [HOOK + "cursor"]
-    with pytest.raises(MailboxError):
-        box.move_webhook(OWNER_EMAIL, GROK.grant_id, from_app=GROK.grant_id)

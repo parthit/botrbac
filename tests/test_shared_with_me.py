@@ -11,7 +11,7 @@ from scoped_drive_mcp.store import KEY_PREFIX
 from tests.conftest import EVE, OWNER_EMAIL
 from tests.dash import client, login, post
 from tests.office_files import compact_xlsx, minimal_xlsx
-from tests.test_external_sharing import SECRET_TEXT, _pair
+from tests.test_external_sharing import SECRET_TEXT, _carol_shares, _pair, carol_drive_fails
 from tests.test_multi_user import CAROL, _app
 
 DRIVE = "google_drive"
@@ -313,37 +313,14 @@ def test_search_across_everything_shared_with_me(pair, world, oauth) -> None:
     assert "No matches" in eve.get("/shared/search?q=roadmap").text
 
 
-def _carol_shares(app, world, eve_pair: bool = True):
-    """Carol signs in, shares one file of hers, and is paired with Eve."""
-    world.add(
-        "carol-doc", "Carol roadmap", "text/plain", ["carol-root"], b"carol roadmap", owner=CAROL
-    )
-    carol = client(app)
-    assert login(carol, "carol-code").status_code == 303
-    assert post(carol, "/sharing/add", file_id="carol-doc").status_code == 303
-    if eve_pair:
-        _pair(app, CAROL, EVE)
-    return carol
-
-
 def test_search_skips_a_sharer_whose_drive_fails(pair, world, monkeypatch) -> None:
-    from scoped_drive_mcp.auth import current_actor
-    from scoped_drive_mcp.service import DriveService
-
     app, owner, eve = pair
     _pair(app, OWNER_EMAIL, EVE)
     assert post(owner, "/sharing/add", file_id="proj").status_code == 303
     _carol_shares(app, world)
     assert "Carol roadmap" in eve.get("/shared/search?q=roadmap").text
 
-    real = DriveService.search_files
-
-    def flaky(self, query, max_results=10):
-        if current_actor.get() == CAROL:
-            raise RuntimeError("Google said 503")
-        return real(self, query, max_results)
-
-    monkeypatch.setattr(DriveService, "search_files", flaky)
+    carol_drive_fails(monkeypatch)
     page = eve.get("/shared/search?q=roadmap")
     assert page.status_code == 200
     assert "Deep roadmap" in page.text  # the owner's results survive

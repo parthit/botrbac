@@ -128,7 +128,7 @@ def _paired(app):
 
 
 @pytest.fixture
-def setup(world, memstore, oauth, blob, signer, monkeypatch):
+def setup(world, memstore, oauth, blob, signer):
     """A Blob store and a signer: dashboard sends go straight to Blob."""
     return _paired(_app(world, memstore, oauth, blob_api=blob, blob_signer=signer))
 
@@ -304,7 +304,7 @@ def test_a_download_url_falls_back_to_the_app_when_the_signer_fails(setup, blob,
     assert owner.get(f"/drops/{row['id']}/piece/0").content == data[:8]
 
 
-def test_the_page_allows_blob_hosts_only_when_direct(setup, world, memstore, oauth) -> None:
+def test_the_page_allows_blob_hosts_only_when_direct(setup) -> None:
     _app_, _owner, eve = setup
     r = eve.get("/sharing?tab=with-me")
     csp = r.headers["content-security-policy"]
@@ -429,6 +429,11 @@ def test_only_marked_rows_are_read_raw(blob) -> None:
     sealed = {"id": "c", "exp": 5, "parts": 1}
     parts.put_piece("c", 5, 0, b"secret")
     assert parts.get_piece(sealed, 0) == b"secret"
+    # Written without a key (before ENCRYPTION_KEY was set): readable only without one.
+    plain = BlobParts(blob, None)
+    plain.put_piece("d", 5, 0, b"forged")
+    assert plain.get_piece({"id": "d", "exp": 5, "parts": 1}, 0) == b"forged"
+    assert parts.get_piece({"id": "d", "exp": 5, "parts": 1}, 0) is None
 
 
 # ---- the HTTP client and its configuration ---------------------------------------
@@ -449,8 +454,9 @@ def test_signer_url_prefers_the_deployments_own_url(monkeypatch) -> None:
     assert signer_url_from_env("https://app.example") is None
 
 
-def test_the_http_signer_sends_an_hmac_and_the_bypass_header(monkeypatch) -> None:
-    seen: dict = {}
+def _answering(monkeypatch, url: str, seen: list | None = None, **signer) -> HttpBlobSigner:
+    """An HttpBlobSigner whose signer function answers `url` (and records each request)."""
+    answer = {"url": url, "headers": {"x-vercel-blob-access": "private", "set-cookie": "no"}}
 
     class Answer:
         def __enter__(self):
@@ -460,24 +466,31 @@ def test_the_http_signer_sends_an_hmac_and_the_bypass_header(monkeypatch) -> Non
             return False
 
         def read(self, _n):
-            return json.dumps(
-                {
-                    "url": "https://vercel.com/api/blob/?pathname=drops/1/a/0",
-                    "headers": {"x-vercel-blob-access": "private", "set-cookie": "no"},
-                }
-            ).encode()
+            return json.dumps(answer).encode()
 
     def urlopen(request, timeout):
-        seen["request"] = request
+        if seen is not None:
+            seen.append(request)
         return Answer()
 
-    s = HttpBlobSigner(
-        "https://x.vercel.app/api/blob-sign", "k" * 44, bypass="bypass!", clock=lambda: 1000
-    )
+    s = HttpBlobSigner("https://x.vercel.app/api/blob-sign", "k" * 44, **signer)
     monkeypatch.setattr(s._opener, "open", urlopen)
+    return s
+
+
+def test_the_http_signer_sends_an_hmac_and_the_bypass_header(monkeypatch) -> None:
+    seen: list = []
+    s = _answering(
+        monkeypatch,
+        "https://vercel.com/api/blob/?pathname=drops/1/a/0",
+        seen,
+        bypass="bypass!",
+        clock=lambda: 1000,
+    )
     got = s.sign_put("drops/1/a/0", 8, 900, 2)
+    # Only the header Blob needs is passed on to the browser.
     assert got["headers"] == {"x-vercel-blob-access": "private"}
-    req = seen["request"]
+    [req] = seen
     headers = {k.lower(): v for k, v in req.header_items()}
     assert headers["x-vercel-protection-bypass"] == "bypass!"
     assert headers == {**headers, **signer_headers(signer_key("k" * 44), req.data, 1000)}
@@ -488,22 +501,6 @@ def test_the_http_signer_sends_an_hmac_and_the_bypass_header(monkeypatch) -> Non
         "validForSeconds": 900,
         "ttlDays": 2,
     }
-
-
-def _answering(monkeypatch, url: str) -> HttpBlobSigner:
-    class Answer:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def read(self, _n):
-            return json.dumps({"url": url}).encode()
-
-    s = HttpBlobSigner("https://x.vercel.app/api/blob-sign", "k" * 44)
-    monkeypatch.setattr(s._opener, "open", lambda *_a, **_k: Answer())
-    return s
 
 
 @pytest.mark.parametrize(
@@ -678,19 +675,19 @@ def test_presigned_puts_count_against_the_budget_when_issued(setup, signer) -> N
 
 
 def test_a_refused_charge_releases_the_claims(setup, memstore, monkeypatch) -> None:
-    """allows() passed at admit, but another send took the room before the charge."""
+    """allows() passed at admit, but another send took the room before the charge. The
+    claims live in the shared store, so that is where they must be released."""
     app, _owner, eve = setup
+    assert "direct" in _start(eve, 20)[1].json()
+
+    def claims() -> list[str]:
+        return [k for k in memstore._values if k.endswith(":claim")]
+
+    assert len(claims()) == 3
     monkeypatch.setattr(app.state.drops.budget, "reserve", lambda _pieces: False)
     r = _start(eve, 20)[1]
     assert r.json()["error"] == "storage_full"
-    assert [k for k in memstore._values if k.endswith(":claim")] == []
-
-
-def test_claims_live_in_the_shared_store(setup, memstore) -> None:
-    """So the check above looks where claims are."""
-    _app_, _owner, eve = setup
-    assert "direct" in _start(eve, 20)[1].json()
-    assert len([k for k in memstore._values if k.endswith(":claim")]) == 3
+    assert len(claims()) == 3
 
 
 def test_each_signed_put_is_claimed_and_finish_runs_once(setup, blob) -> None:

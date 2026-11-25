@@ -7,14 +7,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from scoped_drive_mcp import drop_storage
-from scoped_drive_mcp.drive_client import FOLDER_MIME
+from scoped_drive_mcp import drops as drops_module
+from scoped_drive_mcp.drive_client import GoogleDriveClient
 from scoped_drive_mcp.drop_storage import BlobBudget, BlobParts, KvParts
 from scoped_drive_mcp.external import acting_as
 from scoped_drive_mcp.store import MemoryStore
 from tests.conftest import EVE, OWNER_EMAIL
 from tests.dash import client, csrf, login, mcp_call
 from tests.test_drops import PDF_BYTES, _drop_folders, _held, _send
-from tests.test_external_sharing import _error, _pair
+from tests.test_external_sharing import _pair
 from tests.test_multi_user import _app
 from tests.test_peer_edit import _editor_app
 
@@ -138,23 +139,17 @@ def test_pieces_must_be_the_expected_size(setup, blob) -> None:
     assert r.status_code == 400
 
 
-def test_only_the_sender_can_add_pieces(setup, world, memstore, oauth) -> None:
-    app, owner, (eve, _token) = setup
-    token, r = _start(eve, 8)
+def test_only_the_sender_can_add_pieces_and_only_with_the_csrf_token(setup) -> None:
+    _app_, owner, (eve, _token) = setup
+    _token_, r = _start(eve, 8)
     upload = r.json()["upload_id"]
+    r = eve.post(f"/shared/send/{upload}/piece/0", files={"piece": ("p", b"8bytes!!")})
+    assert r.status_code == 403
     other = csrf(owner, "/sharing?tab=with-me")
     r = owner.post(
         f"/shared/send/{upload}/piece/0", data={"csrf": other}, files={"piece": ("p", b"8bytes!!")}
     )
     assert r.status_code == 400 and r.json()["error"] == "not_found"
-
-
-def test_piece_requests_need_the_csrf_token(setup) -> None:
-    _app_, _owner, (eve, _token) = setup
-    _token_, r = _start(eve, 8)
-    upload = r.json()["upload_id"]
-    r = eve.post(f"/shared/send/{upload}/piece/0", files={"piece": ("p", b"8bytes!!")})
-    assert r.status_code == 403
 
 
 def test_a_send_needs_an_active_pairing(world, memstore, oauth, blob) -> None:
@@ -188,11 +183,11 @@ def test_an_assistant_send_is_stored_in_blob_too(setup, blob) -> None:
 
 def test_old_rows_in_the_key_value_store_still_read(setup, memstore, blob) -> None:
     """A file held before Blob was connected is read from where it was put."""
-    app, owner, _eve = setup
+    app, _owner, eve = setup
     box = app.state.drops
     with acting_as(OWNER_EMAIL):
         box.blob, saved = None, box.blob
-        _send(_eve)
+        _send(eve)
         box.blob = saved
         [row] = box.received()
         assert row["store"] == "kv"
@@ -252,10 +247,8 @@ def test_the_budget_refuses_uploads_past_the_monthly_cap(setup, blob) -> None:
 
 
 def test_uploads_in_progress_count_toward_the_waiting_cap(setup, blob, monkeypatch) -> None:
-    from scoped_drive_mcp import drops
-
     _app_, _owner, (eve, _token) = setup
-    monkeypatch.setattr(drops, "MAX_HELD_BYTES", 20)
+    monkeypatch.setattr(drops_module, "MAX_HELD_BYTES", 20)
     assert _start(eve, 16)[1].status_code == 200
     _token_, r = _start(eve, 8)
     assert r.json()["error"] == "inbox_full"
@@ -289,13 +282,6 @@ def test_a_failed_delete_does_not_break_the_list(setup, blob, monkeypatch) -> No
     monkeypatch.setattr(box, "_drop_parts", broken)
     assert owner.get("/sharing?tab=with-me").status_code == 200
     assert _held(app) == []
-
-
-def test_a_plain_piece_is_refused_when_a_key_is_set(blob) -> None:
-    keyed, plain = BlobParts(blob, "k" * 44), BlobParts(blob, None)
-    plain.put_piece("d", 5, 0, b"forged")
-    assert plain.get_piece({"id": "d", "exp": 5, "parts": 1}, 0) == b"forged"
-    assert keyed.get_piece({"id": "d", "exp": 5, "parts": 1}, 0) is None
 
 
 def test_the_budget_counts_storage_over_the_hold() -> None:
@@ -359,22 +345,9 @@ def test_the_send_form_offers_the_larger_limit(setup) -> None:
 
 
 def test_a_large_drive_upload_is_resumable() -> None:
-    from scoped_drive_mcp.drive_client import GoogleDriveClient
-
     small = GoogleDriveClient._media(b"x" * 10, "application/pdf")
     big = GoogleDriveClient._media(b"x" * (5 * 1024 * 1024 + 1), "application/pdf")
     assert not small.resumable() and big.resumable()
-
-
-def test_saved_folder_is_a_folder(setup, world) -> None:
-    app, owner, (eve, _token) = setup
-    _upload(eve, b"y" * 9)
-    [row] = _held(app)
-    mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])
-    [folder] = _drop_folders(world)
-    assert world.files[folder].mime_type == FOLDER_MIME
-    again = mcp_call(owner, "save_drop", role="editor", drop_id=row["id"])
-    assert _error(again)["error"] == "saved"
 
 
 def test_a_piece_counts_only_once_it_is_stored(setup, blob, monkeypatch) -> None:
