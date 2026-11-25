@@ -55,8 +55,10 @@ Signed in to <https://console.cloud.google.com/> with your own account:
 
    Copy the **Client ID** and **Client secret**.
 5. **Picker key:** **Credentials → Create credentials → API key**, then open the key:
-   - **Application restrictions:** Websites → `https://<your-domain>/*` (and `http://localhost:8000/*`
-     if you run it on your computer).
+   - **Application restrictions:** Websites → `https://<your-domain>/*` and `https://docs.google.com/*`
+     (and `http://localhost:8000/*` if you run it on your computer). The picker runs in a frame on
+     `docs.google.com`, and Safari can send that address to Google instead of yours. Without it, Safari
+     users see "The API developer key is invalid".
    - **API restrictions:** Restrict key → **Google Picker API**.
 
    Save and copy the key (`GOOGLE_PICKER_API_KEY`). It is visible in the page; the restrictions are what
@@ -228,8 +230,8 @@ uv run python scripts/make_secrets.py           # prints SESSION_SECRET and ENCR
 Edit `.env`: paste the two secrets, and set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
 `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER`, `OWNER_EMAIL` and
 `APP_BASE_URL=http://localhost:8000`. The picker key's website restriction must include
-`http://localhost:8000/*`. Leave the Redis variables empty: locally the server
-uses an in-memory store, which is wiped on every restart.
+`http://localhost:8000/*` and `https://docs.google.com/*`. Leave the Redis variables empty: locally the
+server uses an in-memory store, which is wiped on every restart.
 
 ```bash
 uv run --env-file .env uvicorn api.index:app --reload --port 8000
@@ -266,6 +268,7 @@ uv run ruff check . && uv run ruff format --check .
 | Assistant sees your whole Drive | Its built-in Google Drive connector is still connected. Disconnect it |
 | No **Add from Google Drive** button | `GOOGLE_PICKER_API_KEY` or `GOOGLE_CLOUD_PROJECT_NUMBER` is missing |
 | Picker opens, then errors | The API key's website restriction doesn't include this site, or the Picker API isn't enabled or allowed on the key |
+| "The API developer key is invalid", only in Safari | The API key's website restriction is missing `https://docs.google.com/*` |
 | A file in an allowed folder is "not found" | Google hasn't opened it to the app. Pick that file too |
 | "Google gave more access than Bot RBAC asks for" | An older full-Drive grant came back. Remove Bot RBAC at myaccount.google.com/permissions and connect again; remove `…/auth/drive` from the consent screen's scopes |
 | Assistant's OAuth fails with a redirect error | Its callback URL isn't in `ALLOWED_REDIRECT_URIS` (see step 6) |

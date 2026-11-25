@@ -39,7 +39,7 @@ is read-only the same way.
 | `onedrive_list_folder(folder_id?)` | all | No folder: the allowed files and folders. A folder: its contents, when it is allowed or inside one |
 | `onedrive_read_file(file_id)` | all | Text of an allowed file (same formats as `read_file`: Word, PDF, PowerPoint, Excel, RTF, text) |
 | `onedrive_download_file(file_id)` | all | Size-capped base64 of an allowed file |
-| `onedrive_search(query, max_results?)` | all | Microsoft's search (names and content), filtered to what is allowed |
+| `onedrive_search(query, max_results?)` | all | Microsoft's search (names and content) inside each allowed folder; an allowed single file is matched by name |
 | `onedrive_create_folder(name, parent_id?)` | editor, admin | A new folder in an allowed folder (or one inside it) |
 | `onedrive_upload_file(name, content_text \| content_base64, parent_id?)` | editor, admin | A new file there. The type comes from the extension. A taken name fails with `name_taken`; nothing is overwritten |
 | `onedrive_update_file(file_id, content_text \| content_base64)` | editor, admin | Replace an allowed file's whole content. OneDrive keeps the earlier version in its version history |

@@ -256,3 +256,41 @@ def test_admin_revoke_keeps_tokens_google_did_not_confirm(world, memstore, oauth
     post(admin, "/admin/revoke-legacy-drive")
     assert directory.vault_for(EVE).legacy_owner() is None
     assert directory.vault_for(CAROL).legacy_owner() is None
+
+
+def test_another_persons_sign_in_is_not_written_to_the_admins_activity(
+    world, memstore, oauth
+) -> None:
+    """Otherwise anyone with a Google account could fill the admin's Activity (it keeps
+    500 rows) with their own sign-ins and push the real record out."""
+    app = _app(world, memstore, oauth)
+    admin = client(app)
+    assert login(admin).status_code == 303
+    log = app.state.dashboard.activity
+    with as_actor(OWNER_EMAIL):
+        before = log.recent()
+    for _ in range(3):
+        assert login(client(app), "eve-code").status_code == 303
+    with as_actor(OWNER_EMAIL):
+        assert log.recent() == before
+    with as_actor(EVE):
+        assert [r["action"] for r in log.recent()].count("login") == 3
+
+
+def test_refused_sign_ins_are_kept_once_an_hour(world, memstore, oauth) -> None:
+    oauth.accounts["mallory-code"] = ("mallory@example.com", False)  # address not verified
+    app = _app(world, memstore, oauth)
+    for _ in range(5):
+        login(client(app), "mallory-code")
+    with as_actor(OWNER_EMAIL):
+        rows = app.state.dashboard.activity.recent()
+    assert [(r["action"], r["decision"]) for r in rows] == [("login", "deny")]
+
+
+def test_rate_limit_keys_keep_similar_addresses_apart() -> None:
+    from scoped_drive_mcp.ratelimit import _key
+
+    assert _key("x", "a+b@corp.example", 60, 0) != _key("x", "ab@corp.example", 60, 0)
+    assert _key("x", "o'brien@corp.example", 60, 0) != _key("x", "obrien@corp.example", 60, 0)
+    assert _key("x", "ab@corp.example", 60, 0) == "rl:x:ab@corp.example:0"
+    assert _key("x", "a" * 200, 60, 0) != _key("x", "a" * 201, 60, 0)

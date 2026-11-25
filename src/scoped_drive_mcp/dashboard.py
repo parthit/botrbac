@@ -1015,6 +1015,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def login(request: Request) -> Response:
         if session_user(request):
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
+        # A cookie whose session has ended on the server still names its account. Forget
+        # it, so this page (and its header) does not show that address to whoever is at
+        # the browser now.
+        for stale in ("owner", "sid", "csrf"):
+            request.session.pop(stale, None)
         next_url = safe_next(request.query_params.get("next"))
         purpose = hint = None
         if next_url.startswith("/requests/"):
@@ -1165,9 +1170,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ctx.directory.open_session, email, SESSION_MAX_AGE
             )
         request.session["csrf"] = secrets.token_urlsafe(32)
-        audit_owner("login")
+        # As the person signing in, so the row lands in their own Activity. With no
+        # actor it would be written to the admin's list, by anyone with a Google account.
         reset = current_actor.set(email)
         try:
+            audit_owner("login")
             connected = await blocking(ctx.drive_connected)
         finally:
             current_actor.reset(reset)
@@ -1199,7 +1206,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if email != signed_in:
             # The Drive an assistant uses must belong to the person who signed in.
             await refuse_token(tokens, email)
-            audit_owner("connect", "deny", reason="different_account")
+            reset = current_actor.set(signed_in)
+            try:
+                audit_owner("connect", "deny", reason="different_account")
+            finally:
+                current_actor.reset(reset)
             next_url = safe_next(request.session.get("oauth_next"))
             retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
             return render(

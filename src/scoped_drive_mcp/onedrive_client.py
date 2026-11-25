@@ -257,7 +257,9 @@ class OneDriveApi(Protocol):
     def account(self) -> OneDriveAccount: ...
     def get_item(self, item_id: str) -> dict[str, Any]: ...
     def children(self, item_id: str | None, cursor: str | None = None) -> dict[str, Any]: ...
-    def search(self, query: str, cursor: str | None = None) -> dict[str, Any]: ...
+    def search(
+        self, query: str, cursor: str | None = None, folder_id: str | None = None
+    ) -> dict[str, Any]: ...
     def download(self, item_id: str, limit: int) -> bytes: ...
     def create_folder(self, parent_id: str, name: str) -> dict[str, Any]: ...
     def upload_new(self, parent_id: str, name: str, data: bytes) -> dict[str, Any]: ...
@@ -386,11 +388,16 @@ class HttpOneDriveApi:
         path = f"/me/drive/items/{item_id}/children" if item_id else "/me/drive/root/children"
         return self._page(path, {"$top": 200, "$select": ITEM_FIELDS}, cursor)
 
-    def search(self, query: str, cursor: str | None = None) -> dict[str, Any]:
+    def search(
+        self, query: str, cursor: str | None = None, folder_id: str | None = None
+    ) -> dict[str, Any]:
+        """Microsoft's search: inside one folder, or the whole drive with no `folder_id`
+        (the dashboard, for the person themselves; never for an assistant)."""
         # The query sits inside a quoted OData string: a quote is doubled, then the whole
         # thing is percent-encoded so it cannot change the path.
         q = quote(query.replace("'", "''"), safe="")
-        return self._page(f"/me/drive/root/search(q='{q}')", {"$top": 100}, cursor)
+        where = f"items/{folder_id}" if folder_id else "root"
+        return self._page(f"/me/drive/{where}/search(q='{q}')", {"$top": 100}, cursor)
 
     def create_folder(self, parent_id: str, name: str) -> dict[str, Any]:
         """A new folder in `parent_id`. Fails (409) when the name is taken."""

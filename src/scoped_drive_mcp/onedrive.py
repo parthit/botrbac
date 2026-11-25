@@ -71,6 +71,8 @@ LIST_PAGES = 5
 # Search: result pages, parent lookups across all results, and a wall-clock limit.
 SEARCH_PAGES = 3
 SEARCH_LOOKUPS = 80
+# Allowed items one assistant search looks inside (each allowed folder is one Graph search).
+SEARCH_ROOTS = 25
 SEARCH_SECONDS = 15.0
 
 # The search time limit's clock (a name tests can replace).
@@ -509,43 +511,74 @@ class OneDriveService:
                 raise self._not_connected()
             return {"results": [], "note": "Nothing in OneDrive is allowed yet."}
 
+        needle = query.casefold()
+
         def run(api: OneDriveApi) -> dict[str, Any]:
+            # Microsoft is asked to search inside each allowed folder, never the whole
+            # drive, so a match outside the allowlist does not reach this server at all:
+            # neither the note below nor the time a search takes can say whether some
+            # other file matches. An allowed single file is matched by its name.
             access = OneDriveAccess(api, allowed, budget=SEARCH_LOOKUPS)
             results: list[dict[str, Any]] = []
-            cursor: str | None = None
-            incomplete = False
+            seen: set[str] = set()
+            # Ids go into a Graph path: only ones of the shape an id has.
+            roots = sorted(i for i in allowed if normalize_item_id(i) == i)
+            incomplete = len(roots) > SEARCH_ROOTS
             deadline = _clock() + SEARCH_SECONDS
-            for _ in range(SEARCH_PAGES):
+
+            def add(item: dict[str, Any]) -> bool:
+                """Keep a covered hit. True when the search has all it was asked for."""
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    results.append(public_item(item))
+                return len(results) >= limit
+
+            for root_id in roots[:SEARCH_ROOTS]:
                 if _clock() > deadline:
                     incomplete = True
                     break
-                page = api.search(query, cursor)
-                for item in page.get("value") or []:
-                    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                        continue
+                try:
+                    root = access.fetch(root_id)
+                    if root is None or access.covering(root_id, root) is None:
+                        continue  # deleted, or no longer the person's own item
+                except OneDriveUnauthorizedError:
+                    raise
+                except OneDriveApiError:
+                    incomplete = True
+                    continue
+                if kind_of(root) != FOLDER:
+                    if needle in str(root.get("name") or "").casefold() and add(root):
+                        return {"results": results}
+                    continue
+                cursor: str | None = None
+                for _ in range(SEARCH_PAGES):
                     if _clock() > deadline:
-                        # Each hit may cost several lookups; stop within the time limit.
                         incomplete = True
                         break
-                    before = access.budget
-                    # A search hit is only a hint: the check walks fresh lookups. One
-                    # throttled or failed lookup skips that hit, not the whole search.
-                    try:
-                        covered = access.covering(item["id"])
-                    except OneDriveUnauthorizedError:
-                        raise
-                    except OneDriveApiError:
-                        incomplete = True
-                        continue
-                    if covered is not None:
-                        results.append(public_item(access.fetch(item["id"]) or item))
-                        if len(results) >= limit:
+                    page = api.search(query, cursor, folder_id=root_id)
+                    for item in page.get("value") or []:
+                        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                            continue
+                        if _clock() > deadline:
+                            # Each hit may cost several lookups; stop within the time limit.
+                            incomplete = True
+                            break
+                        # A search hit is only a hint: the check walks fresh lookups. One
+                        # throttled or failed lookup skips that hit, not the whole search.
+                        # A hit that is not covered (Microsoft answered for more than the
+                        # folder) is dropped without a word, also when the lookups run out.
+                        try:
+                            covered = access.covering(item["id"])
+                        except OneDriveUnauthorizedError:
+                            raise
+                        except OneDriveApiError:
+                            incomplete = True
+                            continue
+                        if covered is not None and add(access.fetch(item["id"]) or item):
                             return {"results": results}
-                    elif access.budget <= 0 and before > 0:
-                        incomplete = True
-                cursor = page.get("@odata.nextLink")
-                if not cursor:
-                    break
+                    cursor = page.get("@odata.nextLink")
+                    if not cursor:
+                        break
             out: dict[str, Any] = {"results": results}
             if incomplete:
                 out["note"] = "Some matches could not be checked. Try a more specific query."

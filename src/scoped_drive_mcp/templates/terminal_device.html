@@ -7,7 +7,7 @@
 <p>A terminal is asking to connect to your Bot RBAC account.</p>
 <dl>
   <dt>Code</dt><dd><code id="user-code">{{ code }}</code> <span class="muted">(check it matches your terminal)</span></dd>
-  {% if found.hostname %}<dt>Computer</dt><dd>{{ found.hostname }}{% if found.os %} · {{ found.os }}{% endif %}{% if found.version %} · botrbac {{ found.version }}{% endif %}</dd>{% endif %}
+  {% if found.hostname %}<dt>Computer</dt><dd>{{ found.hostname }}{% if found.os %} · {{ found.os }}{% endif %}{% if found.version %} · botrbac {{ found.version }}{% endif %} <span class="muted">(what that computer says about itself; not checked)</span></dd>{% endif %}
 </dl>
 <form class="stack" method="post" action="/device/approve">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -20,7 +20,7 @@
     {% endfor %}
     <p class="muted"><a href="/terminal/roles">Manage roles</a></p>
   </fieldset>
-  <p class="muted">Approve only a code you started on your own computer: approving lets that computer act with this role on your account. It will only run the tools its role allows, and you can change or disconnect it at any time.</p>
+  <p class="muted">Approve only a code you started on your own computer, just now. If someone sent you this link or this code, do not approve it: approving lets that computer act with this role on your account. It will only run the tools its role allows, and you can change or disconnect it at any time.</p>
   <div class="actions">
     <button class="primary" type="submit">Approve</button>
     <button type="submit" formaction="/device/deny">Refuse</button>

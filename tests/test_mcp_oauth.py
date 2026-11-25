@@ -977,3 +977,63 @@ def test_ipv6_addresses_are_counted_per_64(monkeypatch) -> None:
     )
     assert ratelimit.ip_identity(_scope("192.0.2.5")) == "ip:192.0.2.5"
     assert ratelimit.address_bucket("testclient") == "testclient"
+
+
+# ---- audit: bounded connections, bounded bodies, no cross-site lockout ----------------
+
+
+def test_one_account_cannot_pile_up_connections(owner_c, memstore, monkeypatch) -> None:
+    """Every page that lists connections reads everyone's, so one account's are capped:
+    a new approval disconnects that account's least recently used."""
+    monkeypatch.setattr(mcp_oauth_module, "MAX_GRANTS_PER_ACCOUNT", 3)
+    client_id = register(owner_c, GROK).json()["client_id"]
+    tokens = []
+    for _ in range(5):
+        code, verifier = approved(owner_c, client_id)
+        tokens.append(exchange(owner_c, client_id, code, verifier, GROK).json()["access_token"])
+    assert len(memstore.hgetall(f"sdm:{GRANTS_KEY}")) == 3
+    assert [mcp_status(owner_c, t) for t in tokens] == [401, 401, 200, 200, 200]
+
+
+def test_a_connection_whose_refresh_token_ended_is_cleared(owner_c, memstore) -> None:
+    client_id, _ = connect(owner_c)
+    (grant_id,) = memstore.hgetall(f"sdm:{GRANTS_KEY}")
+    oauth_server = owner_c.app.state.dashboard.mcp_oauth
+    assert oauth_server.prune(now=time.time() + REFRESH_TTL - 60) == 0
+    assert oauth_server.prune(now=time.time() + REFRESH_TTL + ACCESS_TTL + 120) == 1
+    assert memstore.hgetall(f"sdm:{GRANTS_KEY}") == {}
+
+
+def test_oauth_endpoints_refuse_oversized_bodies(c) -> None:
+    big = "x" * (mcp_oauth_module.MAX_BODY + 1)
+    r = register(c, GROK, name=big)
+    assert r.status_code in (400, 413)
+    r = c.post("/oauth/token", data={"grant_type": "refresh_token", "refresh_token": big})
+    assert r.status_code in (400, 413)
+    r = c.post("/oauth/token", files={"f": ("a.bin", b"x" * 100)}, data={"grant_type": "x"})
+    assert r.status_code == 400 and "urlencoded" in r.json()["error_description"]
+
+
+def test_a_token_json_cannot_hold_is_refused_not_an_error(c) -> None:
+    r = c.post(
+        "/oauth/token",
+        content=b'{"grant_type":"refresh_token","refresh_token":"\\ud800","client_id":"x"}',
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code in (400, 401)
+
+
+def test_another_site_cannot_spend_a_visitors_token_allowance(owner_c, monkeypatch) -> None:
+    """A page elsewhere can make a browser post to /oauth/token. Those posts are refused
+    without being counted, so they cannot lock the visitor's own apps out."""
+    client_id, tokens = connect(owner_c)
+    monkeypatch.setattr(owner_c.app.state.dashboard.mcp_oauth, "rate_limit", (3, 600))
+    for _ in range(10):
+        r = owner_c.post(
+            "/oauth/token", data={"grant_type": "x"}, headers={"origin": "https://evil.example"}
+        )
+        assert r.status_code == 403
+    assert refresh(owner_c, client_id, tokens["refresh_token"]).status_code == 200
+    # A desktop app's own kind of origin is not a website.
+    r = owner_c.post("/oauth/token", data={"grant_type": "x"}, headers={"origin": "null"})
+    assert r.status_code == 400

@@ -112,6 +112,8 @@ class FakeOneDrive:
         self.next_id = 200
         # Set to make the next conditional write find a newer version (412).
         self.changed_meanwhile = False
+        # True: Graph answers a folder search with matches from the whole drive.
+        self.leaky = False
 
     def writes(self) -> list[tuple[str, str | None]]:
         return [c for c in self.calls if c[0] in WRITE_CALLS]
@@ -151,14 +153,24 @@ class FakeOneDriveApi:
             ]
         }
 
-    def search(self, query: str, cursor: str | None = None) -> dict:
-        self._check("search", query)
+    def _under(self, iid: str, folder_id: str) -> bool:
+        for _ in range(20):
+            iid = (self.world.items.get(iid, {}).get("parentReference") or {}).get("id")
+            if iid is None:
+                return False
+            if iid == folder_id:
+                return True
+        return False
+
+    def search(self, query: str, cursor: str | None = None, folder_id: str | None = None) -> dict:
+        self._check("search", folder_id)
         q = query.lower()
         return {
             "value": [
                 dict(i)
                 for i in self.world.items.values()
                 if "root" not in i
+                and (folder_id is None or self.world.leaky or self._under(i["id"], folder_id))
                 and (
                     q in i["name"].lower()
                     or q in self.world.content.get(i["id"], b"").decode("latin-1")
@@ -601,6 +613,40 @@ def test_search_returns_only_allowed_matches(allowed) -> None:
     assert [h["id"] for h in hits] == [ESSAY]
     hits = result(allowed, "onedrive_search", query="mitochondria")["structuredContent"]["results"]
     assert [h["id"] for h in hits] == [NOTES]
+
+
+def test_search_never_asks_microsoft_about_the_whole_drive(allowed, drive) -> None:
+    """A match outside the allowlist must not change the answer or the work done, or an
+    assistant could learn what else is in the drive one search word at a time."""
+    for n in range(200):
+        drive.items[f"P00F!{n}"] = item(f"P00F!{n}", f"payslip-{n}.pdf", ROOT)
+    drive.calls.clear()
+    out = result(allowed, "onedrive_search", query="payslip")["structuredContent"]
+    assert out == {"results": []}
+    hit = list(drive.calls)
+    assert ("search", SCHOOL) in hit and ("search", None) not in hit
+    drive.calls.clear()
+    assert result(allowed, "onedrive_search", query="nosuchword")["structuredContent"] == {
+        "results": []
+    }
+    assert drive.calls == hit
+
+
+def test_search_says_nothing_about_uncovered_hits_microsoft_returns_anyway(allowed, drive) -> None:
+    drive.leaky = True
+    for n in range(200):
+        drive.items[f"P00F!{n}"] = item(f"P00F!{n}", f"payslip-{n}.pdf", ROOT)
+    out = result(allowed, "onedrive_search", query="payslip")["structuredContent"]
+    assert out == {"results": []}
+
+
+def test_search_matches_an_allowed_single_file_by_name(app, c, drive) -> None:
+    connect(c)
+    allow(c, ESSAY)
+    hits = result(c, "onedrive_search", query="ESSAY")["structuredContent"]["results"]
+    assert [h["id"] for h in hits] == [ESSAY]
+    assert result(c, "onedrive_search", query="diary")["structuredContent"]["results"] == []
+    assert ("search", None) not in drive.calls
 
 
 def test_removed_folder_is_unreadable_at_once(allowed) -> None:
