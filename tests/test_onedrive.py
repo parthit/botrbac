@@ -1366,3 +1366,34 @@ def test_locked_and_unreachable_writes_say_so(allowed, drive, monkeypatch) -> No
         monkeypatch.setattr(FakeOneDriveApi, "replace_content", fail)
         out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
         assert error_of(out) == expected
+
+
+def test_a_connection_stored_before_writing_existed_keeps_working(c, drive, ms_oauth, monkeypatch):
+    """Every production connection today: stored with no scope list ("scp")."""
+    from scoped_drive_mcp.store import TokenVault
+
+    real = TokenVault.set_onedrive
+
+    def as_before(self, *args, **kwargs):
+        args = args[:7]  # what set_onedrive took before: no scopes
+        kwargs.pop("scopes", None)
+        return real(self, *args, **kwargs)
+
+    ms_oauth.scopes = ("Files.Read", "User.Read", "offline_access")
+    monkeypatch.setattr(TokenVault, "set_onedrive", as_before)
+    connect(c)
+    allow(c, SCHOOL)
+    monkeypatch.setattr(TokenVault, "set_onedrive", real)
+    drive.tokens.clear()  # the first call refreshes
+    listed = result(c, "onedrive_list_folder", folder_id=SCHOOL)["structuredContent"]
+    assert ESSAY in {i["id"] for i in listed["items"]}
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+    assert result(c, "onedrive_download_file", file_id=ESSAY)["structuredContent"]["byte_count"]
+    hits = result(c, "onedrive_search", query="essay")["structuredContent"]["results"]
+    assert ESSAY in {h["id"] for h in hits}
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
