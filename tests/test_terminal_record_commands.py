@@ -209,3 +209,25 @@ def test_record_commands_over_http(world, memstore, oauth) -> None:
     page = c.get("/terminal/activity").text
     assert "sent after it was turned off" not in page
     assert SECRET in page  # what was recorded before stays
+
+
+def test_a_rotated_key_drops_the_command_and_never_errors() -> None:
+    """After ENCRYPTION_KEY changes, a command sealed to the old key is dropped on
+    upload (row kept), and one already stored shows as unreadable, not a 500."""
+    from scoped_drive_mcp.terminal.feature import TerminalFeature
+
+    old = _row()
+    old["command"] = sealing.seal(PUBLIC, old["event_id"], "sealed to the old key")
+    new_key = sealing.key_from_secret("rotated")
+    row = clean_row(old, NOW, new_key)
+    assert row is not None and "command" not in row and row["tool"] == "claude-code/Bash"
+    log = TerminalActivity(MemoryStore(), clock=lambda: NOW)
+    assert log.add("a@x.com", "t_1", "laptop", [old], new_key)["accepted"] == 1
+
+    rotated = TerminalFeature(MemoryStore(), signing_secret="rotated")
+    (shown,) = rotated.open_commands([{**old, "command": old["command"]}])
+    assert shown["command"] is None and shown["command_unreadable"]
+    (shown,) = TerminalFeature(MemoryStore()).open_commands([old])  # no key at all
+    assert shown["command"] is None and shown["command_unreadable"]
+    (shown,) = TerminalFeature(MemoryStore(), signing_secret="test secret").open_commands([old])
+    assert shown["command"] == "sealed to the old key"

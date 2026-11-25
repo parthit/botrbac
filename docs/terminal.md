@@ -227,8 +227,10 @@ site's `ENCRYPTION_KEY`; change that and earlier commands can no longer be opene
 What this does not do: hide a command from the agent that ran it (it wrote it), or from whoever runs the
 site, which can open what it stores. Nor is it proof of what ran: sealing needs only the public key, so an
 agent that can run its own code on the computer can write rows with any command it likes, as it could
-already write any row. The recorded command is what the computer reported. Turning it off stops new commands at once on the site (a computer
-stops sealing them at its next check-in). Commands already recorded stay until they age out of the log
+already write any row. The recorded command is what the computer reported.
+
+Turning it off stops new commands at once on the site (a computer stops sealing them at its next
+check-in). Commands already recorded stay, and keep showing to you, until their rows age out of the log
 (the newest 2,000 rows are kept).
 
 ## Commands
