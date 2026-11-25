@@ -10,7 +10,7 @@ that use it; the sign-in step does not change.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .drive_client import ACCEPTABLE_SCOPES, DRIVE_FILE_SCOPE
 from .onedrive_client import ALLOWED_SCOPES as ONEDRIVE_ALLOWED_SCOPES
@@ -75,6 +75,19 @@ NOTION = Connection(
     ),
 )
 
+# What Notion's card says on a deployment that turned page creation on
+# (NOTION_ALLOW_CREATE). Shown in place of NOTION; everything else is the same.
+NOTION_WITH_CREATE = replace(
+    NOTION,
+    summary="Only the Notion pages you pick: to read, and to add new pages under them.",
+    disclosure=(
+        "Notion will ask which pages to share with Bot RBAC. Bot RBAC can read only those "
+        "pages and what is inside them. An assistant you let edit can also add a new page "
+        "under one. Bot RBAC never changes or deletes existing Notion pages. An assistant "
+        "still reaches only the pages you allow on Files."
+    ),
+)
+
 ONEDRIVE = Connection(
     key="onedrive",
     name="OneDrive",
@@ -82,12 +95,14 @@ ONEDRIVE = Connection(
     scopes=ONEDRIVE_SCOPES,
     required_scope=ONEDRIVE_REQUIRED_SCOPE,
     allowed_scopes=ONEDRIVE_ALLOWED_SCOPES,
-    summary="Only the OneDrive files and folders you allow, and only to read.",
+    summary="Only the OneDrive files and folders you allow.",
     disclosure=(
-        "Microsoft will ask you to let Bot RBAC read your OneDrive files and see your "
-        "name. Microsoft can't limit that to some files, so Bot RBAC holds "
-        "assistants to the files and folders you allow on Files. Bot RBAC never edits "
-        "OneDrive."
+        "Microsoft will ask you to let Bot RBAC read and edit your OneDrive files and see "
+        "your name. Microsoft can't limit that to some files, so Bot RBAC holds "
+        "assistants to the files and folders you allow on Files. Only assistants you let "
+        "edit can add files and folders there or change and rename what is inside; none "
+        "can delete, move or share anything. Connect for reading only to give Bot RBAC "
+        "read access alone."
     ),
 )
 
