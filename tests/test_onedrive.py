@@ -680,7 +680,7 @@ def test_download_refuses_a_plain_http_address_and_endless_redirects() -> None:
     def loop(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"location": "https://dl.example/again"})
 
-    with pytest.raises(httpx.TooManyRedirects):
+    with pytest.raises(OneDriveApiError):
         _graph(loop).download(ESSAY, 100)
 
 
@@ -691,3 +691,107 @@ def test_download_served_directly_is_capped_too() -> None:
         return httpx.Response(200, content=b"y" * 5000)
 
     assert _graph(direct).download(ESSAY, 10) == b"y" * 10
+
+
+# ---- second review round -------------------------------------------------------------------
+
+
+def test_a_later_redirect_to_plain_http_is_refused() -> None:
+    import httpx
+
+    from scoped_drive_mcp.onedrive_client import OneDriveApiError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "graph.microsoft.com":
+            return httpx.Response(302, headers={"location": "https://dl.example/f"})
+        if request.url.scheme == "https":
+            return httpx.Response(302, headers={"location": "http://dl.example/f"})
+        return httpx.Response(200, content=b"leaked")
+
+    with pytest.raises(OneDriveApiError):
+        _graph(handler).download(ESSAY, 100)
+
+
+def test_graph_network_errors_become_onedrive_errors() -> None:
+    import httpx
+
+    from scoped_drive_mcp.onedrive_client import OneDriveApiError
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    api = _graph(boom)
+    with pytest.raises(OneDriveApiError):
+        api.get_item(ESSAY)
+    with pytest.raises(OneDriveApiError):
+        api.download(ESSAY, 10)
+
+
+def test_unreachable_graph_gives_the_friendly_messages(c, drive) -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveApiError
+
+    def down(*args, **kwargs):
+        raise OneDriveApiError(0, "unreachable")
+
+    connect(c)
+    drive.factory = lambda token: type("Down", (), {"__getattr__": lambda self, n: down})()
+    app_onedrive = c.app.state.dashboard.onedrive
+    app_onedrive.api_factory = drive.factory
+    page = c.get("/files?tab=onedrive")
+    assert page.status_code == 200 and 'id="onedrive-error"' in page.text
+
+
+def test_connect_refused_by_microsoft_says_so(c, drive) -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveForbiddenError
+
+    def refused(self):
+        raise OneDriveForbiddenError(403, "accessDenied")
+
+    drive_api = type(drive.factory("ms-access-1"))
+    original = drive_api.account
+    drive_api.account = refused
+    try:
+        r = connect(c)
+    finally:
+        drive_api.account = original
+    assert r.status_code == 502
+    assert "refused Bot RBAC access" in r.text
+
+
+def test_a_throttled_check_skips_one_hit_not_the_search(allowed, drive) -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveApiError
+
+    real_get = FakeOneDriveApi.get_item
+
+    def throttled(self, item_id):
+        if item_id == NOTES:
+            raise OneDriveApiError(429, "activityLimitReached")
+        return real_get(self, item_id)
+
+    FakeOneDriveApi.get_item = throttled
+    try:
+        out = result(allowed, "onedrive_search", query="e")["structuredContent"]
+    finally:
+        FakeOneDriveApi.get_item = real_get
+    ids = {r["id"] for r in out["results"]}
+    assert ESSAY in ids and NOTES not in ids
+    assert "could not be checked" in out["note"]
+
+
+def test_a_refresh_without_a_scope_list_keeps_the_connection(allowed, drive, ms_oauth, memstore):
+    drive.tokens.clear()
+    ms_oauth.scopes = ()
+    out = result(allowed, "onedrive_read_file", file_id=ESSAY)["structuredContent"]
+    assert "my essay" in out["content"]
+    assert stored_allowlist(memstore)
+
+
+def test_activity_never_sends_onedrive_ids_to_google() -> None:
+    from scoped_drive_mcp.humanize import item_ids
+
+    records = [
+        {"tool": "onedrive_read_file", "file_id": ESSAY},
+        {"action": "onedrive_allow", "file_id": SCHOOL},
+        {"tool": "read_file", "file_id": "google-file-1"},
+    ]
+    assert item_ids(records) == ["google-file-1"]

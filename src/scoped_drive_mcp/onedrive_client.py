@@ -241,10 +241,16 @@ class HttpOneDriveApi:
         raise OneDriveApiError(resp.status_code, code)
 
     def _get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        resp = self._client.get(path_or_url, params=params)
+        try:
+            resp = self._client.get(path_or_url, params=params)
+        except httpx.HTTPError:
+            raise OneDriveApiError(0, "unreachable") from None
         if resp.status_code != 200:
             self._raise(resp)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise OneDriveApiError(resp.status_code, "bad_response") from None
         if not isinstance(data, dict):
             raise OneDriveApiError(resp.status_code, "bad_response")
         return data
@@ -289,6 +295,14 @@ class HttpOneDriveApi:
         """Up to `limit` bytes of a file. Graph answers with a redirect to a short-lived,
         pre-authorized download address; that address is fetched without the token, with
         a capped number of further redirects. Bodies are streamed and cut at `limit`."""
+        try:
+            return self._download(item_id, limit)
+        except httpx.TooManyRedirects:
+            raise OneDriveApiError(0, "too_many_redirects") from None
+        except httpx.HTTPError:
+            raise OneDriveApiError(0, "unreachable") from None
+
+    def _download(self, item_id: str, limit: int) -> bytes:
         path = f"/me/drive/items/{item_id}/content"
         with self._client.stream("GET", path, follow_redirects=False) as resp:
             if resp.status_code == 200:
@@ -305,12 +319,19 @@ class HttpOneDriveApi:
                 follow_redirects=True,
                 max_redirects=MAX_DOWNLOAD_REDIRECTS,
                 transport=self._transport,
+                # Every hop, not only the first, must stay on https.
+                event_hooks={"request": [_https_only]},
             ) as plain,
             plain.stream("GET", location) as body,
         ):
             if body.status_code != 200:
                 raise OneDriveApiError(body.status_code, "download_failed")
             return _read_capped(body, limit)
+
+
+def _https_only(request: httpx.Request) -> None:
+    if request.url.scheme != "https":
+        raise OneDriveApiError(0, "bad_download_url")
 
 
 def _read_capped(resp: httpx.Response, limit: int) -> bytes:

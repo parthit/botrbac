@@ -27,6 +27,7 @@ from .onedrive_client import (
     PACKAGE,
     OneDriveAccount,
     OneDriveApi,
+    OneDriveApiError,
     OneDriveForbiddenError,
     OneDriveNotFoundError,
     OneDriveOAuth,
@@ -99,6 +100,10 @@ class OneDriveAccess:
         try:
             item: dict[str, Any] | None = self.api.get_item(item_id)
         except (OneDriveNotFoundError, OneDriveForbiddenError):
+            item = None
+        except OneDriveApiError as exc:
+            if exc.status != 400:  # 400: Graph didn't take the id; same as not found
+                raise
             item = None
         self._items[item_id] = item
         return item
@@ -238,8 +243,10 @@ class OneDriveService:
             if latest and latest.get("t") and latest.get("t") != record.get("t"):
                 return latest["t"]
             raise self._reconnect() from None
-        if not scopes_acceptable(tokens.scopes):
-            # An organization admin widened what the app may do: refuse the token. The
+        if tokens.scopes and not scopes_acceptable(tokens.scopes):
+            # Microsoft listed what this token may do, and it is more (or other) than Bot
+            # RBAC asks for. A refresh answer with no scope list is taken as unchanged. An
+            # organization admin widened what the app may do: refuse the token. The
             # list goes with it, so it can't carry over to whichever account connects next.
             vault.clear_onedrive()
             self.clear()
@@ -488,8 +495,16 @@ class OneDriveService:
                         incomplete = True
                         break
                     before = access.budget
-                    # A search hit is only a hint: the check walks fresh lookups.
-                    if access.covering(item["id"]) is not None:
+                    # A search hit is only a hint: the check walks fresh lookups. One
+                    # throttled or failed lookup skips that hit, not the whole search.
+                    try:
+                        covered = access.covering(item["id"])
+                    except OneDriveUnauthorizedError:
+                        raise
+                    except OneDriveApiError:
+                        incomplete = True
+                        continue
+                    if covered is not None:
                         results.append(public_item(access.fetch(item["id"]) or item))
                         if len(results) >= limit:
                             return {"results": results}

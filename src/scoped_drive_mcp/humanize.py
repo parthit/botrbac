@@ -529,12 +529,18 @@ def group_repeats(rows: list[ActivityRow]) -> list[tuple[ActivityRow, int]]:
     return grouped
 
 
+def is_onedrive_record(record: Mapping[str, Any]) -> bool:
+    """A OneDrive tool call or dashboard action: its ids are not Google Drive ids."""
+    name = str(record.get("tool") or record.get("action") or "")
+    return name.startswith("onedrive_")
+
+
 def item_ids(records: list[Mapping[str, Any]]) -> list[str]:
     """Ids from the person's own Drive that a page of records mentions (not other people's
     shared items, which carry `owner`)."""
     seen: list[str] = []
     for record in records:
-        if record.get("owner"):
+        if record.get("owner") or is_onedrive_record(record):
             continue
         item = _item_id(record)
         if item and item not in seen:

@@ -1676,12 +1676,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         try:
             account = await blocking(ctx.onedrive.account_for, tokens.access_token)
         except OneDriveApiError as exc:
-            message = (
-                "This Microsoft account has no OneDrive yet. Open OneDrive once in a "
-                "browser, then try again."
-                if exc.status in (400, 404)
-                else "Microsoft didn’t answer. Try again in a minute."
-            )
+            if exc.status in (400, 404):
+                message = (
+                    "This Microsoft account has no OneDrive yet. Open OneDrive once in a "
+                    "browser, then try again."
+                )
+            elif exc.status in (401, 403):
+                message = (
+                    "Microsoft refused Bot RBAC access to this account’s OneDrive. A school "
+                    "or work account may block it; ask its IT administrator."
+                )
+            else:
+                message = "Microsoft didn’t answer. Try again in a minute."
             return render(
                 request,
                 "error.html",
@@ -3235,6 +3241,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 names[entry.id] = entry.name
         if ctx.ext_allowlist is not None:
             for entry in ctx.ext_allowlist.entries().values():
+                if entry.name:
+                    names.setdefault(entry.id, entry.name)
+        if ctx.onedrive is not None:
+            for entry in ctx.onedrive.allowlist.entries().values():
                 if entry.name:
                     names.setdefault(entry.id, entry.name)
         request_names: dict[str, str] = {}
