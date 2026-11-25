@@ -15,6 +15,7 @@ from .auth import Principal, current_principal
 from .config import Role
 from .drive_client import BotNotConnectedError
 from .notion_client import NotionApiError
+from .onedrive_client import OneDriveApiError
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,15 @@ GUEST_TOOLS: frozenset[str] = frozenset(
 # Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
 NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
 
+# Reading the person's own OneDrive, limited to what they allowed (onedrive.py). Read-only.
+ONEDRIVE_TOOLS: frozenset[str] = frozenset(
+    {"onedrive_list_folder", "onedrive_read_file", "onedrive_download_file", "onedrive_search"}
+)
+
 VIEWER_TOOLS: frozenset[str] = (
     GUEST_TOOLS
     | NOTION_TOOLS
+    | ONEDRIVE_TOOLS
     | frozenset(
         {
             "search_files",
@@ -234,6 +241,10 @@ def require(
                         "source can't be read yet."
                     ) from None
                 raise ToolError("Notion request failed. Try again in a moment.") from None
+            except OneDriveApiError as exc:
+                audit(tool=tool, decision="error", reason="onedrive_error", **who, **ids)
+                logger.warning("tool %s: %s", tool, exc)
+                raise ToolError("OneDrive request failed. Try again in a moment.") from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)

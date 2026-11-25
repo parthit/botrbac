@@ -3,7 +3,7 @@
 {% block title %}Files from Notion{% endblock %}
 {% block content %}
 <h1>Files</h1>
-{{ files_tabs('notion', allow_count, notion_tab) }}
+{{ files_tabs('notion', allow_count, notion_tab, onedrive_tab) }}
 {% if not notion_connected %}
 <div class="card empty" id="notion-connect">
   <h2>Notion isn’t connected</h2>

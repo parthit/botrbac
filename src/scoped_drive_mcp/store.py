@@ -40,6 +40,8 @@ ACCESS_READ = "read"
 ACCESS_EDIT = "edit"
 # What this person's assistants may read in Notion (chosen on Files, "From Notion").
 NOTION_ALLOWLIST_KEY = "notion_allowlist"
+# What this person's assistants may read in OneDrive (chosen on Files, "From OneDrive").
+ONEDRIVE_ALLOWLIST_KEY = "onedrive_allowlist"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
 # A paired person's repeated call is written to the owner's Activity this often.
@@ -47,6 +49,7 @@ GUEST_ROW_EVERY = 3600
 OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
 BOT_TOKEN_KEY = "vault:bot_refresh_token"  # noqa: S105 - a key name
 NOTION_TOKEN_KEY = "vault:notion_token"  # noqa: S105 - a key name
+ONEDRIVE_TOKEN_KEY = "vault:onedrive_token"  # noqa: S105 - a key name
 USERS_INDEX = "users:index"
 REDIS_IMPORT_FLAG = "sdm:meta:redis_admin_imported"  # on the raw store, not the sdm: view
 REDIS_IMPORT_LOCK = "sdm:meta:redis_admin_import_lock"  # same raw store; expires if a copy dies
@@ -436,7 +439,9 @@ class PrefixedStore:
 SIGNED_MARK = "s1."
 _MAC_LENGTH = 43  # urlsafe base64 of 32 bytes, without padding
 _MAC_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-_SIGNED_HASHES = frozenset({ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY, NOTION_ALLOWLIST_KEY})
+_SIGNED_HASHES = frozenset(
+    {ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY, NOTION_ALLOWLIST_KEY, ONEDRIVE_ALLOWLIST_KEY}
+)
 _SIGNED_PREFIXES = (
     "oauth:",
     "bridge:link:",
@@ -1446,6 +1451,51 @@ class TokenVault:
 
     def clear_notion(self) -> None:
         self.store.delete(NOTION_TOKEN_KEY)
+
+    def set_onedrive(
+        self,
+        access_token: str,
+        refresh_token: str | None,
+        email: str,
+        expires_at: float,
+        drive_id: str = "",
+        account: str = "",
+        drive_type: str = "",
+    ) -> None:
+        """This person's OneDrive connection. Encrypted like the Drive token, and naming
+        the account it belongs to, so a record copied into another person's slot is
+        refused."""
+        if self._fernet is None:
+            raise RuntimeError("ENCRYPTION_KEY is not set")
+        payload = {
+            "t": access_token,
+            "email": email,
+            "at": utc_now(),
+            "exp": str(int(expires_at)),
+            "drive_id": drive_id,
+            "account": account,
+            "drive_type": drive_type,
+        }
+        if refresh_token:
+            payload["r"] = refresh_token
+        self.store.set(
+            ONEDRIVE_TOKEN_KEY, self._fernet.encrypt(json.dumps(payload).encode()).decode()
+        )
+
+    def onedrive(self) -> dict[str, str] | None:
+        """The stored OneDrive connection for the current person, or None."""
+        record = self._take(ONEDRIVE_TOKEN_KEY)
+        if not record or not record.get("t"):
+            return None
+        want = self.expected() if self.expected is not None else None
+        have = record.get("email")
+        if want and (not have or str(have).strip().lower() != want.strip().lower()):
+            logger.warning("stored OneDrive connection belongs to a different account; ignored")
+            return None
+        return record
+
+    def clear_onedrive(self) -> None:
+        self.store.delete(ONEDRIVE_TOKEN_KEY)
 
     def set_bot(self, token: str, email: str) -> None:
         self._put(BOT_TOKEN_KEY, token, email)

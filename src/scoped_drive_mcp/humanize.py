@@ -126,6 +126,10 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "notion_list_pages": ("listed your allowed Notion pages", "list your Notion pages"),
     "notion_read_page": ("read a Notion page", "read a Notion page"),
     "notion_search": ("searched your allowed Notion pages", "search your Notion pages"),
+    "onedrive_list_folder": ("listed your allowed OneDrive files", "list your OneDrive files"),
+    "onedrive_read_file": ("read a OneDrive file", "read a OneDrive file"),
+    "onedrive_download_file": ("downloaded a OneDrive file", "download a OneDrive file"),
+    "onedrive_search": ("searched your allowed OneDrive files", "search your OneDrive files"),
     "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
     "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
@@ -262,6 +266,10 @@ _REFUSALS = {
     "notion_not_connected": "Notion isn’t connected",
     "notion_reconnect": "Notion needs to be connected again",
     "notion_error": "Notion returned an error",
+    "onedrive_not_allowed": "that OneDrive file isn’t allowed",
+    "onedrive_not_connected": "OneDrive isn’t connected",
+    "onedrive_reconnect": "OneDrive needs to be connected again",
+    "onedrive_error": "OneDrive returned an error",
 }
 
 
@@ -396,6 +404,16 @@ def _owner_row(
         ),
         "notion_remove": (
             f"You removed the Notion page {notion_name} from your assistants’ list.",
+            Badge("", "Removed", "–"),
+        ),
+        "onedrive_connect": ("You connected OneDrive.", Badge("ok", "Connected", "✓")),
+        "onedrive_disconnect": ("You disconnected OneDrive.", Badge("", "Disconnected", "–")),
+        "onedrive_allow": (
+            f"You allowed the OneDrive item {notion_name} for your assistants.",
+            _ALLOWED,
+        ),
+        "onedrive_remove": (
+            f"You removed the OneDrive item {notion_name} from your assistants’ list.",
             Badge("", "Removed", "–"),
         ),
     }
