@@ -1461,10 +1461,12 @@ class TokenVault:
         drive_id: str = "",
         account: str = "",
         drive_type: str = "",
+        scopes: str = "",
     ) -> None:
         """This person's OneDrive connection. Encrypted like the Drive token, and naming
         the account it belongs to, so a record copied into another person's slot is
-        refused."""
+        refused. `scopes` is what Microsoft granted (space-separated); a record without
+        it was made before writing existed and is read-only."""
         if self._fernet is None:
             raise RuntimeError("ENCRYPTION_KEY is not set")
         payload = {
@@ -1476,6 +1478,8 @@ class TokenVault:
             "account": account,
             "drive_type": drive_type,
         }
+        if scopes:
+            payload["scp"] = scopes
         if refresh_token:
             payload["r"] = refresh_token
         self.store.set(

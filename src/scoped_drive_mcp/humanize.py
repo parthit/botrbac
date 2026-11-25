@@ -136,6 +136,10 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "onedrive_read_file": ("read a OneDrive file", "read a OneDrive file"),
     "onedrive_download_file": ("downloaded a OneDrive file", "download a OneDrive file"),
     "onedrive_search": ("searched your allowed OneDrive files", "search your OneDrive files"),
+    "onedrive_create_folder": ("created a OneDrive folder", "create a OneDrive folder"),
+    "onedrive_upload_file": ("added a file to OneDrive", "add a file to OneDrive"),
+    "onedrive_update_file": ("changed a OneDrive file", "change a OneDrive file"),
+    "onedrive_rename_file": ("renamed a OneDrive item", "rename a OneDrive item"),
     "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
     "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
@@ -278,6 +282,11 @@ _REFUSALS = {
     "onedrive_reconnect": "OneDrive needs to be connected again",
     "onedrive_error": "OneDrive returned an error",
     "onedrive_unavailable": "Microsoft wasn’t answering",
+    "onedrive_read_only": "OneDrive is connected for reading only",
+    "onedrive_refused": "Microsoft refused the change",
+    "onedrive_changed": "the OneDrive item changed meanwhile",
+    "onedrive_full": "OneDrive is full",
+    "name_taken": "that name is already taken",
 }
 
 

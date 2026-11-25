@@ -89,9 +89,12 @@ from .mcp_oauth import (
 )
 from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
+from .onedrive import can_write as onedrive_can_write
 from .onedrive_client import OneDriveApiError, OneDriveOAuthError
 from .onedrive_client import normalize_item_id as normalize_onedrive_id
+from .onedrive_client import normalize_scopes as normalize_onedrive_scopes
 from .onedrive_client import scopes_acceptable as onedrive_scopes_acceptable
+from .onedrive_client import scopes_can_write as onedrive_scopes_can_write
 from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
@@ -1665,9 +1668,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 400,
                 title="OneDrive isn’t connected",
                 message=(
-                    "Microsoft gave Bot RBAC different access than it asks for (read your "
-                    "files), so the connection was not kept. Try again, and keep the "
-                    "permission to read your files ticked."
+                    "Microsoft gave Bot RBAC different access than it asks for (read and "
+                    "edit your files), so the connection was not kept. Try again, and keep "
+                    "the permission to your files ticked."
                 ),
                 actions=retry_actions,
             )
@@ -1708,13 +1711,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             account.drive_id,
             account.name,
             account.drive_type,
+            " ".join(sorted(normalize_onedrive_scopes(tokens.scopes))),
         )
         audit_owner("onedrive_connect", connection="onedrive")
-        flash(
-            request,
-            "ok",
-            "OneDrive is connected. Now allow the files and folders your assistants may read.",
-        )
+        if onedrive_scopes_can_write(tokens.scopes):
+            done = "OneDrive is connected. Now allow the files and folders your assistants may use."
+        else:
+            done = (
+                "OneDrive is connected for reading only: Microsoft didn’t grant editing. "
+                "Now allow the files and folders your assistants may read."
+            )
+        flash(request, "ok", done)
         return RedirectResponse("/files?tab=onedrive", status_code=303)
 
     async def onedrive_disconnect(request: Request) -> Response:
@@ -1743,6 +1750,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
             out: dict[str, Any] = {
                 "onedrive_connected": record is not None,
+                "onedrive_can_write": onedrive_can_write(record),
                 "account": (record or {}).get("account") or "",
                 "allowed": allowed,
                 "listing": {"folder": None, "up": None, "items": []},

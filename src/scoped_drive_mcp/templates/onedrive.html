@@ -7,7 +7,7 @@
 {% if not onedrive_connected %}
 <div class="card empty" id="onedrive-connect">
   <h2>OneDrive isn’t connected</h2>
-  <p>Connect OneDrive with your Microsoft account. Then come back here and <b>Allow</b> the files and folders your assistants may read. Bot RBAC never edits OneDrive.</p>
+  <p>Connect OneDrive with your Microsoft account. Then come back here and <b>Allow</b> the files and folders your assistants may use. Assistants that may read see only what you allow; assistants that may edit can also add and change files inside it.</p>
   <p class="muted small">A school or work account may need your IT administrator to approve Bot RBAC first.</p>
   <form method="post" action="/connect/onedrive">
     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -16,7 +16,19 @@
   </form>
 </div>
 {% else %}
-<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder. They can’t edit OneDrive.{% if account %} Account: <b>{{ account }}</b>.{% endif %}</p>
+{% if onedrive_can_write %}
+<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder. Assistants that may edit can also add files and folders there, and change or rename what is inside. They can’t delete, move or share anything.{% if account %} Account: <b>{{ account }}</b>.{% endif %}</p>
+{% else %}
+<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder.{% if account %} Account: <b>{{ account }}</b>.{% endif %}</p>
+<div class="card" id="onedrive-read-only">
+  <p>OneDrive is connected for reading only, so no assistant can add or change files. To let assistants that may edit do that inside what you allow, connect OneDrive again and approve editing. Your allowed list is kept.</p>
+  <form method="post" action="/connect/onedrive">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="/files?tab=onedrive">
+    <button type="submit">Reconnect OneDrive</button>
+  </form>
+</div>
+{% endif %}
 
 <h2>Allowed <span class="count">{{ allowed | length }}</span></h2>
 {% if allowed %}
@@ -29,7 +41,7 @@
     <td data-label="Type">{{ "Folder" if e.mime_type == "onedrive/folder" else "File" }}</td>
     <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
     <td data-label="Action">
-      <form class="inline" method="post" action="/onedrive/remove" data-confirm="Stop assistants reading this item{% if e.mime_type == 'onedrive/folder' %} and everything inside it{% endif %}?" data-confirm-action="Remove">
+      <form class="inline" method="post" action="/onedrive/remove" data-confirm="Stop assistants using this item{% if e.mime_type == 'onedrive/folder' %} and everything inside it{% endif %}?" data-confirm-action="Remove">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <button class="danger" type="submit">Remove<span class="sr-only"> {{ e.name }}</span></button>
