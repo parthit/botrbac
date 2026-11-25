@@ -634,7 +634,9 @@ def test_pdf_form_drawn_many_times_is_refused_quickly() -> None:
     assert len(data) < 5000
     with _Timer() as timer, pytest.raises(ExtractError, match="too complex"):
         extract_text(data, "pdf", char_limit=100_000)
-    assert timer.seconds < 3
+    # Refusing it takes 2-4 s of real work on a loaded CI machine; 10 s still fails the
+    # 110 s regression by a wide margin without failing at random.
+    assert timer.seconds < 10
 
 
 def test_pdf_with_a_small_form_still_reads_its_text() -> None:
