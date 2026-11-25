@@ -89,6 +89,9 @@ from .mcp_oauth import (
 )
 from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
+from .onedrive_client import OneDriveApiError, OneDriveOAuthError
+from .onedrive_client import normalize_item_id as normalize_onedrive_id
+from .onedrive_client import scopes_acceptable as onedrive_scopes_acceptable
 from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
@@ -144,6 +147,9 @@ _env.globals["observability_on"] = observability_on
 # Connect Notion posts a form that redirects to Notion's consent screen, which may pass
 # through Notion's sign-in. form-action is checked along that redirect chain.
 NOTION_FORM_HOSTS = b"https://api.notion.com https://www.notion.so https://app.notion.com"
+# Connect OneDrive does the same with Microsoft's sign-in (personal accounts pass through
+# login.live.com).
+MICROSOFT_FORM_HOSTS = b"https://login.microsoftonline.com https://login.live.com"
 
 # Every page: scripts and everything else only from this site. Sign-in forms redirect to
 # Google, which form-action checks along the redirect chain. frame-ancestors stays none
@@ -156,7 +162,11 @@ STRICT_CSP = (
     b"connect-src 'self'; "
     b"frame-src 'none'; "
     b"worker-src 'self'; "
-    b"form-action 'self' https://accounts.google.com " + NOTION_FORM_HOSTS + b"; "
+    b"form-action 'self' https://accounts.google.com "
+    + NOTION_FORM_HOSTS
+    + b" "
+    + MICROSOFT_FORM_HOSTS
+    + b"; "
     b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 )
 # Only pages that can open the Google Picker (PICKER_TEMPLATES): it loads api.js from
@@ -264,6 +274,8 @@ class DashboardContext:
     hidden: Any = None
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
+    # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
+    onedrive: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
     drops: Any = None
     # Bot RBAC Terminal (terminal.TerminalFeature): roles for agents on people's own
@@ -378,6 +390,12 @@ class DashboardContext:
             return None
         return self.vault.notion()
 
+    def onedrive_record(self) -> dict[str, str] | None:
+        """This person's stored OneDrive connection, when OneDrive is offered here."""
+        if self.onedrive is None or not self.vault.enabled:
+            return None
+        return self.vault.onedrive()
+
     def connection_rows(self) -> list[dict[str, Any]]:
         """Each connection offered here and whether this person has finished it."""
         rows = []
@@ -390,6 +408,14 @@ class DashboardContext:
                 connected = record is not None
                 if record and record.get("workspace_name"):
                     detail = f"Workspace: {record['workspace_name']}"
+                needs_upgrade = False
+            elif conn.provider == "microsoft":
+                if self.onedrive is None:
+                    continue
+                record = self.onedrive_record()
+                connected = record is not None
+                if record and record.get("account"):
+                    detail = f"Account: {record['account']}"
                 needs_upgrade = False
             else:
                 connected = self.drive_connected()
@@ -651,6 +677,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
+    ctx.setdefault("onedrive_tab", getattr(request.state, "onedrive_tab", False))
     ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
     html = _env.get_template(template).render(
         request=request,
@@ -1288,12 +1315,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="Unknown connection.")
         if connection.provider == "notion" and ctx.notion is None:
             return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "microsoft" and ctx.onedrive is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
         limited = await login_rate_limited(request)
         if limited is not None:
             return limited
         request.session["oauth_next"] = safe_next(form.get("next"))
         if connection.provider == "notion":
             return start_notion(request)
+        if connection.provider == "microsoft":
+            return start_onedrive(request)
         if connection.key == "google_drive":
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
@@ -1324,6 +1355,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if ctx.notion is None:
                 return render(request, "error.html", 404, message="Unknown connection.")
             return await notion_disconnect(request)
+        if connection.provider == "microsoft":
+            if ctx.onedrive is None:
+                return render(request, "error.html", 404, message="Unknown connection.")
+            return await onedrive_disconnect(request)
         email = current_actor.get()
         # An old full-Drive token is kept until Google confirms it is revoked, so a failed
         # revoke can be retried. It is never used meanwhile.
@@ -1539,6 +1574,237 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if entry is None:
             return action_done(request, "ok", "That page was not allowed.", back, changed=False)
         audit_owner("notion_remove", page_id=entry.id, name=entry.name)
+        return action_done(
+            request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back
+        )
+
+    # ---- OneDrive (an optional connection, Microsoft's own OAuth) ----------------
+
+    def start_onedrive(request: Request) -> Response:
+        """Send the signed-in person to Microsoft's sign-in and consent screen. The state
+        is signed, expires, is tied to this browser (nonce) and names the account."""
+        nonce = secrets.token_urlsafe(24)
+        request.session["onedrive_nonce"] = nonce
+        state = serializer.dumps(
+            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or ""}
+        )
+        return RedirectResponse(ctx.onedrive.oauth.authorization_url(state), status_code=303)
+
+    async def onedrive_callback(request: Request) -> Response:
+        if ctx.onedrive is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        params = request.query_params
+        nonce = request.session.pop("onedrive_nonce", None)
+        request.session.pop("oauth_next", None)
+        retry_actions = [
+            {"label": "Back to Settings", "href": "/settings#services", "primary": True},
+        ]
+        error = params.get("error")
+        if error:
+            # error_description is Microsoft's text; only its AADSTS code is looked at.
+            description = params.get("error_description") or ""
+            needs_admin = error in ("consent_required", "admin_consent_required") or any(
+                code in description for code in ("AADSTS65001", "AADSTS90094", "AADSTS90095")
+            )
+            if needs_admin:
+                title = "Your organization has to approve Bot RBAC"
+                message = (
+                    "Your school or work account doesn’t let you connect apps like Bot RBAC "
+                    "yourself. Ask your IT administrator to approve Bot RBAC for your "
+                    "organization, then try again. Nothing changed."
+                )
+            elif error == "access_denied":
+                title = "You didn’t connect OneDrive"
+                message = "You cancelled on Microsoft’s screen, so nothing changed."
+            else:
+                title = "OneDrive isn’t connected"
+                message = "Microsoft didn’t finish connecting. Nothing changed."
+            return render(
+                request, "error.html", 400, title=title, message=message, actions=retry_actions
+            )
+        try:
+            data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+        except BadSignature:
+            data = None
+        email = current_actor.get() or ""
+        if (
+            not isinstance(data, dict)
+            or data.get("flow") != "onedrive"
+            or not nonce
+            or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
+            or str(data.get("who") or "") != email
+        ):
+            audit_owner("onedrive_connect", "deny", reason="bad_state")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="OneDrive connection expired",
+                message="That OneDrive connection didn’t start here, or took too long. Try again.",
+                actions=retry_actions,
+            )
+        code = params.get("code")
+        if not code:
+            return render(request, "error.html", 400, message="Microsoft did not return a code.")
+        try:
+            tokens = await blocking(ctx.onedrive.oauth.exchange_code, code)
+        except OneDriveOAuthError as exc:
+            return render(
+                request,
+                "error.html",
+                502,
+                title="OneDrive isn’t connected",
+                message=f"Connecting OneDrive failed: {exc}.",
+                actions=retry_actions,
+            )
+        if not onedrive_scopes_acceptable(tokens.scopes):
+            # Not stored. Microsoft has no per-token revoke for this kind of app; the token
+            # expires within the hour and is never used.
+            audit_owner("onedrive_connect", "deny", reason="scopes")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="OneDrive isn’t connected",
+                message=(
+                    "Microsoft gave Bot RBAC different access than it asks for (read your "
+                    "files), so the connection was not kept. Try again, and keep the "
+                    "permission to read your files ticked."
+                ),
+                actions=retry_actions,
+            )
+        try:
+            account = await blocking(ctx.onedrive.account_for, tokens.access_token)
+        except OneDriveApiError as exc:
+            if exc.status in (400, 404):
+                message = (
+                    "This Microsoft account has no OneDrive yet. Open OneDrive once in a "
+                    "browser, then try again."
+                )
+            elif exc.status in (401, 403):
+                message = (
+                    "Microsoft refused Bot RBAC access to this account’s OneDrive. A school "
+                    "or work account may block it; ask its IT administrator."
+                )
+            else:
+                message = "Microsoft didn’t answer. Try again in a minute."
+            return render(
+                request,
+                "error.html",
+                502,
+                title="OneDrive isn’t connected",
+                message=message,
+                actions=retry_actions,
+            )
+        previous = await blocking(ctx.onedrive_record)
+        if previous is None or previous.get("drive_id") != account.drive_id:
+            # A list is kept only when the same drive reconnects. With no usable earlier
+            # connection we can't tell which account the list was chosen for, so it goes.
+            await blocking(ctx.onedrive.clear)
+        await blocking(
+            ctx.vault.set_onedrive,
+            tokens.access_token,
+            tokens.refresh_token,
+            email,
+            tokens.expires_at,
+            account.drive_id,
+            account.name,
+            account.drive_type,
+        )
+        audit_owner("onedrive_connect", connection="onedrive")
+        flash(
+            request,
+            "ok",
+            "OneDrive is connected. Now allow the files and folders your assistants may read.",
+        )
+        return RedirectResponse("/files?tab=onedrive", status_code=303)
+
+    async def onedrive_disconnect(request: Request) -> Response:
+        await blocking(ctx.vault.clear_onedrive)
+        # The list belongs to that account's drive; a later connection starts empty.
+        await blocking(ctx.onedrive.clear)
+        audit_owner("onedrive_disconnect", connection="onedrive")
+        flash(
+            request,
+            "ok",
+            "OneDrive is disconnected. Assistants can no longer reach it. To remove Bot "
+            "RBAC’s permission at Microsoft too, open account.live.com/consent/Manage "
+            "(personal account) or myapps.microsoft.com (work or school account).",
+        )
+        return RedirectResponse("/settings#services", status_code=303)
+
+    async def onedrive_files(request: Request) -> Response:
+        """Files → From OneDrive: what assistants may read, and the person's drive."""
+        query = (request.query_params.get("q") or "").strip()[:200]
+        folder = (request.query_params.get("folder") or "").strip()[:256]
+
+        def gather() -> dict[str, Any]:
+            record = ctx.onedrive_record()
+            allowed = sorted(
+                ctx.onedrive.allowlist.entries().values(), key=lambda e: e.name.lower()
+            )
+            out: dict[str, Any] = {
+                "onedrive_connected": record is not None,
+                "account": (record or {}).get("account") or "",
+                "allowed": allowed,
+                "listing": {"folder": None, "up": None, "items": []},
+                "onedrive_error": None,
+            }
+            if record is None:
+                return out
+            try:
+                out["listing"] = ctx.onedrive.browse(folder or None, query)
+            except PayloadToolError as exc:
+                out["onedrive_error"] = str(exc.payload.get("message") or "Microsoft refused.")
+            except OneDriveApiError:
+                out["onedrive_error"] = "OneDrive didn’t answer. Reload the page in a minute."
+            return out
+
+        data = await blocking(gather)
+        here = "/files?" + urlencode(
+            {
+                "tab": "onedrive",
+                **({"folder": folder} if folder else {}),
+                **({"q": query} if query else {}),
+            }
+        )
+        return render(request, "onedrive.html", query=query, next=here, **data)
+
+    def onedrive_back(form: dict[str, str]) -> str:
+        """Where an Allow or Remove returns to: the same OneDrive folder, if any."""
+        folder = normalize_onedrive_id(form.get("folder") or "")
+        return f"/files?tab=onedrive&folder={quote(folder)}" if folder else "/files?tab=onedrive"
+
+    async def onedrive_allow(request: Request, form: dict[str, str]) -> Response:
+        if ctx.onedrive is None:
+            return refused(request, 404, "OneDrive is not set up on this server.")
+        back = onedrive_back(form)
+        try:
+            entry = await blocking(ctx.onedrive.allow, form.get("file_id", ""))
+        except PayloadToolError as exc:
+            return action_done(request, "error", str(exc.payload.get("message")), back)
+        except OneDriveApiError:
+            return action_done(request, "error", "OneDrive didn’t answer. Try again.", back)
+        if entry is None:
+            return action_done(
+                request,
+                "error",
+                "That item can’t be allowed. It may have been deleted, be the top of your "
+                "OneDrive, or be a shortcut to someone else’s file.",
+                back,
+                changed=False,
+            )
+        audit_owner("onedrive_allow", file_id=entry.id, name=entry.name)
+        return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
+
+    async def onedrive_remove(request: Request, form: dict[str, str]) -> Response:
+        if ctx.onedrive is None:
+            return refused(request, 404, "OneDrive is not set up on this server.")
+        entry = await blocking(ctx.onedrive.remove, form.get("file_id", ""))
+        back = onedrive_back(form)
+        if entry is None:
+            return action_done(request, "ok", "That item was not allowed.", back, changed=False)
+        audit_owner("onedrive_remove", file_id=entry.id, name=entry.name)
         return action_done(
             request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back
         )
@@ -2977,6 +3243,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             for entry in ctx.ext_allowlist.entries().values():
                 if entry.name:
                     names.setdefault(entry.id, entry.name)
+        if ctx.onedrive is not None:
+            for entry in ctx.onedrive.allowlist.entries().values():
+                if entry.name:
+                    names.setdefault(entry.id, entry.name)
         request_names: dict[str, str] = {}
         for req in ctx.requests.recent(300):
             if req.file_id and req.file_name:
@@ -3451,9 +3721,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def files_page(request: Request) -> Response:
         request.state.allow_count = len(await blocking(ctx.allowlist.entries))
         request.state.notion_tab = ctx.notion is not None
+        request.state.onedrive_tab = ctx.onedrive is not None
         if request.query_params.get("tab") == "notion" and ctx.notion is not None:
             # Notion does not need Google Drive, so this tab works without it.
             return await notion_files(request)
+        if request.query_params.get("tab") == "onedrive" and ctx.onedrive is not None:
+            return await onedrive_files(request)
         if request.query_params.get("tab") == "allowed":
             return await access(request)
         return await browse(request)
@@ -3724,6 +3997,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/connect/notion/callback", owner_only(notion_callback), methods=["GET"]),
         Route("/notion/allow", csrf_protected(notion_allow), methods=["POST"]),
         Route("/notion/remove", csrf_protected(notion_remove), methods=["POST"]),
+        Route("/connect/onedrive/callback", owner_only(onedrive_callback), methods=["GET"]),
+        Route("/onedrive/allow", csrf_protected(onedrive_allow), methods=["POST"]),
+        Route("/onedrive/remove", csrf_protected(onedrive_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", safely(home), methods=["GET"]),
         Route("/files", owner_only(files_page), methods=["GET"]),

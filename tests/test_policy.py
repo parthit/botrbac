@@ -58,6 +58,14 @@ SHARED_TOOLS = {
 }
 # Read-only, the person's own Notion, registered only when Notion is configured.
 NOTION_READ_TOOLS = {"notion_list_pages", "notion_read_page", "notion_search"}
+# Read-only, the person's own OneDrive, registered only when OneDrive is configured.
+ONEDRIVE_READ_TOOLS = {
+    "onedrive_list_folder",
+    "onedrive_read_file",
+    "onedrive_download_file",
+    "onedrive_search",
+}
+OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS
 SHARED_WRITE_TOOLS = {
     "create_shared_doc",
     "create_shared_folder",
@@ -78,6 +86,7 @@ VIEWER_EXPECTED = (
     | MAILBOX_TOOLS
     | SHARED_TOOLS
     | NOTION_READ_TOOLS
+    | ONEDRIVE_READ_TOOLS
     | DROP_READ_TOOLS
 )
 EXPECTED = {
@@ -97,6 +106,7 @@ EXPECTED = {
     | SHARED_TOOLS
     | SHARED_WRITE_TOOLS
     | NOTION_READ_TOOLS
+    | ONEDRIVE_READ_TOOLS
     | DROP_READ_TOOLS
     | DROP_SEND_TOOLS,
 }
@@ -124,8 +134,8 @@ async def test_registered_tools_are_exactly_the_role_map(service) -> None:
     mcp = create_mcp(service)
     tools = {t.name: t for t in mcp._tool_manager.list_tools()}
     names = set(tools)
-    # Notion's tools exist only when Notion is configured (tests/test_notion.py).
-    assert names == set(ADMIN_TOOLS) - NOTION_READ_TOOLS
+    # Notion's and OneDrive's tools exist only when each is configured.
+    assert names == set(ADMIN_TOOLS) - OPTIONAL_TOOLS
     assert GUEST_TOOLS == SHARED_TOOLS
     assert GUEST_WRITE_TOOLS == SHARED_WRITE_TOOLS
     for name in names - GUEST_TOOLS - GUEST_WRITE_TOOLS:
@@ -174,7 +184,7 @@ async def test_list_tools_filtered_by_role(service) -> None:
             names = {t.name for t in await mcp.list_tools()}
         finally:
             current_principal.reset(token)
-        assert names == EXPECTED[role] - NOTION_READ_TOOLS
+        assert names == EXPECTED[role] - OPTIONAL_TOOLS
     assert await mcp.list_tools() == []
 
 

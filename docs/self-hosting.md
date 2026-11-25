@@ -307,6 +307,7 @@ uv run ruff check . && uv run ruff format --check .
 | `REQUIRE_SIGNED_RECORDS` | on | Unsigned allowlist, app and pairing records are ignored. A deployment from before records were signed sets `0`, runs **Sign existing records** on `/admin`, then removes it. See [security.md](security.md) |
 | `TRUSTED_PROXY_HOPS` | unset | proxies in front of the server that add to `X-Forwarded-For`. Leave unset on Vercel |
 | `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET` | unset | optional Notion connection; both set turns it on ([notion.md](notion.md)) |
+| `ONEDRIVE_OAUTH_CLIENT_ID`, `ONEDRIVE_OAUTH_CLIENT_SECRET` | unset | optional read-only OneDrive connection; both set turns it on ([onedrive.md](onedrive.md)) |
 | `WEBHOOK_KEK`, `WEBHOOK_HOST_ALLOWLIST` | off until `WEBHOOK_KEK` is set | wake-up pings to paired assistants ([sharing.md](sharing.md)) |
 | `VERCEL_OBSERVABILITY` | on | `off` removes Vercel Speed Insights and Web Analytics scripts |
 | `OAUTH_TEST_CALLBACK` | off | `1` accepts this server's own `/oauth/done` as an OAuth redirect, for local testing only |

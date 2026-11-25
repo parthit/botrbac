@@ -74,6 +74,14 @@ def _secret_set(value: SecretStr | None) -> bool:
     return value is not None and bool(value.get_secret_value().strip())
 
 
+def _real_secret(value: SecretStr | None) -> bool:
+    """Set, and not a placeholder such as REPLACE_WITH_..."""
+    if not _secret_set(value):
+        return False
+    assert value is not None
+    return not value.get_secret_value().strip().upper().startswith("REPLACE")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, extra="ignore", case_sensitive=False)
 
@@ -110,6 +118,10 @@ class Settings(BaseSettings):
     # Notion is offered on Settings only when both are set.
     notion_oauth_client_id: SecretStr | None = None
     notion_oauth_client_secret: SecretStr | None = None
+    # Optional: Microsoft OneDrive (an app registered in Microsoft Entra). Offered on
+    # Settings only when both are set. Read-only (Files.Read).
+    onedrive_oauth_client_id: SecretStr | None = None
+    onedrive_oauth_client_secret: SecretStr | None = None
 
     redis_rest_url: str | None = Field(
         default=None,
@@ -348,16 +360,19 @@ class Settings(BaseSettings):
     def notion_configured(self) -> bool:
         """Both Notion OAuth values are set (a placeholder such as REPLACE_WITH_... does
         not count) and there is a public address for Notion to send people back to."""
-
-        def real(value: SecretStr | None) -> bool:
-            if not _secret_set(value):
-                return False
-            assert value is not None
-            return not value.get_secret_value().strip().upper().startswith("REPLACE")
-
         return (
-            real(self.notion_oauth_client_id)
-            and real(self.notion_oauth_client_secret)
+            _real_secret(self.notion_oauth_client_id)
+            and _real_secret(self.notion_oauth_client_secret)
+            and bool(self.app_base_url)
+        )
+
+    @property
+    def onedrive_configured(self) -> bool:
+        """Both Microsoft OAuth values are set (not placeholders) and there is a public
+        address for Microsoft to send people back to."""
+        return (
+            _real_secret(self.onedrive_oauth_client_id)
+            and _real_secret(self.onedrive_oauth_client_secret)
             and bool(self.app_base_url)
         )
 

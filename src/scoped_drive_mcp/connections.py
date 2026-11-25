@@ -3,16 +3,19 @@
 Signing in (step 1) only proves who someone is. Each entry here is a separate,
 explicit step 2: the person chooses **Connect**, Google (or later, another provider)
 shows the wider permission, and the refresh token that comes back is stored for that
-person. Google Drive is the first connection; Notion is the second (offered only when
-its OAuth client is configured, see notion.py). Adding another service means adding an
-entry here, a token slot for it, and the tools that use it; the sign-in step does not
-change.
+person. Google Drive is the first connection; Notion and OneDrive are optional (each
+offered only when its OAuth client is configured, see notion.py and onedrive.py).
+Adding another service means adding an entry here, a token slot for it, and the tools
+that use it; the sign-in step does not change.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .drive_client import ACCEPTABLE_SCOPES, DRIVE_FILE_SCOPE
+from .onedrive_client import ALLOWED_SCOPES as ONEDRIVE_ALLOWED_SCOPES
+from .onedrive_client import REQUIRED_SCOPE as ONEDRIVE_REQUIRED_SCOPE
+from .onedrive_client import SCOPES as ONEDRIVE_SCOPES
 
 
 @dataclass(frozen=True)
@@ -22,7 +25,7 @@ class Connection:
     name: str
     """What the person sees, e.g. "Google Drive"."""
     provider: str
-    """Who runs the consent screen: "google" or "notion"."""
+    """Who runs the consent screen: "google", "notion" or "microsoft"."""
     scopes: tuple[str, ...]
     """Scopes requested in addition to the sign-in scopes."""
     required_scope: str
@@ -72,7 +75,23 @@ NOTION = Connection(
     ),
 )
 
-CONNECTIONS: dict[str, Connection] = {c.key: c for c in (GOOGLE_DRIVE, NOTION)}
+ONEDRIVE = Connection(
+    key="onedrive",
+    name="OneDrive",
+    provider="microsoft",
+    scopes=ONEDRIVE_SCOPES,
+    required_scope=ONEDRIVE_REQUIRED_SCOPE,
+    allowed_scopes=ONEDRIVE_ALLOWED_SCOPES,
+    summary="Only the OneDrive files and folders you allow, and only to read.",
+    disclosure=(
+        "Microsoft will ask you to let Bot RBAC read your OneDrive files and see your "
+        "name. Microsoft can't limit that to some files, so Bot RBAC holds "
+        "assistants to the files and folders you allow on Files. Bot RBAC never edits "
+        "OneDrive."
+    ),
+)
+
+CONNECTIONS: dict[str, Connection] = {c.key: c for c in (GOOGLE_DRIVE, NOTION, ONEDRIVE)}
 
 
 def get_connection(key: str | None) -> Connection | None:
