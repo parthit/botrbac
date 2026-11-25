@@ -1,0 +1,27 @@
+# Update pull requests for everything that is pinned: the SHA-pinned actions, uv.lock and
+# the Node signer's one dependency. Grouped, so a week is one pull request per ecosystem.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      node:
+        patterns: ["*"]
