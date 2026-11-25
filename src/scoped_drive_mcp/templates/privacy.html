@@ -46,6 +46,18 @@
      delete the token and ask Notion to revoke it, or remove Bot RBAC in Notion under
      Settings → Connections.</p>
 
+  <h2>OneDrive data we access</h2>
+  <p>Connecting OneDrive is optional, and only offered when this deployment has set it up.
+     Microsoft then asks you to let Bot RBAC read your OneDrive files and see your name.
+     Microsoft can’t limit that to some files, so this app lets an assistant read only the
+     OneDrive files and folders you allow on Files, and what is inside them, and never
+     edits OneDrive. Your name or address is used only to show which account is
+     connected. The OneDrive tokens are stored encrypted, like the Google refresh token.
+     File contents are read only to answer an assistant’s request and are not stored.
+     Disconnect OneDrive in Settings to delete the tokens, and remove Bot RBAC at
+     account.live.com/consent/Manage (personal account) or myapps.microsoft.com (work or
+     school account) to end the permission at Microsoft.</p>
+
   <h2>How we use it</h2>
   <p>Google user data is used only to provide the features on the home page and in the
      dashboard:</p>

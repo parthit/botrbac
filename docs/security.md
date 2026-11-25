@@ -285,6 +285,24 @@ its children readable. The tools are read-only and page text is wrapped in untru
 The Notion token is encrypted with `ENCRYPTION_KEY` and names the account it belongs to. The connect
 flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
 
+## OneDrive
+
+OneDrive is an optional connection ([onedrive.md](onedrive.md)). Unlike Drive and Notion there is no outer
+gate: Microsoft's `Files.Read` reaches the person's whole drive, so the person's OneDrive allowlist (signed,
+like the Drive allowlist) is the only limit on assistants. Every tool call fetches the requested item fresh
+from `/me/drive` (so another person's drive is never addressed) and walks its `parentReference` chain, capped
+in depth, until it reaches an allowed item or the top of the drive; anything else, including items that do not
+exist, gets the same `onedrive_not_allowed` answer. The top of the drive can't be allowed, shortcuts to other
+people's items (`remoteItem`) are never followed, and a deleted allowed folder does not keep its contents
+readable. Search results pass the same check. Item ids are checked against a strict pattern before they go
+into a Graph path, and Graph's paging links are followed only when they point back at Graph. Downloads follow
+Graph's redirect to a pre-authorized address without sending the access token. A token whose granted scopes
+are missing `Files.Read` or include anything beyond `Files.Read`, `User.Read`, `offline_access` and the
+OpenID scopes is refused and not stored, on connect and on every refresh. The tools are read-only and file
+text is wrapped in untrusted-content markers. The tokens are encrypted with `ENCRYPTION_KEY` and name the
+account they belong to. The connect flow uses a signed, expiring `state` bound to the browser session and
+the signed-in account.
+
 ## Terminal
 
 Bot RBAC Terminal ([terminal.md](terminal.md)) is separate from `/mcp`. Its tokens (`brt_at_…`, one hour,
