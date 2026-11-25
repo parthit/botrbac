@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
-from botrbac_cli import signing
+from botrbac_cli import sealing, signing
 from botrbac_cli.api import DEFAULT_SERVER
 
 from ..audit import audit_owner
@@ -165,7 +165,8 @@ class TerminalFeature:
     store: Any
     base_url: str | None = None
     signed_in: Callable[[str], bool] = lambda _email: True
-    # ENCRYPTION_KEY: policies are signed with a key derived from it. None: unsigned.
+    # ENCRYPTION_KEY: policies are signed with a key derived from it, and recorded
+    # commands are sealed to another. None: unsigned, and commands are never recorded.
     signing_secret: str | None = None
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
@@ -174,6 +175,9 @@ class TerminalFeature:
     def __post_init__(self) -> None:
         self._signing_key = (
             signing.key_from_secret(self.signing_secret) if self.signing_secret else None
+        )
+        self._command_key = (
+            sealing.key_from_secret(self.signing_secret) if self.signing_secret else None
         )
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
@@ -194,6 +198,9 @@ class TerminalFeature:
             "roles": [r.public() for r in self.roles.all(email)],
             "revoked_sessions": self.activity.revoked_sessions(email),
         }
+        if self._command_key is not None and self.activity.records_commands(email):
+            # "Record commands" is on: the CLI seals what agents run to this key.
+            body["command_key"] = sealing.public_key_text(self._command_key)
         digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
         body["version"] = digest[:16]
         body["issued_at"] = time.time()
@@ -202,6 +209,29 @@ class TerminalFeature:
             # policy cache on the computer blocks every tool instead of widening a role.
             body["signature"] = signing.sign(self._signing_key, body)
         return body
+
+    def command_key_for(self, email: str) -> Any:
+        """The key that opens this person's sealed commands, while recording is on."""
+        if self._command_key is None or not self.activity.records_commands(email):
+            return None
+        return self._command_key
+
+    def open_commands(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Copies of `rows` with each sealed command opened, for the owner's eyes only.
+        A command that will not open (ENCRYPTION_KEY changed) says so."""
+        out = []
+        for row in rows:
+            sealed = row.get("command")
+            if sealed and self._command_key is not None:
+                try:
+                    text = sealing.open_sealed(self._command_key, row["event_id"], sealed)
+                except sealing.SealError:
+                    text = None
+                row = {**row, "command": text, "command_unreadable": text is None}
+            elif sealed:
+                row = {**row, "command": None, "command_unreadable": True}
+            out.append(row)
+        return out
 
     @property
     def policy_key(self) -> str | None:
@@ -280,9 +310,15 @@ class TerminalFeature:
                 data = None
             if not isinstance(data, dict):
                 return JSONResponse({"error": "invalid_request"}, status_code=400)
+            command_key = await _run(self.command_key_for, terminal.email)
             try:
                 result = await _run(
-                    self.activity.add, terminal.email, terminal.id, terminal.name, data.get("rows")
+                    self.activity.add,
+                    terminal.email,
+                    terminal.id,
+                    terminal.name,
+                    data.get("rows"),
+                    command_key,
                 )
             except IngestError as exc:
                 return JSONResponse({"error": "invalid_request", "message": str(exc)}, 400)
@@ -543,10 +579,13 @@ class TerminalFeature:
                 limit = max(ACTIVITY_PAGE, min(int(request.query_params.get("show") or 0), 2000))
             except ValueError:
                 limit = ACTIVITY_PAGE
+            recording = await _run(self.activity.records_commands, email)
             return render(
                 request,
                 "terminal_activity.html",
-                rows=shown[:limit],
+                rows=self.open_commands(shown[:limit]),
+                recording=recording,
+                can_record=self._command_key is not None,
                 more=len(shown) > limit,
                 limit=limit,
                 total=len(rows),
@@ -558,9 +597,11 @@ class TerminalFeature:
 
         async def activity_export(request: Request) -> Response:
             rows = filtered(request, await _run(self.activity.recent, _me()))
+            rows = self.open_commands(rows)
             fields = [
-                "ts", "terminal", "terminal_id", "agent", "tool", "decision", "reason",
-                "role", "session_id", "parent_session_id", "via", "event_id", "received",
+                "ts", "terminal", "terminal_id", "agent", "tool", "command",
+                "command_error", "decision", "reason", "role", "session_id",
+                "parent_session_id", "via", "event_id", "received",
             ]  # fmt: skip
             if request.query_params.get("format") == "jsonl":
                 text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
@@ -584,6 +625,24 @@ class TerminalFeature:
                     "cache-control": "no-store",
                 },
             )
+
+        async def record_commands(request: Request, form: Any) -> Response:
+            on = str(form.get("record") or "") == "1"
+            if on and self._command_key is None:
+                kit.flash(request, "error", "This site has no ENCRYPTION_KEY, so it cannot.")
+                return RedirectResponse("/terminal/activity", status_code=303)
+            await _run(self.activity.set_records_commands, _me(), on)
+            audit_owner("terminal_record_commands", on="1" if on else "0")
+            kit.flash(
+                request,
+                "ok",
+                "Recording commands. Each computer starts the next time it checks in "
+                "(within about a minute while online)."
+                if on
+                else "Commands are no longer recorded. Ones already recorded stay until "
+                "they age out of the log.",
+            )
+            return RedirectResponse("/terminal/activity", status_code=303)
 
         async def session_page(request: Request) -> Response:
             tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
@@ -615,6 +674,7 @@ class TerminalFeature:
             Route("/terminal/roles", own(roles_page), methods=["GET"]),
             Route("/terminal/activity", own(activity_page), methods=["GET"]),
             Route("/terminal/activity/export", own(activity_export), methods=["GET"]),
+            Route("/terminal/activity/record", csrf(record_commands), methods=["POST"]),
             Route("/terminal/sessions/{session_id}", own(session_page), methods=["GET"]),
             Route("/terminal/sessions/{session_id}/revoke", csrf(session_revoke), methods=["POST"]),
             Route("/terminal/roles/new", own(role_edit), methods=["GET"]),

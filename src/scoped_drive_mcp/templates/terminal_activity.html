@@ -3,8 +3,20 @@
 {% block title %}Terminal activity{% endblock %}
 {% block content %}
 <h1>Terminal activity</h1>
-<p class="muted">Tool calls on your terminals, newest first, including calls made while a computer was offline. Only tool names and decisions are recorded, never what was sent to a tool.</p>
+<p class="muted">Tool calls on your terminals, newest first, including calls made while a computer was offline. {% if recording %}With each one, the command the agent ran or what it sent to the tool. Never the results.{% else %}Only tool names and decisions are recorded, never what was sent to a tool.{% endif %}</p>
 {{ terminal_tabs('activity') }}
+{% if can_record %}
+<section class="card term-record" id="record-commands" aria-labelledby="record-title">
+  <h2 id="record-title">Record commands {% if recording %}<span class="pill ok">on</span>{% else %}<span class="pill">off</span>{% endif %}</h2>
+  <p class="small">See the exact command each agent ran (or what it sent to a tool), secrets included. Each computer seals it with this site's key before it is saved, so agents on that computer cannot read it back, nor can <code>botrbac log</code>. Only you see it here, and in exports. Results are never recorded. Long commands are cut at 8,000 characters.</p>
+  <form class="term-form" method="post" action="/terminal/activity/record">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="record" value="{{ '0' if recording else '1' }}">
+    <button type="submit" id="record-toggle"{% if not recording %} class="primary"{% endif %}>{{ "Stop recording commands" if recording else "Record commands" }}</button>
+    {% if recording %}<span class="muted small">Commands already recorded stay until they age out of the log.</span>{% endif %}
+  </form>
+</section>
+{% endif %}
 {% if total %}
 <form class="actions term-filters" method="get" action="/terminal/activity" aria-label="Filter terminal activity">
   <label>Terminal
@@ -31,6 +43,7 @@
     <td data-label="Terminal">{{ r.terminal }}</td>
     <td data-label="Agent">{{ r.agent or "—" }}</td>
     <td data-label="Tool">{% if r.decision == 'session' %}started <code>{{ r.program or "a program" }}</code> as <strong>{{ r.role }}</strong>{% else %}<code>{{ r.tool }}</code>{% endif %}
+      {% if r.command %}<pre class="term-ran" aria-label="Command">{{ r.command }}</pre>{% elif r.command_unreadable %}<br><span class="muted small">Command recorded, but it cannot be opened (this site's key changed).</span>{% elif r.command_error %}<br><span class="muted small">The computer could not record this command ({{ r.command_error }}).</span>{% endif %}
       {% if r.session_id %}<br><a class="muted" href="/terminal/sessions/{{ r.session_id }}">session …{{ r.session_id[-6:] }}</a>{% endif %}</td>
     <td data-label="Result">{% if r.decision == 'allow' %}<span class="pill ok">allowed</span>{% elif r.decision == 'deny' %}<span class="pill bad">blocked</span> <span class="muted">{{ r.reason }}</span>{% elif r.decision == 'session' %}<span class="pill">session</span>{% else %}<span class="pill">error</span> <span class="muted">{{ r.reason }}</span>{% endif %}</td>
   </tr>

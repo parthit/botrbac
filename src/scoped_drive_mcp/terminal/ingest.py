@@ -1,8 +1,11 @@
 """Audit rows sent by terminals, and the sessions they describe.
 
 The CLI keeps rows on the computer and sends them when it can. Each row has a client
-`event_id`, so a batch sent twice is stored once. Rows hold identifiers and decisions
-only (never tool arguments or file contents), and every field is capped here too.
+`event_id`, so a batch sent twice is stored once. Rows hold identifiers and decisions,
+and every field is capped here too. When the person turns on "Record commands", a row
+can also carry what the agent ran, sealed on the computer to the website's key
+(botrbac_cli.sealing). It is stored sealed and opened only to show it to its owner.
+Tool results and file contents read are never sent.
 """
 
 import json
@@ -12,11 +15,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from botrbac_cli import sealing
 from botrbac_cli.patterns import is_tool_id
 
 ACTIVITY_KEY = "term:activity:{email}"
 SEEN_KEY = "term:seen:{email}:{event_id}"
 REVOKED_KEY = "term:revoked:{email}"
+SETTINGS_KEY = "term:settings:{email}"
 ACTIVITY_MAX = 2000
 BATCH_MAX = 500
 SEEN_TTL = 30 * 24 * 3600
@@ -49,8 +54,10 @@ def _ts(value: Any, now: float) -> float | None:
     return ts
 
 
-def clean_row(raw: Any, now: float) -> dict[str, Any] | None:
-    """A stored row, or None for one that is not worth keeping."""
+def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] | None:
+    """A stored row, or None for one that is not worth keeping. A sealed command is
+    kept only with `command_key` (recording is on) and only if it opens with it for
+    this row; otherwise the row is kept without it."""
     if not isinstance(raw, dict):
         return None
     event_id = str(raw.get("event_id") or "")
@@ -74,8 +81,20 @@ def clean_row(raw: Any, now: float) -> dict[str, Any] | None:
         value = str(raw.get(key) or "")
         if _ID.match(value):
             row[key] = value
+    command = raw.get("command")
+    if command_key is not None and isinstance(command, str):
+        try:
+            sealing.open_sealed(command_key, event_id, command)
+        except sealing.SealError:
+            pass
+        else:
+            row["command"] = command
+    if command_key is not None and raw.get("command_error") and "command" not in row:
+        # The computer could not seal this one: say so, without any of the command.
+        row["command_error"] = _word(raw.get("command_error"), 40) or "error"
     if decision == "session":
-        # Only the program's name: arguments can hold secrets.
+        # In the clear, only the program's name: arguments can hold secrets. The whole
+        # command line is in the sealed `command` when recording is on.
         words = str(raw.get("program") or "").split()
         row["program"] = _word(words[0].rsplit("/", 1)[-1], 40) if words else ""
         if "session_id" not in row:
@@ -88,7 +107,16 @@ class TerminalActivity:
     store: Any
     clock: Callable[[], float] = field(default=time.time)
 
-    def add(self, email: str, terminal_id: str, terminal_name: str, rows: Any) -> dict[str, int]:
+    def add(
+        self,
+        email: str,
+        terminal_id: str,
+        terminal_name: str,
+        rows: Any,
+        command_key: Any = None,
+    ) -> dict[str, int]:
+        """`command_key`: the private key that opens sealed commands, passed only while
+        this person has "Record commands" on. Without it, commands are dropped."""
         if not isinstance(rows, list):
             raise IngestError("rows must be a list")
         if len(rows) > BATCH_MAX:
@@ -97,7 +125,7 @@ class TerminalActivity:
         accepted = duplicates = rejected = 0
         key = ACTIVITY_KEY.format(email=email)
         for raw in rows:
-            row = clean_row(raw, now)
+            row = clean_row(raw, now, command_key)
             if row is None:
                 rejected += 1
                 continue
@@ -128,6 +156,14 @@ class TerminalActivity:
         # Newest by when it happened on the computer, not when it arrived.
         out.sort(key=lambda r: r.get("ts") or 0, reverse=True)
         return out
+
+    # ---- recording commands -------------------------------------------------------
+
+    def records_commands(self, email: str) -> bool:
+        return self.store.hget(SETTINGS_KEY.format(email=email), "record_commands") == "1"
+
+    def set_records_commands(self, email: str, on: bool) -> None:
+        self.store.hset(SETTINGS_KEY.format(email=email), "record_commands", "1" if on else "0")
 
     # ---- sessions -----------------------------------------------------------------
 

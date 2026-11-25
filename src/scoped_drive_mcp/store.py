@@ -465,7 +465,7 @@ _SIGNED_PREFIXES = (
     "bridge:user:",
     "bridge:invite:",
     "bridge:selfclaim:",
-    # Bot RBAC Terminal: roles, terminals, their tokens and revoked sessions.
+    # Bot RBAC Terminal: roles, terminals, their tokens, revoked sessions, settings.
     "term:roles:",
     "term:terminal:",
     "term:terminals:",
@@ -474,6 +474,8 @@ _SIGNED_PREFIXES = (
     "term:at:",
     "term:rt:",
     "term:revoked:",
+    # Whether commands are recorded: a store writer must not be able to switch it on.
+    "term:settings:",
 )
 _TENANT_PREFIX = re.compile(r"^u:[^:]+:")
 # A tenant email becomes part of `u:{email}:`, so it may not hold the ':' delimiter (the
