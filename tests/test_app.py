@@ -9,22 +9,8 @@ import pytest
 
 from scoped_drive_mcp.server import build_app
 from tests.conftest import CLIENT_SECRET, REFRESH_TOKEN, TOKENS, make_settings
-
-MCP_HEADERS = {
-    "Accept": "application/json, text/event-stream",
-    "Content-Type": "application/json",
-}
-
-INIT = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {"name": "pytest", "version": "0"},
-    },
-}
+from tests.dash import MCP_HEADERS
+from tests.test_mcp_oauth import INIT
 
 
 def rpc(method: str, params: dict | None = None, id_: int = 2) -> dict:
@@ -49,9 +35,7 @@ async def client(app):
 async def test_health_needs_no_auth(client, drive) -> None:
     r = await client.get("/health")
     assert r.status_code == 200
-    body = r.json()
-    assert body == {"status": "ok"}
-    assert "missing" not in body and "mode" not in body and "store" not in body
+    assert r.json() == {"status": "ok"}
     assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
     assert drive.get_calls == [] and drive.queries == []
 
@@ -199,9 +183,8 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
     async with httpx.AsyncClient(transport=transport, base_url="https://x.vercel.app") as c:
         r = await c.get("/health")
         assert r.status_code == 503
-        body = r.json()
-        assert body == {"status": "unavailable"}
-        assert "redis" not in r.text.lower() and "missing" not in body
+        assert r.json() == {"status": "unavailable"}
+        assert "redis" not in r.text.lower()
         assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
         r = await c.post("/mcp", json=INIT, headers=auth("admin"))
         assert r.status_code == 503 and "storage" in r.json()["error"]
@@ -214,15 +197,11 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
     assert drive.get_calls == [] and drive.queries == []
 
 
-def test_local_without_redis_uses_memory(monkeypatch, no_redis_env, drive) -> None:
+def test_memory_store_only_off_vercel(monkeypatch, no_redis_env, drive) -> None:
     monkeypatch.delenv("VERCEL", raising=False)
-    app = build_app(make_settings(), drive)
-    assert app.state.dashboard.store.kind == "memory"
+    assert build_app(make_settings(), drive).state.dashboard.store.kind == "memory"
     monkeypatch.setenv("VERCEL", "")
     assert build_app(make_settings(), drive).state.dashboard.store.kind == "memory"
-
-
-def test_vercel_with_redis_builds_normally(monkeypatch, drive) -> None:
     monkeypatch.setenv("VERCEL", "1")
     settings = make_settings(
         redis_rest_url="https://example.upstash.io", redis_rest_token=secrets.token_urlsafe(16)

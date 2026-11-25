@@ -138,7 +138,6 @@ async def test_registered_tools_are_exactly_the_role_map(service) -> None:
     # Writing into another person's share: content only, never sharing, moving or deleting.
     for name in GUEST_WRITE_TOOLS:
         assert not any(w in name for w in ("move", "permission", "delete", "parent", "trash"))
-        assert "trash" not in name
 
 
 @pytest.mark.anyio

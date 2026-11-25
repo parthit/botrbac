@@ -1,12 +1,17 @@
+import datetime
 import hashlib
 import re
 import secrets
 
+import httpx
 import pytest
+from google.auth import exceptions
 from pydantic import ValidationError
 
 from scoped_drive_mcp.auth import extract_token, hash_token, verify_token
 from scoped_drive_mcp.config import Role, Settings, parse_api_tokens
+from scoped_drive_mcp.drive_client import DRIVE_SCOPE, TOKEN_URI, build_credentials
+from scoped_drive_mcp.oauth import USERINFO_URL, GoogleOAuthClient, OAuthError
 from tests.conftest import (
     API_TOKENS,
     CLIENT_ID,
@@ -104,8 +109,6 @@ def test_refresh_token_and_root_are_optional() -> None:
 
 
 def test_build_credentials_oauth_bot() -> None:
-    from scoped_drive_mcp.drive_client import DRIVE_SCOPE, TOKEN_URI, build_credentials
-
     creds = build_credentials(make_settings())
     assert creds.refresh_token == REFRESH_TOKEN
     assert creds.client_id == CLIENT_ID
@@ -138,12 +141,6 @@ def test_api_tokens_optional(monkeypatch, raw) -> None:
 def test_every_refresh_is_checked_against_what_google_granted(monkeypatch, granted, ok) -> None:
     """Even a refresh token that holds full Drive only ever yields drive.file access
     tokens: the refresh asks for drive.file, and Google's answer is checked."""
-    import datetime
-
-    from google.auth import exceptions
-
-    from scoped_drive_mcp.drive_client import build_credentials
-
     sent: dict = {}
 
     def fake_refresh_grant(request, token_uri, refresh_token, client_id, client_secret, **kw):
@@ -166,12 +163,14 @@ def test_every_refresh_is_checked_against_what_google_granted(monkeypatch, grant
     assert sent["scopes"] == ["https://www.googleapis.com/auth/drive.file"]
 
 
+GOOGLE = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
+
+
+def _down(*a, **k):
+    raise httpx.ConnectError("no route")
+
+
 def test_google_revoke_reports_whether_google_confirmed(monkeypatch) -> None:
-    import httpx
-
-    from scoped_drive_mcp.oauth import GoogleOAuthClient
-
-    client = GoogleOAuthClient("id", "secret", "https://app.example/auth/callback")
     answers = iter(
         [
             httpx.Response(200),
@@ -181,10 +180,68 @@ def test_google_revoke_reports_whether_google_confirmed(monkeypatch) -> None:
         ]
     )
     monkeypatch.setattr(httpx, "post", lambda *a, **k: next(answers))
-    assert [client.revoke("t") for _ in range(4)] == [True, True, False, False]
+    assert [GOOGLE.revoke("t") for _ in range(4)] == [True, True, False, False]
 
-    def down(*a, **k):
-        raise httpx.ConnectError("no route")
+    monkeypatch.setattr(httpx, "post", _down)
+    assert GOOGLE.revoke("t") is False
 
-    monkeypatch.setattr(httpx, "post", down)
-    assert client.revoke("t") is False
+
+def test_google_code_exchange(monkeypatch) -> None:
+    """The real sign-in calls to Google: what is sent, and every way the answer can fail
+    surfaces as an OAuthError with a message safe to show (never a 500)."""
+    sent: list = []
+    answer = httpx.Response(
+        200, json={"access_token": "at", "refresh_token": "rt", "scope": "openid email"}
+    )
+
+    def fake_post(url, data, timeout):
+        sent.append((url, data))
+        return answer
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    tokens = GOOGLE.exchange_code("the-code")
+    assert (tokens.access_token, tokens.refresh_token) == ("at", "rt")
+    assert tokens.scopes == frozenset({"openid", "email"})
+    url, data = sent[0]
+    assert url == TOKEN_URI
+    assert data["code"] == "the-code" and data["grant_type"] == "authorization_code"
+    assert data["redirect_uri"] == "https://app.example/auth/callback"
+    answer = httpx.Response(200, json={"access_token": "at"})
+    assert GOOGLE.exchange_code("c").refresh_token is None  # a sign-in gets no refresh token
+
+    for bad, message in (
+        (httpx.Response(400, json={"error": "invalid_grant"}), "rejected"),
+        (httpx.Response(200, text="not json"), "unexpected"),
+        (httpx.Response(200, json={"no": "token"}), "unexpected"),
+        (httpx.Response(200, json=["a", "list"]), "unexpected"),
+    ):
+        answer = bad
+        with pytest.raises(OAuthError, match=message):
+            GOOGLE.exchange_code("c")
+    monkeypatch.setattr(httpx, "post", _down)
+    with pytest.raises(OAuthError, match="could not reach Google"):
+        GOOGLE.exchange_code("c")
+
+
+def test_google_userinfo(monkeypatch) -> None:
+    seen: list = []
+    answer = httpx.Response(200, json={"email": "a@example.com", "email_verified": True})
+
+    def fake_get(url, headers, timeout):
+        seen.append((url, headers))
+        return answer
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert GOOGLE.userinfo("at")["email"] == "a@example.com"
+    assert seen == [(USERINFO_URL, {"Authorization": "Bearer at"})]
+    for bad in (
+        httpx.Response(401),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json=["not", "an", "object"]),
+    ):
+        answer = bad
+        with pytest.raises(OAuthError, match="email"):
+            GOOGLE.userinfo("at")
+    monkeypatch.setattr(httpx, "get", _down)
+    with pytest.raises(OAuthError, match="could not reach Google"):
+        GOOGLE.userinfo("at")
