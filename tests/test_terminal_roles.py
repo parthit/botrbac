@@ -1,4 +1,4 @@
-"""Terminal, phase 2: patterns and per-person roles."""
+"""Terminal: patterns and per-person roles."""
 
 import pytest
 
@@ -114,6 +114,8 @@ def test_roles_pages(world, memstore, oauth) -> None:
     assert c.get("/terminal/roles/new").status_code == 200
     assert c.get("/terminal/roles/full").status_code == 200
     assert c.get("/terminal/roles/r_missing").status_code == 404
+    no_csrf = c.post("/terminal/roles/save", data={"name": "X", "patterns": "fs/*"})
+    assert no_csrf.status_code == 403
 
     token = dash.csrf(c, "/terminal/roles/new")
     r = c.post(
@@ -145,13 +147,6 @@ def test_roles_pages(world, memstore, oauth) -> None:
     role_id = listing.split('id="role-r_', 1)[1].split('"', 1)[0]
     c.post(f"/terminal/roles/r_{role_id}/delete", data={"csrf": token})
     assert "Reviewer" not in c.get("/terminal/roles").text
-
-
-def test_role_pages_need_csrf(world, memstore, oauth) -> None:
-    c = dash.client(terminal_app(world, memstore, oauth))
-    dash.login(c)
-    r = c.post("/terminal/roles/save", data={"name": "X", "patterns": "fs/*"})
-    assert r.status_code == 403
 
 
 def test_hand_typed_pattern_survives_an_edit(world, memstore, oauth) -> None:

@@ -13,7 +13,7 @@ from botrbac_cli.protect import refusal
 from botrbac_cli.queue import AuditQueue
 from tests import dash
 from tests.conftest import OWNER_EMAIL
-from tests.terminal_helpers import connect_terminal, terminal_app
+from tests.terminal_helpers import FakeApi, bearer, connect_terminal, stub_upstream, terminal_app
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +56,9 @@ def _call(tool: str, **tool_input) -> str:
         ("Bash", {"command": "cat ~/.config/botrbac/credentials.json"}),
         ("Read", {"file_path": "~/.config/botrbac/credentials.json"}),
         ("mcp__fs__write_file", {"path": "~/.claude/settings.json", "content": "{}"}),
+        # Switching the hook off another way.
+        ("Bash", {"command": "botrbac hooks remove claude-code --user"}),
+        ("Bash", {"command": "echo '{\"disableAllHooks\": true}' > x.json"}),
     ],
 )
 def test_protected_files_are_refused_even_with_full_access(tool, tool_input) -> None:
@@ -72,6 +75,7 @@ def test_protected_files_are_refused_even_with_full_access(tool, tool_input) -> 
         ("Grep", {"pattern": "botrbac", "path": "~/.claude"}),
         ("Edit", {"file_path": "src/app.py", "old_string": "a", "new_string": "b"}),
         ("Bash", {"command": "git status && gh pr list"}),
+        ("Read", {"file_path": "app/credentials.json"}),  # only botrbac's own is protected
     ],
 )
 def test_ordinary_calls_still_pass(tool, tool_input) -> None:
@@ -87,25 +91,17 @@ def test_custom_botrbac_home_is_protected(home, monkeypatch) -> None:
 
 def test_gateway_refuses_protected_paths() -> None:
     import anyio
-    from mcp import types
 
-    from botrbac_cli.gateway import Gateway, Upstream
-
-    class Session:
-        called = False
-
-        async def call_tool(self, name, arguments):
-            Session.called = True
-            return types.CallToolResult(content=[])
+    from botrbac_cli.gateway import Gateway
 
     gateway = Gateway(policy.Enforcer(), AuditQueue(), agent="t")
-    tool = types.Tool(name="write_file", inputSchema={"type": "object"})
-    gateway.add(Upstream("fs", session=Session(), tools=[tool]))  # type: ignore[arg-type]
+    upstream = stub_upstream("fs", "write_file")
+    gateway.add(upstream)
     result = anyio.run(gateway.call, "fs__write_file", {"path": "~/.claude/settings.json"})
     assert result.isError and "Blocked by Bot RBAC" in result.content[0].text
-    assert not Session.called
+    assert upstream.session.calls == []
     anyio.run(gateway.call, "fs__write_file", {"path": "notes.txt"})
-    assert Session.called
+    assert upstream.session.calls == [("write_file", {"path": "notes.txt"})]
 
 
 # ---- is the hook still there? ------------------------------------------------------
@@ -138,7 +134,7 @@ def test_missing_hook_shows_on_the_website(world, memstore, oauth) -> None:
     c = dash.client(app)
     dash.login(c)
     issued = connect_terminal(c)
-    headers = {"Authorization": f"Bearer {issued['access_token']}"}
+    headers = bearer(issued)
     c.post("/api/terminal/audit", json={"rows": [], "hooks": {"claude-code": "missing"}},
            headers=headers)  # fmt: skip
     (terminal,) = app.state.terminal.terminals.for_person(OWNER_EMAIL)
@@ -154,18 +150,9 @@ def test_sync_reports_hook_status() -> None:
     from botrbac_cli.sync import sync
 
     expect_hook("claude-code", True)
-    sent = []
-
-    class Api:
-        def send_audit(self, body):
-            sent.append(body)
-            return {}
-
-        def policy(self):
-            return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
-
-    sync(Api(), AuditQueue())
-    assert sent[0]["hooks"] == {"claude-code": "missing"}
+    api = FakeApi()
+    sync(api, AuditQueue())
+    assert api.bodies[0]["hooks"] == {"claude-code": "missing"}
 
 
 # ---- the signed role file ----------------------------------------------------------
@@ -194,9 +181,7 @@ def test_server_signs_policies_and_hands_out_the_key(world, memstore, oauth) -> 
     dash.login(c)
     issued = connect_terminal(c)
     assert issued["policy_key"]
-    body = c.get(
-        "/api/terminal/policy", headers={"Authorization": f"Bearer {issued['access_token']}"}
-    ).json()
+    body = c.get("/api/terminal/policy", headers=bearer(issued)).json()
     assert signing.verify(issued["policy_key"], body)
     body["role"]["patterns"] = ["*"]
     assert not signing.verify(issued["policy_key"], body)
@@ -208,19 +193,26 @@ def test_signed_policy_is_used() -> None:
     assert not check("claude-code", _call("Edit", file_path="notes.txt"), None, False)[0]
 
 
-def test_edited_policy_blocks_everything() -> None:
-    body = _pin_signed_policy()
+def _widen(body: dict) -> None:
     body["role"]["patterns"] = ["*"]  # an agent widening its own role
+
+
+def _strip_signature(body: dict) -> None:
+    body.pop("signature")
+
+
+def _widen_and_unpin(body: dict) -> None:
+    _widen(body)
+    state.write_json("credentials.json", {})  # removing the key does not switch signing off
+
+
+@pytest.mark.parametrize("tamper", [_widen, _strip_signature, _widen_and_unpin])
+def test_a_policy_changed_on_this_computer_blocks_everything(tamper) -> None:
+    body = _pin_signed_policy()
+    tamper(body)
     state.write_json("policy.json", {"policy": body, "fetched_at": time.time()})
     allowed, reason = check("claude-code", _call("Read", file_path="notes.txt"), None, False)
     assert not allowed and "changed on this computer" in reason
-
-
-def test_unsigned_policy_is_refused_once_a_key_is_pinned() -> None:
-    body = _pin_signed_policy()
-    body.pop("signature")
-    state.write_json("policy.json", {"policy": body, "fetched_at": time.time()})
-    assert not check("claude-code", _call("Read", file_path="notes.txt"), None, False)[0]
 
 
 def test_fetch_time_cannot_stretch_the_offline_grace() -> None:
@@ -238,9 +230,11 @@ def test_login_pins_the_key_and_refresh_keeps_it() -> None:
     api._save({**base, "policy_key": "KEY"})
     api._save(base)  # an answer without a key keeps the pinned one
     assert state.read_json("credentials.json", {})["policy_key"] == "KEY"
+    api._save({**base, "policy_key": "NEW"})  # a new server key replaces it
+    assert state.read_json("credentials.json", {})["policy_key"] == "NEW"
 
 
-# ---- paths through symlinks and `..`, and switching hooks off -------------------------
+# ---- paths through symlinks and `..` ---------------------------------------------------
 
 
 def test_symlink_to_protected_file_is_refused(home) -> None:
@@ -253,36 +247,6 @@ def test_symlink_to_protected_file_is_refused(home) -> None:
         ".claude", "./.claude"
     )
     assert not check("claude-code", _call("Edit", file_path=sneaky), None, False)[0]
-
-
-@pytest.mark.parametrize(
-    "command",
-    ["botrbac hooks remove claude-code --user", "echo '{\"disableAllHooks\": true}' > x.json"],
-)
-def test_switching_hooks_off_is_refused(command) -> None:
-    assert not check("claude-code", _call("Bash", command=command), None, False)[0]
-
-
-def test_other_credentials_files_can_be_read() -> None:
-    assert check("claude-code", _call("Read", file_path="app/credentials.json"), None, False)[0]
-
-
-def test_removing_the_pinned_key_does_not_switch_signing_off() -> None:
-    body = _pin_signed_policy()
-    body["role"]["patterns"] = ["*"]
-    state.write_json("policy.json", {"policy": body, "fetched_at": time.time()})
-    state.write_json("credentials.json", {})
-    assert not check("claude-code", _call("Read", file_path="notes.txt"), None, False)[0]
-
-
-def test_a_new_server_key_replaces_the_pinned_one() -> None:
-    from botrbac_cli.api import Api
-
-    api = Api("https://example.test")
-    base = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
-    api._save({**base, "policy_key": "OLD"})
-    api._save({**base, "policy_key": "NEW"})
-    assert state.read_json("credentials.json", {})["policy_key"] == "NEW"
 
 
 def test_read_looking_names_that_write_are_not_read_only() -> None:

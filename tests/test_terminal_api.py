@@ -1,4 +1,4 @@
-"""Terminal, phase 4: policy and audit API, activity page and export."""
+"""Terminal: policy and audit API, activity page and export."""
 
 import uuid
 
@@ -8,7 +8,7 @@ from scoped_drive_mcp.store import MemoryStore
 from scoped_drive_mcp.terminal.ingest import BATCH_MAX, TerminalActivity, clean_row
 from tests import dash
 from tests.conftest import OWNER_EMAIL
-from tests.terminal_helpers import connect_terminal, terminal_app
+from tests.terminal_helpers import bearer, connect_terminal, terminal_app
 
 NOW = 1_800_000_000.0
 
@@ -25,10 +25,6 @@ def _row(**over):
     }
     row.update(over)
     return row
-
-
-def _auth(issued):
-    return {"Authorization": f"Bearer {issued['access_token']}"}
 
 
 def test_clean_row_caps_and_rejects() -> None:
@@ -58,12 +54,8 @@ def test_dedupe_and_batch_limit() -> None:
     assert log.add("a@x.com", "t_1", "laptop", rows)["duplicates"] == 2
     assert len(log.recent("a@x.com")) == 2
     assert log.recent("b@x.com") == []
-    try:
+    with pytest.raises(ValueError):
         log.add("a@x.com", "t_1", "laptop", [_row()] * (BATCH_MAX + 1))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected a batch limit")
 
 
 def test_session_tree() -> None:
@@ -103,12 +95,12 @@ def test_policy_and_audit_over_http(world, memstore, oauth) -> None:
     assert c.get("/api/terminal/policy", headers={"Authorization": "Bearer x"}).status_code == 401
     issued = connect_terminal(c, role_id="read-only")
 
-    policy = c.get("/api/terminal/policy", headers=_auth(issued)).json()
+    policy = c.get("/api/terminal/policy", headers=bearer(issued)).json()
     assert policy["email"] == OWNER_EMAIL
     assert policy["role"]["id"] == "read-only"
     assert {r["id"] for r in policy["roles"]} >= {"read-only", "full", "none"}
     version = policy["version"]
-    assert c.get("/api/terminal/policy", headers=_auth(issued)).json()["version"] == version
+    assert c.get("/api/terminal/policy", headers=bearer(issued)).json()["version"] == version
 
     sent = c.post(
         "/api/terminal/audit",
@@ -118,10 +110,10 @@ def test_policy_and_audit_over_http(world, memstore, oauth) -> None:
             "unguarded": ["notion"],
             "queued": 3,
         },
-        headers=_auth(issued),
+        headers=bearer(issued),
     )
     assert sent.json() == {"accepted": 2, "duplicates": 0, "rejected": 0}
-    bad = c.post("/api/terminal/audit", json={"rows": "x"}, headers=_auth(issued))
+    bad = c.post("/api/terminal/audit", json={"rows": "x"}, headers=bearer(issued))
     assert bad.status_code == 400
 
     page = c.get("/terminal/activity").text
@@ -141,7 +133,7 @@ def test_policy_and_audit_over_http(world, memstore, oauth) -> None:
     (terminal,) = app.state.terminal.terminals.for_person(OWNER_EMAIL)
     token = dash.csrf(c, "/terminal")
     c.post(f"/terminal/t/{terminal.id}/role", data={"csrf": token, "role_id": "full"})
-    changed = c.get("/api/terminal/policy", headers=_auth(issued)).json()
+    changed = c.get("/api/terminal/policy", headers=bearer(issued)).json()
     assert changed["role"]["id"] == "full" and changed["version"] != version
 
 
@@ -149,13 +141,13 @@ def test_csv_export_neutralizes_formulas(world, memstore, oauth) -> None:
     c = dash.client(terminal_app(world, memstore, oauth))
     dash.login(c)
     issued = connect_terminal(c)
-    c.post(
-        "/api/terminal/audit",
-        json={"rows": [_row(reason="@SUM(A1)", agent="=cmd")]},
-        headers=_auth(issued),
-    )
+    rows = [_row(reason="@SUM(A1)", agent="=cmd"), _row(reason="", agent="-cmd", role="")]
+    c.post("/api/terminal/audit", json={"rows": rows}, headers=bearer(issued))
     text = c.get("/terminal/activity/export").text
     assert ",=cmd" not in text and ",@SUM" not in text
+    (dash_row,) = [line for line in text.splitlines() if "-cmd" in line]
+    assert ",'-cmd," in dash_row
+    assert "'" not in dash_row.replace("'-cmd", "")  # empty cells stay empty
 
 
 def test_activity_is_per_person(world, memstore, oauth) -> None:
@@ -166,26 +158,12 @@ def test_activity_is_per_person(world, memstore, oauth) -> None:
     assert "x/secret" not in c.get("/terminal/activity").text
 
 
-def test_csv_export_leaves_empty_cells_empty(world, memstore, oauth) -> None:
-    c = dash.client(terminal_app(world, memstore, oauth))
-    dash.login(c)
-    issued = connect_terminal(c)
-    c.post(
-        "/api/terminal/audit",
-        json={"rows": [_row(reason="", agent="-cmd", role="")]},
-        headers=_auth(issued),
-    )
-    lines = c.get("/terminal/activity/export").text.splitlines()
-    assert ",'-cmd," in lines[1]
-    assert "'" not in lines[1].replace("'-cmd", "")  # empty cells stay empty
-
-
 def test_audit_body_limits(world, memstore, oauth, monkeypatch) -> None:
     from scoped_drive_mcp.terminal import feature
 
     c = dash.client(terminal_app(world, memstore, oauth))
     dash.login(c)
-    headers = _auth(connect_terminal(c))
+    headers = bearer(connect_terminal(c))
     odd = c.post(
         "/api/terminal/audit",
         content=b"{}",
