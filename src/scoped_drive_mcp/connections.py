@@ -67,11 +67,12 @@ NOTION = Connection(
     scopes=(),
     required_scope="",
     allowed_scopes=frozenset(),
-    summary="Only the Notion pages you pick, and only to read.",
+    summary="Only the Notion pages you pick: to read, and to add new pages under them.",
     disclosure=(
         "Notion will ask which pages to share with Bot RBAC. Bot RBAC can read only those "
-        "pages and what is inside them, and never edits Notion. An assistant still reaches "
-        "only the pages you allow on Files."
+        "pages and what is inside them. An assistant you let edit can also add a new page "
+        "under one. Bot RBAC never changes or deletes existing Notion pages. An assistant "
+        "still reaches only the pages you allow on Files."
     ),
 )
 

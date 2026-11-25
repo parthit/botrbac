@@ -7,7 +7,7 @@
 {% if not notion_connected %}
 <div class="card empty" id="notion-connect">
   <h2>Notion isn’t connected</h2>
-  <p>Connect Notion, and Notion will ask which pages to share with Bot RBAC. Then come back here and <b>Allow</b> the ones your assistants may read. Bot RBAC never edits Notion.</p>
+  <p>Connect Notion, and Notion will ask which pages to share with Bot RBAC. Then come back here and <b>Allow</b> the ones your assistants may read. Bot RBAC never changes or deletes your existing Notion pages.</p>
   <form method="post" action="/connect/notion">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="next" value="/files?tab=notion">
@@ -15,7 +15,7 @@
   </form>
 </div>
 {% else %}
-<p class="muted lead">Your assistants can read the Notion pages and databases you <b>Allow</b> here, and everything inside them. They can’t edit Notion.{% if workspace %} Workspace: <b>{{ workspace }}</b>.{% endif %}</p>
+<p class="muted lead">Your assistants can read the Notion pages and databases you <b>Allow</b> here, and everything inside them. Assistants you let edit can also add new pages under them. None can change or delete existing pages.{% if workspace %} Workspace: <b>{{ workspace }}</b>.{% endif %}</p>
 
 <h2>Allowed <span class="count">{{ allowed | length }}</span></h2>
 {% if allowed %}

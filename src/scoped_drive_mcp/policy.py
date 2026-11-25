@@ -34,6 +34,9 @@ GUEST_TOOLS: frozenset[str] = frozenset(
 
 # Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
 NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
+# Creating a new page under an allowed Notion page (notion.py). Never edits or deletes one.
+# Like create_doc, only for a connection allowed to edit.
+NOTION_WRITE_TOOLS: frozenset[str] = frozenset({"notion_create_page"})
 
 # Reading the person's own OneDrive, limited to what they allowed (onedrive.py). Read-only.
 ONEDRIVE_TOOLS: frozenset[str] = frozenset(
@@ -94,6 +97,7 @@ DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
 
 EDITOR_TOOLS: frozenset[str] = (
     VIEWER_TOOLS
+    | NOTION_WRITE_TOOLS
     | GUEST_WRITE_TOOLS
     | DROP_TOOLS
     | UPLOAD_TOOLS
@@ -122,6 +126,7 @@ _AUDITED_ID_ARGS = (
     "request_id",
     "owner",
     "page_id",
+    "parent_page_id",
     "upload_id",
 )
 
@@ -279,6 +284,10 @@ def require(
                 fid = result.get("id")
                 if isinstance(fid, str) and not ids.get("file_id"):
                     ids["file_id"] = fid
+            if tool == "notion_create_page" and isinstance(result, dict):
+                # The new page, next to the parent it was asked for (parent_page_id).
+                pid = result.get("id")
+                ids["page_id"] = pid if isinstance(pid, str) else None
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 

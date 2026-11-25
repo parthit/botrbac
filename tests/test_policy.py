@@ -67,7 +67,9 @@ ONEDRIVE_READ_TOOLS = {
     "onedrive_download_file",
     "onedrive_search",
 }
-OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS
+# A new page under an allowed Notion page: editor and up, like create_doc.
+NOTION_WRITE_TOOLS = {"notion_create_page"}
+OPTIONAL_TOOLS = NOTION_READ_TOOLS | NOTION_WRITE_TOOLS | ONEDRIVE_READ_TOOLS
 UPLOAD_TOOLS = {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 SHARED_WRITE_TOOLS = {
     "create_shared_doc",
@@ -104,6 +106,7 @@ EXPECTED = {
         "rename_file",
     }
     | SHARED_WRITE_TOOLS
+    | NOTION_WRITE_TOOLS
     | DROP_SEND_TOOLS
     | UPLOAD_TOOLS,
     Role.ADMIN: set(VALID_ARGS)
@@ -111,6 +114,7 @@ EXPECTED = {
     | SHARED_TOOLS
     | SHARED_WRITE_TOOLS
     | NOTION_READ_TOOLS
+    | NOTION_WRITE_TOOLS
     | ONEDRIVE_READ_TOOLS
     | DROP_READ_TOOLS
     | DROP_SEND_TOOLS

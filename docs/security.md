@@ -292,7 +292,29 @@ allowed item or the top of the workspace; anything else, including items that do
 same `not_allowed` answer (including items Notion answers 403 `restricted_resource` for). Search results
 pass the same check. A copy of a synced block inside an allowed page shows content stored elsewhere, so it
 is read only when its original block is itself under an allowed item. A trashed allowed page does not keep
-its children readable. The tools are read-only and page text is wrapped in untrusted-content markers.
+its children readable. Page text is wrapped in untrusted-content markers.
+
+The only write is `notion_create_page`, which adds a new page and never edits, appends to, moves or
+deletes an existing one. Three things must all hold:
+
+- **Role.** It is in the `editor` and `admin` tool sets only, next to `create_doc`. A read-only
+  connection is not offered it and is refused with `Permission denied`.
+- **Parent.** The parent is fetched fresh and must pass the same parent-chain check as a read
+  (`NotionAccess.covering`): an allowed page or a page under one, not trashed. Otherwise the answer is
+  the same `not_allowed` a read gets, and Notion is not asked to create anything. Databases are refused
+  as parents.
+- **Notion's capability.** Notion creates pages only for a connection with **Insert content**. Bot RBAC
+  does not request or change capabilities; a connection without it gets Notion's 403, reported as
+  `notion_cannot_create` with what the person has to change. An operator who ticks **Insert content**
+  is making page creation possible for every `editor` and `admin` connection of people who connected
+  Notion; leave it off to keep Notion read-only.
+
+The body is built by the server from plain text into a fixed set of simple blocks holding plain text
+only (no links, mentions, embeds or child pages); callers cannot pass block JSON. Title (200
+characters), content (20,000 characters) and block count (100) are capped, and one call is one request
+to Notion with no retry. The audit row records the parent asked for and the new page's id, never the
+title or text. A prompt-injected assistant with an editing role could still create unwanted pages under
+allowed pages; it cannot overwrite or remove anything, and each page shows on Activity.
 The Notion token is encrypted with `ENCRYPTION_KEY` and names the account it belongs to. The connect
 flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
 
