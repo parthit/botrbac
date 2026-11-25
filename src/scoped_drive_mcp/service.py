@@ -23,7 +23,8 @@ from .drive_client import (
     DriveExportTooLargeError,
     DriveNotFoundError,
 )
-from .extract import ExtractError, document_kind, extract_text, xlsx_tabs
+from .extract import Extracted, ExtractError, document_kind, extract, read_xlsx_tabs
+from .extract_worker import ExtractBusy, extract_isolated, xlsx_tabs_isolated
 from .scope import (
     FileRef,
     InvalidInputError,
@@ -34,11 +35,29 @@ from .scope import (
 )
 
 META_FIELDS = (
-    "id,name,mimeType,parents,size,createdTime,modifiedTime,webViewLink,trashed,properties"
+    "id,name,mimeType,parents,size,createdTime,modifiedTime,webViewLink,trashed,"
+    "properties,appProperties"
 )
-# Set on files a paired person's assistant writes into a folder shared with them.
+# Set on files a paired person's assistant writes into a folder shared with them. They are
+# written to `appProperties`, which only this app can see or change. Older versions wrote
+# them to `properties`, which anyone who can edit the file can change, so a mark found there
+# is still honoured, but only to flag a file as untrusted, never to clear that flag.
 WRITER_PROPERTY = "botrbac_writer"
 RENAMER_PROPERTY = "botrbac_renamed_by"
+
+
+def peer_mark(meta: dict[str, Any], key: str) -> str | None:
+    """Who a peer mark names: the app's private mark first, else a legacy `properties` one.
+
+    Either one makes the file untrusted. A legacy mark cannot override the private one, so
+    an editor cannot change who a file is attributed to once this app has marked it."""
+    for source in ("appProperties", "properties"):
+        value = (meta.get(source) or {}).get(key)
+        if value:
+            return str(value)
+    return None
+
+
 PUBLIC_META_KEYS = (
     "id",
     "name",
@@ -55,6 +74,39 @@ SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SLIDES_MIME = "application/vnd.google-apps.presentation"
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+PDF_MIME = "application/pdf"
+
+# export_file and save_export: the formats Drive can export each Google type to, by the
+# short name an assistant passes (also the new file's extension).
+EXPORT_CHOICES: dict[str, dict[str, str]] = {
+    DOC_MIME: {
+        "pdf": PDF_MIME,
+        "docx": DOCX_MIME,
+        "odt": "application/vnd.oasis.opendocument.text",
+        "rtf": "application/rtf",
+        "txt": "text/plain",
+        "md": "text/markdown",
+        "html": "application/zip",
+        "epub": "application/epub+zip",
+    },
+    SHEET_MIME: {
+        "pdf": PDF_MIME,
+        "xlsx": XLSX_MIME,
+        "ods": "application/vnd.oasis.opendocument.spreadsheet",
+        "csv": "text/csv",
+        "tsv": "text/tab-separated-values",
+    },
+    SLIDES_MIME: {
+        "pdf": PDF_MIME,
+        "pptx": PPTX_MIME,
+        "odp": "application/vnd.oasis.opendocument.presentation",
+        "txt": "text/plain",
+    },
+}
+# Drive refuses to export anything over 10 MB, so a saved export is never larger.
+EXPORT_SAVE_CAP = 10 * 1024 * 1024
 
 # What read_file asks Drive for. A Sheet's CSV export holds only its first tab, so read_file
 # exports the workbook (every tab) and falls back to this CSV only when that cannot be read.
@@ -180,13 +232,26 @@ class DriveService:
         guard: ScopeGuard,
         settings: Settings,
         writer: Callable[[], str | None] | None = None,
+        created_note: str = "Created by {who}'s assistant through Bot RBAC.",
     ):
         self.drive = drive
         self.guard = guard
         self.max_bytes = settings.max_bytes
         self.max_chars = settings.max_chars
+        # Read Office and PDF files in a resource-limited child process (extract_worker).
+        self.extract_isolation = settings.extract_isolation
+        self.extract_memory_mb = settings.extract_memory_mb
         # For the paired-person write service: who is writing (stamped on what they write).
         self.writer = writer
+        # The Drive description put on a new file written for a paired person.
+        self.created_note = created_note
+        # Called after every check of a write has passed and right before the Drive call
+        # (the paired-person service charges its hourly quota here). It may raise to stop it.
+        self.before_write: Callable[[], None] | None = None
+
+    def _about_to_write(self) -> None:
+        if self.before_write is not None:
+            self.before_write()
 
     def _fetch_meta(self, file_id: str) -> dict[str, Any]:
         validate_drive_id(file_id)
@@ -227,13 +292,13 @@ class DriveService:
         A file a paired person's assistant wrote says so, wherever it is listed: its name
         and content are theirs, so they are untrusted data for whoever reads them."""
         out = public_meta(meta)
-        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        writer = peer_mark(meta, WRITER_PROPERTY)
         if writer:
-            out["written_by"] = str(writer).removeprefix("guest:")
+            out["written_by"] = writer.removeprefix("guest:")
             out["content_trust"] = "untrusted_peer"
-        renamer = (meta.get("properties") or {}).get(RENAMER_PROPERTY)
+        renamer = peer_mark(meta, RENAMER_PROPERTY)
         if renamer:
-            out["renamed_by"] = str(renamer).removeprefix("guest:")
+            out["renamed_by"] = renamer.removeprefix("guest:")
             out["name_trust"] = "untrusted_peer"
         if "parents" not in out:
             return out
@@ -333,12 +398,12 @@ class DriveService:
         meta = self._get_in_scope(file_id)
         mime = meta.get("mimeType", "")
         result: dict[str, Any] = {"file": self._public(meta), "content": None, "truncated": False}
-        writer = (meta.get("properties") or {}).get(WRITER_PROPERTY)
+        writer = peer_mark(meta, WRITER_PROPERTY)
         if writer:
             # A paired person's assistant wrote this into a folder you shared: its text is
             # theirs, so it is untrusted data for whoever reads it, you included.
             result["content_trust"] = "untrusted_peer"
-            result["written_by"] = str(writer).removeprefix("guest:")
+            result["written_by"] = writer.removeprefix("guest:")
 
         if mime == FOLDER_MIME:
             raise InvalidInputError("this is a folder; use list_folder")
@@ -400,7 +465,13 @@ class DriveService:
         if data is None:
             return None
         try:
-            tabs = xlsx_tabs(data, self.max_chars)
+            tabs, partial = self._workbook_tabs(data)
+        except ExtractBusy as exc:
+            # Nothing is wrong with the Sheet; reading it again shortly should work, and a
+            # first-tab fallback would hide that.
+            logger.info("sheet %s waited too long for an extraction slot", file_id)
+            result["note"] = str(exc)
+            return result
         except Exception as exc:  # never log cell contents, only the failure's type
             logger.info(
                 "sheet %s workbook read failed (%s); reading its first tab",
@@ -423,6 +494,11 @@ class DriveService:
             text = text[: self.max_chars]
             result["truncated"] = True
             result["note"] = f"text cut off in tab {cut_in!r}; later tabs are not shown"
+        elif partial:
+            result["truncated"] = True
+            result["note"] = (
+                "the workbook is too large or complex to read whole; later rows are missing"
+            )
         result["content"] = text  # xlsx_tabs already strips NUL characters
         return result
 
@@ -454,12 +530,43 @@ class DriveService:
 
     def _read_extracted(self, file_id: str, result: dict[str, Any], kind: str) -> dict[str, Any]:
         data = self.drive.download(file_id, self.max_bytes + 1)
+        return self._extracted_text(data, kind, result)
+
+    def text_from_bytes(self, data: bytes, mime: str, name: str) -> dict[str, Any]:
+        """read_file's text for bytes that are not in Drive (a file someone sent and that
+        is held for a while): `content` (or None) plus `truncated` and an optional `note`."""
+        result: dict[str, Any] = {"content": None, "truncated": False}
+        kind = document_kind(mime, name)
+        if kind is not None:
+            return self._extracted_text(data, kind, result)
+        if not is_text_like(mime, name):
+            result["note"] = f"binary file ({mime or 'unknown type'}); text not available"
+            return result
+        if len(data) > self.max_bytes:
+            data = data[: self.max_bytes]
+            result["truncated"] = True
+        if b"\x00" in data[:8192]:
+            result["note"] = "file looks binary; content not returned"
+            return result
+        text = data.decode("utf-8", errors="replace")
+        if len(text) > self.max_chars:
+            text = text[: self.max_chars]
+            result["truncated"] = True
+        result["content"] = text
+        return result
+
+    def _extracted_text(self, data: bytes, kind: str, result: dict[str, Any]) -> dict[str, Any]:
         source_truncated = len(data) > self.max_bytes
         if source_truncated:
             data = data[: self.max_bytes]
             result["truncated"] = True
         try:
-            text = extract_text(data, kind, char_limit=self.max_chars)
+            extracted = self._extract(data, kind)
+        except ExtractBusy as exc:
+            # Nothing is wrong with the file; reading it again shortly should work.
+            logger.info("text extraction of a %s waited too long for a slot", kind)
+            result["note"] = str(exc)
+            return result
         except ExtractError as exc:
             logger.info("text extraction failed for %s: %s", kind, exc)
             if source_truncated:
@@ -474,6 +581,7 @@ class DriveService:
             logger.exception("text extraction failed for %s", kind)
             result["note"] = "text could not be extracted. Use download_file for the bytes."
             return result
+        text = extracted.text
         if not text.strip():
             result["note"] = (
                 "no extractable text (the file may be a scan or image-only). "
@@ -483,9 +591,29 @@ class DriveService:
         if len(text) > self.max_chars:
             text = text[: self.max_chars]
             result["truncated"] = True
+        elif extracted.truncated:
+            result["truncated"] = True
+            result["note"] = (
+                "the file is too large or complex to read whole; only the start of its text "
+                "is shown. Use download_file for the bytes."
+            )
         result["content"] = text
         result["extracted_as"] = "text/plain"
         return result
+
+    def _extract(self, data: bytes, kind: str) -> Extracted:
+        if self.extract_isolation:
+            return extract_isolated(
+                data, kind, char_limit=self.max_chars, memory_mb=self.extract_memory_mb
+            )
+        return extract(data, kind, char_limit=self.max_chars)
+
+    def _workbook_tabs(self, data: bytes) -> tuple[list[tuple[str, str]], bool]:
+        if self.extract_isolation:
+            return xlsx_tabs_isolated(
+                data, char_limit=self.max_chars, memory_mb=self.extract_memory_mb
+            )
+        return read_xlsx_tabs(data, self.max_chars)
 
     def download_file(self, file_id: str) -> dict[str, Any]:
         """Raw bytes for a file inside the share. Google Workspace files have no media body."""
@@ -515,6 +643,79 @@ class DriveService:
         result["byte_count"] = len(data)
         return result
 
+    def _export_target(self, file_id: str, fmt: Any) -> tuple[dict[str, Any], str, str]:
+        """(meta, short format, export mime) for a Google file in scope."""
+        meta = self._get_in_scope(file_id)
+        mime = meta.get("mimeType", "")
+        choices = EXPORT_CHOICES.get(mime)
+        if choices is None:
+            if mime == FOLDER_MIME:
+                raise InvalidInputError("this is a folder; use list_folder")
+            raise InvalidInputError(
+                "only Google Docs, Sheets and Slides can be exported; use download_file for "
+                "other files"
+            )
+        if not isinstance(fmt, str) or fmt.strip().lower().lstrip(".") not in choices:
+            raise InvalidInputError(f"format must be one of: {', '.join(choices)}")
+        fmt = fmt.strip().lower().lstrip(".")
+        return meta, fmt, choices[fmt]
+
+    def _export_bytes(self, file_id: str, export_mime: str) -> bytes:
+        try:
+            return self.drive.export(file_id, export_mime)
+        except DriveExportTooLargeError:
+            raise InvalidInputError(
+                "file is over Google Drive's 10 MB export limit in that format"
+            ) from None
+
+    def export_file(self, file_id: str, format: str = "pdf") -> dict[str, Any]:
+        """A Google Doc, Sheet or Slides exported by Drive (PDF, Office and other formats),
+        as base64 under the same cap as download_file. A larger export returns no bytes:
+        save_export writes it to Drive instead."""
+        meta, fmt, export_mime = self._export_target(file_id, format)
+        data = self._export_bytes(file_id, export_mime)
+        limit = min(self.max_bytes, DOWNLOAD_BYTE_CAP)
+        result: dict[str, Any] = {
+            "file": self._public(meta),
+            "format": fmt,
+            "mime_type": export_mime,
+            "byte_count": len(data),
+            "content_base64": None,
+        }
+        if len(data) > limit:
+            # Part of a PDF or an Office file is not a usable file, so none is returned.
+            result["too_large"] = True
+            result["note"] = (
+                f"the export is {len(data)} bytes, over the {limit}-byte limit for returned "
+                "bytes; use save_export to save it in Drive"
+            )
+            return result
+        result["content_base64"] = base64.b64encode(data).decode("ascii")
+        return result
+
+    def save_export(
+        self,
+        file_id: str,
+        format: str = "pdf",
+        parent_id: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Export a Google Doc, Sheet or Slides and save the result as a new file. Without
+        parent_id it goes next to the original, when that folder is in scope."""
+        meta, fmt, export_mime = self._export_target(file_id, format)
+        if name is None:
+            base = str(meta.get("name") or "Untitled")
+            name = f"{base[: MAX_NAME_LEN - len(fmt) - 1]}.{fmt}"
+        name = validate_name(name)
+        if not parent_id:
+            in_scope = self._public(meta).get("parents") or []
+            parent_id = in_scope[0] if in_scope else None
+        # Check where it goes before asking Drive for the export.
+        parent_id = self.resolve_parent(parent_id)
+        data = self._export_bytes(file_id, export_mime)
+        created = self.upload_bytes(name, export_mime, data, parent_id, max_bytes=EXPORT_SAVE_CAP)
+        return {**created, "exported_from": file_id, "format": fmt, "byte_count": len(data)}
+
     # ---- editor tools ----------------------------------------------------
 
     def _create(
@@ -524,20 +725,26 @@ class DriveService:
         mime: str | None,
         parent_id: str | None,
     ) -> dict[str, Any]:
+        parent = self.resolve_parent(parent_id)
+        metadata = {**metadata, "parents": [parent], **self._stamp(created=True)}
+        self._about_to_write()
+        created = self.drive.create(metadata, content, mime, fields=META_FIELDS)
+        ref = FileRef.from_api(created)
+        if ref.is_folder:
+            self.guard.remember(ref)
+            self.guard.invalidate()
+        return self._public(created, {parent: True})
+
+    def resolve_parent(self, parent_id: str | None) -> str:
+        """The folder a create goes to, after the scope check: parent_id, or the default
+        when there is only one place it could go. Writes nothing."""
         if not parent_id:
             parent_id = self.guard.default_parent()
             if parent_id is None:
                 raise InvalidInputError(
                     "parent_id is required; call list_folder to find a folder you may use"
                 )
-        parent = self.guard.assert_parent_in_scope(parent_id)
-        metadata = {**metadata, "parents": [parent.id], **self._stamp(created=True)}
-        created = self.drive.create(metadata, content, mime, fields=META_FIELDS)
-        ref = FileRef.from_api(created)
-        if ref.is_folder:
-            self.guard.remember(ref)
-            self.guard.invalidate()
-        return self._public(created, {parent.id: True})
+        return self.guard.assert_parent_in_scope(parent_id).id
 
     def _stamp(self, created: bool = False) -> dict[str, Any]:
         """Metadata that records who wrote a file, when this service writes for a paired
@@ -545,9 +752,11 @@ class DriveService:
         who = self.writer() if self.writer is not None else None
         if not who:
             return {}
-        stamp: dict[str, Any] = {"properties": {WRITER_PROPERTY: f"guest:{who}"}}
+        # appProperties: only this app can read or change it, so other editors of the file
+        # cannot remove the mark or put someone else's name in it.
+        stamp: dict[str, Any] = {"appProperties": {WRITER_PROPERTY: f"guest:{who}"}}
         if created:
-            stamp["description"] = f"Created by {who}'s assistant through Bot RBAC."
+            stamp["description"] = self.created_note.format(who=who)
         return stamp
 
     def create_folder(self, name: str, parent_id: str | None = None) -> dict[str, Any]:
@@ -569,12 +778,44 @@ class DriveService:
         content_base64: str | None = None,
         parent_id: str | None = None,
     ) -> dict[str, Any]:
+        name, mime_type, data = self.upload_payload(name, mime_type, content_text, content_base64)
+        return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
+
+    def upload_bytes(
+        self,
+        name: str,
+        mime_type: str,
+        data: bytes,
+        parent_id: str | None = None,
+        *,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        """upload_file for bytes already here (a file someone sent), with its own size
+        limit: a file sent from the dashboard may be larger than MAX_BYTES."""
+        name, mime_type = self.check_upload_meta(name, mime_type)
+        if len(data) > max_bytes:
+            raise InvalidInputError(f"content is larger than the {max_bytes}-byte limit")
+        return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
+
+    def check_upload_meta(self, name: str, mime_type: str) -> tuple[str, str]:
+        """upload_file's checks on a file's name and type: (name, mime)."""
         name = validate_name(name)
         if not isinstance(mime_type, str) or not _MIME_RE.fullmatch(mime_type.strip()):
             raise InvalidInputError("mime_type must look like type/subtype")
         mime_type = mime_type.strip()
         if mime_type.lower().startswith(GOOGLE_APPS_PREFIX):
             raise InvalidInputError("use create_doc or create_folder for Google Workspace types")
+        return name, mime_type
+
+    def upload_payload(
+        self,
+        name: str,
+        mime_type: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+    ) -> tuple[str, str, bytes]:
+        """upload_file's checks on its input, without a Drive call: (name, mime, bytes)."""
+        name, mime_type = self.check_upload_meta(name, mime_type)
         if (content_text is None) == (content_base64 is None):
             raise InvalidInputError("provide exactly one of content_text or content_base64")
         if content_text is not None:
@@ -590,7 +831,7 @@ class DriveService:
                 raise InvalidInputError("content_base64 is not valid base64") from None
             if len(data) > self.max_bytes:
                 raise InvalidInputError(f"content is larger than the {self.max_bytes}-byte limit")
-        return self._create({"name": name, "mimeType": mime_type}, data, mime_type, parent_id)
+        return name, mime_type, data
 
     def update_file_content(self, file_id: str, content: str) -> dict[str, Any]:
         meta = self._fetch_meta(file_id)
@@ -608,6 +849,7 @@ class DriveService:
             upload_mime = mime or "text/plain"
         else:
             raise InvalidInputError("binary files cannot be updated with text content")
+        self._about_to_write()
         updated = self.drive.update(
             file_id, self._stamp() or None, data, upload_mime, fields=META_FIELDS
         )
@@ -621,18 +863,28 @@ class DriveService:
         metadata: dict[str, Any] = {"name": new_name}
         who = self.writer() if self.writer is not None else None
         if who:
-            metadata["properties"] = {RENAMER_PROPERTY: f"guest:{who}"}
-        elif (meta.get("properties") or {}).get(RENAMER_PROPERTY):
-            # The owner's own assistant chose this name, so it is no longer a peer's.
-            # Drive deletes a property that is set to null.
-            metadata["properties"] = {RENAMER_PROPERTY: None}
+            metadata["appProperties"] = {RENAMER_PROPERTY: f"guest:{who}"}
+        else:
+            # The owner's own assistant chose this name, so it is no longer a peer's. Both
+            # the private mark and a legacy one are cleared. Drive deletes a property that
+            # is set to null.
+            for source in ("appProperties", "properties"):
+                if (meta.get(source) or {}).get(RENAMER_PROPERTY):
+                    metadata[source] = {RENAMER_PROPERTY: None}
+        self._about_to_write()
         updated = self.drive.update(file_id, metadata, None, None, fields=META_FIELDS)
         return self._public(updated)
 
     # ---- admin tools -----------------------------------------------------
 
     def trash_file(self, file_id: str) -> dict[str, Any]:
-        self._get_in_scope(file_id, allow_root=False)
+        meta = self._get_in_scope(file_id, allow_root=False)
+        if meta.get("mimeType") == FOLDER_MIME:
+            # Trashing a folder trashes everything in it, including items the owner granted
+            # that sit further down (an allowlisted file inside a subfolder of an
+            # allowlisted folder). Those are protected like the granted items themselves.
+            self.guard.assert_not_above_allowed(file_id)
+        self._about_to_write()
         updated = self.drive.update(file_id, {"trashed": True}, None, None, fields=META_FIELDS)
         self.guard.invalidate(file_id)
         return {**self._public(updated), "trashed": bool(updated.get("trashed", True))}

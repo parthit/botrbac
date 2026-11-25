@@ -11,7 +11,7 @@ prompt yours. Messages only go between one person's own assistants.
 A same-account link pairs two assistants of one person (say Grok and Claude, both
 signed in with the same Google account). Its sides are OAuth grants, not emails: mail
 is addressed to `email#grant_id`, so each assistant has its own inbox. The human
-approves it once. `self_pairing` (see flags.py) can turn the feature off.
+approves it once.
 """
 
 import hashlib
@@ -31,8 +31,18 @@ from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .store import KeyValueStore, parse_inbox_token
-from .wake import SCHEMES, WakeSettings, approve_url, check_scheme_target, deliver, hint, seal
+from .store import KeyValueStore, parse_inbox_token, purpose_fernet
+from .wake import (
+    SCHEMES,
+    WakeSettings,
+    approve_url,
+    check_scheme_target,
+    deliver,
+    hint,
+    open_secret,
+    record_slot,
+    seal,
+)
 
 HOUR = 3600
 DAY = 24 * HOUR
@@ -54,7 +64,6 @@ _INJECTION = re.compile(
     re.IGNORECASE,
 )
 
-SELF_PAIRING_OFF = "Pairing your own assistants is turned off for your organisation."
 PEER_MAIL_OFF = (
     "Messages only go between your own assistants. A pairing with another person shares "
     "documents, not messages: put what they need on your Sharing list instead."
@@ -133,18 +142,22 @@ class Mailbox:
         clock: Any = None,
         encryption_key: str | None = None,
         wake: WakeSettings | None = None,
-        self_pairing: Callable[[str], bool] | None = None,
         strict: bool = False,
     ) -> None:
         self.store = store
         # REQUIRE_SIGNED_RECORDS is on: an approval has to name the person who joined.
         self.strict = strict
-        # Whether this person may pair two of their own assistants (Edge Config switch).
-        self.self_pairing = self_pairing or (lambda _email: True)
         self.base_url = base_url.rstrip("/")
         self.clock = clock or time.time
         self._lock = threading.Lock()
-        self._fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
+        # Mail has its own key, derived from ENCRYPTION_KEY. The Drive sign-in vault uses
+        # ENCRYPTION_KEY itself, so with one shared key a message body swapped in the
+        # store for a vault record would be decrypted and shown, and a message could be
+        # written that the vault accepts.
+        self._fernet = purpose_fernet(encryption_key, "mailbox") if encryption_key else None
+        # Mail saved before that was encrypted with ENCRYPTION_KEY itself. It is still
+        # read until it expires (MESSAGE_TTL), see `_open_body`.
+        self._legacy_fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
         self.wake = wake or WakeSettings()
         # Called with (a, b) when two people stop being paired, so each person's Sharing
         # list stops naming the other: re-pairing later must not bring that access back.
@@ -528,8 +541,6 @@ class Mailbox:
                 status=status,
             )
         if link.get("same_account"):
-            if not self.self_pairing(you):
-                raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
             # One person, one click: approving covers both of their assistants.
             for both in ("a", "b"):
                 self.store.hset(f"bridge:appr:{link['link_id']}", both, self._approval(link, peer))
@@ -565,6 +576,9 @@ class Mailbox:
         raise MailboxError("internal_error", "Could not create an invite. Try again.")
 
     def _redeem(self, you: str, code: str) -> dict[str, Any]:
+        # Checked before the code is looked up: past the limit even a right code is
+        # refused, or the limit would not slow guessing at all.
+        self._attempts_left(you)
         link_id = self.store.get(f"bridge:invite:{code}")
         if not link_id:
             self._charge_attempt(you)
@@ -637,8 +651,6 @@ class Mailbox:
         assistant = current_assistant.get()
         assert assistant is not None
         link_id = link["link_id"]
-        if not self.self_pairing(you):
-            raise MailboxError("self_pairing_off", SELF_PAIRING_OFF)
         if self._revoked(link_id):
             self._charge_attempt(you)
             raise MailboxError(
@@ -701,6 +713,48 @@ class Mailbox:
             self._end(link, you, "turned_off" if status == "active" else "cancelled")
             ended += 1
         return ended
+
+    def relabel_assistant(self, email: str, grant_id: str, label: str) -> int:
+        """The owner renamed one of their assistants. Its pairings named it when they were
+        made, so give them the new name too. Mail already sent keeps the old one. Returns
+        how many pairings changed."""
+        you = _email(email)
+        if not grant_id or not label:
+            return 0
+        changed = 0
+        for link_id in self._user_link_ids(you):
+            key = f"bridge:link:{link_id}"
+            replace = getattr(self.store, "replace", None)
+            for _attempt in range(4):
+                raw = self.store.get(key)
+                try:
+                    link = json.loads(raw) if raw else None
+                except json.JSONDecodeError:
+                    link = None
+                if not isinstance(link, dict) or not link.get("link_id"):
+                    break
+                # Only the side that is this person's: grant_a is always theirs when they
+                # made the link; grant_b is theirs only on a pairing of their own assistants.
+                sides = [
+                    side
+                    for side in ("a", "b")
+                    if link.get(f"grant_{side}") == grant_id
+                    and ((side == "a" and link.get("email_a") == you) or link.get("same_account"))
+                    and link.get(f"label_{side}") != label
+                ]
+                if not sides:
+                    break
+                updated = json.dumps({**link, **{f"label_{side}": label for side in sides}})
+                if replace is None:
+                    self.store.set(key, updated)
+                elif not replace(key, raw, updated):
+                    continue
+                changed += 1
+                break
+            else:
+                # Lost every race on this record. It keeps the old name until the next rename.
+                logging.getLogger(__name__).warning("relabel_link_gave_up")
+        return changed
 
     def get_webhook(self, email: str, app: str | None = None) -> dict[str, Any]:
         """The wake-up hook this caller uses. `app` (dashboard only) picks a slot: "" for
@@ -783,12 +837,14 @@ class Mailbox:
             # a routine's token only starts that one routine.
             current = {}
         if key:
-            ciphertext, nonce = seal(key, self.wake.kek or b"")
+            ciphertext, nonce = seal(key, self.wake.kek or b"", owner)
             saved_hint = hint(key)
+            bound = True
         else:
             ciphertext = current.get("ciphertext")
             nonce = current.get("nonce")
             saved_hint = current.get("hint")
+            bound = bool(current.get("bound"))
         if not ciphertext or not nonce:
             raise MailboxError(
                 "secret_required",
@@ -801,6 +857,8 @@ class Mailbox:
             "nonce": nonce,
             "hint": saved_hint,
             "enabled": current.get("enabled", True) if enabled is None else bool(enabled),
+            # The key only opens for this slot (see wake.seal).
+            "bound": bound,
         }
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
@@ -847,6 +905,21 @@ class Mailbox:
                 "That assistant already has its own wake-up. Remove that one first, then "
                 "give it this one.",
             )
+        # The key is sealed for the slot it sits in, so it is sealed again for the new one.
+        try:
+            key = open_secret(
+                str(record["ciphertext"]),
+                str(record["nonce"]),
+                self.wake.kek or b"",
+                record_slot(record, source),
+            )
+        except Exception:
+            raise MailboxError(
+                "invalid_state",
+                "That wake-up's key could not be read. Remove it and add it again.",
+            ) from None
+        ciphertext, nonce = seal(key, self.wake.kek or b"", owner)
+        record = {**record, "ciphertext": ciphertext, "nonce": nonce, "bound": True}
         self.store.set(f"bridge:hook:{owner}", json.dumps(record))
         self.store.delete(f"bridge:hookerr:{owner}")
         self._index_hook(you, owner, present=True)
@@ -899,7 +972,26 @@ class Mailbox:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             return None
-        return parsed if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict):
+            return None
+        return self._bind_hook(email, raw, parsed)
+
+    def _bind_hook(self, slot: str, raw: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Seal a key saved before keys were bound to their slot for this slot, once.
+        If that cannot be done now the record is returned as it is and still works."""
+        if record.get("bound") or not self.wake.kek:
+            return record
+        try:
+            key = open_secret(str(record["ciphertext"]), str(record["nonce"]), self.wake.kek)
+        except Exception:
+            return record
+        ciphertext, nonce = seal(key, self.wake.kek, slot)
+        bound = {**record, "ciphertext": ciphertext, "nonce": nonce, "bound": True}
+        swap = getattr(self.store, "replace", None) or getattr(self.store, "swap", None)
+        if swap is None or not swap(f"bridge:hook:{slot}", raw, json.dumps(bound)):
+            logging.getLogger(__name__).warning("wake_key_not_bound_yet")
+            return record
+        return bound
 
     def _maybe_wake(self, message: dict[str, Any]) -> dict[str, Any]:
         """Ping the recipient's wake-up hook(s) and say what happened, so the sender
@@ -931,7 +1023,7 @@ class Mailbox:
             # Which slot, never the address or URL: "app" for one app's own, else "account".
             kind = "app" if "#" in slot else "account"
             try:
-                status = deliver(self.wake, record, message)
+                status = deliver(self.wake, record, message, slot)
             except Exception as exc:
                 self.store.delete(mark)
                 logged = _wake_error(exc)
@@ -983,7 +1075,7 @@ class Mailbox:
             "created_at": self._iso(),
         }
         try:
-            status = deliver(self.wake, record, message)
+            status = deliver(self.wake, record, message, owner)
         except Exception as exc:
             logged = _wake_error(exc)
             self._note_wake(owner, record, logged, http=_wake_http(exc))
@@ -1096,8 +1188,6 @@ class Mailbox:
         peer = self._other(link, you)
         sender = self._addr(link, you)
         if link.get("same_account"):
-            if not self.self_pairing(you):
-                raise MailboxError("self_pairing_off", SELF_PAIRING_OFF, link_id=link["link_id"])
             if sender is None:
                 raise MailboxError(
                     "not_found",
@@ -1321,6 +1411,21 @@ class Mailbox:
             return None
         return view if isinstance(view, dict) else None
 
+    def _attempts_left(self, you: str) -> None:
+        """Refuse when this hour's wrong invite codes are already over the limit."""
+        bucket = int(self._now()) // HOUR
+        raw = self.store.get(f"bridge:attempts:{you}:{bucket}")
+        try:
+            count = int(raw) if raw else 0
+        except ValueError:
+            count = 0
+        if count >= LINK_REQUESTS_PER_HOUR:
+            raise MailboxError(
+                "rate_limited",
+                "Too many pairing attempts this hour.",
+                retry_after_seconds=_retry(self._now(), bucket),
+            )
+
     def _charge_attempt(self, you: str) -> None:
         bucket = int(self._now()) // HOUR
         count = self.store.incr(f"bridge:attempts:{you}:{bucket}", ex=HOUR)
@@ -1417,15 +1522,12 @@ class Mailbox:
         other = {"a": "b", "b": "a"}.get(side or "", "b")
         status = self._status(link)
         ended = self._ended(link["link_id"]) if status == "revoked" else None
-        allowed = self.self_pairing(you)
         approved = self._approved(link["link_id"], "a", link=link)
         page = self._page()
-        needs_you = status == "pending_approval" and not approved and allowed
+        needs_you = status == "pending_approval" and not approved
         you_label = str(link.get(f"label_{side}") or link.get("label_a") or "") if side else None
         peer_label = str(link.get(f"label_{other}") or "your other assistant")
-        if not allowed and status != "revoked":
-            step = SELF_PAIRING_OFF
-        elif status == "pending_approval":
+        if status == "pending_approval":
             step = "Approve on the Sharing page (People) to connect your two assistants."
         elif status == "active":
             step = (
@@ -1453,7 +1555,6 @@ class Mailbox:
             "assistants": [link.get("label_a") or "Assistant", link.get("label_b") or "Assistant"],
             "grant_ids": [link.get("grant_a"), link.get("grant_b")],
             "created_by_you": side in (None, "a"),
-            **({"disabled_by_org": True} if not allowed else {}),
             **({"approval_url": page} if needs_you else {}),
             **(
                 {
@@ -1905,14 +2006,35 @@ class Mailbox:
         if not isinstance(data, dict) or self._stamp(str(data.get("expires_at"))) <= self._now():
             return None
         if data.get("body_enc"):
-            if self._fernet is None:
+            body = self._open_body(str(data["body"]))
+            if body is None:
                 return None
-            try:
-                data["body"] = self._fernet.decrypt(str(data["body"]).encode()).decode()
-            except (InvalidToken, ValueError):
-                return None
+            data["body"] = body
             data.pop("body_enc", None)
         return data
+
+    def _open_body(self, sealed: str) -> str | None:
+        if self._fernet is None or self._legacy_fernet is None:
+            return None
+        try:
+            return str(self._fernet.decrypt(sealed.encode()).decode())
+        except (InvalidToken, ValueError):
+            pass
+        # Mail from before the mailbox had its own key. ENCRYPTION_KEY also encrypts the
+        # Drive sign-in vault, whose records are JSON objects, so a body that opens to one
+        # is refused: it is a vault record put here to be read out, not mail. This branch
+        # can go once mail from before the change has expired (MESSAGE_TTL, 14 days).
+        try:
+            body = str(self._legacy_fernet.decrypt(sealed.encode()).decode())
+        except (InvalidToken, ValueError):
+            return None
+        try:
+            if isinstance(json.loads(body), dict):
+                logging.getLogger(__name__).warning("mailbox_body_not_mail_refused")
+                return None
+        except ValueError:
+            pass
+        return body
 
     def _save_message(self, message: dict[str, Any]) -> None:
         remaining = int(self._stamp(message["expires_at"]) - self._now())

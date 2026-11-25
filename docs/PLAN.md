@@ -196,8 +196,9 @@ There is no second Google account. Drive calls use the signed-in user's refresh 
   every 30 s). That value has to be the user's own token.
 - Session: Starlette `SessionMiddleware` (signed, httponly, Secure unless APP_BASE_URL is http://localhost,
   SameSite=Lax, 8 h). CSRF token per session on every POST, plus a same-origin `Origin` check. CSP, frame and
-  referrer headers on every dashboard response. Referrer-Policy is `same-origin`: `no-referrer` would make
-  browsers send `Origin: null` on form posts (including logout) and fail that check.
+  referrer headers on every dashboard response. Referrer-Policy is `strict-origin-when-cross-origin`: other
+  sites get only the origin (Google needs it to check a website-restricted Picker key), and `no-referrer`
+  would make browsers send `Origin: null` on form posts (including logout) and fail that check.
 - Separation: `/mcp` is its own ASGI app behind `BearerAuthMiddleware`; the dashboard is mounted separately and
   never reads the Authorization header. Neither accepts the other's credential.
 - Activity: every audit line goes to stdout and to the capped Redis list `sdm:activity` (500).

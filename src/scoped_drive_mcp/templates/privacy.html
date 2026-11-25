@@ -24,11 +24,11 @@
         the account’s email address and whether Google has verified it. We use that to
         tell signed-in people apart. No Google token is stored at this step.</li>
     <li><b>Connecting Google Drive</b>, which you choose separately after signing in,
-        requests <code>https://www.googleapis.com/auth/drive</code>. It can see, create,
-        edit, and trash files and folders in the Google account you signed in with.
-        This server still limits the assistant to items you have allowed. A folder you
-        allow covers files inside it. Files the assistant creates inside an allowed
-        folder are included.</li>
+        requests only <code>https://www.googleapis.com/auth/drive.file</code>. Google then
+        lets this app see, create, edit, and trash only the files you pick in Google’s
+        file picker and the files this app creates. Google keeps the rest of your Drive
+        closed to this app. This server further limits an assistant to the items you
+        have allowed. Files the assistant creates inside an allowed folder are included.</li>
   </ul>
   <p>We do not ask for your name, contacts, Gmail, or other Google products.</p>
   <p>What an assistant can do depends on the role of the connection you gave it: search,
@@ -36,19 +36,42 @@
      Drive’s trash. This app has no tool to permanently delete a file, to change who a
      file is shared with, or to move a file between folders.</p>
 
+  <h2>Notion data we access</h2>
+  <p>Connecting Notion is optional, and only offered when this deployment has set it up.
+     Notion then asks you which pages to share with Bot RBAC. This app can read only those
+     pages and what is inside them, and never edits Notion. An assistant can read only
+     the Notion pages you allow on Files, and what is inside them. The Notion access
+     token is stored encrypted, like the Google refresh token. Page text is read only to
+     answer an assistant’s request and is not stored. Disconnect Notion in Settings to
+     delete the token and ask Notion to revoke it, or remove Bot RBAC in Notion under
+     Settings → Connections.</p>
+
+  <h2>OneDrive data we access</h2>
+  <p>Connecting OneDrive is optional, and only offered when this deployment has set it up.
+     Microsoft then asks you to let Bot RBAC read your OneDrive files and see your name.
+     Microsoft can’t limit that to some files, so this app lets an assistant read only the
+     OneDrive files and folders you allow on Files, and what is inside them, and never
+     edits OneDrive. Your name or address is used only to show which account is
+     connected. The OneDrive tokens are stored encrypted, like the Google refresh token.
+     File contents are read only to answer an assistant’s request and are not stored.
+     Disconnect OneDrive in Settings to delete the tokens, and remove Bot RBAC at
+     account.live.com/consent/Manage (personal account) or myapps.microsoft.com (work or
+     school account) to end the permission at Microsoft.</p>
+
   <h2>How we use it</h2>
   <p>Google user data is used only to provide the features on the home page and in the
      dashboard:</p>
   <ul>
     <li>Confirm the signed-in account.</li>
-    <li>Show files in your Drive so you can allow them for an assistant.</li>
+    <li>Show the files you picked so you can allow them for an assistant.</li>
     <li>Check each assistant request against that list.</li>
     <li>Call Drive for an allowed item and return the result to the assistant you connected.</li>
   </ul>
-  <p>Those Drive calls use the Google account you signed in with. Allowing an item adds it
-     to this server’s list, and that list is what an assistant can reach. A sign-in saved
-     when this app asked only for files it created or you picked cannot see the rest of
-     your Drive until you sign in again.</p>
+  <p>Those Drive calls use the Google account you signed in with, limited by Google to the
+     files you picked. Allowing an item adds it to this server’s list, and that list is what
+     an assistant can reach. An older connection that could reach the whole Drive is no
+     longer used: it is deleted and revoked at Google when you reconnect or when the
+     operator revokes old connections.</p>
   <p>File contents are read from Drive only to answer that request. This server does not
      keep a copy, does not build a database of your files, and does not write contents,
      file names, or search text to the activity log.</p>

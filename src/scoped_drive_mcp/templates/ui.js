@@ -87,6 +87,40 @@
     }
   });
 
+  // Example buttons that add a line to a textarea (Terminal role patterns).
+  document.addEventListener("click", function (event) {
+    var btn = event.target.closest("[data-insert]");
+    if (!btn) return;
+    var area = document.getElementById(btn.getAttribute("data-target") || "");
+    if (!area) return;
+    var line = btn.getAttribute("data-insert") || "";
+    var lines = area.value.split("\n").map(function (l) { return l.trim(); });
+    if (lines.indexOf(line) === -1) {
+      area.value = area.value.replace(/\s*$/, "") + (area.value.trim() ? "\n" : "") + line + "\n";
+    }
+    area.focus();
+    announce("ok", "Added " + line + ".");
+  });
+
+  // Terminal setup: an agent picker that rewrites one copyable command. Without
+  // JavaScript the picker stays hidden and every agent's command is listed instead.
+  Array.prototype.forEach.call(document.querySelectorAll("[data-agent-pick]"), function (pick) {
+    var select = pick.querySelector("select");
+    var input = select && document.getElementById(select.getAttribute("data-target") || "");
+    var button = input && input.parentNode.querySelector("[data-copy]");
+    if (!button) return;
+    pick.hidden = false;
+    var way = pick.parentNode;
+    Array.prototype.forEach.call(way.querySelectorAll("[data-nojs-only]"), function (el) { el.hidden = true; });
+    var sync = function () {
+      input.textContent = select.value;
+      button.setAttribute("data-copy", select.value);
+      button.setAttribute("aria-label", "Copy: " + select.value);
+    };
+    select.addEventListener("change", sync);
+    sync();  // a browser may restore the select's choice after a reload
+  });
+
   // ---- Row actions without a full page reload --------------------------------
   // Forms marked data-async (Allow, Remove, Share, Stop sharing, Disconnect) post in the
   // background and update only their own row. The server answers JSON when asked for it
@@ -296,7 +330,7 @@
       var ok = document.createElement("button");
       ok.type = "button";
       var submit = form.querySelector("button[type=submit], button:not([type])");
-      ok.className = submit && submit.classList.contains("danger") ? "danger" : "primary";
+      ok.className = form.hasAttribute("data-confirm-danger") || (submit && submit.classList.contains("danger")) ? "danger" : "primary";
       ok.textContent = form.getAttribute("data-confirm-action") ||
         (submit ? (submit.childNodes[0] && submit.childNodes[0].textContent || "").trim() : "") || "Confirm";
       row.appendChild(cancel);
@@ -533,8 +567,25 @@
   }
   localTimes();
 
-  var pick = document.getElementById("pick-drive");
-  if (!pick) return;
+  // "Add from Google Drive", "Choose the file to approve", and each "Pick again" button.
+  var pickButtons = document.querySelectorAll("#pick-drive, [data-pick]");
+  if (!pickButtons.length) return;
+  var pick = pickButtons[0];
+
+  // Safari (desktop, and every iOS browser since they all use WebKit) blocks Google's
+  // cookies in the picker's frame while cross-site tracking prevention is on.
+  var ua = navigator.userAgent;
+  var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg(?!iOS)|OPR|Android/.test(ua);
+  // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
+  var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  if (webkitOnly) {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
+      var mac = note.querySelector("[data-safari-mac]");
+      var touch = note.querySelector("[data-safari-ios]");
+      if (ios && mac && touch) { mac.hidden = true; touch.hidden = false; }
+      note.hidden = false;
+    });
+  }
 
   function loadPicker() {
     return new Promise(function (resolve, reject) {
@@ -626,6 +677,9 @@
     var view = new google.picker.DocsView(google.picker.ViewId.DOCS);
     view.setIncludeFolders(true);
     view.setSelectFolderEnabled(true);
+    // "Pick again" opens Google's search already filled in with the item's name.
+    var query = (pick.getAttribute("data-query") || "").slice(0, 200);
+    if (query && typeof view.setQuery === "function") view.setQuery(query);
     var builder = new google.picker.PickerBuilder()
       .addView(view)
       .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
@@ -644,7 +698,8 @@
     builder.build().setVisible(true);
   }
 
-  pick.addEventListener("click", function () {
+  function onPickClick(event) {
+    pick = event.currentTarget;
     var note = document.getElementById("pick-error");
     if (note) note.hidden = true;
     pick.disabled = true;
@@ -657,6 +712,9 @@
       .then(openPicker)
       .catch(function () { if (note) note.hidden = false; })
       .then(function () { pick.disabled = false; });
+  }
+  Array.prototype.forEach.call(pickButtons, function (button) {
+    button.addEventListener("click", onPickClick);
   });
 })();
 
@@ -680,5 +738,373 @@
     } else if (opener) {
       opener.focus();
     }
+  });
+})();
+
+// Files sent to a paired person (Sharing → Shared with me). Vercel refuses request and
+// response bodies over 4.5 MB, so a file goes up, and comes back down, in pieces of at
+// most 4 MB. When the server hands out presigned Blob URLs ("direct"), the browser moves
+// each piece to and from Vercel Blob itself; the server still decides who may do what.
+// Such a piece is encrypted here first, with the file's key from the server, so Blob
+// holds only ciphertext. If this browser cannot encrypt, or Blob cannot be reached, the
+// send goes through the server, which encrypts it. Without JavaScript the plain form
+// still sends files up to 4 MB.
+(function () {
+  var subtle = window.crypto && window.crypto.subtle;
+  var canSeal = !!(subtle && window.TextEncoder && window.Blob && Blob.prototype.arrayBuffer);
+
+  function importKey(base64) {
+    var raw = Uint8Array.from(atob(base64), function (c) { return c.charCodeAt(0); });
+    return subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  }
+
+  // A stored piece is 0x01 | 12-byte nonce | AES-GCM(piece), with the piece's pathname
+  // as associated data (drop_storage.BlobParts): it opens only as that piece of that file.
+  function seal(key, path, piece) {
+    var nonce = window.crypto.getRandomValues(new Uint8Array(12));
+    return piece.arrayBuffer().then(function (plain) {
+      var how = { name: "AES-GCM", iv: nonce, additionalData: new TextEncoder().encode(path) };
+      return subtle.encrypt(how, key, plain);
+    }).then(function (sealed) {
+      return new Blob([new Uint8Array([1]), nonce, sealed], { type: "application/octet-stream" });
+    });
+  }
+
+  function unseal(key, path, piece) {
+    var unreadable = function () { throw new Error("The file could not be read. Ask for it to be sent again."); };
+    return piece.arrayBuffer().then(function (stored) {
+      var bytes = new Uint8Array(stored);
+      if (bytes.length < 29 || bytes[0] !== 1) return unreadable();
+      var how = { name: "AES-GCM", iv: bytes.subarray(1, 13), additionalData: new TextEncoder().encode(path) };
+      return subtle.decrypt(how, key, bytes.subarray(13)).then(
+        function (plain) { return new Blob([plain]); },
+        unreadable
+      );
+    });
+  }
+
+  function fail(response) {
+    return response.json().then(
+      function (body) { throw new Error((body && body.message) || "Something went wrong. Try again."); },
+      function () { throw new Error("Something went wrong (" + response.status + "). Reload the page and try again."); }
+    );
+  }
+
+  function post(url, body) {
+    return fetch(url, {
+      method: "POST",
+      body: body,
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }).then(function (response) { return response.ok ? response.json() : fail(response); });
+  }
+
+  // Blob could not be reached (network or CORS): send through the server route instead.
+  function blobError(cause) {
+    var err = new Error("The file could not be sent. Try again.");
+    err.blob = true;
+    err.cause = cause;
+    return err;
+  }
+
+  // Blob refused the signed URL (403: expired, or refused): start the send again, so
+  // the server checks it again and signs new URLs.
+  function refusedError(status) {
+    var err = new Error("The upload link was refused (" + status + "). Try sending the file again.");
+    err.restart = true;
+    return err;
+  }
+
+  // One retry for a dropped connection; a refusal is final.
+  function retried(send) {
+    return send().catch(function (err) { if (err instanceof TypeError) return send(); throw err; });
+  }
+
+  var form = document.querySelector("form[data-drop-send]");
+  if (form && window.fetch && window.FormData) {
+    var status = form.querySelector("[data-drop-status]");
+    var button = form.querySelector("button[type=submit]");
+    var say = function (text) { if (status) status.textContent = text; };
+
+    var sendFile = function (file, csrf, direct) {
+      var start = new FormData();
+      start.append("csrf", csrf);
+      start.append("to", form.elements.to.value);
+      start.append("name", file.name);
+      start.append("type", file.type || "application/octet-stream");
+      start.append("size", String(file.size));
+      if (!direct) start.append("direct", "0");
+      say("Starting…");
+      return post("/shared/send/start", start).then(function (begun) {
+        var base = "/shared/send/" + encodeURIComponent(begun.upload_id);
+        var slice = function (n) { return file.slice(n * begun.piece_bytes, (n + 1) * begun.piece_bytes); };
+        var key = begun.direct ? importKey(begun.key) : null;
+        var putPiece = function (n) {
+          if (begun.direct) {
+            var signed = begun.direct[n];
+            return key.then(function (k) { return seal(k, signed.path, slice(n)); }).then(function (sealed) {
+              return retried(function () {
+                return fetch(signed.url, {
+                  method: "PUT",
+                  body: sealed,
+                  headers: signed.headers || {},
+                  credentials: "omit",
+                  referrerPolicy: "no-referrer",
+                });
+              });
+            }).then(
+              function (response) {
+                if (response.status === 403) throw refusedError(response.status);
+                if (!response.ok) throw blobError(response.status);
+              },
+              function (err) { throw blobError(err); }
+            );
+          }
+          var body = new FormData();
+          body.append("csrf", csrf);
+          body.append("piece", slice(n), "piece");
+          return retried(function () { return post(base + "/piece/" + n, body); });
+        };
+        var next = function (n) {
+          if (n >= begun.pieces) return Promise.resolve();
+          say("Sending… " + Math.round((n / begun.pieces) * 100) + "%");
+          return putPiece(n).then(function () { return next(n + 1); });
+        };
+        return next(0).then(function () {
+          var done = new FormData();
+          done.append("csrf", csrf);
+          say("Finishing…");
+          return post(base + "/finish", done);
+        });
+      });
+    };
+
+    form.addEventListener("submit", function (event) {
+      var file = form.elements.file.files[0];
+      if (!file) return;
+      event.preventDefault();
+      var max = parseInt(form.getAttribute("data-drop-max"), 10) || 0;
+      if (max && file.size > max) {
+        say("That file is larger than " + Math.floor(max / 1048576) + " MB.");
+        return;
+      }
+      var csrf = form.elements.csrf.value;
+      button.disabled = true;
+      var fallback = function (err) {
+        if (err && err.blob) return sendFile(file, csrf, false);
+        throw err;
+      };
+      sendFile(file, csrf, canSeal)
+        .catch(function (err) {
+          // Once: a second refusal is shown, not retried.
+          if (err && err.restart) return sendFile(file, csrf, canSeal).catch(fallback);
+          return fallback(err);
+        })
+        .then(function () { window.location.assign("/sharing?tab=with-me"); })
+        .catch(function (err) {
+          button.disabled = false;
+          say(err && err.message ? err.message : "The file could not be sent. Try again.");
+        });
+    });
+  }
+
+  // One piece: ask this app where to fetch it (a short-lived Blob URL and the key that
+  // opens it, or its own route), then fetch it. A Blob URL that cannot be reached, a
+  // piece that does not open (cut short on the way, say), or a browser that cannot
+  // decrypt falls back to the app's route, which reads the piece from Blob itself and
+  // decrypts it; a piece that was really changed does not open there either.
+  function fetchPiece(id, n) {
+    var own = "/drops/" + id + "/piece/" + n;
+    var get = function (url, direct) {
+      var how = direct ? { credentials: "omit", referrerPolicy: "no-referrer" } : { credentials: "same-origin" };
+      return fetch(url, how)
+        .then(function (response) { return response.ok ? response.blob() : fail(response); });
+    };
+    return fetch(own + "/url", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (response) { return response.ok ? response.json() : fail(response); })
+      .then(function (where) {
+        if (!where.direct || (where.key && !canSeal)) return get(own, false);
+        return get(where.url, true).then(
+          function (stored) {
+            if (!where.key) return stored;
+            return importKey(where.key)
+              .then(function (k) { return unseal(k, where.path, stored); })
+              .catch(function () { return get(own, false); });
+          },
+          // Out of reach, or refused (the link ran out): the app's route still serves it.
+          function () { return get(own, false); }
+        );
+      });
+  }
+
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest("a[data-drop-download]");
+    if (!link || !window.fetch || !window.Blob || !window.URL) return;
+    var pieces = parseInt(link.getAttribute("data-drop-pieces"), 10) || 1;
+    // A small file the app encrypted is fine through the plain link.
+    if (pieces <= 1 && !link.hasAttribute("data-drop-direct")) return;
+    event.preventDefault();
+    if (link.getAttribute("aria-busy") === "true") return;
+    var id = encodeURIComponent(link.getAttribute("data-drop-download"));
+    var label = link.textContent;
+    var parts = [];
+    link.setAttribute("aria-busy", "true");
+    var next = function (n) {
+      if (n >= pieces) return Promise.resolve();
+      link.textContent = "Downloading… " + Math.round((n / pieces) * 100) + "%";
+      return fetchPiece(id, n).then(function (blob) { parts.push(blob); return next(n + 1); });
+    };
+    next(0)
+      .then(function () {
+        var url = URL.createObjectURL(new Blob(parts, { type: "application/octet-stream" }));
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = link.getAttribute("data-drop-name") || "file";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+      })
+      .catch(function (err) {
+        window.alert(err && err.message ? err.message : "The file could not be downloaded.");
+      })
+      .then(function () {
+        link.textContent = label;
+        link.removeAttribute("aria-busy");
+      });
+  });
+})();
+
+// Tick several items and act on them together (Files › Allowed, Files › From Google Drive,
+// Sharing › Shared by me; markup in _batch.html). Without JavaScript the bar is a plain
+// form that is always shown. Here it appears once something is ticked, each button counts
+// the ticked items it would change, and anything that takes access away asks first.
+(function () {
+  var forms = document.querySelectorAll("form[data-batch]");
+  if (!forms.length) return;
+
+  function items(n) { return n + (n === 1 ? " item" : " items"); }
+
+  Array.prototype.forEach.call(forms, function (form) {
+    var id = form.id;
+    var all = document.querySelector('[data-batch-all="' + id + '"]');
+    var count = form.querySelector("[data-batch-count]");
+    var clear = form.querySelector("[data-batch-clear]");
+    var buttons = form.querySelectorAll("button[name=action]");
+    function boxes() { return document.querySelectorAll('input[name=file_id][form="' + id + '"]'); }
+    function ticked() { return Array.prototype.filter.call(boxes(), function (b) { return b.checked; }); }
+    function applies(button, box) {
+      var needs = button.getAttribute("data-batch-needs");
+      if (!needs) return true;
+      var row = box.closest("[data-row]");
+      return !!(row && row.matches(needs));
+    }
+
+    function update() {
+      var on = ticked();
+      var total = boxes().length;
+      form.hidden = on.length === 0;
+      if (count) count.textContent = items(on.length) + " selected";
+      if (clear) clear.hidden = on.length === 0;
+      if (all) {
+        all.checked = on.length > 0 && on.length === total;
+        all.indeterminate = on.length > 0 && on.length < total;
+      }
+      Array.prototype.forEach.call(boxes(), function (b) {
+        var row = b.closest("[data-row]");
+        if (row) row.classList.toggle("ticked", b.checked);
+      });
+      Array.prototype.forEach.call(buttons, function (button) {
+        var n = on.filter(function (b) { return applies(button, b); }).length;
+        var label = button.querySelector("[data-batch-n]");
+        if (label) label.textContent = n ? " " + n : "";
+        button.disabled = n === 0;
+      });
+    }
+
+    if (all) {
+      all.hidden = false;
+      all.addEventListener("change", function () {
+        Array.prototype.forEach.call(boxes(), function (b) { b.checked = all.checked; });
+        update();
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-batch-reveal]"), function (el) {
+      if (el.querySelector('[data-batch-all="' + id + '"]')) el.hidden = false;
+    });
+    document.addEventListener("change", function (event) {
+      var t = event.target;
+      if (t && t.name === "file_id" && t.getAttribute("form") === id) update();
+    });
+    if (clear) {
+      clear.addEventListener("click", function () {
+        Array.prototype.forEach.call(boxes(), function (b) { b.checked = false; });
+        update();
+        var first = boxes()[0];
+        if (first) first.focus();
+      });
+    }
+
+    form.addEventListener("submit", function (event) {
+      var button = event.submitter;
+      if (!button || button.name !== "action") return;
+      event.preventDefault();
+      var chosen = ticked().filter(function (b) { return applies(button, b); });
+      if (!chosen.length) return;
+      var ask = button.getAttribute("data-batch-ask");
+      var go = function () {
+        // Only the items this action applies to are sent; the others stay ticked.
+        ticked().forEach(function (b) { if (chosen.indexOf(b) === -1) b.disabled = true; });
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "action";
+        hidden.value = button.value;
+        form.appendChild(hidden);
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+        form.submit();
+      };
+      if (!ask || !window.__askConfirm) { go(); return; }
+      var names = chosen.map(function (b) { return "“" + b.getAttribute("data-name") + "”"; });
+      var list = names.length > 6 ? names.slice(0, 5).join(", ") + " and " + (names.length - 5) + " more" : names.join(", ");
+      var message = ask.replace("{n}", items(chosen.length)) + " " + list + ".";
+      var note = button.getAttribute("data-batch-note");
+      if (note) message += " " + note;
+      // An item inside a folder that stays on the list is still reachable. Say so, unless
+      // that folder is being removed in the same go.
+      var warn = button.getAttribute("data-batch-warn");
+      if (warn) {
+        var attr = warn === "shared" ? "data-shared-by" : "data-covered-by";
+        var going = chosen.map(function (b) { return b.getAttribute("data-name"); });
+        var still = chosen.filter(function (b) {
+          var folder = b.getAttribute(attr);
+          return folder && going.indexOf(folder) === -1;
+        });
+        if (still.length === 1) {
+          var f = still[0].getAttribute(attr);
+          message += " “" + still[0].getAttribute("data-name") + "” will still be " +
+            (warn === "shared" ? "readable" : "available") + " because “" + f + "” " +
+            (warn === "shared" ? "stays shared" : "stays allowed") + ". Include “" + f +
+            "” too to cut it off.";
+        } else if (still.length > 1) {
+          message += " " + still.length + " of these will still be " +
+            (warn === "shared" ? "readable through folders that stay shared." : "available through folders that stay allowed.");
+        }
+      }
+      form.setAttribute("data-confirm", message);
+      form.setAttribute("data-confirm-action", button.textContent.replace(/\s+/g, " ").trim());
+      form.toggleAttribute("data-confirm-danger", button.classList.contains("danger"));
+      var answer = window.__askConfirm(form);
+      // The dialog has read these already. Left on the form, confirm.js would see
+      // data-confirm on this same submit event and ask a second time.
+      ["data-confirm", "data-confirm-action", "data-confirm-danger"].forEach(function (a) { form.removeAttribute(a); });
+      answer.then(function (yes) { if (yes) go(); else button.focus(); });
+    });
+
+    // Back from the next page: the browser may restore ticks and disabled boxes.
+    window.addEventListener("pageshow", function () {
+      Array.prototype.forEach.call(boxes(), function (b) { b.disabled = false; });
+      update();
+    });
+    update();
   });
 })();

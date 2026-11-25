@@ -5,9 +5,9 @@ Google is asked twice, on purpose:
 1. **Sign in.** `SIGN_IN_SCOPES` only (`openid`, `email`). This proves who the person
    is. No refresh token is requested or stored, and nothing of theirs is reachable.
 2. **Connect a service.** A separate, explicit step after sign-in asks for the wider
-   scopes one connection needs (see `connections.py`; Google Drive is the first). That
-   request uses incremental authorization and offline access, so the refresh token it
-   returns is what the server stores.
+   scope one connection needs (see `connections.py`; Google Drive asks for `drive.file`
+   only). That request uses offline access without incremental authorization, so the
+   refresh token it returns carries only that scope, and it is what the server stores.
 
 One "Web application" OAuth client serves both steps; the redirect URI is always
 APP_BASE_URL/auth/callback and the step is carried in a signed `state`.
@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .drive_client import TOKEN_URI
+from .drive_client import DRIVE_FILE_SCOPE, TOKEN_URI, scopes_acceptable
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -50,7 +50,7 @@ class OAuthClient(Protocol):
     ) -> str: ...
     def exchange_code(self, code: str) -> OAuthTokens: ...
     def userinfo(self, access_token: str) -> dict[str, Any]: ...
-    def revoke(self, token: str) -> None: ...
+    def revoke(self, token: str) -> bool: ...
 
 
 class GoogleOAuthClient:
@@ -71,8 +71,9 @@ class GoogleOAuthClient:
 
         `offline=False` is the sign-in step: identity scopes, no refresh token, and
         Google's account chooser. `offline=True` is a connection step: it asks for a
-        refresh token, always shows the consent screen (so Google returns one), and
-        adds the new scopes to what this app already holds (incremental auth).
+        refresh token and always shows the consent screen (so Google returns one). It
+        does not fold in scopes granted earlier (`include_granted_scopes=false`), so a
+        person who once granted full Drive gets back only what is asked for now.
         """
         params = {
             "client_id": self.client_id,
@@ -84,7 +85,7 @@ class GoogleOAuthClient:
         if offline:
             params["access_type"] = "offline"
             params["prompt"] = "consent"
-            params["include_granted_scopes"] = "true"
+            params["include_granted_scopes"] = "false"
         else:
             params["access_type"] = "online"
             params["prompt"] = "select_account"
@@ -139,13 +140,23 @@ class GoogleOAuthClient:
             raise OAuthError("Google did not return the account's email")
         return info
 
-    def revoke(self, token: str) -> None:
-        with contextlib.suppress(httpx.HTTPError):
-            httpx.post(REVOKE_URL, data={"token": token}, timeout=self.timeout)
+    def revoke(self, token: str) -> bool:
+        """Ask Google to end this token's grant. True when Google confirms it is gone:
+        revoked now (200), or already invalid (400 invalid_token). False when Google could
+        not be reached or refused, so a caller can keep the token and try again."""
+        try:
+            resp = httpx.post(REVOKE_URL, data={"token": token}, timeout=self.timeout)
+        except httpx.HTTPError:
+            return False
+        if resp.status_code == 200:
+            return True
+        if resp.status_code == 400:
+            with contextlib.suppress(ValueError):
+                return resp.json().get("error") == "invalid_token"
+        return False
 
 
-PICKER_SCOPE = "https://www.googleapis.com/auth/drive.file"
-FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+PICKER_SCOPE = DRIVE_FILE_SCOPE
 
 
 def refresh_access_token(
@@ -178,7 +189,8 @@ def refresh_access_token(
     token = body.get("access_token")
     if not isinstance(token, str) or not token:
         raise OAuthError("Google did not refresh the sign-in")
-    granted = str(body.get("scope") or "").split()
-    if PICKER_SCOPE not in granted or FULL_DRIVE_SCOPE in granted:
+    # drive.file and the sign-in scopes only: anything wider (full Drive, drive.readonly,
+    # cloud-platform, ...) would let page script reach files outside the allowlist.
+    if not scopes_acceptable(str(body.get("scope") or "")):
         raise OAuthError("Google did not give a token limited to picked files")
     return token

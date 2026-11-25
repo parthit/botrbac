@@ -61,20 +61,19 @@
     {% elif shared_by %}
     <h2 id="not-in-drive">This file isn’t in your Drive</h2>
     <p><b>{{ shared_by }}</b> shares it with you through Mailbox, so your assistant can already read it with <code>read_shared_file</code>. There is nothing to approve here. Deny this request to close it.</p>
-    {% elif reconsent or drive_error %}
-    {% if drive_error %}
+    {% elif drive_error %}
     <p>Google Drive didn’t answer just now, so this file couldn’t be checked. Reload the page to try again.</p>
+    <p>If the assistant meant a different file, <a href="/files?request={{ req.id }}">pick it from Files</a>.</p>
     {% else %}
-    <p>Your Google Drive connection only covers some of your files, so this one can’t be checked yet. Reconnect Google Drive using the banner above, then reload this page.</p>
-    {% endif %}
+    <h2 id="not-picked">Bot RBAC can’t open this file yet</h2>
+    <p>Google only lets Bot RBAC open files you pick. If this file is yours, choose it in Google’s file picker to approve the request. If it isn’t yours or doesn’t exist, deny the request so the assistant stops waiting.</p>
     {% if picker_ready %}
     <p><button type="button" class="primary" id="pick-drive" data-next="/requests/{{ req.id }}" data-request="{{ req.id }}">Choose the file to approve</button></p>
     <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
-    {% endif %}
-    <p>If the assistant meant a different file, <a href="/files?request={{ req.id }}">pick it from Files</a>.</p>
+    {% include "_safari_note.html" %}
     {% else %}
-    <h2 id="file-missing">This file doesn’t exist or you can’t open it</h2>
-    <p>Your Google Drive has no file with this id that you can open, so there is nothing to approve. Deny the request so the assistant stops waiting.</p>
+    <p class="muted">Google’s file picker isn’t set up on this server, so the file can’t be chosen here. Ask whoever runs it to set <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code>.</p>
+    {% endif %}
     <p>If the assistant meant a different file, <a href="/files?request={{ req.id }}">pick it from Files</a>.</p>
     {% endif %}
   {% else %}

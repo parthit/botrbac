@@ -12,6 +12,7 @@ ASGI app behind BearerAuthMiddleware). Every POST requires the per-session CSRF 
 a cross-origin `Origin` is refused.
 """
 
+import base64
 import functools
 import hashlib
 import hmac
@@ -22,6 +23,7 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
@@ -29,6 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
+import anyio
 import anyio.to_thread
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -55,13 +58,13 @@ from .bridge import MailboxError
 from .config import Settings
 from .connections import CONNECTIONS, Connection, get_connection
 from .drive_client import (
-    DRIVE_SCOPE,
     FOLDER_MIME,
     SHORTCUT_MIME,
     DriveNotFoundError,
     LazyBotDriveClient,
     OwnerDriveClient,
 )
+from .drop_storage import BLOB_API_HOST, BLOB_API_PATH, PIECE_BYTES
 from .errors import report_exception
 from .external import SharedAccessError, normalize_email
 from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
@@ -85,9 +88,15 @@ from .mcp_oauth import (
     McpOAuth,
     QueryMapping,
 )
+from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
-from .ratelimit import allow, client_ip
+from .onedrive_client import OneDriveApiError, OneDriveOAuthError
+from .onedrive_client import normalize_item_id as normalize_onedrive_id
+from .onedrive_client import scopes_acceptable as onedrive_scopes_acceptable
+from .policy import PayloadToolError
+from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
+from .shared_sources import VIA_DASHBOARD
 from .store import (
     ACCESS_EDIT,
     ACCESS_READ,
@@ -98,7 +107,10 @@ from .store import (
     SignedStore,
     TokenVault,
     sign_existing_records,
+    usable_email,
 )
+from .terminal.feature import Kit as TerminalKit
+from .terminal.feature import epoch_iso
 
 logger = logging.getLogger(__name__)
 
@@ -133,36 +145,92 @@ def observability_on() -> bool:
 
 _env.globals["observability_on"] = observability_on
 
+# Connect Notion posts a form that redirects to Notion's consent screen, which may pass
+# through Notion's sign-in. form-action is checked along that redirect chain.
+NOTION_FORM_HOSTS = b"https://api.notion.com https://www.notion.so https://app.notion.com"
+# Connect OneDrive does the same with Microsoft's sign-in (personal accounts pass through
+# login.live.com).
+MICROSOFT_FORM_HOSTS = b"https://login.microsoftonline.com https://login.live.com"
+
+# Every page: scripts and everything else only from this site. Sign-in forms redirect to
+# Google, which form-action checks along the redirect chain. frame-ancestors stays none
+# so this site is not embedded.
+STRICT_CSP = (
+    b"default-src 'self'; "
+    b"script-src 'self'; "
+    b"style-src 'self' 'unsafe-inline'; "
+    b"img-src 'self' data:; "
+    b"connect-src 'self'; "
+    b"frame-src 'none'; "
+    b"worker-src 'self'; "
+    b"form-action 'self' https://accounts.google.com "
+    + NOTION_FORM_HOSTS
+    + b" "
+    + MICROSOFT_FORM_HOSTS
+    + b"; "
+    b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+)
+# Only pages that can open the Google Picker (PICKER_TEMPLATES): it loads api.js from
+# apis.google.com (that script evaluates code), then opens Drive in a frame.
+PICKER_CSP = (
+    b"default-src 'self'; "
+    b"script-src 'self' https://apis.google.com https://www.gstatic.com 'unsafe-eval'; "
+    b"style-src 'self' 'unsafe-inline'; "
+    b"img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; "
+    b"connect-src 'self' https://www.googleapis.com https://content.googleapis.com; "
+    b"frame-src https://docs.google.com https://drive.google.com https://accounts.google.com "
+    b"https://content.googleapis.com https://*.google.com https://*.googleusercontent.com; "
+    b"worker-src 'self' blob:; "
+    b"form-action 'self' https://accounts.google.com; "
+    b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+)
+# Sharing → Shared with me when the browser sends and fetches held files straight to and
+# from Vercel Blob (drop_storage.BlobSigner): uploads go to the Blob API (that path only),
+# downloads come from this deployment's own private store. Same as STRICT_CSP otherwise.
+_CONNECT_SELF = b"connect-src 'self'; "
+# The replace below must match, or the page would block its own uploads silently.
+assert _CONNECT_SELF in STRICT_CSP, "STRICT_CSP lost its connect-src 'self'"
+
+
+def direct_drop_csp(store_host: str) -> str:
+    """`store_host` is the connected store's own host: no other store is allowed."""
+    connect = f"https://{BLOB_API_HOST}{BLOB_API_PATH} https://{store_host}".encode()
+    return STRICT_CSP.replace(_CONNECT_SELF, b"connect-src 'self' " + connect + b"; ").decode()
+
+
+# Templates with a picker button (#pick-drive or [data-pick]). They get PICKER_CSP when
+# the picker is configured (render's `picker_ready`); every other response gets STRICT_CSP.
+PICKER_TEMPLATES = frozenset({"browse.html", "access.html", "request.html"})
+
 SECURITY_HEADERS = [
     (b"x-frame-options", b"DENY"),
     (b"x-content-type-options", b"nosniff"),
-    # `no-referrer` makes browsers send `Origin: null` on HTML form POSTs (Fetch:
-    # non-GET, non-cors). check_csrf treats that as a cross-origin request, so a
-    # signed-in Sign out fails before the session token is compared. `same-origin`
-    # still withholds the referrer from other sites, and a same-origin form POST
-    # carries this app's origin.
-    (b"referrer-policy", b"same-origin"),
+    # Other sites get only this site's origin, never a path (so ids in URLs such as
+    # /requests/<id> stay here), and nothing over a downgrade to http. Google needs
+    # that origin: a Picker API key restricted to this website is checked against the
+    # Referer, and `same-origin` sent none, so Google rejected the key.
+    # `no-referrer` would also break forms: browsers then send `Origin: null` on HTML
+    # form POSTs, which check_csrf rejects (Sign out would fail).
+    (b"referrer-policy", b"strict-origin-when-cross-origin"),
     (b"cache-control", b"no-store"),
-    (
-        b"content-security-policy",
-        # Google Picker loads api.js from apis.google.com (that script evaluates code),
-        # then opens Drive in a frame. frame-ancestors stays none so this site is not embedded.
-        b"default-src 'self'; "
-        b"script-src 'self' https://apis.google.com https://www.gstatic.com 'unsafe-eval'; "
-        b"style-src 'self' 'unsafe-inline'; "
-        b"img-src 'self' data: https://*.googleusercontent.com https://*.gstatic.com; "
-        b"connect-src 'self' https://www.googleapis.com https://content.googleapis.com; "
-        b"frame-src https://docs.google.com https://drive.google.com https://accounts.google.com "
-        b"https://content.googleapis.com https://*.google.com https://*.googleusercontent.com; "
-        b"worker-src 'self' blob:; "
-        b"form-action 'self' https://accounts.google.com; "
-        b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
-    ),
+    # A response that already carries a policy (a Picker page) keeps it.
+    (b"content-security-policy", STRICT_CSP),
 ]
 
 _LOGIN_HINT = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Searches per person per minute on "Shared with me". Each one reads every sharer's Drive.
 SHARED_SEARCH_LIMIT = 20
+# Files sent from the dashboard. Vercel refuses request bodies over 4.5 MB, so the form
+# stays under it; an assistant's send_file has the larger MAX_BYTES limit.
+DROP_UPLOAD_LIMIT = 4_000_000
+DROP_UPLOAD_MB = DROP_UPLOAD_LIMIT // 1_000_000
+# Room for the form's other fields and the multipart framing around the file.
+DROP_FORM_OVERHEAD = 64_000
+# With JavaScript, the page sends a larger file in pieces of this size (drop_storage), one
+# request each, so every request stays under Vercel's 4.5 MB limit.
+DROP_PIECE_LIMIT = PIECE_BYTES
+# Files listed under "Sent to you" on the Shared with me page.
+DROPS_SHOWN = 50
 # Folder lookups one Files page may make to work out search-result paths and
 # folder-inherited access. Past this, the remaining rows say to open their folder.
 SEARCH_LOOKUPS = 40
@@ -205,15 +273,33 @@ class DashboardContext:
     sharer_of: Callable[[str, str], str | None] | None = None
     # The first read by each paired person's assistant, shown on Overview.
     first_reads: Any = None
+    # Items removed from Bot RBAC on Files (store.HiddenFiles). None keeps every item listed.
+    hidden: Any = None
+    # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
+    notion: Any = None
+    # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
+    onedrive: Any = None
+    # Files paired people send this person (drops.DropBox). None hides sending.
+    drops: Any = None
+    # Bot RBAC Terminal (terminal.TerminalFeature): roles for agents on people's own
+    # computers. None leaves its pages out (tests that build a bare context).
+    terminal: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
+    # actor -> (refresh token, My Drive's folder id). The id never changes for an account,
+    # so Files asks Drive once per connection instead of on every page load.
+    _owner_roots: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
 
     def _admin_actor(self) -> bool:
         actor = current_actor.get()
         return not actor or actor == self.settings.owner_email
 
     def owner_drive(self) -> OwnerDriveClient:
+        return self.owner_drive_and_token()[0]
+
+    def owner_drive_and_token(self) -> tuple[OwnerDriveClient, str]:
+        """The signed-in person's Drive client and the refresh token it was built from."""
         record = self.vault.owner()
         if not record or not record.get("t"):
             raise OwnerNotConnectedError
@@ -222,14 +308,29 @@ class DashboardContext:
         cached = self._owner_clients.get(actor)
         if cached is None or cached[0] != token:
             self._owner_clients[actor] = (token, self.owner_drive_factory(token))
-        return self._owner_clients[actor][1]
+        return self._owner_clients[actor][1], token
+
+    def owner_root_id(self, drive: OwnerDriveClient, token: str) -> str | None:
+        """My Drive's folder id for the signed-in person, or None while drive.file cannot
+        open it yet (not cached then, so it shows up once the app may open My Drive).
+        Pass what owner_drive_and_token() returned. The cache is keyed by the token, so a
+        new connection (reconsent, another account) looks it up again."""
+        actor = current_actor.get() or ""
+        cached = self._owner_roots.get(actor)
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        try:
+            root_id = str(drive.get_file("root", fields="id")["id"])
+        except DriveNotFoundError:
+            return None
+        self._owner_roots[actor] = (token, root_id)
+        return root_id
 
     def grants(self) -> GrantService:
         return GrantService(
             self.owner_drive,
             self.allowlist,
             self.requests,
-            None,
             on_change=self.on_allowlist_change,
         )
 
@@ -243,7 +344,6 @@ class DashboardContext:
             self.owner_drive,
             self.ext_allowlist,
             self.requests,
-            None,
             on_change=self.on_ext_change,
             audience=AUDIENCE_LINKED,
             audit_actions=("share_external", "unshare_external"),
@@ -285,48 +385,129 @@ class DashboardContext:
         record = self.vault.owner()
         return bool(record and record.get("t"))
 
+    def notion_record(self) -> dict[str, str] | None:
+        """This person's stored Notion connection, when Notion is offered here."""
+        if self.notion is None or not self.vault.enabled:
+            return None
+        return self.vault.notion()
+
+    def onedrive_record(self) -> dict[str, str] | None:
+        """This person's stored OneDrive connection, when OneDrive is offered here."""
+        if self.onedrive is None or not self.vault.enabled:
+            return None
+        return self.vault.onedrive()
+
     def connection_rows(self) -> list[dict[str, Any]]:
-        """Each connection and whether this person has finished it."""
+        """Each connection offered here and whether this person has finished it."""
         rows = []
         for conn in CONNECTIONS.values():
-            connected = self.drive_connected() if conn.key == "google_drive" else False
-            # A stored token without the full scope (old drive.file, or no scope stamp)
-            # still works for what it covers, but has to be upgraded by connecting again.
-            needs_upgrade = connected and conn.key == "google_drive" and self.reconsent_needed()
+            detail = None
+            if conn.provider == "notion":
+                if self.notion is None:
+                    continue
+                record = self.notion_record()
+                connected = record is not None
+                if record and record.get("workspace_name"):
+                    detail = f"Workspace: {record['workspace_name']}"
+                needs_upgrade = False
+            elif conn.provider == "microsoft":
+                if self.onedrive is None:
+                    continue
+                record = self.onedrive_record()
+                connected = record is not None
+                if record and record.get("account"):
+                    detail = f"Account: {record['account']}"
+                needs_upgrade = False
+            else:
+                connected = self.drive_connected()
+                # An older full-Drive (or unstamped) token is no longer used: the person
+                # is not connected until they reconnect, which revokes it first.
+                needs_upgrade = not connected and self.reconsent_needed()
             rows.append(
-                {"connection": conn, "connected": connected, "needs_upgrade": needs_upgrade}
+                {
+                    "connection": conn,
+                    "connected": connected,
+                    "needs_upgrade": needs_upgrade,
+                    "detail": detail,
+                }
             )
         return rows
 
     def disconnect_drive(self) -> str | None:
-        """Forget this person's Drive token. Returns the token so Google can revoke it."""
-        record = self.vault.owner() if self.vault.enabled else None
+        """Forget this person's Drive token, current or old. Returns it so Google can
+        revoke it."""
+        if not self.vault.enabled:
+            self.vault.clear_owner()
+            return None
+        record = self.vault.owner() or self.vault.legacy_owner()
         token = record.get("t") if record else None
         self.vault.clear_owner()
         return token
 
-    def reconsent_needed(self) -> bool:
-        """True when the saved sign-in cannot see the whole Drive.
+    def revoke_legacy_drive(self, revoke: Callable[[str], bool]) -> bool | None:
+        """Revoke an old full-Drive (or unstamped) token at Google, then delete it here.
 
-        A missing scope stamp, or a token that only has drive.file, has to sign in
-        again. A token that already includes full Drive does not.
+        None when there is none. False when Google did not confirm: the token is kept so
+        a later reconnect or the admin action can try again (it is never used meanwhile).
+        A current drive.file token is left alone."""
+        if not self.vault.enabled:
+            return None
+        record = self.vault.legacy_owner()
+        if not record:
+            return None
+        if not revoke(record["t"]):
+            return False
+        # Only delete what was revoked: a reconnect may have stored a new token since.
+        current = self.vault.legacy_owner()
+        if current and current.get("t") == record["t"]:
+            self.vault.clear_owner()
+        return True
+
+    def reconsent_needed(self) -> bool:
+        """True when an old sign-in is stored that this server no longer uses.
+
+        That is a full-Drive token, or one saved before scopes were recorded. It is not
+        used for anything; the person reconnects with per-file access, which revokes it.
         """
         if not self.vault.enabled:
             return False
-        record = self.vault.owner()
-        if not record or not record.get("t"):
-            return False
-        scopes = set(str(record.get("scopes") or "").split())
-        return DRIVE_SCOPE not in scopes
+        return self.vault.legacy_owner() is not None
 
 
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
 
 
+# Drive lookups a page makes side by side (the Allowed tab's folder checks). One pool for
+# the process, so its threads and their Drive connections are reused between requests.
+DRIVE_LOOKUP_WORKERS = 8
+_drive_pool = ThreadPoolExecutor(DRIVE_LOOKUP_WORKERS, thread_name_prefix="drive-lookup")
+
+
+def fetch_parents(drive: Any, ids: list[str]) -> dict[str, dict[str, Any] | None | Exception]:
+    """files.get("id,parents") for each id, in parallel. None for not found, else the
+    error a lookup raised, so one failure does not lose the other answers."""
+
+    def one(fid: str) -> dict[str, Any] | None | Exception:
+        try:
+            return drive.get_file(fid, fields="id,parents")
+        except DriveNotFoundError:
+            return None
+        except Exception as exc:
+            return exc
+
+    if len(ids) == 1:
+        return {ids[0]: one(ids[0])}
+    return dict(zip(ids, _drive_pool.map(one, ids), strict=True))
+
+
 WAKE_HOME = "/settings#assistants"
 LIST_FIELDS = OWNER_FIELDS + ",modifiedTime"
 COVER_CHECK_LIMIT = 25
+# The action bar on Files and Sharing. Each item is one Drive lookup at most, run in turn,
+# so a batch stays well inside one function call.
+BATCH_ACTIONS = ("allow", "remove", "share", "unshare", "forget")
+BATCH_LIMIT = 50
 # How each app role is named on the consent page and in Settings.
 ROLE_LABELS = {
     "viewer": "Read only",
@@ -496,6 +677,9 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         reconsent = getattr(request.state, "reconsent", False)
     ctx.setdefault("mailbox_count", getattr(request.state, "mailbox_count", 0))
     ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
+    ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
+    ctx.setdefault("onedrive_tab", getattr(request.state, "onedrive_tab", False))
+    ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -508,7 +692,12 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         status_code=status_code,
         **ctx,
     )
-    return HTMLResponse(html, status_code=status_code)
+    response = HTMLResponse(html, status_code=status_code)
+    if template in PICKER_TEMPLATES and ctx.get("picker_ready"):
+        response.headers["content-security-policy"] = PICKER_CSP.decode()
+    elif template == "shared.html" and ctx.get("drops_store_host"):
+        response.headers["content-security-policy"] = direct_drop_csp(ctx["drops_store_host"])
+    return response
 
 
 def render_plain(template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
@@ -627,27 +816,40 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     app_origin = origin_of(settings.app_base_url)
 
     async def remember_pending(request: Request) -> None:
-        """One waiting-request count for this page, off the event loop. The nav reads it."""
-        try:
-            request.state.pending_count = await blocking(ctx.requests.pending_count)
-        except Exception:
-            logger.exception("pending request count failed")
-            request.state.pending_count = 0
-        try:
-            request.state.reconsent = await blocking(ctx.reconsent_needed)
-        except Exception:
-            logger.exception("reconsent check failed")
-            request.state.reconsent = False
-        # Mailbox nav badge: pairings waiting on this person's approval.
+        """The nav badges for this page, off the event loop. The three lookups are
+        independent store reads, so they run side by side rather than one after another."""
         actor = current_actor.get()
+        request.state.pending_count = 0
+        request.state.reconsent = False
         request.state.mailbox_count = 0
-        if ctx.mailbox is not None and actor:
+
+        async def pending() -> None:
+            try:
+                request.state.pending_count = await blocking(ctx.requests.pending_count)
+            except Exception:
+                logger.exception("pending request count failed")
+
+        async def reconsent() -> None:
+            try:
+                request.state.reconsent = await blocking(ctx.reconsent_needed)
+            except Exception:
+                logger.exception("reconsent check failed")
+
+        async def mailbox() -> None:
+            # Mailbox nav badge: pairings waiting on this person's approval.
+            if ctx.mailbox is None or not actor:
+                return
             try:
                 request.state.mailbox_count = await blocking(
                     ctx.mailbox.needs_approval_count, actor
                 )
             except Exception:
                 logger.exception("mailbox approval count failed")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(pending)
+            tg.start_soon(reconsent)
+            tg.start_soon(mailbox)
 
     def session_user(request: Request) -> str | None:
         """Signed-in email (step 1). A Drive connection (step 2) is not required here."""
@@ -789,15 +991,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return RedirectResponse(url, status_code=303)
 
     async def login_rate_limited(request: Request) -> Response | None:
-        ip = client_ip(
-            [(k.encode(), v.encode()) for k, v in request.headers.items()],
-            request.client.host if request.client else "unknown",
-        )
         allowed = await blocking(
             allow,
             ctx.store,
             "login",
-            "ip:" + ip,
+            ip_identity(request.scope),
             settings.login_rate_limit,
             settings.login_rate_window_seconds,
         )
@@ -881,7 +1079,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         email = str(info.get("email", "")).strip().lower()
         verified = info.get("email_verified") in (True, "true")
-        if not verified or not settings.sign_in_allowed(email):
+        # An address that cannot name a tenant (one with ':' or control characters) is
+        # refused here, so it gets a clear answer instead of failing inside the store.
+        if not verified or not usable_email(email) or not settings.sign_in_allowed(email):
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             audit_owner("login", "deny", reason="wrong_account")
             return render(
@@ -954,9 +1154,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             finally:
                 current_actor.reset(reset)
         next_url = safe_next(request.session.get("oauth_next"))
+        old_sid = request.session.get("sid")
         request.session.clear()
         request.session["owner"] = email
         if ctx.directory is not None:
+            # End the session this browser had before, so a copy of the old cookie
+            # stops working (and a different account's session does not linger).
+            await blocking(ctx.directory.close_session, old_sid)
             request.session["sid"] = await blocking(
                 ctx.directory.open_session, email, SESSION_MAX_AGE
             )
@@ -972,30 +1176,29 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return RedirectResponse(f"/connect?{urlencode({'next': next_url})}", status_code=303)
         return RedirectResponse(next_url, status_code=303)
 
+    async def refuse_token(tokens: Any, email: str) -> None:
+        # Google's revoke ends this app's whole grant for that Google account, which
+        # would also kill a token already stored for it (a reconnect that was
+        # declined, or another person's account). Only revoke when none is stored.
+        if ctx.directory is not None:
+            stored = await blocking(ctx.directory.has_owner_refresh, email)
+        else:
+            stored = True
+        if not stored:
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+
     async def finish_connect(
         request: Request, data: dict[str, Any], tokens: Any, email: str
     ) -> Response:
         """Step 2 done. Store the refresh token for the signed-in person."""
-
-        async def refuse_token() -> None:
-            # Google's revoke ends this app's whole grant for that Google account, which
-            # would also kill a token already stored for it (a reconnect that was
-            # declined, or another person's account). Only revoke when none is stored.
-            if ctx.directory is not None:
-                stored = await blocking(ctx.directory.has_owner_refresh, email)
-            else:
-                stored = True
-            if not stored:
-                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
-
         signed_in = session_user(request)
         connection = get_connection(str(data.get("connection") or ""))
         if not signed_in or connection is None:
-            await refuse_token()
+            await refuse_token(tokens, email)
             return render(request, "error.html", 400, message="Sign in first, then connect.")
         if email != signed_in:
             # The Drive an assistant uses must belong to the person who signed in.
-            await refuse_token()
+            await refuse_token(tokens, email)
             audit_owner("connect", "deny", reason="different_account")
             next_url = safe_next(request.session.get("oauth_next"))
             retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
@@ -1013,15 +1216,46 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     {"label": "Back to Overview", "href": "/"},
                 ],
             )
+        # Everything below reads or changes this person's own stored state. The callback
+        # runs outside owner_only, so set the actor here: unset, the store falls back to
+        # the admin's keys, and a refused connection would wipe the admin's Drive token.
+        reset = current_actor.set(email)
+        try:
+            return await complete_connect(request, tokens, email, connection)
+        finally:
+            current_actor.reset(reset)
+
+    async def complete_connect(
+        request: Request, tokens: Any, email: str, connection: Connection
+    ) -> Response:
+        """The rest of step 2, with `current_actor` already set to `email`."""
+        if connection.scopes_too_wide(tokens.scopes):
+            # Wider than this app asks for. Never stored. Revoking it ends this app's grant
+            # for that account, which is the point: Google should not keep it either.
+            await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
+            await blocking(ctx.disconnect_drive)
+            ctx.forget_drive(email)
+            audit_owner("connect", "deny", reason="scope_too_wide")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="Google gave more access than Bot RBAC asks for",
+                message=(
+                    "Bot RBAC only uses access to the files you pick, so that connection "
+                    "was refused and revoked. Remove Bot RBAC at "
+                    "myaccount.google.com/permissions, then choose Connect again."
+                ),
+            )
         if connection.required_scope not in tokens.scopes:
-            await refuse_token()
+            await refuse_token(tokens, email)
             return render(
                 request,
                 "error.html",
                 400,
                 message=(
                     f"{connection.name} access was not granted. Choose Connect again and "
-                    f"allow access to your Drive."
+                    f"allow access to the files you pick."
                 ),
             )
         if not tokens.refresh_token:
@@ -1033,14 +1267,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "myaccount.google.com/permissions and try again.",
             )
 
-        reset = current_actor.set(email)
-        try:
-            scope_stamp = " ".join(sorted(tokens.scopes))
-            await blocking(ctx.vault.set_owner, tokens.refresh_token, email, scope_stamp)
-            if ctx.directory is not None:
-                await blocking(ctx.directory.remember_user, email)
-        finally:
-            current_actor.reset(reset)
+        scope_stamp = " ".join(sorted(tokens.scopes))
+        await blocking(ctx.vault.set_owner, tokens.refresh_token, email, scope_stamp)
+        if ctx.directory is not None:
+            await blocking(ctx.directory.remember_user, email)
         ctx.forget_drive(email)
         audit_owner("connect", connection=connection.key)
         next_url = safe_next(request.session.pop("oauth_next", None))
@@ -1059,13 +1289,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         except AuthorizeError:
             return None
 
+    def drive_row_connected(rows: list[dict[str, Any]]) -> bool:
+        return any(r["connected"] for r in rows if r["connection"].provider == "google")
+
     async def connect_page(request: Request) -> Response:
         rows = await blocking(ctx.connection_rows)
         next_url = safe_next(request.query_params.get("next"))
         if next_url.startswith("/connect"):
             next_url = "/"
         client_name = await blocking(waiting_client, next_url)
-        if any(r["connected"] for r in rows) and next_url == "/" and not client_name:
+        if drive_row_connected(rows) and next_url == "/" and not client_name:
             # Set up already: the services list lives in Settings now.
             return RedirectResponse("/settings#services", status_code=303)
         return render(
@@ -1074,37 +1307,508 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             rows=rows,
             next=next_url,
             waiting_client=client_name,
-            drive_connected=any(r["connected"] for r in rows),
+            drive_connected=drive_row_connected(rows),
         )
 
     async def connect_start(request: Request, form: dict[str, str]) -> Response:
         connection = get_connection(request.path_params.get("key"))
         if connection is None:
             return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "notion" and ctx.notion is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "microsoft" and ctx.onedrive is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
         limited = await login_rate_limited(request)
         if limited is not None:
             return limited
         request.session["oauth_next"] = safe_next(form.get("next"))
+        if connection.provider == "notion":
+            return start_notion(request)
+        if connection.provider == "microsoft":
+            return start_onedrive(request)
+        if connection.key == "google_drive":
+            # An old full-Drive token is revoked before Google's consent screen. Revoking
+            # ends this app's whole grant for the account, so doing it after the new
+            # consent would also kill the new per-file token.
+            revoked = await blocking(ctx.revoke_legacy_drive, oauth.revoke)
+            if revoked is False:
+                audit_owner("revoke_legacy_drive", "deny", reason="google_unreachable")
+                return render(
+                    request,
+                    "error.html",
+                    503,
+                    title="Couldn’t end your old connection",
+                    message=(
+                        "Google didn’t confirm that your old Drive connection was ended, so "
+                        "nothing was changed. Try Reconnect again in a minute."
+                    ),
+                )
+            if revoked:
+                ctx.forget_drive(current_actor.get() or None)
+                audit_owner("revoke_legacy_drive")
         return start_oauth(request, "connect", current_actor.get() or None, connection)
 
     async def connect_remove(request: Request, form: dict[str, str]) -> Response:
         connection = get_connection(request.path_params.get("key"))
         if connection is None:
             return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "notion":
+            if ctx.notion is None:
+                return render(request, "error.html", 404, message="Unknown connection.")
+            return await notion_disconnect(request)
+        if connection.provider == "microsoft":
+            if ctx.onedrive is None:
+                return render(request, "error.html", 404, message="Unknown connection.")
+            return await onedrive_disconnect(request)
         email = current_actor.get()
+        # An old full-Drive token is kept until Google confirms it is revoked, so a failed
+        # revoke can be retried. It is never used meanwhile.
+        legacy = await blocking(ctx.revoke_legacy_drive, oauth.revoke)
+        if legacy is False:
+            ctx.forget_drive(email)
+            flash(
+                request,
+                "error",
+                "Google didn\u2019t confirm that your old Drive connection was ended, so it "
+                "is kept (and still unused). Choose Disconnect again in a minute.",
+            )
+            return RedirectResponse("/settings#services", status_code=303)
+        # A current per-file token is removed here at once, as asked, then revoked.
         token = await blocking(ctx.disconnect_drive)
+        confirmed = True
         if token:
             # Google's revoke also ends this app's sign-in grant. Step 1 holds no token,
             # so the dashboard session is unaffected.
-            await blocking(oauth.revoke, token)
+            confirmed = await blocking(oauth.revoke, token)
         ctx.forget_drive(email)
         audit_owner("disconnect", connection=connection.key)
+        if confirmed:
+            flash(
+                request,
+                "ok",
+                f"{connection.name} is disconnected. Assistants can no longer reach it.",
+            )
+        else:
+            flash(
+                request,
+                "error",
+                f"{connection.name} is disconnected here, but Google didn\u2019t confirm it "
+                "ended the permission. Remove Bot RBAC at myaccount.google.com/permissions "
+                "to be sure.",
+            )
+        return RedirectResponse("/connect", status_code=303)
+
+    # ---- Notion (a second connection, its own OAuth) ---------------------------
+
+    def start_notion(request: Request) -> Response:
+        """Send the signed-in person to Notion's consent screen. The state is signed,
+        expires, is tied to this browser (nonce) and names the account it is for."""
+        nonce = secrets.token_urlsafe(24)
+        request.session["notion_nonce"] = nonce
+        state = serializer.dumps(
+            {"flow": "notion", "nonce": nonce, "who": current_actor.get() or ""}
+        )
+        url = ctx.notion.oauth.authorization_url(state)
+        return RedirectResponse(url, status_code=303)
+
+    async def notion_callback(request: Request) -> Response:
+        if ctx.notion is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        params = request.query_params
+        nonce = request.session.pop("notion_nonce", None)
+        request.session.pop("oauth_next", None)
+        retry_actions = [
+            {"label": "Back to Settings", "href": "/settings#services", "primary": True},
+        ]
+        if params.get("error"):
+            cancelled = params.get("error") == "access_denied"
+            return render(
+                request,
+                "error.html",
+                400,
+                title="You didn’t connect Notion" if cancelled else "Notion isn’t connected",
+                message=(
+                    "You cancelled on Notion’s screen, so nothing changed."
+                    if cancelled
+                    else "Notion didn’t finish connecting. Nothing changed."
+                ),
+                actions=retry_actions,
+            )
+        try:
+            data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+        except BadSignature:
+            data = None
+        email = current_actor.get() or ""
+        if (
+            not isinstance(data, dict)
+            or data.get("flow") != "notion"
+            or not nonce
+            or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
+            or str(data.get("who") or "") != email
+        ):
+            audit_owner("notion_connect", "deny", reason="bad_state")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="Notion connection expired",
+                message="That Notion connection didn’t start here, or took too long. Try again.",
+                actions=retry_actions,
+            )
+        code = params.get("code")
+        if not code:
+            return render(request, "error.html", 400, message="Notion did not return a code.")
+        try:
+            tokens = await blocking(ctx.notion.oauth.exchange_code, code)
+        except NotionOAuthError as exc:
+            return render(
+                request,
+                "error.html",
+                502,
+                title="Notion isn’t connected",
+                message=f"Connecting Notion failed: {exc}.",
+                actions=retry_actions,
+            )
+        previous = await blocking(ctx.notion_record)
+        if previous and previous.get("workspace_id") != tokens.workspace_id:
+            # Another workspace: the old list names pages that are not there.
+            await blocking(ctx.notion.clear)
+        await blocking(
+            ctx.vault.set_notion,
+            tokens.access_token,
+            tokens.refresh_token,
+            email,
+            tokens.workspace_id,
+            tokens.workspace_name,
+        )
+        audit_owner("notion_connect", connection="notion")
         flash(
             request,
             "ok",
-            f"{connection.name} is disconnected. Assistants can no longer reach it.",
+            "Notion is connected. Now allow the pages your assistants may read.",
         )
-        return RedirectResponse("/connect", status_code=303)
+        return RedirectResponse("/files?tab=notion", status_code=303)
+
+    async def notion_disconnect(request: Request) -> Response:
+        record = await blocking(ctx.notion_record)
+        await blocking(ctx.vault.clear_notion)
+        # The list belongs to that connection's workspace; a later connection starts empty.
+        await blocking(ctx.notion.clear)
+        confirmed = True
+        # Notion revokes one token per call: the access token, then the refresh token.
+        for key in ("t", "r"):
+            if record and record.get(key):
+                confirmed = await blocking(ctx.notion.oauth.revoke, record[key]) and confirmed
+        audit_owner("notion_disconnect", connection="notion")
+        if confirmed:
+            flash(request, "ok", "Notion is disconnected. Assistants can no longer reach it.")
+        else:
+            flash(
+                request,
+                "error",
+                "Notion is disconnected here, but Notion didn’t confirm it ended the "
+                "connection. In Notion, open Settings → Connections and remove Bot RBAC "
+                "to be sure.",
+            )
+        return RedirectResponse("/settings#services", status_code=303)
+
+    async def notion_files(request: Request) -> Response:
+        """Files → From Notion: what assistants may read, and what Notion shows Bot RBAC."""
+        query = (request.query_params.get("q") or "").strip()[:200]
+
+        def gather() -> dict[str, Any]:
+            record = ctx.notion_record()
+            allowed = sorted(ctx.notion.allowlist.entries().values(), key=lambda e: e.name.lower())
+            out: dict[str, Any] = {
+                "notion_connected": record is not None,
+                "workspace": (record or {}).get("workspace_name") or "",
+                "allowed": allowed,
+                "visible": [],
+                "notion_error": None,
+            }
+            if record is None:
+                return out
+            try:
+                out["visible"] = ctx.notion.visible(query)
+            except PayloadToolError as exc:
+                out["notion_error"] = str(exc.payload.get("message") or "Notion refused.")
+            except NotionApiError:
+                out["notion_error"] = "Notion didn’t answer. Reload the page in a minute."
+            return out
+
+        data = await blocking(gather)
+        return render(
+            request,
+            "notion.html",
+            query=query,
+            next="/files?tab=notion",
+            **data,
+        )
+
+    async def notion_allow(request: Request, form: dict[str, str]) -> Response:
+        if ctx.notion is None:
+            return refused(request, 404, "Notion is not set up on this server.")
+        back = "/files?tab=notion"
+        try:
+            entry = await blocking(ctx.notion.allow, form.get("page_id", ""))
+        except PayloadToolError as exc:
+            return action_done(request, "error", str(exc.payload.get("message")), back)
+        except NotionApiError:
+            return action_done(request, "error", "Notion didn’t answer. Try again.", back)
+        if entry is None:
+            return action_done(
+                request,
+                "error",
+                "Notion doesn’t show Bot RBAC that page. Choose Pick pages in Notion to add it "
+                "there first.",
+                back,
+                changed=False,
+            )
+        audit_owner("notion_allow", page_id=entry.id, name=entry.name)
+        return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
+
+    async def notion_remove(request: Request, form: dict[str, str]) -> Response:
+        if ctx.notion is None:
+            return refused(request, 404, "Notion is not set up on this server.")
+        entry = await blocking(ctx.notion.remove, form.get("page_id", ""))
+        back = "/files?tab=notion"
+        if entry is None:
+            return action_done(request, "ok", "That page was not allowed.", back, changed=False)
+        audit_owner("notion_remove", page_id=entry.id, name=entry.name)
+        return action_done(
+            request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back
+        )
+
+    # ---- OneDrive (an optional connection, Microsoft's own OAuth) ----------------
+
+    def start_onedrive(request: Request) -> Response:
+        """Send the signed-in person to Microsoft's sign-in and consent screen. The state
+        is signed, expires, is tied to this browser (nonce) and names the account."""
+        nonce = secrets.token_urlsafe(24)
+        request.session["onedrive_nonce"] = nonce
+        state = serializer.dumps(
+            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or ""}
+        )
+        return RedirectResponse(ctx.onedrive.oauth.authorization_url(state), status_code=303)
+
+    async def onedrive_callback(request: Request) -> Response:
+        if ctx.onedrive is None:
+            return render(request, "error.html", 404, message="Unknown connection.")
+        params = request.query_params
+        nonce = request.session.pop("onedrive_nonce", None)
+        request.session.pop("oauth_next", None)
+        retry_actions = [
+            {"label": "Back to Settings", "href": "/settings#services", "primary": True},
+        ]
+        error = params.get("error")
+        if error:
+            # error_description is Microsoft's text; only its AADSTS code is looked at.
+            description = params.get("error_description") or ""
+            needs_admin = error in ("consent_required", "admin_consent_required") or any(
+                code in description for code in ("AADSTS65001", "AADSTS90094", "AADSTS90095")
+            )
+            if needs_admin:
+                title = "Your organization has to approve Bot RBAC"
+                message = (
+                    "Your school or work account doesn’t let you connect apps like Bot RBAC "
+                    "yourself. Ask your IT administrator to approve Bot RBAC for your "
+                    "organization, then try again. Nothing changed."
+                )
+            elif error == "access_denied":
+                title = "You didn’t connect OneDrive"
+                message = "You cancelled on Microsoft’s screen, so nothing changed."
+            else:
+                title = "OneDrive isn’t connected"
+                message = "Microsoft didn’t finish connecting. Nothing changed."
+            return render(
+                request, "error.html", 400, title=title, message=message, actions=retry_actions
+            )
+        try:
+            data = serializer.loads(params.get("state", ""), max_age=STATE_MAX_AGE)
+        except BadSignature:
+            data = None
+        email = current_actor.get() or ""
+        if (
+            not isinstance(data, dict)
+            or data.get("flow") != "onedrive"
+            or not nonce
+            or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
+            or str(data.get("who") or "") != email
+        ):
+            audit_owner("onedrive_connect", "deny", reason="bad_state")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="OneDrive connection expired",
+                message="That OneDrive connection didn’t start here, or took too long. Try again.",
+                actions=retry_actions,
+            )
+        code = params.get("code")
+        if not code:
+            return render(request, "error.html", 400, message="Microsoft did not return a code.")
+        try:
+            tokens = await blocking(ctx.onedrive.oauth.exchange_code, code)
+        except OneDriveOAuthError as exc:
+            return render(
+                request,
+                "error.html",
+                502,
+                title="OneDrive isn’t connected",
+                message=f"Connecting OneDrive failed: {exc}.",
+                actions=retry_actions,
+            )
+        if not onedrive_scopes_acceptable(tokens.scopes):
+            # Not stored. Microsoft has no per-token revoke for this kind of app; the token
+            # expires within the hour and is never used.
+            audit_owner("onedrive_connect", "deny", reason="scopes")
+            return render(
+                request,
+                "error.html",
+                400,
+                title="OneDrive isn’t connected",
+                message=(
+                    "Microsoft gave Bot RBAC different access than it asks for (read your "
+                    "files), so the connection was not kept. Try again, and keep the "
+                    "permission to read your files ticked."
+                ),
+                actions=retry_actions,
+            )
+        try:
+            account = await blocking(ctx.onedrive.account_for, tokens.access_token)
+        except OneDriveApiError as exc:
+            if exc.status in (400, 404):
+                message = (
+                    "This Microsoft account has no OneDrive yet. Open OneDrive once in a "
+                    "browser, then try again."
+                )
+            elif exc.status in (401, 403):
+                message = (
+                    "Microsoft refused Bot RBAC access to this account’s OneDrive. A school "
+                    "or work account may block it; ask its IT administrator."
+                )
+            else:
+                message = "Microsoft didn’t answer. Try again in a minute."
+            return render(
+                request,
+                "error.html",
+                502,
+                title="OneDrive isn’t connected",
+                message=message,
+                actions=retry_actions,
+            )
+        previous = await blocking(ctx.onedrive_record)
+        if previous is None or previous.get("drive_id") != account.drive_id:
+            # A list is kept only when the same drive reconnects. With no usable earlier
+            # connection we can't tell which account the list was chosen for, so it goes.
+            await blocking(ctx.onedrive.clear)
+        await blocking(
+            ctx.vault.set_onedrive,
+            tokens.access_token,
+            tokens.refresh_token,
+            email,
+            tokens.expires_at,
+            account.drive_id,
+            account.name,
+            account.drive_type,
+        )
+        audit_owner("onedrive_connect", connection="onedrive")
+        flash(
+            request,
+            "ok",
+            "OneDrive is connected. Now allow the files and folders your assistants may read.",
+        )
+        return RedirectResponse("/files?tab=onedrive", status_code=303)
+
+    async def onedrive_disconnect(request: Request) -> Response:
+        await blocking(ctx.vault.clear_onedrive)
+        # The list belongs to that account's drive; a later connection starts empty.
+        await blocking(ctx.onedrive.clear)
+        audit_owner("onedrive_disconnect", connection="onedrive")
+        flash(
+            request,
+            "ok",
+            "OneDrive is disconnected. Assistants can no longer reach it. To remove Bot "
+            "RBAC’s permission at Microsoft too, open account.live.com/consent/Manage "
+            "(personal account) or myapps.microsoft.com (work or school account).",
+        )
+        return RedirectResponse("/settings#services", status_code=303)
+
+    async def onedrive_files(request: Request) -> Response:
+        """Files → From OneDrive: what assistants may read, and the person's drive."""
+        query = (request.query_params.get("q") or "").strip()[:200]
+        folder = (request.query_params.get("folder") or "").strip()[:256]
+
+        def gather() -> dict[str, Any]:
+            record = ctx.onedrive_record()
+            allowed = sorted(
+                ctx.onedrive.allowlist.entries().values(), key=lambda e: e.name.lower()
+            )
+            out: dict[str, Any] = {
+                "onedrive_connected": record is not None,
+                "account": (record or {}).get("account") or "",
+                "allowed": allowed,
+                "listing": {"folder": None, "up": None, "items": []},
+                "onedrive_error": None,
+            }
+            if record is None:
+                return out
+            try:
+                out["listing"] = ctx.onedrive.browse(folder or None, query)
+            except PayloadToolError as exc:
+                out["onedrive_error"] = str(exc.payload.get("message") or "Microsoft refused.")
+            except OneDriveApiError:
+                out["onedrive_error"] = "OneDrive didn’t answer. Reload the page in a minute."
+            return out
+
+        data = await blocking(gather)
+        here = "/files?" + urlencode(
+            {
+                "tab": "onedrive",
+                **({"folder": folder} if folder else {}),
+                **({"q": query} if query else {}),
+            }
+        )
+        return render(request, "onedrive.html", query=query, next=here, **data)
+
+    def onedrive_back(form: dict[str, str]) -> str:
+        """Where an Allow or Remove returns to: the same OneDrive folder, if any."""
+        folder = normalize_onedrive_id(form.get("folder") or "")
+        return f"/files?tab=onedrive&folder={quote(folder)}" if folder else "/files?tab=onedrive"
+
+    async def onedrive_allow(request: Request, form: dict[str, str]) -> Response:
+        if ctx.onedrive is None:
+            return refused(request, 404, "OneDrive is not set up on this server.")
+        back = onedrive_back(form)
+        try:
+            entry = await blocking(ctx.onedrive.allow, form.get("file_id", ""))
+        except PayloadToolError as exc:
+            return action_done(request, "error", str(exc.payload.get("message")), back)
+        except OneDriveApiError:
+            return action_done(request, "error", "OneDrive didn’t answer. Try again.", back)
+        if entry is None:
+            return action_done(
+                request,
+                "error",
+                "That item can’t be allowed. It may have been deleted, be the top of your "
+                "OneDrive, or be a shortcut to someone else’s file.",
+                back,
+                changed=False,
+            )
+        audit_owner("onedrive_allow", file_id=entry.id, name=entry.name)
+        return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
+
+    async def onedrive_remove(request: Request, form: dict[str, str]) -> Response:
+        if ctx.onedrive is None:
+            return refused(request, 404, "OneDrive is not set up on this server.")
+        entry = await blocking(ctx.onedrive.remove, form.get("file_id", ""))
+        back = onedrive_back(form)
+        if entry is None:
+            return action_done(request, "ok", "That item was not allowed.", back, changed=False)
+        audit_owner("onedrive_remove", file_id=entry.id, name=entry.name)
+        return action_done(
+            request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back
+        )
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
@@ -1191,15 +1895,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return {"mailbox_summary": mailbox, "shared_summary": shared}
 
     def browse_data(folder: str, q: str | None, page_token: str | None) -> dict[str, Any]:
-        drive = ctx.owner_drive()
+        drive, token = ctx.owner_drive_and_token()
         # drive.file cannot files.get("root") until the app has opened My Drive.
         # The alias still works in a parents query, which is enough to list files
         # this app created or the user picked.
-        root_id: str | None
-        try:
-            root_id = str(drive.get_file("root", fields="id")["id"])
-        except DriveNotFoundError:
-            root_id = None
+        root_id = ctx.owner_root_id(drive, token)
         entries = ctx.allowlist.entries()
         shared = ctx.ext_ids()
         crumbs: list[dict[str, str]] = []
@@ -1225,9 +1925,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 folder_id = root_id or "root"
             else:
                 folder_id = validate_drive_id(folder, "folder")
-            if folder_id == "root":
+            if folder_id == "root" or folder_id == root_id:
+                # My Drive itself: its name and place are known, so no lookup.
                 current = {
-                    "id": "root",
+                    "id": folder_id,
                     "name": "My Drive",
                     "mimeType": FOLDER_MIME,
                     "parents": [],
@@ -1259,18 +1960,30 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            if folder_id == "root":
-                query = "'root' in parents and trashed=false"
+            at_top = folder == "root"
+            if at_top:
+                # Google opens a file to this app only once it is picked (drive.file), and
+                # picked files can sit anywhere in the Drive, not just in My Drive's top
+                # level. So the top of Files lists everything the app can open: the
+                # picked items and the files it created, each with Allow and Share.
+                # That "everything" is bounded by the OAuth scope, which is always
+                # drive.file: a wider token is refused at connect and on every refresh.
+                query = "trashed=false"
             else:
                 query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
-                query, fields=LIST_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
+                query,
+                fields=LIST_FIELDS,
+                page_size=BROWSE_PAGE_SIZE,
+                page_token=page_token,
+                # Folders first, then by name, across every page (not just within one).
+                order_by="folder,name",
             )
             items = resp.get("files", [])
             # Drive's parents filter can echo a file that merely mentions the folder.
             # The alias "root" is not the id Drive returns on a file, so it cannot be
             # used for that check.
-            if folder_id != "root":
+            if not at_top and folder_id != "root":
                 items = [i for i in items if folder_id in (i.get("parents") or [])]
             next_token = resp.get("nextPageToken")
         items.sort(key=lambda i: (i.get("mimeType") != FOLDER_MIME, str(i.get("name", "")).lower()))
@@ -1326,9 +2039,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         # answer applies. Search results come from anywhere, so each works out its own.
         folder_cover = (covered_id, covered_by) if covered_by and covered_id else None
         folder_share = (shared_id, shared_by) if shared_by and shared_id else None
+        # Removed from Bot RBAC: left out of My Drive's list and search, the two places a
+        # picked item shows up on its own. Inside a folder everything is still listed.
+        hidden = ctx.hidden.ids() if ctx.hidden is not None and (q or folder == "root") else set()
+        hidden_count = sum(1 for item in items if str(item["id"]) in hidden)
         rows = []
         for item in items:
             iid = str(item["id"])
+            if iid in hidden:
+                continue
             mime = str(item.get("mimeType", ""))
             is_shortcut = mime == SHORTCUT_MIME
             path: str | None = None
@@ -1413,6 +2132,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             ),
             "next_token": next_token,
             "more_matches": more_matches,
+            "hidden_count": hidden_count,
             "drive_error": False,
         }
 
@@ -1523,6 +2243,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             entry = await blocking(ctx.grants().grant, file_id)
         except GrantError as exc:
             return action_done(request, "error", str(exc), next_url)
+        await unhide(file_id, entry.id)
         what = f"\u201c{entry.name}\u201d"
         if entry.id != file_id:
             what += ", the shortcut\u2019s target,"
@@ -1568,6 +2289,180 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "the assistant can still use it through that folder."
             )
         return action_done(request, "ok", message, next_url, extra=await allow_count_extra(request))
+
+    async def unhide(*file_ids: str) -> None:
+        """Picking or allowing an item again brings it back onto Files."""
+        if ctx.hidden is not None:
+            for fid in set(file_ids):
+                await blocking(ctx.hidden.unhide, fid)
+
+    def plural(n: int, one: str = "item", many: str = "items") -> str:
+        return f"{n} {one if n == 1 else many}"
+
+    async def files_batch(request: Request, form: dict[str, str]) -> Response:
+        """One action on several ticked items: the action bar on Files and Sharing.
+
+        Each item goes through the same GrantService call as its own row button, so the
+        allowlist checks, audit records and cache invalidation are unchanged. An item the
+        action does not apply to (Remove on an item that is not allowed) is skipped.
+        """
+        action = form.get("action") or ""
+        next_url = safe_next(form.get("next") or "/files")
+        if action not in BATCH_ACTIONS:
+            return action_done(request, "error", "Choose what to do with the items.", next_url)
+        raw = (await request.form()).getlist("file_id")
+        try:
+            ids = list(dict.fromkeys(validate_drive_id(str(v)) for v in raw))
+        except InvalidInputError:
+            # Only a hand-made request carries one: the page renders real ids. Refuse the
+            # whole batch rather than act on part of it.
+            return action_done(
+                request, "error", "One of the ticked items is not a Drive item.", next_url
+            )
+        if not ids:
+            return action_done(request, "error", "Tick at least one item first.", next_url)
+        if len(ids) > BATCH_LIMIT:
+            return action_done(
+                request, "error", f"Choose at most {BATCH_LIMIT} items at a time.", next_url
+            )
+        if action in ("share", "unshare") and ctx.ext_allowlist is None:
+            return action_done(request, "error", "Sharing is not set up on this server.", next_url)
+        own = ctx.grants()
+        ext = ctx.ext_grants() if ctx.ext_allowlist is not None else None
+
+        def run() -> tuple[int, list[str], list[str], list[str]]:
+            done = 0
+            errors: list[str] = []
+            names: list[str] = []
+            # Ids actually taken off a list, for the folder check below. Skipped items
+            # (Remove on something that was not allowed) must not be reported on.
+            changed: list[str] = []
+            hidden = ctx.hidden
+
+            def unhide(*fids: str) -> None:
+                if hidden is not None:
+                    for one in set(fids):
+                        hidden.unhide(one)
+
+            for fid in ids:
+                try:
+                    if action == "allow":
+                        entry = own.grant(fid)
+                        names.append(entry.name)
+                        unhide(fid, entry.id)
+                    elif action == "share":
+                        assert ext is not None
+                        entry = ext.grant(fid)
+                        names.append(entry.name)
+                        unhide(fid, entry.id)
+                    elif action == "remove":
+                        entry = ctx.allowlist.get(fid)
+                        if entry is None:
+                            continue
+                        names.append(entry.name)
+                        own.revoke(fid)
+                        changed.append(fid)
+                    elif action == "unshare":
+                        assert ext is not None and ctx.ext_allowlist is not None
+                        entry = ctx.ext_allowlist.get(fid)
+                        if entry is None:
+                            continue
+                        names.append(entry.name)
+                        ext.revoke(fid)
+                        changed.append(fid)
+                    else:  # forget: off both lists, then off this list
+                        mine = ctx.allowlist.get(fid)
+                        theirs = ctx.ext_allowlist.get(fid) if ctx.ext_allowlist else None
+                        listed = mine or theirs
+                        if listed is not None and listed.name:
+                            names.append(listed.name)
+                        if mine is not None:
+                            own.revoke(fid)
+                        shared = ctx.ext_allowlist
+                        if ext is not None and shared is not None and shared.get(fid) is not None:
+                            ext.revoke(fid)
+                        if hidden is not None:
+                            hidden.hide(fid)
+                    done += 1
+                except GrantError as exc:
+                    errors.append(str(exc))
+            return done, errors, names, changed
+
+        done, errors, names, changed = await blocking(run)
+        if action == "remove":
+            # Same check as one row's Remove, bounded: an allowed folder above an item
+            # still includes it, so the message must not say the item is unreachable.
+            root = ctx.visible_root_folder_id()
+            extra = {root: "the folder set on the server"} if root else None
+        else:
+            extra = None
+        # still: the folder that still covers each removed item. unknown: removed items
+        # whose folders were not checked, because Drive did not answer ("") or the batch
+        # was past COVER_CHECK_LIMIT. Then the message must not say they are unreachable.
+        still: list[str] = []
+        unknown = 0
+        checker = own if action == "remove" else ext if action == "unshare" else None
+        if checker is not None:
+            unknown = max(0, len(changed) - COVER_CHECK_LIMIT)
+            for fid in changed[:COVER_CHECK_LIMIT]:
+                cover = await still_covered(checker, fid, extra)
+                if cover:
+                    still.append(cover)
+                elif cover == "":
+                    unknown += 1
+        what = f"\u201c{names[0]}\u201d" if done == 1 and names else plural(done)
+        message = {
+            "allow": f"Allowed {what} for your assistants.",
+            "remove": f"Removed {what}. Your assistants can no longer use "
+            f"{'it' if done == 1 else 'them'}.",
+            "share": f"Shared {what} with the assistants of people you are paired with.",
+            "unshare": f"Stopped sharing {what}. Paired people\u2019s assistants can no longer "
+            f"read {'it' if done == 1 else 'them'}.",
+            "forget": f"Removed {what} from Bot RBAC. No assistant can open "
+            f"{'it' if done == 1 else 'them'}. Google still lists Bot RBAC as able to open "
+            f"{'it' if done == 1 else 'them'} until you remove the app in your Google Account.",
+        }[action]
+        if unknown and not still:
+            # Same wording as one row's Remove when Drive could not be asked.
+            them = "it" if done == 1 else "them"
+            if action == "remove":
+                message = (
+                    f"Removed {what}. If a folder above {them} is allowed, your assistants "
+                    f"can still use {them} through that folder."
+                )
+            else:
+                message = (
+                    f"Stopped sharing {what}. If a folder above {them} is on your Sharing "
+                    f"list, paired people\u2019s assistants can still read {them} through it."
+                )
+        if still:
+            folders = ", ".join(f"\u201c{c}\u201d" for c in dict.fromkeys(still))
+            stays = "stays" if len(set(still)) == 1 else "stay"
+            if action == "remove":
+                message = (
+                    f"Removed {what}, but your assistants can still use "
+                    f"{len(still)} of them through {folders}, "
+                    f"which {stays} allowed."
+                    if done > 1
+                    else f"Removed {what}, but your assistants can still use it because "
+                    f"{folders} is allowed."
+                )
+            else:
+                message += f" Still readable through {folders}, which {stays} shared."
+        if errors:
+            first = errors[0].replace("allowlist", "list")
+            failed = plural(len(errors))
+            if done:
+                message += f" {failed} could not be changed: {first}"
+            else:
+                return action_done(
+                    request, "error", f"{failed} could not be changed: {first}", next_url
+                )
+        if done == 0:
+            return action_done(
+                request, "error", "None of the ticked items needed that change.", next_url
+            )
+        return action_done(request, "ok", message, next_url)
 
     async def allow_count_extra(request: Request) -> dict[str, int] | None:
         """The new number for the Allowed tab, so ui.js can update it without a reload."""
@@ -1780,10 +2675,260 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         def gather() -> dict[str, Any]:
             peers = ctx.mailbox.active_peers(email) if ctx.mailbox is not None else []
-            return {"people": ctx.shared_with_me.overview(email), "peers": peers}
+            data: dict[str, Any] = {
+                "people": ctx.shared_with_me.overview(email),
+                "peers": peers,
+                "drops_on": ctx.drops is not None,
+                "drops_direct": ctx.drops is not None and ctx.drops.direct,
+                "drops_store_host": ctx.drops.store_host if ctx.drops is not None else None,
+                "received": [],
+                "send_limit_mb": DROP_UPLOAD_MB,
+                "send_max_mb": ctx.drops.max_mb if ctx.drops is not None else 0,
+                "send_max_bytes": ctx.drops.max_bytes if ctx.drops is not None else 0,
+                "hold_hours": ctx.drops.hold_hours if ctx.drops is not None else 0,
+            }
+            if ctx.drops is not None:
+                data["received"] = [
+                    # The page needs no key (a download asks for it, piece by piece).
+                    {
+                        **{k: v for k, v in row.items() if k != "key"},
+                        "pieces": ctx.drops.pieces(row),
+                    }
+                    for row in ctx.drops.received(DROPS_SHOWN)
+                ]
+            return data
 
         data = await blocking(gather)
         return render(request, "shared.html", **data)
+
+    async def drop_send(request: Request, form: dict[str, str]) -> Response:
+        """A person sends one file from the dashboard to someone they are paired with."""
+        back = "/sharing?tab=with-me"
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        email = str(request.session.get("owner") or "")
+        upload = (await request.form()).get("file")
+        to = (form.get("to") or "").strip()
+        if not to:
+            flash(request, "error", "Pick who to send the file to.")
+            return RedirectResponse(back, status_code=303)
+        if upload is None or isinstance(upload, str) or not upload.filename:
+            flash(request, "error", "Choose a file to send.")
+            return RedirectResponse(back, status_code=303)
+        data = await upload.read(DROP_UPLOAD_LIMIT + 1)
+        if len(data) > DROP_UPLOAD_LIMIT:
+            flash(request, "error", f"That file is larger than {DROP_UPLOAD_MB} MB.")
+            return RedirectResponse(back, status_code=303)
+        if not data:
+            flash(request, "error", "That file is empty.")
+            return RedirectResponse(back, status_code=303)
+        mime = (upload.content_type or "").split(";")[0].strip() or "application/octet-stream"
+        try:
+            sent = await blocking(
+                ctx.drops.send,
+                email,
+                to,
+                upload.filename,
+                mime,
+                None,
+                base64.b64encode(data).decode(),
+                via=VIA_DASHBOARD,
+            )
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+        else:
+            flash(request, "ok", f"Sent “{sent['name']}” to {sent['to']}.")
+        return RedirectResponse(back, status_code=303)
+
+    def body_limited(handler: Handler, limit: int) -> Handler:
+        """Refuse a request body larger than `limit` before it is read."""
+
+        async def wrapped(request: Request) -> Response:
+            try:
+                length = int(request.headers.get("content-length") or "")
+            except ValueError:
+                length = -1
+            if length < 0 or length > limit:
+                return refused(
+                    request,
+                    413,
+                    f"That file is too large to send. The limit is {DROP_UPLOAD_MB} MB.",
+                    title="File too large",
+                )
+            return await handler(request)
+
+        return wrapped
+
+    def drop_json_error(exc: SharedAccessError) -> Response:
+        return JSONResponse({"ok": False, "error": exc.code, "message": exc.message}, 400)
+
+    async def drop_begin(request: Request, form: dict[str, str]) -> Response:
+        """Start sending a file in pieces (ui.js): every check, before any bytes."""
+        if ctx.drops is None:
+            return JSONResponse({"ok": False, "message": "Sending files is not set up."}, 404)
+        email = str(request.session.get("owner") or "")
+        try:
+            size = int(form.get("size") or "")
+        except ValueError:
+            size = -1
+        mime = (form.get("type") or "").split(";")[0].strip() or "application/octet-stream"
+        try:
+            started = await blocking(
+                partial(
+                    ctx.drops.begin,
+                    email,
+                    (form.get("to") or "").strip(),
+                    form.get("name") or "",
+                    mime,
+                    size,
+                    via=VIA_DASHBOARD,
+                    # ui.js sends direct=0 when the browser cannot encrypt or reach Blob.
+                    direct=form.get("direct") != "0",
+                )
+            )
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        return JSONResponse({"ok": True, **started})
+
+    async def drop_piece_put(request: Request, form: dict[str, str]) -> Response:
+        """One piece of a file being sent (ui.js)."""
+        if ctx.drops is None:
+            return JSONResponse({"ok": False, "message": "Sending files is not set up."}, 404)
+        email = str(request.session.get("owner") or "")
+        piece = (await request.form()).get("piece")
+        if piece is None or isinstance(piece, str):
+            return JSONResponse({"ok": False, "message": "No file data arrived."}, 400)
+        data = await piece.read(DROP_PIECE_LIMIT + 1)
+        try:
+            n = int(request.path_params["n"])
+        except ValueError:
+            n = -1
+        try:
+            await blocking(ctx.drops.put_piece, email, request.path_params["upload_id"], n, data)
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        return JSONResponse({"ok": True})
+
+    async def drop_finish(request: Request, form: dict[str, str]) -> Response:
+        """All pieces sent: list the file for its recipient (ui.js)."""
+        if ctx.drops is None:
+            return JSONResponse({"ok": False, "message": "Sending files is not set up."}, 404)
+        email = str(request.session.get("owner") or "")
+        try:
+            sent = await blocking(ctx.drops.finish, email, request.path_params["upload_id"])
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        message = f"Sent “{sent['name']}” to {sent['to']}."
+        flash(request, "ok", message)
+        return JSONResponse({"ok": True, "message": message})
+
+    async def drop_piece_get(request: Request) -> Response:
+        """One piece of a held file, for the recipient's browser to join (ui.js). Each
+        response stays under Vercel's 4.5 MB limit."""
+        if ctx.drops is None:
+            return Response(status_code=404)
+        try:
+            n = int(request.path_params["n"])
+        except ValueError:
+            n = -1
+        try:
+            _row, data = await blocking(ctx.drops.piece, request.path_params["drop_id"], n)
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        return Response(
+            data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment", "Cache-Control": "no-store"},
+        )
+
+    async def drop_piece_link(request: Request) -> Response:
+        """Where the recipient's browser fetches one piece: a presigned Blob URL valid for
+        a few minutes, with the key that opens it, when the piece was uploaded straight
+        to Blob; else this app's own piece route (ui.js)."""
+        if ctx.drops is None:
+            return Response(status_code=404)
+        drop_id = request.path_params["drop_id"]
+        try:
+            n = int(request.path_params["n"])
+        except ValueError:
+            n = -1
+        try:
+            link = await blocking(ctx.drops.piece_link, drop_id, n)
+        except SharedAccessError as exc:
+            return drop_json_error(exc)
+        if link is None:
+            return JSONResponse({"ok": True, "url": f"/drops/{quote(drop_id, safe='')}/piece/{n}"})
+        return JSONResponse({"ok": True, "direct": True, **link})
+
+    async def drop_download(request: Request) -> Response:
+        """The recipient downloads a held file. Never served inline: it is another
+        person's file and this is our origin."""
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        try:
+            row, data = await blocking(ctx.drops.download, request.path_params["drop_id"])
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+            return RedirectResponse("/sharing?tab=with-me", status_code=303)
+        if len(data) > DROP_PIECE_LIMIT and os.environ.get("VERCEL", "").strip():
+            # One response this large is refused on Vercel; ui.js downloads it in pieces.
+            flash(
+                request,
+                "error",
+                "This file is too large to download without JavaScript. Turn JavaScript on, "
+                "or save it to Google Drive and open it there.",
+            )
+            return RedirectResponse("/sharing?tab=with-me", status_code=303)
+        return Response(
+            data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": attachment_disposition(str(row.get("name") or "file"))},
+        )
+
+    async def drop_act(request: Request, form: dict[str, str]) -> Response:
+        """Save a held file to the recipient's Drive, or delete it now."""
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        drop_id = request.path_params["drop_id"]
+        action = request.path_params["action"]
+        try:
+            if action == "save":
+                saved = await blocking(ctx.drops.save, drop_id)
+                audit_owner("drop_saved", file_id=saved["file_id"])
+                flash(
+                    request,
+                    "ok",
+                    f"Saved “{saved['name']}” to “Sent to me (Bot RBAC)” in your Google Drive.",
+                )
+            elif action == "dismiss":
+                await blocking(ctx.drops.dismiss, drop_id)
+                flash(request, "ok", "Deleted.")
+            else:
+                return render(request, "error.html", 404, message="That page is not available.")
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+        return RedirectResponse("/sharing?tab=with-me", status_code=303)
+
+    async def drop_allow(request: Request, form: dict[str, str]) -> Response:
+        """Turn files from one paired person on or off."""
+        if ctx.drops is None:
+            return render(request, "error.html", 404, message="Sending files is not set up.")
+        person = (form.get("person") or "").strip()
+        on = form.get("on") == "1"
+        try:
+            await blocking(ctx.drops.set_allowed, person, on)
+        except SharedAccessError as exc:
+            flash(request, "error", exc.message)
+        else:
+            audit_owner("drops_on" if on else "drops_off", person=person.lower())
+            flash(
+                request,
+                "ok",
+                f"{person} can send you files again."
+                if on
+                else f"{person} can no longer send you files. Your pairing is still on.",
+            )
+        return RedirectResponse("/sharing?tab=people", status_code=303)
 
     async def shared_search(request: Request) -> Response:
         if ctx.shared_with_me is None:
@@ -1876,27 +3021,49 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
 
-        def overlaps() -> dict[str, str]:
-            # An entry inside another allowed folder: removing it alone changes nothing,
-            # so the list says so. Bounded, since each check walks up the folder tree.
-            found: dict[str, str] = {}
-            if not data["drive_connected"] or len(rows) < 2:
-                return found
-            grants = ctx.grants()
-            for entry in rows[:COVER_CHECK_LIMIT]:
-                try:
-                    cover = grants.covering_entry(entry.id)
-                except Exception:
-                    return found
-                if cover and cover[0] != entry.id:
-                    found[entry.id] = cover[1]
-            return found
+        def entry_status() -> tuple[dict[str, str], set[str]]:
+            # covered: an entry inside another allowed folder. Removing it alone changes
+            # nothing, so the list says so. needs_pick: Google opens a file to this app
+            # only once it is picked (drive.file); an entry from an older connection
+            # stays on the list but can't be opened until it is picked again.
+            # One pass for both, with each level of folder lookups run in parallel.
+            # Bounded, since each check walks up the folder tree.
+            if not data["drive_connected"] or not rows:
+                return {}, set()
+            try:
+                drive = ctx.owner_drive()
+            except Exception:
+                return {}, set()
+            ids = [entry.id for entry in rows[:COVER_CHECK_LIMIT]]
+            failed = [0]
 
-        covered = await blocking(overlaps)
+            def fetch(batch: list[str]) -> dict[str, dict[str, Any] | None | Exception]:
+                found = fetch_parents(drive, batch)
+                failed[0] += sum(isinstance(v, Exception) for v in found.values())
+                return found
+
+            try:
+                covers, not_found = ctx.grants().entry_status(ids, fetch)
+            except Exception:
+                logger.exception("allowed list status check failed")
+                return {}, set()
+            if failed[0]:
+                # Those items get no note rather than a guess. Logged so a burst of rate
+                # limits or Drive errors shows up instead of quietly hiding the notes.
+                logger.warning("allowed list status check: %d Drive lookups failed", failed[0])
+            if len(rows) < 2:
+                # One entry can't be inside another. The walk above still ran, because
+                # it also finds the entries Drive no longer opens (needs_pick).
+                covers = {}
+            return {fid: c[1] for fid, c in covers.items() if c[0] != fid}, not_found
+
+        covered, needs_pick = await blocking(entry_status)
         return render(
             request,
             "access.html",
             covered=covered,
+            needs_pick=needs_pick,
+            picker_ready=settings.picker_configured,
             rows=rows,
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
@@ -2077,6 +3244,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             for entry in ctx.ext_allowlist.entries().values():
                 if entry.name:
                     names.setdefault(entry.id, entry.name)
+        if ctx.onedrive is not None:
+            for entry in ctx.onedrive.allowlist.entries().values():
+                if entry.name:
+                    names.setdefault(entry.id, entry.name)
         request_names: dict[str, str] = {}
         for req in ctx.requests.recent(300):
             if req.file_id and req.file_name:
@@ -2088,9 +3259,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request_names[req.id] = str(label)
         unknown = [i for i in item_ids(records) if i not in names][:ACTIVITY_LOOKUPS]
         if unknown and ctx.drive_connected():
-            # Under a limited (drive.file) sign-in Google also answers 404 for real files
-            # this app never opened, so a 404 proves nothing: don't call them missing.
-            limited = ctx.reconsent_needed()
+            # Under drive.file Google also answers 404 for real files this app never
+            # opened, so a 404 proves nothing: don't call them missing.
+            limited = True
             try:
                 drive = ctx.owner_drive()
                 for item in unknown:
@@ -2162,7 +3333,60 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         signing = None
         if isinstance(ctx.store, SignedStore):
             signing = {"required": ctx.store.require}
-        return render(request, "admin.html", people=people, signing=signing)
+        legacy = sum(1 for person in people if person["legacy"])
+        return render(request, "admin.html", people=people, signing=signing, legacy=legacy)
+
+    async def admin_revoke_legacy(request: Request, form: dict[str, str]) -> Response:
+        """Revoke and delete every stored full-Drive (or unstamped) token, for everyone.
+
+        Those tokens are already never used. This removes them from the store and asks
+        Google to end them, so a copy of the store cannot be used to reach anyone's Drive.
+        Each person reconnects with per-file access when they next visit."""
+        if session_user(request) != settings.owner_email or ctx.directory is None:
+            return render(request, "error.html", 404, message="Page not found.")
+
+        def run() -> tuple[int, int]:
+            assert ctx.directory is not None
+            done = failed = 0
+            for person in ctx.directory.known_users():
+                vault = ctx.directory.vault_for(person)
+                record = vault.legacy_owner()
+                if not record:
+                    continue
+                try:
+                    ok = oauth.revoke(record["t"])
+                except Exception:
+                    logger.exception("revoking an old Drive connection failed")
+                    ok = False
+                if not ok:
+                    # Kept so the next run can try again. It is never used meanwhile.
+                    failed += 1
+                    continue
+                current = vault.legacy_owner()
+                if current and current.get("t") == record["t"]:
+                    vault.clear_owner()
+                ctx.forget_drive(person)
+                done += 1
+            return done, failed
+
+        done, failed = await blocking(run)
+        audit_owner("revoke_legacy_drive", count=str(done), failed=str(failed))
+        if failed:
+            flash(
+                request,
+                "error",
+                f"Revoked {done}. Google didn’t confirm {failed}; those are kept (and still "
+                "unused). Run this again.",
+            )
+        else:
+            flash(
+                request,
+                "ok",
+                f"Revoked {done} old full-Drive connection{'' if done == 1 else 's'}."
+                if done
+                else "No old full-Drive connections are stored.",
+            )
+        return RedirectResponse("/admin", status_code=303)
 
     async def admin_sign_records(request: Request, form: dict[str, str]) -> Response:
         """Sign the allowlist, app and pairing records saved before records were signed."""
@@ -2201,8 +3425,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request,
                 "error",
                 f"Signed {signed}, but {failed} could not be signed because they changed "
-                "at that moment or the store refused. Run this again, and do not turn on "
-                "REQUIRE_SIGNED_RECORDS until it reports none left.",
+                "at that moment or the store refused. Run this again, and keep "
+                "REQUIRE_SIGNED_RECORDS=0 until it reports none left.",
             )
         else:
             flash(
@@ -2231,6 +3455,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "email": person,
                     "created_at": earliest[1] if earliest else None,
                     "grants": grants,
+                    "legacy": ctx.directory.vault_for(person).legacy_owner() is not None,
                 }
             )
         return rows
@@ -2308,6 +3533,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request,
                 "consent.html",
                 client_name=pending.client_name,
+                # Named by where the approval goes, which the allow list vouches for, not
+                # by the name the app chose for itself.
+                platform=ctx.mcp_oauth.platform(pending.redirect_uri),
                 scope=SCOPE,
                 requested_scope=pending.requested_scope,
                 return_host=return_host,
@@ -2418,6 +3646,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "id": g.id,
                     "short_id": g.id[-5:],
                     "name": g.client_name,
+                    "app_name": g.app_name or g.client_name,
+                    "renamed": g.renamed,
                     "created_at": g.created_at,
                     "last_used": g.last_used,
                     "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,
@@ -2442,7 +3672,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
         data["missing_wakeups"] = await blocking(ctx.mailbox.missing_wakeups, email)
-        data["self_pairing"] = await blocking(ctx.mailbox.self_pairing, email)
         # Approving a pairing lets that person's assistant read the Sharing list, so each
         # card that asks for approval says what that list holds right now.
         ext = ctx.ext_allowlist
@@ -2460,6 +3689,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 peer = link.get("peer_email")
                 if peer and not link.get("same_account"):
                     data["visible_to"][peer] = [e for e in ordered if e.readable_by(peer)]
+        data["drops_on"] = ctx.drops is not None
+        data["drops_off"] = await blocking(ctx.drops.off_list) if ctx.drops is not None else set()
         return render(request, "bridge.html", tab="people", **data)
 
     async def settings_page(request: Request) -> Response:
@@ -2485,7 +3716,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             mcp_url=f"{settings.app_base_url}/mcp",
             role_url_base=f"{settings.app_base_url}/mcp/role/",
             describe_mime=describe_mime,
-            drive_connected=any(r["connected"] for r in data["rows"]),
+            drive_connected=drive_row_connected(data["rows"]),
             next="/settings",
             missing=settings.missing_settings(),
             store_kind=getattr(ctx.store, "kind", "custom"),
@@ -2499,6 +3730,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def files_page(request: Request) -> Response:
         request.state.allow_count = len(await blocking(ctx.allowlist.entries))
+        request.state.notion_tab = ctx.notion is not None
+        request.state.onedrive_tab = ctx.onedrive is not None
+        if request.query_params.get("tab") == "notion" and ctx.notion is not None:
+            # Notion does not need Google Drive, so this tab works without it.
+            return await notion_files(request)
+        if request.query_params.get("tab") == "onedrive" and ctx.onedrive is not None:
+            return await onedrive_files(request)
         if request.query_params.get("tab") == "allowed":
             return await access(request)
         return await browse(request)
@@ -2737,6 +3975,28 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request, "ok", "Deleted the role. Agents using its address are refused.", back
         )
 
+    async def oauth_grant_rename(request: Request, form: dict[str, str]) -> Response:
+        """The owner gives one of their connected apps a name of their own ("Grok Bot"
+        instead of the "Cursor" it registered as). Empty goes back to the app's name."""
+        email = str(request.session.get("owner") or "")
+        grant_id = form.get("grant_id") or ""
+        back = f"/settings#app-{grant_id}" if grant_id else "/settings#assistants"
+        if ctx.mcp_oauth is None:
+            return action_done(request, "error", "That app is not connected.", back)
+        before = {g.id: g.client_name for g in await blocking(ctx.mcp_oauth.list_grants, email)}
+        shown = await blocking(ctx.mcp_oauth.set_label, grant_id, email, form.get("name"))
+        if shown is None:
+            return action_done(request, "error", "That app is not connected.", back)
+        if ctx.mailbox is not None:
+            try:
+                await blocking(ctx.mailbox.relabel_assistant, email, grant_id, shown)
+            except Exception:  # noqa: BLE001 - the new name is saved either way
+                logging.getLogger(__name__).warning("relabel_pairings_failed", exc_info=True)
+        old = before.get(grant_id, "an app")
+        if shown != old:
+            audit_owner("oauth_rename", grant=grant_id[-5:], client=old, label=shown)
+        return action_done(request, "ok", f"Saved. It is now called {shown}.", back)
+
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
@@ -2779,6 +4039,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/connect", owner_only(connect_page), methods=["GET"]),
         Route("/connect/{key}", csrf_protected(connect_start), methods=["POST"]),
         Route("/connect/{key}/disconnect", csrf_protected(connect_remove), methods=["POST"]),
+        Route("/connect/notion/callback", owner_only(notion_callback), methods=["GET"]),
+        Route("/notion/allow", csrf_protected(notion_allow), methods=["POST"]),
+        Route("/notion/remove", csrf_protected(notion_remove), methods=["POST"]),
+        Route("/connect/onedrive/callback", owner_only(onedrive_callback), methods=["GET"]),
+        Route("/onedrive/allow", csrf_protected(onedrive_allow), methods=["POST"]),
+        Route("/onedrive/remove", csrf_protected(onedrive_remove), methods=["POST"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", safely(home), methods=["GET"]),
         Route("/files", owner_only(files_page), methods=["GET"]),
@@ -2786,6 +4052,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/picker/session", owner_only(picker_session), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
+        Route("/files/batch", csrf_protected(files_batch), methods=["POST"]),
         Route("/access", moved("/files", tab="allowed"), methods=["GET"]),
         Route("/sharing", owner_only(sharing_hub), methods=["GET"]),
         Route("/settings", owner_only(settings_page), methods=["GET"]),
@@ -2796,11 +4063,29 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/grants/role", csrf_protected(oauth_grant_role), methods=["POST"]),
         Route("/roles/save", csrf_protected(role_save), methods=["POST"]),
         Route("/roles/delete", csrf_protected(role_delete), methods=["POST"]),
+        Route("/oauth/grants/rename", csrf_protected(oauth_grant_rename), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),
         Route("/shared/open", owner_only(shared_open), methods=["GET"]),
         Route("/shared/download", owner_only(shared_download), methods=["GET"]),
+        Route(
+            "/shared/send",
+            body_limited(csrf_protected(drop_send), DROP_UPLOAD_LIMIT + DROP_FORM_OVERHEAD),
+            methods=["POST"],
+        ),
+        Route("/shared/send/start", csrf_protected(drop_begin), methods=["POST"]),
+        Route(
+            "/shared/send/{upload_id}/piece/{n}",
+            body_limited(csrf_protected(drop_piece_put), DROP_PIECE_LIMIT + DROP_FORM_OVERHEAD),
+            methods=["POST"],
+        ),
+        Route("/shared/send/{upload_id}/finish", csrf_protected(drop_finish), methods=["POST"]),
+        Route("/drops/allow", csrf_protected(drop_allow), methods=["POST"]),
+        Route("/drops/{drop_id}/download", owner_only(drop_download), methods=["GET"]),
+        Route("/drops/{drop_id}/piece/{n}", owner_only(drop_piece_get), methods=["GET"]),
+        Route("/drops/{drop_id}/piece/{n}/url", owner_only(drop_piece_link), methods=["GET"]),
+        Route("/drops/{drop_id}/{action}", csrf_protected(drop_act), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
@@ -2811,11 +4096,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", safely(admin_page), methods=["GET"]),
         Route("/admin/sign-records", csrf_protected(admin_sign_records), methods=["POST"]),
+        Route("/admin/revoke-legacy-drive", csrf_protected(admin_revoke_legacy), methods=["POST"]),
         Route("/oauth/authorize", safely(oauth_authorize), methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         *legal_routes(),
+        *(
+            ctx.terminal.page_routes(TerminalKit(owner_only, csrf_protected, render, flash))
+            if ctx.terminal
+            else []
+        ),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     app = Starlette(
@@ -2833,6 +4124,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ],
     )
     app.state.owner_email = settings.owner_email
+    app.state.terminal_tab = ctx.terminal is not None
     # Mount("/") serves this app, so request.app is this app, not the outer one.
     app.state.dashboard = ctx
     return app
@@ -2954,6 +4246,9 @@ def request_headline(
         "create_folder": f"create a folder in {item}",
         "create_doc": f"create a document in {item}",
         "upload_file": f"upload a file in {item}",
+        "start_upload": f"upload a file in {item}",
+        "export_file": f"export {item}",
+        "save_export": f"save an export of {item}",
         "update_file_content": f"edit {item}",
         "rename_file": f"rename {item}",
         "trash_file": f"move {item} to trash",
@@ -2991,6 +4286,9 @@ def tool_label(tool: str) -> str:
         "create_folder": "Create a folder",
         "create_doc": "Create a document",
         "upload_file": "Upload a file",
+        "start_upload": "Upload a file",
+        "export_file": "Export a file",
+        "save_export": "Export a file",
         "update_file_content": "Edit a file",
         "rename_file": "Rename a file",
         "trash_file": "Move to trash",
@@ -3042,5 +4340,6 @@ _env.globals["shared_href"] = shared_href
 _env.globals["human_size"] = human_size
 _env.globals["assistant_label"] = assistant_label
 _env.filters["when"] = when
+_env.filters["epoch"] = epoch_iso
 _env.globals["icon_kind"] = icon_kind
 _env.globals["role_labels"] = ROLE_LABELS

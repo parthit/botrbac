@@ -53,7 +53,6 @@ class GrantService:
         owner_drive: Callable[[], OwnerDriveClient],
         allowlist: Allowlist,
         requests: AccessRequests,
-        bot_email: str | None,
         on_change: Callable[[], None] = lambda: None,
         audience: str | None = None,
         audit_actions: tuple[str, str] = ("grant", "revoke"),
@@ -61,7 +60,6 @@ class GrantService:
         self._owner_drive = owner_drive
         self.allowlist = allowlist
         self.requests = requests
-        self.bot_email = bot_email
         self._on_change = on_change
         # Stamped on new entries. Set for the external list (who may read the item).
         self.audience = audience
@@ -125,14 +123,12 @@ class GrantService:
         chosen = self._audience_for(audience)
         if isinstance(chosen, tuple) and not chosen:
             raise GrantError("Choose at least one person, or share the item with everyone.")
-        permission_id = self._share(item_id) if self.bot_email else None
         entry = AllowEntry(
             id=item_id,
             name=str(meta.get("name", "")),
             mime_type=str(meta.get("mimeType", "")),
-            permission_id=permission_id,
+            permission_id=None,  # only entries from the old bot-account mode carry one
             request_id=request_id,
-            shared_with=self.bot_email if permission_id else None,
             audience=chosen,
             expires_at=expires_at if self.audience is not None else None,
         )
@@ -190,63 +186,6 @@ class GrantService:
         assistants and leaves those denials alone."""
         if self.audience is None:
             self.requests.clear_denials(item_id)
-
-    def _share(self, item_id: str) -> str:
-        assert self.bot_email is not None
-        try:
-            return self.owner_drive().create_permission(item_id, self.bot_email, "writer")
-        except DriveNotFoundError:
-            raise GrantError("That item was not found in your Drive.") from None
-        except Exception as exc:
-            audit_owner(self._grant_action, "error", file_id=item_id, reason=type(exc).__name__)
-            raise GrantError(
-                "Google refused to share this item with the bot (you may not own it)."
-            ) from None
-
-    def unshared(self) -> list[AllowEntry]:
-        """Allowlisted items not yet shared with the current bot (e.g. ticked in
-        same-account mode before a bot was configured)."""
-        if not self.bot_email:
-            return []
-        return [e for e in self.allowlist.entries().values() if e.shared_with != self.bot_email]
-
-    def share_all(self) -> dict[str, Any]:
-        """Share every allowlisted item with the current bot. Safe to run again: items
-        already shared with this bot are skipped, and a failure leaves the entry as it was."""
-        if not self.bot_email:
-            raise GrantError("Set BOT_EMAIL to a separate account first.")
-        shared: list[str] = []
-        failed: list[dict[str, str]] = []
-        for entry in self.unshared():
-            try:
-                permission_id = self._share(entry.id)
-            except GrantError as exc:
-                failed.append({"id": entry.id, "name": entry.name, "error": str(exc)})
-                continue
-            if entry.permission_id:
-                # Left over from an earlier bot address; that account should lose access.
-                try:
-                    self.owner_drive().delete_permission(entry.id, entry.permission_id)
-                except Exception as exc:
-                    audit_owner("share_all", "error", file_id=entry.id, reason=type(exc).__name__)
-            current = self.allowlist.get(entry.id)
-            if current is None:
-                # Revoked while we were sharing: undo the new share.
-                try:
-                    self.owner_drive().delete_permission(entry.id, permission_id)
-                except Exception:
-                    failed.append({"id": entry.id, "name": entry.name, "error": "revoked"})
-                continue
-            self.allowlist.add(
-                replace(current, permission_id=permission_id, shared_with=self.bot_email)
-            )
-            shared.append(entry.id)
-        if shared:
-            # Newly shared folders become visible to the bot. Drop the cached folder
-            # tree the same way grant() does, or search keeps using the old set until TTL.
-            self._on_change()
-        audit_owner("share_all", shared=str(len(shared)), failed=str(len(failed)))
-        return {"shared": shared, "failed": failed}
 
     def revoke(self, file_id: str) -> None:
         validate_drive_id(file_id)
@@ -310,6 +249,66 @@ class GrantService:
             frontier = next_frontier
         return None
 
+    def entry_status(
+        self,
+        file_ids: list[str],
+        fetch_many: Callable[[list[str]], dict[str, dict[str, Any] | None | Exception]],
+    ) -> tuple[dict[str, tuple[str, str]], set[str]]:
+        """covering_entry for many ids at once, plus which ids Drive no longer opens.
+
+        Same walk as covering_entry (every parent chain, nearest live entry, the same
+        bounds), but the list is read once and the walks advance level by level together,
+        so each level is one `fetch_many` call (the caller can run those lookups in
+        parallel) and a folder shared by several walks is looked up once.
+
+        `fetch_many` maps each id to its metadata ("id,parents"), None when Drive says
+        not found, or the exception it raised. Returns ({id: (cover id, cover name)},
+        {ids not found}). An id whose own lookup failed gets neither answer.
+        """
+        entries = {fid: e for fid, e in self.allowlist.entries().items() if _live(e)}
+        metas: dict[str, dict[str, Any] | None | Exception] = {}
+
+        def fetch(ids: set[str]) -> None:
+            missing = [i for i in ids if i not in metas]
+            if missing:
+                metas.update(fetch_many(missing))
+
+        fetch(set(file_ids))
+        not_found = {fid for fid in file_ids if metas.get(fid) is None}
+        covers: dict[str, tuple[str, str]] = {}
+        # One walk per id: (seen, frontier). A walk leaves the dict when it ends.
+        walks = {fid: ({fid}, [fid]) for fid in file_ids}
+        for _ in range(MAX_COVER_DEPTH):
+            if not walks:
+                break
+            # This level's folders, in one batch (the first level is already fetched).
+            fetch({node for _, frontier in walks.values() for node in frontier})
+            next_walks: dict[str, tuple[set[str], list[str]]] = {}
+            for fid, (seen, frontier) in walks.items():
+                next_frontier: list[str] = []
+                found: tuple[str, str] | None = None
+                for node in frontier:
+                    meta = metas.get(node)
+                    if not isinstance(meta, dict):
+                        continue
+                    for parent in meta.get("parents") or []:
+                        pid = str(parent)
+                        if pid in seen:
+                            continue
+                        seen.add(pid)
+                        if pid in entries:
+                            found = (pid, entries[pid].name or pid)
+                            break
+                        next_frontier.append(pid)
+                    if found:
+                        break
+                if found:
+                    covers[fid] = found
+                elif next_frontier and len(seen) <= MAX_COVER_NODES:
+                    next_walks[fid] = (seen, next_frontier)
+            walks = next_walks
+        return covers, not_found
+
     # ---- access request decisions --------------------------------------
 
     def approval_options(self, req: AccessRequest) -> list[ApprovalOption]:
@@ -325,7 +324,21 @@ class GrantService:
         options: list[ApprovalOption] = []
         # The item itself is not an option when it is My Drive. Sharing it would
         # give the bot the owner's whole drive; grant() refuses that too.
-        if item_id != root_id:
+        if meta.get("mimeType") == SHORTCUT_MIME:
+            # Approving a shortcut allows what it points to (see grant), which can be a
+            # folder with another name. So the option shows the target, not the shortcut.
+            target_id = (meta.get("shortcutDetails") or {}).get("targetId")
+            target = self.owner_meta(str(target_id)) if target_id else None
+            if target is not None and str(target["id"]) != root_id:
+                options.append(
+                    ApprovalOption(
+                        id=str(target["id"]),
+                        name=str(target.get("name", "")),
+                        mime_type=str(target.get("mimeType", "")),
+                        label="Share what this shortcut points to",
+                    )
+                )
+        elif item_id != root_id:
             options.append(
                 ApprovalOption(
                     id=item_id,

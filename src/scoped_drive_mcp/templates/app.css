@@ -932,6 +932,55 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
 
 .switch-account { margin: 0 0 1em; }
 
+/* ---- "Allow <assistant>?" (OAuth consent) ---------------------------------------- */
+.card.consent { max-width: 640px; margin-inline: auto; padding: 32px 36px 28px; }
+.card.consent:hover { border-color: var(--line); }
+.card.consent h1 { margin-bottom: 10px; }
+.card.consent h2 { font-size: 18px; letter-spacing: -0.01em; font-weight: 600; margin: 28px 0 6px; }
+.consent-account { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin: 0 0 20px; color: var(--ink2); }
+.consent-account p, .consent-account .switch-account { margin: 0; }
+.consent-account b { color: var(--ink); font-weight: 600; }
+.switch-account button {
+  height: auto; padding: 0; border: 0; border-radius: 4px; background: none;
+  font-weight: 500; color: var(--accent); text-decoration: underline; text-underline-offset: 3px;
+}
+.switch-account button:hover { background: none; color: var(--ink); }
+/* The one thing to check before allowing: did you start this yourself? */
+.consent-check { background: var(--wash); border-radius: 12px; padding: 14px 16px; }
+.consent-check p { margin: 0; }
+.consent-check p + p { margin-top: 6px; }
+.consent-can { list-style: none; margin: 0 0 4px; padding: 0; }
+.consent-can li { position: relative; padding: 12px 0 12px 30px; border-top: 1px solid var(--line); }
+.consent-can li:first-child { border-top: 0; }
+.consent-can li::before {
+  content: ""; position: absolute; left: 4px; top: 17px; width: 11px; height: 6px;
+  border: solid var(--ok); border-width: 0 0 2px 2px; transform: rotate(-45deg);
+}
+.roles { margin: 24px 0 20px; }
+.roles legend { padding: 0; font-size: 18px; letter-spacing: -0.01em; margin-bottom: 12px; }
+.role {
+  display: flex; align-items: flex-start; gap: 12px; padding: 13px 16px; margin: 0 0 8px;
+  border: 1px solid var(--line); border-radius: 12px; cursor: pointer;
+}
+.role:hover { border-color: var(--ink3); }
+.role:has(input:checked) { border-color: var(--accent); background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
+.role:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.role input { width: 18px; height: 18px; flex: 0 0 auto; margin: 3px 0 0; }
+.role input:focus-visible { outline: 0; }
+.role .muted { display: block; font-size: 15px; margin-top: 2px; }
+.role-tag {
+  font: 500 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ok); margin-left: 6px; white-space: nowrap;
+}
+.card.consent .actions { margin: 0 0 14px; gap: 10px; }
+.card.consent .actions button { height: 46px; padding: 0 26px; font-size: 16px; }
+.card.consent .actions .primary { min-width: 9rem; }
+.consent-after { margin: 0; }
+@media (max-width: 720px) {
+  .card.consent { padding: 22px 18px 20px; }
+  .card.consent .actions button { flex: 1 1 8rem; }
+}
+
 /* ---- Navigation restructure (Files · Requests · Sharing, Settings) -------------- */
 /* One row at every width: on a phone the row scrolls sideways instead of wrapping, so
    switching tabs never moves the underline to another line. The base line is an inset
@@ -1201,3 +1250,209 @@ header { view-transition-name: site-header; }
   .tabs { gap: 0; }
   .tabs a { padding: 0 8px; }
 }
+
+/* ---- Tick several, act once (_batch.html) ---------------------------------------- */
+/* The bar sticks under the fixed header while the list scrolls. */
+.batch {
+  position: sticky;
+  top: 76px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin: 8px 0 16px;
+  padding: 10px 12px 10px 18px;
+  background: var(--card);
+  border: 1px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+.batch-count { margin: 0; flex: 1 1 auto; }
+.batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.batch-actions .act-who { min-width: 0; margin-left: 6px; }
+.batch-actions button[data-batch-needs]:disabled,
+.batch-actions button:disabled { opacity: 0.4; }
+.batch-check {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
+.batch-all-row { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-weight: 500; color: var(--ink2); cursor: pointer; }
+/* The first two columns keep a minimum width; with a tick column in front, that is the
+   name column, not the tick. */
+table.cards th.pick, table.cards td.pick { width: 36px; min-width: 0; padding-right: 8px; }
+table.cards td.pick + td { min-width: 8em; }
+table.cards tr.ticked td, .file.ticked { background: var(--accent-wash); }
+.file.ticked { box-shadow: -8px 0 0 var(--accent-wash), 8px 0 0 var(--accent-wash); }
+.file-name .batch-check { margin-right: 4px; }
+#hidden-note { max-width: 680px; }
+@media (max-width: 720px) {
+  .batch { top: 72px; padding: 10px 12px; }
+  .batch-actions { width: 100%; }
+}
+/* Wherever a table turns into cards: phones, and six-column tables (these, with the tick
+   column) on a portrait tablet. The tick takes the place of the NAME label, and the name
+   moves to the left of the card. */
+@media (max-width: 900px) {
+  table.cards:has(> thead th.pick) tr { position: relative; }
+  table.cards:has(> thead th.pick) td.pick { position: absolute; top: 25px; left: 14px; padding: 0; border: 0; width: auto; }
+  table.cards:has(> thead th.pick) td.pick::before { display: none; }
+  table.cards:has(> thead th.pick) td.pick:empty { display: none; }
+  table.cards:has(> thead th.pick) td.pick + td { border-top: 0; justify-content: flex-start; text-align: left; font-weight: 500; }
+  table.cards:has(> thead th.pick) td.pick + td::before { content: ""; flex: 0 0 22px; margin-right: 0; }
+  table.cards:has(> thead th.pick) tr.ticked { border-color: var(--accent); background: var(--accent-wash); }
+  table.cards:has(> thead th.pick) tr.ticked td { background: transparent; }
+}
+
+/* ---- Google file picker ------------------------------------------------------------
+   Google adds the picker to this page with position: absolute and a top it works out from
+   the scroll position. In Safari that lands near the top of the page, so on a page scrolled
+   down the picker opened out of view. Pin it, and its backdrop, to the window instead.
+   Google sets the size and position inline, hence !important. */
+.picker-dialog-bg {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+.picker-dialog {
+  position: fixed !important;
+  inset: 0 !important;
+  margin: auto !important;
+}
+.safari-note {
+  font-size: 14px;
+  margin: 4px 0 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--accent-wash);
+  color: var(--ink);
+}
+
+/* ---- Bot RBAC Terminal ---------------------------------------------------------------
+   Setup steps with copy buttons, the terminals and roles tables, and the role form. */
+textarea, input[type="number"] {
+  font: 400 16px/1.4 var(--font);
+  border: 1px solid var(--line2);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  max-width: 100%;
+}
+textarea { display: block; width: min(100%, 36rem); padding: 10px 12px; font-family: var(--mono); font-size: 14px; resize: vertical; }
+input[type="number"] { height: 42px; padding: 0 12px; width: 8rem; }
+textarea:focus-visible, input[type="number"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+[aria-invalid="true"] { border-color: var(--bad); }
+.term-setup h3 { margin-top: 24px; }
+.term-setup > h2:first-child { margin-top: 0; }
+.term-copy { display: flex; align-items: flex-start; gap: 10px; margin-top: 8px; }
+.term-cmd {
+  flex: 1 1 auto; min-width: 0; display: block;
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--line2);
+  font: 500 13px/1.5 var(--mono); white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
+  user-select: all;
+}
+.term-copy > button { flex: none; }
+.term-steps { padding-left: 1.4em; margin: 8px 0 4px; }
+.term-steps > li { margin: 0 0 18px; padding-left: 4px; }
+.term-steps > li > p { margin: 6px 0 0; }
+.term-steps .term-more { margin-top: 10px; border-top: 0; }
+.term-more > summary { font-weight: 600; min-height: 44px; }
+.term-more[open] > summary { margin-bottom: 4px; }
+#more-options { margin-top: 8px; padding-top: 6px; }
+.snippet {
+  margin: 4px 0 14px;
+  padding: 10px 12px;
+  background: var(--wash);
+  border-radius: 8px;
+  font: 13px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.term-options dt { font-weight: 600; margin-top: 12px; }
+.term-options dd { margin: 4px 0 0; color: var(--ink2); }
+.term-options dd code { color: var(--ink); }
+.term-note { margin: 16px 0 0; }
+.term-name { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.term-title { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.term-patterns { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.term-patterns code { word-break: normal; overflow-wrap: anywhere; }
+.term-desc { display: inline-block; max-width: 36rem; }
+.term-manage { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.term-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
+.term-form select { width: auto; min-width: 9rem; max-width: 100%; }
+.term-form input[type="text"] { width: 9rem; }
+.term-table td:last-child { white-space: normal; }
+.term-tools { margin: 0 0 14px; }
+.term-server { font-weight: 600; margin: 0 0 6px; }
+.term-ticks { display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.stack .term-tick {
+  display: inline-flex; flex-direction: row; align-items: center; gap: 8px;
+  margin: 0; padding: 0 12px; min-height: 40px;
+  border: 1px solid var(--line2); border-radius: 999px;
+  font: 500 14px/1.2 var(--mono); cursor: pointer;
+}
+.stack .term-tick:has(input:checked) { border-color: var(--accent); background: var(--accent-wash); }
+.term-tick input { width: 16px; height: 16px; margin: 0; }
+.term-help p { margin: 0 0 6px; }
+.term-examples { list-style: none; padding: 0; margin: 0 0 10px; display: grid; gap: 6px; }
+.term-examples li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+button.term-example { font: 500 13px var(--mono); height: 36px; padding: 0 12px; }
+.term-field-error { color: var(--bad); font-weight: 600; font-size: 14px; margin: 4px 0 6px; }
+.term-role fieldset { margin-bottom: 18px; }
+@media (max-width: 1100px), (pointer: coarse) {
+  .stack .term-tick { min-height: 44px; }
+  button.term-example { height: 44px; }
+  input[type="number"] { height: 44px; }
+}
+@media (max-width: 720px) {
+  .term-table td { justify-content: space-between; }
+  .term-table td[data-label="Name"] { display: block; text-align: left; }
+  .term-table td[data-label="Name"]::before { display: none; }
+  .term-table td[data-label="Allows"] { display: block; text-align: left; }
+  .term-table td[data-label="Allows"]::before { display: block; margin-bottom: 6px; }
+  .term-table td[data-label="Manage"]::before,
+  .term-table td[data-label="Role"]::before { flex-basis: 100%; }
+  .term-manage, .term-form { width: 100%; }
+  .term-form select, .term-form input[type="text"] { flex: 1 1 8rem; width: auto; }
+  .term-manage > .btn, .term-manage > .term-form > button { flex: 0 0 auto; }
+  .term-activity td[data-label="Tool"], .term-activity td[data-label="Result"] { display: block; text-align: left; }
+  .term-activity td[data-label="Tool"]::before, .term-activity td[data-label="Result"]::before { display: block; margin-bottom: 4px; }
+}
+.term-filters label { display: inline-flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 14px; }
+.term-filters label.inline { flex-direction: row; align-items: center; min-height: 44px; font-weight: 500; }
+.term-filters select { width: auto; min-width: 10rem; }
+@media (max-width: 720px) {
+  .term-filters > label:not(.inline) { flex: 1 1 100%; }
+  .term-filters select { width: 100%; }
+}
+.session-tree, .session-tree ul { padding-left: 1.2em; }
+.session-tree li { margin: 6px 0; overflow-wrap: anywhere; }
+.term-ways { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 14px; margin: 14px 0 8px; }
+.term-way { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+.term-way:first-child { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.term-way h3 { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; font-size: 17px; }
+.term-way p { margin: 0 0 4px; }
+.term-badge {
+  display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none;
+  border-radius: 999px; background: var(--accent); color: var(--on-accent); font: 600 13px/1 var(--font);
+}
+.term-agent-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 0; }
+.term-agent-pick label { font-weight: 600; }
+.term-agent-pick select { width: auto; min-width: 11rem; }
+.term-way .term-more { margin-top: 10px; }
+#manual { margin-top: 12px; padding-top: 6px; }
+@media (max-width: 520px) {
+  .term-setup { padding: 18px 16px; }
+  .term-way { padding: 14px; }
+  .term-copy { flex-wrap: wrap; }
+  .term-cmd { flex-basis: 100%; }
+}
+.term-role textarea + p { margin-top: 8px; }
+@media (min-width: 721px) { .term-table td[data-label="Role"] .term-form { flex-wrap: nowrap; } }

@@ -1,75 +1,89 @@
-# Google OAuth verification
+# Google OAuth setup and verification
 
-The app asks Google for `openid`, `email`, and `https://www.googleapis.com/auth/drive`.
-That Drive scope is restricted. It lets this server see and change the signed-in account's
-Drive. The allowlist is what an assistant can use. Brand verification, a production project,
-and a public privacy policy still have to be finished in Google Cloud and Search Console.
-Google can ask for a security assessment (CASA) because the scope is restricted. This page
-is the list of those clicks. Nothing here changes Vercel secrets for you.
+The app asks Google for `openid`, `email`, and `https://www.googleapis.com/auth/drive.file`. That Drive
+scope is **non-sensitive**: Google opens to the app only the files a person picks in Google's file picker
+and the files the app creates. Google enforces it, so the rest of a person's Drive stays closed to this
+server whatever the server does. Brand verification, a production project, and a public privacy policy
+still have to be finished in Google Cloud and Search Console. Because no restricted scope is requested,
+Google's restricted-scope security assessment (CASA) does not apply. This page is the list of those
+clicks. Nothing here changes Vercel settings for you.
 
 ## What the server already does
 
-- Google is asked twice. **Sign-in** (`/auth/login`) requests only `openid` and `email`, online
-  access, and stores no token. **Connect Google Drive** (`/connect`, a separate click after
-  sign-in) requests `https://www.googleapis.com/auth/drive` with offline access and incremental
-  authorization (`include_granted_scopes=true`), pinned to the signed-in address with
-  `login_hint`. A connect token that does not include the Drive scope, or that belongs to a
-  different Google account than the one signed in, is revoked and refused. A stored token that only has
-  `https://www.googleapis.com/auth/drive.file` keeps working for files that grant already
-  covers, and the dashboard asks that person to sign in again.
+- Google is asked twice. **Sign-in** (`/auth/login`) requests only `openid` and `email`, online access,
+  and stores no token. **Connect Google Drive** (`/connect`, a separate click after sign-in) requests
+  `drive.file` with offline access, **without** incremental authorization
+  (`include_granted_scopes=false`), pinned to the signed-in address with `login_hint`.
+- A connect token that lacks `drive.file`, or belongs to a different Google account than the one signed
+  in, is refused. One that comes back with the full Drive scope (`https://www.googleapis.com/auth/drive`)
+  is refused **and revoked**, and never stored.
+- Every access token is refreshed as `drive.file` only, and the scopes Google reports are checked. A wider
+  grant fails closed.
 - `/privacy` and `/terms` are public and linked from the home page, the sign-in page, and the footer.
-- `APP_BASE_URL` is the only public origin. The OAuth redirect is `APP_BASE_URL/auth/callback`.
-  Point a custom domain at the deployment, set `APP_BASE_URL` to `https://that-domain` (no trailing
-  slash), and add that same callback URL on the OAuth client. `http://` is accepted only for
-  `localhost` and `127.0.0.1`.
-- The Google Picker is optional. It is enabled when both `GOOGLE_PICKER_API_KEY` and
-  `GOOGLE_CLOUD_PROJECT_NUMBER` are set. Browse and approval use the signed-in Drive without it.
-  The API key is visible to a signed-in browser. Restrict it by HTTP referrer to the production origin.
-- Content-Security-Policy allows `https://apis.google.com` and `https://www.gstatic.com` scripts
-  (the Picker script evaluates code) and frames from Drive, Docs, Accounts, and `content.googleapis.com`.
+- `APP_BASE_URL` is the only public origin. The OAuth redirect is `APP_BASE_URL/auth/callback`. `http://`
+  is accepted only for `localhost` and `127.0.0.1`.
+- Google's file picker is required: it is how people add files. It is enabled when both
+  `GOOGLE_PICKER_API_KEY` and `GOOGLE_CLOUD_PROJECT_NUMBER` are set; until then the admin overview lists
+  them as missing. The API key is visible to a signed-in browser, so restrict it (step 4 below).
+- Content-Security-Policy allows `https://apis.google.com` and `https://www.gstatic.com` scripts (the
+  picker script evaluates code) and frames from Drive, Docs, Accounts, and `content.googleapis.com`.
 
-## Migration for people who already connected
+## Google Cloud clicks
 
-Refresh tokens keep the scopes they were granted. The server does not send a new scope list on
-refresh, so a `drive.file` token still cannot open the rest of Drive until that person signs in again.
+Do these in the Google Cloud project whose OAuth client is in `GOOGLE_OAUTH_CLIENT_ID`. For a public
+deployment, use a separate production project, not one used for experiments.
 
-1. Each person opens the dashboard. A banner says the saved connection cannot see the whole Drive.
-2. They choose **Reconnect Google Drive** and allow Drive access. If Google keeps the narrower permission,
-   they remove the app at [Google Account permissions](https://myaccount.google.com/permissions)
-   and sign in once more.
-3. If `GOOGLE_OAUTH_REFRESH_TOKEN` is set, it overrides the admin's dashboard sign-in. Replace it
-   with `scripts/bootstrap_oauth.py` when that token was minted with `drive.file`.
-4. The server allowlist is unchanged. A call still has to match an allowed id or an allowed parent.
-   Approving a request adds that file. Files the assistant creates inside an allowed folder stay available.
+1. **Custom domain.** Attach the domain to the host. Set `APP_BASE_URL` to `https://your-domain`. Add
+   `https://your-domain/auth/callback` as an authorized redirect URI on the OAuth client. Remove
+   preview-only redirect URIs from the production client.
+2. **APIs.** APIs & Services → Library: enable **Google Drive API** and **Google Picker API**.
+3. **OAuth client.** Web application. Its client ID and secret are `GOOGLE_OAUTH_CLIENT_ID` and
+   `GOOGLE_OAUTH_CLIENT_SECRET`.
+4. **Picker key.** APIs & Services → Credentials → **Create credentials → API key**. Open the key:
+   - **Application restrictions:** Websites → `https://your-domain/*` and `https://docs.google.com/*`
+     (add `http://localhost:8000/*` only on a development project). The picker runs in a frame on
+     `docs.google.com`, and Safari can send that address to Google instead of yours. Without it, Safari
+     users see "The API developer key is invalid".
+   - **API restrictions:** Restrict key → **Google Picker API** only.
 
-The assistant tools, mailbox, and webhook routes are the same. Only the Google permission changed.
+   Save. The key is `GOOGLE_PICKER_API_KEY`.
+5. **Project number.** Console home → Project info → **Project number** (the long number, not the
+   project ID). It is `GOOGLE_CLOUD_PROJECT_NUMBER`. The picker needs it so that a file someone picks is
+   opened to *this* app.
+6. **Consent screen** (Google Auth Platform):
+   - **Branding:** app name, support email, developer contact, logo, home page `APP_BASE_URL`, privacy
+     policy `APP_BASE_URL/privacy`, terms `APP_BASE_URL/terms`.
+   - **Audience:** External.
+   - **Data access:** scopes `openid`, `email`, `https://www.googleapis.com/auth/drive.file`.
+     **Remove** `https://www.googleapis.com/auth/drive` if it is listed. Justification: sign-in uses only
+     `openid` and `email`; `drive.file` is requested in a separate step when the person chooses to connect
+     Drive, and only files they pick in Google's file picker are opened to the app.
+7. **Search Console.** Add the custom domain as a property and verify it (DNS is the durable method).
+   Google uses this for brand verification.
+8. **Brand verification.** Submit the app for brand verification on the same verified domain. The home
+   page should show the app name, what it does, and a link to the privacy policy.
+9. **Publish.** Set the app to **In production**. In *Testing*, Google expires refresh tokens after 7 days
+   and only listed test users can connect.
 
-## Clicks left for the owner
+After the first production connection: pick one file, allow it, confirm an assistant can read it, and
+confirm it cannot read a file you did not pick.
 
-Do these in a **separate production** Google Cloud project, not the one you used for experiments.
+## Moving from full Drive to drive.file
 
-1. **Custom domain.** Attach the domain to the host. Set `APP_BASE_URL` to `https://your-domain`.
-   Add `https://your-domain/auth/callback` as an authorized redirect URI. Remove preview-only
-   redirect URIs from the production client.
-2. **APIs.** In that project enable **Google Drive API**. Enable **Google Picker API** only if you
-   want the optional picker.
-3. **OAuth client.** Web application. Client id and secret become `GOOGLE_OAUTH_CLIENT_ID` and
-   `GOOGLE_OAUTH_CLIENT_SECRET`. For the picker, create an API key for `GOOGLE_PICKER_API_KEY`,
-   restricted to the Picker API and to your domain. Copy the project **number** (not the project id)
-   into `GOOGLE_CLOUD_PROJECT_NUMBER`.
-4. **Consent screen.** App name, support email, developer contact, logo, and home page
-   `APP_BASE_URL`. Privacy policy `APP_BASE_URL/privacy`. Terms `APP_BASE_URL/terms`.
-   Scopes: `openid`, `email`, `https://www.googleapis.com/auth/drive`. Audience: External.
-   In the scope justification, say that sign-in uses only `openid` and `email`, and that the
-   Drive scope is requested in a separate step only when the person chooses to connect Drive.
-5. **Search Console.** Add the custom domain as a property and verify it (DNS is the durable
-   method). Google uses this for brand verification of the domain on the consent screen.
-6. **Brand verification.** In the Google Auth Platform / consent screen, submit the app for
-   brand verification. Use the same domain Search Console shows as verified. The home page
-   should show the app name, what it does, and a link to the privacy policy.
-7. **Publish.** Set the app to **In production**. Testing mode expires refresh tokens after
-   7 days. The full Drive scope is restricted, so Google can ask for a security assessment
-   before the unverified-app screen goes away.
+Earlier versions asked for the full Drive scope. After deploying this version:
 
-After the first production sign-in, allow one file, confirm an assistant can read it, and
-confirm it cannot read a file you did not allow.
+1. **Old connections stop being used immediately.** A stored token that carries full Drive (or has no
+   scope stamp) counts as not connected. Assistants get "Google Drive is not connected" until the person
+   reconnects. No Drive call is made with it.
+2. **Revoke them.** On `/admin`, **Revoke old connections** deletes every old token and ends it at Google.
+   (Each person's own **Reconnect** or **Disconnect** also revokes theirs.)
+3. **Each person reconnects.** Settings → **Reconnect Google Drive**. Their old token is revoked first,
+   then Google asks for access to only the files they pick.
+4. **Each person picks their files again.** Their allowed list is kept, but Google opens an item to the app
+   only once it is picked. Files shows **Not opened yet** next to those items, with a **Pick again**
+   button that opens Google's picker searching for that name. Files the app itself created keep working.
+   Items shared with paired people work again once their owner picks them.
+5. **Remove** `GOOGLE_OAUTH_REFRESH_TOKEN` from the server if it is set. (If kept, every access token it
+   yields is still limited to `drive.file`, but it overrides the admin's own connection.)
+6. **Remove the full Drive scope** from the consent screen's Data access (step 6 above), and update any
+   verification submission that listed it.

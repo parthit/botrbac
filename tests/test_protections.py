@@ -10,9 +10,9 @@ from scoped_drive_mcp.drive_client import (
     LazyBotDriveClient,
     check_update_metadata,
 )
-from scoped_drive_mcp.scope import InvalidInputError, OutOfScopeError
+from scoped_drive_mcp.scope import InvalidInputError, OutOfScopeError, ScopeGuard
 from scoped_drive_mcp.service import DriveService
-from tests.conftest import ROOT
+from tests.conftest import BOT_EMAIL, ROOT, make_settings
 
 # ---- shortcuts --------------------------------------------------------------
 
@@ -55,9 +55,6 @@ def test_shortcut_listing_and_search_do_not_expose_target(drive, service: DriveS
 
 def test_shortcut_target_out_of_scope_even_when_bot_can_see_it(world) -> None:
     """In the two-view world: grant a folder containing a shortcut to a private file."""
-    from scoped_drive_mcp.scope import ScopeGuard
-    from tests.conftest import BOT_EMAIL, make_settings
-
     bot = world.as_user(BOT_EMAIL)
     world.share("proj", BOT_EMAIL)
     world.share("priv-secret", BOT_EMAIL)  # even if Google would allow the target...

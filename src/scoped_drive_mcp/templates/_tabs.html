@@ -1,7 +1,9 @@
 {#- Tabs for the two merged pages. Links, not ARIA tabs: each tab is its own address. -#}
-{% macro files_tabs(active, allow_count=None) -%}
+{% macro files_tabs(active, allow_count=None, notion_tab=False, onedrive_tab=False) -%}
 <nav class="tabs" aria-label="Files">
-  <a href="/files" {% if active == 'all' %}aria-current="true"{% endif %}>All files</a>
+  <a href="/files" {% if active == 'all' %}aria-current="true"{% endif %}>From Google Drive</a>
+  {% if notion_tab %}<a href="/files?tab=notion" {% if active == 'notion' %}aria-current="true"{% endif %}>From Notion</a>{% endif %}
+  {% if onedrive_tab %}<a href="/files?tab=onedrive" {% if active == 'onedrive' %}aria-current="true"{% endif %}>From OneDrive</a>{% endif %}
   <a href="/files?tab=allowed" {% if active == 'allowed' %}aria-current="true"{% endif %}>Allowed{% if allow_count is not none %} <span class="count">{{ allow_count }}</span>{% endif %}</a>
 </nav>
 {%- endmacro %}

@@ -1,6 +1,6 @@
 """Settings loaded from environment variables only (no credential files on disk).
 
-Only malformed values (and a missing API_TOKENS) make the settings fail to load. Settings the
+Only malformed values make the settings fail to load. Settings the
 dashboard or the bot connection need are optional at load time; `missing_settings()` reports
 which ones are absent so the signed-in admin overview can list them (names only, never values).
 The public /health route stays a liveness check and does not repeat that list.
@@ -17,7 +17,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
-_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Each address keys its own store (`u:{email}:`), so ':' and control, whitespace and
+# Redis glob characters are refused (see store.tenant_prefix).
+_EMAIL_CHAR = r"[^@:\s\x00-\x1f\x7f*?\[\]\\]"
+_EMAIL = re.compile(rf"^{_EMAIL_CHAR}+@{_EMAIL_CHAR}+\.{_EMAIL_CHAR}+$")
 _PROJECT_NUMBER = re.compile(r"^[0-9]{6,20}$")
 _LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
@@ -71,6 +74,14 @@ def _secret_set(value: SecretStr | None) -> bool:
     return value is not None and bool(value.get_secret_value().strip())
 
 
+def _real_secret(value: SecretStr | None) -> bool:
+    """Set, and not a placeholder such as REPLACE_WITH_..."""
+    if not _secret_set(value):
+        return False
+    assert value is not None
+    return not value.get_secret_value().strip().upper().startswith("REPLACE")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, extra="ignore", case_sensitive=False)
 
@@ -83,7 +94,9 @@ class Settings(BaseSettings):
     # Optional since phase 2: the bot can be connected from the dashboard instead.
     google_oauth_refresh_token: SecretStr | None = None
 
-    api_tokens: Annotated[list[TokenEntry], NoDecode]
+    # Optional legacy bearer tokens for the admin (xAI API, scripts). Assistants that
+    # connect with OAuth do not need them.
+    api_tokens: Annotated[list[TokenEntry], NoDecode] = Field(default_factory=list)
 
     owner_email: str | None = None
     bot_email: str | None = None
@@ -94,12 +107,21 @@ class Settings(BaseSettings):
     encryption_key: SecretStr | None = None
     # Local testing only: also accept this server's own /oauth/done as an OAuth redirect.
     oauth_test_callback: bool = False
-    webhooks_enabled: bool = False
+    # Also accept http://localhost:8787/callback and http://127.0.0.1:8787/callback as
+    # OAuth redirects. No supported assistant uses them, and any program on the approver's
+    # computer could be listening there, so they are off unless you run such a client.
+    oauth_loopback_callback: bool = False
+    # Wake-up pings to paired assistants are on whenever WEBHOOK_KEK is set.
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"
-    # Vercel Edge Config connection string (set when an Edge Config is connected to the
-    # project). Holds server-side switches such as `self_pairing`; see flags.py.
-    edge_config: SecretStr | None = None
+    # Optional: Notion as a second connection (a public OAuth "developer connection").
+    # Notion is offered on Settings only when both are set.
+    notion_oauth_client_id: SecretStr | None = None
+    notion_oauth_client_secret: SecretStr | None = None
+    # Optional: Microsoft OneDrive (an app registered in Microsoft Entra). Offered on
+    # Settings only when both are set. Read-only (Files.Read).
+    onedrive_oauth_client_id: SecretStr | None = None
+    onedrive_oauth_client_secret: SecretStr | None = None
 
     redis_rest_url: str | None = Field(
         default=None,
@@ -121,6 +143,22 @@ class Settings(BaseSettings):
 
     max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
+    # How long a file a paired person sent is held for its recipient to save to their own
+    # Drive. After this it is deleted here; a saved copy in their Drive stays.
+    drop_hold_hours: int = Field(default=24, ge=24, le=168)
+    # Largest file a person may send from the dashboard (in pieces, each under Vercel's
+    # 4.5 MB request limit). An assistant's send_file keeps the MAX_BYTES limit.
+    drop_max_mb: int = Field(default=20, ge=1, le=100)
+    # With a Vercel Blob store connected, held files go there. These keep them inside the
+    # free (Hobby) Blob tier: 2,000 uploads a month and 1 GB stored. Going over turns Blob
+    # off for 30 days, so the defaults leave room. Raise them on a paid plan.
+    drop_blob_monthly_uploads: int = Field(default=1500, ge=10, le=10_000_000)
+    drop_blob_storage_mb: int = Field(default=800, ge=16, le=10_000_000)
+    # Read PDF and Office files in a separate process with hard memory and CPU limits.
+    # Turn off only where the host does not allow starting a process.
+    extract_isolation: bool = True
+    # Address-space limit for that process, in MB.
+    extract_memory_mb: int = Field(default=768, ge=256, le=8192)
     scope_cache_ttl: float = Field(default=60.0, ge=0, le=3600)
     # How long the allowlist is cached per instance; bounds how fast a revoke takes effect.
     allowlist_cache_ttl: float = Field(default=2.0, ge=0, le=10)
@@ -130,14 +168,15 @@ class Settings(BaseSettings):
     google_picker_api_key: str | None = None
     google_cloud_project_number: str | None = None
 
-    # Fixed-window counters. Login is per IP. /mcp is per bearer token, or per IP
-    # when the request has no token. High defaults so normal use is unaffected.
+    # Fixed-window counters. Login is per address (IPv6 per /64). /mcp is per connection
+    # (OAuth app or API_TOKENS entry); refused bearers are counted per address. High
+    # defaults so normal use is unaffected.
     login_rate_limit: int = Field(default=30, ge=1, le=10_000)
     login_rate_window_seconds: int = Field(default=600, ge=1, le=86_400)
     mcp_rate_limit: int = Field(default=300, ge=1, le=100_000)
-    # Off: an unsigned allowlist, app or pairing record is accepted and signed when read.
-    # On: it is ignored. Turn on once the records from before signing have been signed.
-    require_signed_records: bool = False
+    # On (the default): an unsigned allowlist, app or pairing record is ignored. Set it
+    # to 0 only on an older deployment, until /admin has signed the records from before.
+    require_signed_records: bool = True
     # Access requests one connected app may have waiting for the person at once.
     max_pending_requests: int = Field(default=50, ge=1, le=300)
     mcp_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
@@ -285,8 +324,10 @@ class Settings(BaseSettings):
     @field_validator("api_tokens", mode="before")
     @classmethod
     def _parse_tokens(cls, value: object) -> object:
+        if value is None:
+            return []
         if isinstance(value, str):
-            return parse_api_tokens(value)
+            return parse_api_tokens(value) if value.strip() else []
         return value
 
     # ---- derived ---------------------------------------------------------
@@ -313,6 +354,26 @@ class Settings(BaseSettings):
     def oauth_client_configured(self) -> bool:
         return _secret_set(self.google_oauth_client_id) and _secret_set(
             self.google_oauth_client_secret
+        )
+
+    @property
+    def notion_configured(self) -> bool:
+        """Both Notion OAuth values are set (a placeholder such as REPLACE_WITH_... does
+        not count) and there is a public address for Notion to send people back to."""
+        return (
+            _real_secret(self.notion_oauth_client_id)
+            and _real_secret(self.notion_oauth_client_secret)
+            and bool(self.app_base_url)
+        )
+
+    @property
+    def onedrive_configured(self) -> bool:
+        """Both Microsoft OAuth values are set (not placeholders) and there is a public
+        address for Microsoft to send people back to."""
+        return (
+            _real_secret(self.onedrive_oauth_client_id)
+            and _real_secret(self.onedrive_oauth_client_secret)
+            and bool(self.app_base_url)
         )
 
     @property
@@ -347,6 +408,9 @@ class Settings(BaseSettings):
             ("ENCRYPTION_KEY", _secret_set(self.encryption_key)),
             ("UPSTASH_REDIS_REST_URL", self.redis_rest_url is not None),
             ("UPSTASH_REDIS_REST_TOKEN", _secret_set(self.redis_rest_token)),
+            # Drive access is per file, and Google's file picker is how files are added.
+            ("GOOGLE_PICKER_API_KEY", self.google_picker_api_key is not None),
+            ("GOOGLE_CLOUD_PROJECT_NUMBER", self.google_cloud_project_number is not None),
         ]
         missing = [name for name, ok in checks if not ok]
         if self.postgres_configured:
@@ -356,14 +420,23 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _signing_needs_a_key(self) -> "Settings":
         # Records are signed with a key made from ENCRYPTION_KEY. Without it nothing is
-        # signed or checked, so asking for signed records must not quietly do nothing.
-        if self.require_signed_records and self.encryption_key is None:
+        # signed or checked, so asking for signed records explicitly must not quietly do
+        # nothing. The default (on) applies only once a key is set.
+        if (
+            self.require_signed_records
+            and "require_signed_records" in self.model_fields_set
+            and self.encryption_key is None
+        ):
             raise ValueError("REQUIRE_SIGNED_RECORDS needs ENCRYPTION_KEY to be set")
         return self
 
     def dashboard_missing(self) -> list[str]:
-        """Settings the web dashboard cannot run without (Redis may fall back to memory)."""
-        return [m for m in self.missing_settings() if not m.startswith("UPSTASH_")]
+        """Settings the web dashboard cannot run without (Redis may fall back to memory).
+
+        The picker settings are listed as missing but do not stop the dashboard: sign-in,
+        Settings and Disconnect still have to work while they are being set up."""
+        optional = ("UPSTASH_", "GOOGLE_PICKER_", "GOOGLE_CLOUD_PROJECT_NUMBER")
+        return [m for m in self.missing_settings() if not m.startswith(optional)]
 
     @property
     def secure_cookies(self) -> bool:

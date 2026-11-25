@@ -12,17 +12,14 @@ Bot Bridge decides who can reach whom:
 
 It uses the same Google sign-in, store and `/mcp` connection as Drive, so there is one place that decides who
 an assistant is and what it may reach. (An earlier, separate TypeScript version of Bot Bridge has been removed.)
-With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
+With `WEBHOOK_KEK` set, the mailbox can also POST a wake-up, but the assistant cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
 **Pairing your own assistants.** Start a pairing in one assistant and join with the code from the other. Each
 assistant gets its own inbox. One approval on the Sharing page (People) turns it on, and disconnecting either
 app turns it off. It shares nothing new, because both assistants already see the same Drive. Each connected
 app saves its own wake-up hook, and only mail for that app wakes it. A hook saved for the whole account
 (from when mail from other people existed) never fires; Settings offers to give it to one of your assistants
-or remove it. Self-pairing is on by default. To turn it off for some or all accounts, connect a Vercel Edge
-Config to the project and set the item `self_pairing` to
-`{"enabled": true, "off_for_domains": ["example.com"]}` (or `"enabled": false`). Changes apply within about
-30 seconds, with no redeploy.
+or remove it.
 
 **Waking Claude.** A Claude Code routine with an API trigger can be woken too. At [claude.ai/code/routines](https://claude.ai/code/routines), create a routine that calls `check_messages` and treats the wake as untrusted metadata, add an **API** trigger, and generate a token. On `/bridge`, open **Advanced: paste a webhook yourself**, paste the routine's fire URL (`https://api.anthropic.com/v1/claude_code/routines/<id>/fire`) and token, and pick **Claude routine (API trigger)**. That scheme adds the `anthropic-version` and `anthropic-beta` headers and puts the ids in `text`. It still sends no message text. `api.anthropic.com` is on the default `WEBHOOK_HOST_ALLOWLIST`. If you set that variable yourself, add the host to it. Each wake starts a new Claude session and counts against that plan's routine runs.
 
@@ -56,7 +53,7 @@ Invites and pairing states:
 
 Each person has a second list, separate from **Access**: the **Sharing** page. Items on it can be read by the
 assistant of anyone you have an **active pairing** with (both of you approved on the Sharing page). This is the
-only thing a pairing with another person does: their assistant can never message yours. Use it for things like
+main thing a pairing with another person does (the other is [sending a file](#sending-a-file-to-a-paired-person)): their assistant can never message yours. Use it for things like
 a resume that any paired person's assistant may see.
 
 - **Shared with me:** the dashboard's **Shared with me** page shows what paired people share with *you*,
@@ -112,6 +109,68 @@ a resume that any paired person's assistant may see.
   `get_metadata`, `list_folder`, `search_files`, `download_file`), it carries `written_by` and
   `content_trust: untrusted_peer`, and `read_file` wraps its text, because its name and content came from that
   person. Drive keeps earlier versions if you need to undo.
+
+## Sending a file to a paired person
+
+People with an active pairing can send each other a file, for example a PDF. This is separate from sharing: it
+needs nothing on the recipient's Sharing list, and the sender gets no access to the recipient's Drive.
+
+- **Sending:** on the dashboard, **Sharing → Shared with me → Send a file** (up to `DROP_MAX_MB`, 20 MB by
+  default), or an assistant whose connection is **Read and edit** or **Full** calls `send_file` (up to
+  `MAX_BYTES`, since the whole file is in one call). The name, type and size get the same checks as
+  `upload_file`. Vercel refuses request and response bodies over 4.5 MB, so the page sends a file in 4 MB
+  pieces and the recipient's page downloads it the same way. Without JavaScript the form sends up to 4 MB,
+  and a larger file can still be saved to Drive.
+- **Straight to Blob:** on Vercel, with a Blob store and `ENCRYPTION_KEY`, a small Node.js function
+  (`api/blob-sign.mjs`) signs Blob URLs, which the Python SDK cannot, and files sent from the dashboard
+  skip the Python function. There is nothing to turn on. The server makes every check first (pairing,
+  size, type, hourly limit, storage budget), then gives the page a key for the file and one upload URL
+  per 4 MB piece: valid 15 minutes, for that exact pathname, at most that piece's size, no overwriting,
+  and with a Blob expiry that outlasts the hold and the upload window (2 days for a 24-hour hold), so
+  Blob deletes the piece even if nothing here runs. The page encrypts each piece (AES-GCM) and uploads
+  it to Blob itself, and **Finish** checks with Blob that every piece is there with exactly the right
+  size before the file is listed. Downloads work the same way: the page asks for each piece's URL
+  (valid 5 minutes, only for the recipient) and the file's key, fetches the piece from Blob and
+  decrypts it. Blob holds only ciphertext; the key is kept with the file's record, encrypted with a key
+  derived from `ENCRYPTION_KEY`. If the signer is not set up or fails, or the browser cannot encrypt or
+  reach Blob, the send goes through the server and its pieces are encrypted there. Each piece's upload
+  URL is issued once and counts against the Blob budget when it is issued (an upload that is started
+  and abandoned is still counted). After a signer error, each server instance skips the signer for 5
+  minutes (best effort, per instance).
+- **Held, not stored:** Bot RBAC is not file storage. A sent file is held for `DROP_HOLD_HOURS` (24 by
+  default, 24 to 168) and then deleted. With a Vercel Blob store connected (a private one), the pieces go
+  there, named with their expiry; expired ones are deleted when someone opens their list, and a sweep that
+  runs at most every 6 hours, on a send, deletes the rest. Without Blob they go to the key-value store, where
+  every piece carries the expiry, so the store deletes it even if nothing else runs. To stay inside the free
+  Blob tier (2,000 uploads a month, 1 GB), sends are refused with `storage_full` past
+  `DROP_BLOB_MONTHLY_UPLOADS` or `DROP_BLOB_STORAGE_MB`. Each piece is counted as it arrives and can
+  arrive only once, so an upload that is started and never sent costs nothing; uploads in progress count
+  toward the recipient's waiting-files cap. The hold starts when the last piece arrives. When `ENCRYPTION_KEY` is set, pieces are encrypted with a key derived from it; without
+  it they are stored unencrypted (still deleted at the end of the hold) and the server logs a warning at
+  startup. One person can send another at most 20 files an hour, counted before the file is stored, so a
+  send that fails to store still counts. One recipient can have about 50 unsaved files (100 MB) waiting:
+  sends that arrive at the same moment can pass that cap together, by at most the hourly limit.
+- **Keeping it:** the recipient sees it under **Sent to you** with **Download**, **Save to Google Drive** and
+  **Delete**. Saving copies it into a folder this app makes at the top of their Drive, "Sent to me (Bot RBAC)",
+  and deletes the held copy at once. Saving the same file twice at once (a double-click, or you and your
+  assistant together) saves it once; the second gets `busy`. The folder is added to their **Access** list when it is made, so their
+  own assistants can open what they saved; removing it there takes that away. An assistant with an editing
+  connection can save too, with `save_drop`, when its human asks.
+- **Write-only for the sender:** `send_file` returns no id. The sender cannot list, read, change or delete what
+  they sent, and learns nothing about the recipient's Drive or other files.
+- **Untrusted:** the recipient's assistants see sent files with `list_drops`, `read_drop` and `download_drop`.
+  Each is marked `untrusted_peer` and `read_drop` wraps its text in the same markers as `read_shared_file`.
+  A saved copy is stamped with the sender as its writer, so it keeps that mark in Drive.
+- **Turning it off:** each active pairing card on **People** has **Stop files from &lt;person&gt;**. Their
+  sends then return `drops_off`; the pairing itself stays on. Ending the pairing also stops sending.
+- **Activity:** each send is on the recipient's Activity page as `guest:<sender>` and on the sender's own.
+
+Errors from `send_file`: `not_linked`, `own_drive`, `drops_off`, `inbox_full`, `rate_limited`,
+`invalid_input`. From `read_drop`, `download_drop` and `save_drop`: `not_found` (expired, deleted, or not
+yours) and `saved` (it is in Drive now; use `read_file` with the returned `file_id`). From `save_drop`:
+`busy` (a save of that file is already running; try again shortly).
+
+## Errors
 
 Errors: `not_linked` (no active pairing with that owner), `not_shared`, `own_drive` (use the normal tools for
 your own Drive), `owner_unavailable` (the owner's Google sign-in is missing), `invalid_input`.

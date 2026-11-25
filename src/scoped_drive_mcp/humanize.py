@@ -56,12 +56,14 @@ def when(value: Any, empty: str = "—", date_only: bool = False) -> Markup:
 
 def app_names(grants: Any) -> dict[str, str]:
     """Activity and requests record an OAuth app as `oauth:<slug>`. Map that back to the
-    name the person saw when they chose Allow."""
+    name the person gave it, or else the name they saw when they chose Allow. The key comes
+    from the registered name, which a rename does not change."""
     names: dict[str, str] = {}
     for grant in grants or []:
         name = str(getattr(grant, "client_name", "") or "").strip()
+        registered = str(getattr(grant, "app_name", "") or "").strip() or name
         if name:
-            names.setdefault(principal_name(name), name)
+            names.setdefault(principal_name(registered), name)
     return names
 
 
@@ -97,6 +99,12 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "create_folder": ("created a folder in {item}", "create a folder in {item}"),
     "create_doc": ("created a document in {item}", "create a document in {item}"),
     "upload_file": ("uploaded a file to {item}", "upload a file to {item}"),
+    "start_upload": ("started uploading a file to {item}", "upload a file to {item}"),
+    "append_chunk": ("sent part of a file", "send part of a file"),
+    "finish_upload": ("uploaded {item}", "finish uploading a file"),
+    "cancel_upload": ("cancelled an upload", "cancel an upload"),
+    "export_file": ("exported {item}", "export {item}"),
+    "save_export": ("saved an export of {item}", "save an export of {item}"),
     "update_file_content": ("edited {item}", "edit {item}"),
     "rename_file": ("renamed {item}", "rename {item}"),
     "trash_file": ("moved {item} to the trash", "move {item} to the trash"),
@@ -121,11 +129,23 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
         "search files people share with you",
     ),
     "list_shared_folder": ("opened {item}", "open {item}"),
+    "notion_list_pages": ("listed your allowed Notion pages", "list your Notion pages"),
+    "notion_read_page": ("read a Notion page", "read a Notion page"),
+    "notion_search": ("searched your allowed Notion pages", "search your Notion pages"),
+    "onedrive_list_folder": ("listed your allowed OneDrive files", "list your OneDrive files"),
+    "onedrive_read_file": ("read a OneDrive file", "read a OneDrive file"),
+    "onedrive_download_file": ("downloaded a OneDrive file", "download a OneDrive file"),
+    "onedrive_search": ("searched your allowed OneDrive files", "search your OneDrive files"),
     "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
     "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
     "update_shared_file": ("edited {item}", "edit {item}"),
     "rename_shared_file": ("renamed {item}", "rename {item}"),
+    "send_file": ("sent a file", "send a file"),
+    "list_drops": ("listed files people sent you", "list files people sent you"),
+    "read_drop": ("read a file someone sent you", "read a file someone sent you"),
+    "download_drop": ("downloaded a file someone sent you", "download a file someone sent you"),
+    "save_drop": ("saved a file someone sent you to Drive", "save a file to Drive"),
     "read_shared_file": ("read {item}", "read {item}"),
     "download_shared_file": ("downloaded {item}", "download {item}"),
 }
@@ -140,6 +160,7 @@ _FOLDER_TOOLS = frozenset(
         "create_folder",
         "create_doc",
         "upload_file",
+        "start_upload",
         "list_shared_folder",
         "create_shared_doc",
         "create_shared_folder",
@@ -248,6 +269,15 @@ _REFUSALS = {
     "not_shared": "it isn’t shared with you",
     "not_found": "it wasn’t found",
     "webhooks_disabled": "wake-ups are turned off on this server",
+    "not_allowed": "that Notion page isn’t allowed",
+    "notion_not_connected": "Notion isn’t connected",
+    "notion_reconnect": "Notion needs to be connected again",
+    "notion_error": "Notion returned an error",
+    "onedrive_not_allowed": "that OneDrive file isn’t allowed",
+    "onedrive_not_connected": "OneDrive isn’t connected",
+    "onedrive_reconnect": "OneDrive needs to be connected again",
+    "onedrive_error": "OneDrive returned an error",
+    "onedrive_unavailable": "Microsoft wasn’t answering",
 }
 
 
@@ -345,6 +375,7 @@ def _owner_row(
     item = _item_text(record, names, request_names)
     client = str(record.get("client") or "an app")
     role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
+    notion_name = _quoted(str(record.get("name") or "Untitled"))
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -372,11 +403,35 @@ def _owner_row(
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
         "oauth_role": (f"You changed what {client} can do: {role_words}.", _DONE),
+        "oauth_rename": (
+            f"You renamed {client} to {str(record.get('label') or client)}.",
+            _DONE,
+        ),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
         "role_save": (f"You saved the role {record.get('name') or 'a role'}.", _DONE),
         "role_delete": (
             f"You deleted the role {record.get('name') or 'a role'}.",
             Badge("", "Deleted", "–"),
+        ),
+        "notion_connect": ("You connected Notion.", Badge("ok", "Connected", "✓")),
+        "notion_disconnect": ("You disconnected Notion.", Badge("", "Disconnected", "–")),
+        "notion_allow": (
+            f"You allowed the Notion page {notion_name} for your assistants.",
+            _ALLOWED,
+        ),
+        "notion_remove": (
+            f"You removed the Notion page {notion_name} from your assistants’ list.",
+            Badge("", "Removed", "–"),
+        ),
+        "onedrive_connect": ("You connected OneDrive.", Badge("ok", "Connected", "✓")),
+        "onedrive_disconnect": ("You disconnected OneDrive.", Badge("", "Disconnected", "–")),
+        "onedrive_allow": (
+            f"You allowed the OneDrive item {notion_name} for your assistants.",
+            _ALLOWED,
+        ),
+        "onedrive_remove": (
+            f"You removed the OneDrive item {notion_name} from your assistants’ list.",
+            Badge("", "Removed", "–"),
         ),
     }
     group = "you"
@@ -495,12 +550,18 @@ def group_repeats(rows: list[ActivityRow]) -> list[tuple[ActivityRow, int]]:
     return grouped
 
 
+def is_onedrive_record(record: Mapping[str, Any]) -> bool:
+    """A OneDrive tool call or dashboard action: its ids are not Google Drive ids."""
+    name = str(record.get("tool") or record.get("action") or "")
+    return name.startswith("onedrive_")
+
+
 def item_ids(records: list[Mapping[str, Any]]) -> list[str]:
     """Ids from the person's own Drive that a page of records mentions (not other people's
     shared items, which carry `owner`)."""
     seen: list[str] = []
     for record in records:
-        if record.get("owner"):
+        if record.get("owner") or is_onedrive_record(record):
             continue
         item = _item_id(record)
         if item and item not in seen:

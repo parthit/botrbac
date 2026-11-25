@@ -12,25 +12,63 @@ import io
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 
 from .config import Settings
 
-# The signed-in account's Drive. The server allowlist, not this scope, decides
-# what an assistant can open. A stored token that only has drive.file cannot see
-# files this app did not create or the user did not pick, so those people sign in again.
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+# Per-file access: Google lets this app open only files the person picked in the Google
+# Picker and files the app created. Google enforces that, so a leaked token or a bug in
+# this server cannot reach the rest of the Drive. The allowlist narrows it further.
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+# The whole Drive. Never requested, never stored, never used. A token that carries it is
+# refused at connect, treated as not connected if one is still stored, and revoked.
+FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DRIVE_SCOPE = DRIVE_FILE_SCOPE
+# Everything a token may carry: drive.file plus the identity scopes sign-in uses. Anything
+# else (drive.readonly, drive.metadata.readonly, drive.photos.readonly, cloud-platform,
+# full Drive, ...) reaches past the files a person picked, so the token is refused.
+ACCEPTABLE_SCOPES = frozenset(
+    {
+        DRIVE_FILE_SCOPE,
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    }
+)
+
+
+def scopes_acceptable(scopes: str | Iterable[str] | None) -> bool:
+    """True for a stored or granted scope list this server may use.
+
+    It has to include drive.file and nothing outside `ACCEPTABLE_SCOPES`: an allowlist,
+    so a new or unexpected wide scope is refused rather than let through. A record with
+    no scope list predates the stamp and could be a full-Drive token, so it is not
+    acceptable either.
+    """
+    if scopes is None:
+        return False
+    granted = set(scopes.split() if isinstance(scopes, str) else scopes)
+    return DRIVE_FILE_SCOPE in granted and granted <= ACCEPTABLE_SCOPES
+
+
 TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint, not a secret
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_APPS_PREFIX = "application/vnd.google-apps."
+# Google's limit for a one-request (multipart) upload; larger ones are resumable.
+SIMPLE_UPLOAD_BYTES = 5 * 1024 * 1024
 
-# `description` and `properties` only carry who wrote a file (a paired person's assistant
-# writing into a folder shared with them); they never move a file or change who sees it.
-CREATE_METADATA_KEYS = frozenset({"name", "mimeType", "parents", "description", "properties"})
-UPDATE_METADATA_KEYS = frozenset({"name", "trashed", "properties"})
+# `description`, `appProperties` and (legacy) `properties` only carry who wrote a file (a
+# paired person's assistant writing into a folder shared with them); they never move a file
+# or change who sees it.
+CREATE_METADATA_KEYS = frozenset(
+    {"name", "mimeType", "parents", "description", "properties", "appProperties"}
+)
+UPDATE_METADATA_KEYS = frozenset({"name", "trashed", "properties", "appProperties"})
 
 
 class DriveNotFoundError(Exception):
@@ -85,7 +123,12 @@ class DriveClient(Protocol):
     def get_file(self, file_id: str, fields: str) -> dict[str, Any]: ...
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]: ...
 
     def export(self, file_id: str, mime_type: str) -> bytes: ...
@@ -144,24 +187,69 @@ class CredentialsProvider(Protocol):
 
 
 def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
-    """Build user credentials without pinning a scope on refresh.
+    """Credentials whose every access token is limited to `drive.file`, as Google confirms.
 
-    Google binds a refresh token to the scopes granted when it was issued. Sending
-    a different `scope` on refresh would reject a token that still has only
-    `drive.file`. Omitting `scopes` keeps whichever grant that token already has.
-    New sign-ins request `DRIVE_SCOPE` (full Drive) in the authorization URL.
+    Each refresh asks Google for `drive.file` only, so even an older refresh token that
+    carries the full Drive scope is used only for per-file access. After each refresh the
+    scopes Google says it granted are checked: if they include anything beyond drive.file
+    and the sign-in scopes (`ACCEPTABLE_SCOPES`), or Google did not say, the refresh fails
+    and no Drive call is made.
+
+    The refresh runs on a private copy, so a token that fails the check is never set on
+    these (shared) credentials, not even for a moment.
     """
+    from google.auth import exceptions
     from google.oauth2.credentials import Credentials
+
+    class PickedFilesCredentials(Credentials):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._refresh_lock = threading.Lock()
+
+        def refresh(self, request: Any) -> None:
+            # Refresh a private copy and check it before anything changes here: these
+            # credentials are shared by every thread of a GoogleDriveClient, so a new
+            # token must never be visible on them until its scopes have passed.
+            stale = self.token
+            with self._refresh_lock:
+                if self.token is not None and self.token != stale and self.valid:
+                    # Another thread refreshed while this one waited (parallel Drive
+                    # lookups all see the same expired token). That token passed the
+                    # scope check below, so use it instead of asking Google again. A
+                    # refresh after a 401 still goes ahead: its token has not changed.
+                    return
+                trial = Credentials(
+                    token=None,
+                    refresh_token=self.refresh_token,
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_uri=self.token_uri,
+                    scopes=self.scopes,
+                )
+                trial.refresh(request)
+                if not scopes_acceptable(trial.granted_scopes or ()):
+                    # Drop the old token as well: this sign-in no longer refreshes to
+                    # a narrow one, so no further Drive call should go out on it.
+                    self.token = None
+                    raise exceptions.RefreshError(
+                        "Google returned a token wider than drive.file; refusing to use it"
+                    )
+                self._granted_scopes = trial.granted_scopes
+                self._id_token = trial.id_token
+                if trial.refresh_token:
+                    self._refresh_token = trial.refresh_token
+                self.expiry = trial.expiry
+                self.token = trial.token
 
     assert settings.google_oauth_client_id is not None
     assert settings.google_oauth_client_secret is not None
-    return Credentials(
+    return PickedFilesCredentials(
         token=None,
         refresh_token=refresh_token,
         client_id=settings.google_oauth_client_id.get_secret_value(),
         client_secret=settings.google_oauth_client_secret.get_secret_value(),
         token_uri=TOKEN_URI,
-        scopes=None,
+        scopes=[DRIVE_FILE_SCOPE],
     )
 
 
@@ -233,7 +321,12 @@ class GoogleDriveClient:
             raise
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
         from googleapiclient.errors import HttpError
 
@@ -250,6 +343,8 @@ class GoogleDriveClient:
             "includeItemsFromAllDrives": True,
             "supportsAllDrives": True,
         }
+        if order_by:
+            common["orderBy"] = order_by
 
         def run(extra: dict[str, Any]) -> dict[str, Any]:
             return self._execute(files.list(**common, **extra))
@@ -300,8 +395,12 @@ class GoogleDriveClient:
             return None
         from googleapiclient.http import MediaIoBaseUpload
 
+        # Google takes at most 5 MB in a one-request upload; larger files use a resumable
+        # upload (execute() sends it in one piece and handles the protocol).
         return MediaIoBaseUpload(
-            io.BytesIO(content), mimetype=content_mime or "application/octet-stream"
+            io.BytesIO(content),
+            mimetype=content_mime or "application/octet-stream",
+            resumable=len(content) > SIMPLE_UPLOAD_BYTES,
         )
 
     def create(
@@ -424,9 +523,14 @@ class LazyBotDriveClient:
         return self._inner().get_file(file_id, fields)
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
-        return self._inner().list_files(q, fields, page_size, page_token)
+        return self._inner().list_files(q, fields, page_size, page_token, order_by)
 
     def export(self, file_id: str, mime_type: str) -> bytes:
         return self._inner().export(file_id, mime_type)
@@ -512,9 +616,14 @@ class RoutingDriveClient:
         return self._client().get_file(file_id, fields)
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
-        return self._client().list_files(q, fields, page_size, page_token)
+        return self._client().list_files(q, fields, page_size, page_token, order_by)
 
     def export(self, file_id: str, mime_type: str) -> bytes:
         return self._client().export(file_id, mime_type)

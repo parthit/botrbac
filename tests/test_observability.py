@@ -1,7 +1,12 @@
 """Vercel Speed Insights / Web Analytics tags, and the page-stability markup in base.html."""
 
+import json
+import shutil
+import subprocess
+
 import pytest
 
+from scoped_drive_mcp.dashboard import TEMPLATES_DIR
 from tests.dash import client
 
 SCRIPTS = (
@@ -93,12 +98,6 @@ console.log(JSON.stringify(out));
 
 
 def _run_redaction(page: str, referrer: str, *urls: str) -> dict:
-    import json
-    import shutil
-    import subprocess
-
-    from scoped_drive_mcp.dashboard import TEMPLATES_DIR
-
     node = shutil.which("node")
     if not node:
         pytest.skip("node is not installed")

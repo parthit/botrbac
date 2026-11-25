@@ -36,6 +36,8 @@ class FakeFile:
     shortcut_target: str | None = None
     description: str | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # Private to the app that set them: other Drive editors cannot see or change these.
+    app_properties: dict[str, str] = field(default_factory=dict)
     # Bytes Drive returns for files.export in a given format; others get `content`.
     exports: dict[str, bytes | Exception] = field(default_factory=dict)
 
@@ -59,6 +61,8 @@ class FakeFile:
             full["description"] = self.description
         if self.properties:
             full["properties"] = dict(self.properties)
+        if self.app_properties:
+            full["appProperties"] = dict(self.app_properties)
         wanted = {f.strip() for f in fields.split(",")}
         return {k: v for k, v in full.items() if k in wanted}
 
@@ -169,6 +173,7 @@ def compile_query(q: str):
 class FakeDrive:
     files: dict[str, FakeFile] = field(default_factory=dict)
     queries: list[str] = field(default_factory=list)
+    orders: list[str | None] = field(default_factory=list)
     get_calls: list[str] = field(default_factory=list)
     ignore_parent_filter: bool = False
     page_size_cap: int = 1000
@@ -211,6 +216,7 @@ class FakeDrive:
             roots=self.roots,
             _ids=self._ids,
             default_owner=self.default_owner,
+            orders=self.orders,
         )
 
     def share(self, file_id: str, email: str, role: str = "writer") -> str:
@@ -248,14 +254,22 @@ class FakeDrive:
         return self._get(file_id).as_api(fields)
 
     def list_files(
-        self, q: str, fields: str, page_size: int, page_token: str | None = None
+        self,
+        q: str,
+        fields: str,
+        page_size: int,
+        page_token: str | None = None,
+        order_by: str | None = None,
     ) -> dict[str, Any]:
         self.queries.append(q)
+        self.orders.append(order_by)
         if self.ignore_parent_filter:
             pred = compile_query(re.sub(r" and \((?:'[^']*' in parents(?: or )?)+\)", "", q))
         else:
             pred = compile_query(q)
         matches = [f for f in self.files.values() if pred(f) and self.visible(f)]
+        if order_by == "folder,name":
+            matches.sort(key=lambda f: (f.mime_type != FOLDER_MIME, f.name.lower()))
         start = int(page_token or 0)
         size = min(page_size, self.page_size_cap)
         page = matches[start : start + size]
@@ -293,6 +307,7 @@ class FakeDrive:
         )
         f.description = metadata.get("description")
         f.properties = dict(metadata.get("properties") or {})
+        f.app_properties = dict(metadata.get("appProperties") or {})
         return f.as_api(fields)
 
     def create_permission(self, file_id: str, email: str, role: str) -> str:
@@ -325,13 +340,13 @@ class FakeDrive:
             f.name = metadata["name"]
         if metadata.get("trashed"):
             f.trashed = True
-        if "properties" in metadata:
+        for meta_key, stored in (("properties", f.properties), ("appProperties", f.app_properties)):
             # Like Drive: a property set to null is deleted.
-            for key, value in (metadata["properties"] or {}).items():
+            for key, value in (metadata.get(meta_key) or {}).items():
                 if value is None:
-                    f.properties.pop(key, None)
+                    stored.pop(key, None)
                 else:
-                    f.properties[key] = value
+                    stored[key] = value
         if content is not None:
             f.content = content
         return f.as_api(fields)

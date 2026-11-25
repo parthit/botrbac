@@ -24,6 +24,8 @@ VALID_ARGS = {
     "get_metadata": {"file_id": "notes-txt"},
     "read_file": {"file_id": "notes-txt"},
     "download_file": {"file_id": "notes-txt"},
+    "export_file": {"file_id": "sheet-1", "format": "csv"},
+    "save_export": {"file_id": "sheet-1", "format": "csv"},
     "create_folder": {"name": "New folder"},
     "create_doc": {"title": "New doc", "content": "hello"},
     "upload_file": {"name": "a.txt", "mime_type": "text/plain", "content_text": "x"},
@@ -46,6 +48,9 @@ MAILBOX_TOOLS = {
     "set_webhook",
     "clear_webhook",
 }
+# Files paired people sent this human (read) and sending one (write, editor and up).
+DROP_READ_TOOLS = {"list_drops", "read_drop", "download_drop"}
+DROP_SEND_TOOLS = {"send_file", "save_drop"}
 SHARED_TOOLS = {
     "list_shared_with_me",
     "search_shared_files",
@@ -53,6 +58,17 @@ SHARED_TOOLS = {
     "read_shared_file",
     "download_shared_file",
 }
+# Read-only, the person's own Notion, registered only when Notion is configured.
+NOTION_READ_TOOLS = {"notion_list_pages", "notion_read_page", "notion_search"}
+# Read-only, the person's own OneDrive, registered only when OneDrive is configured.
+ONEDRIVE_READ_TOOLS = {
+    "onedrive_list_folder",
+    "onedrive_read_file",
+    "onedrive_download_file",
+    "onedrive_search",
+}
+OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS
+UPLOAD_TOOLS = {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 SHARED_WRITE_TOOLS = {
     "create_shared_doc",
     "create_shared_folder",
@@ -67,11 +83,15 @@ VIEWER_EXPECTED = (
         "get_metadata",
         "read_file",
         "download_file",
+        "export_file",
         "request_access",
         "check_access_request",
     }
     | MAILBOX_TOOLS
     | SHARED_TOOLS
+    | NOTION_READ_TOOLS
+    | ONEDRIVE_READ_TOOLS
+    | DROP_READ_TOOLS
 )
 EXPECTED = {
     Role.VIEWER: VIEWER_EXPECTED,
@@ -83,8 +103,18 @@ EXPECTED = {
         "update_file_content",
         "rename_file",
     }
-    | SHARED_WRITE_TOOLS,
-    Role.ADMIN: set(VALID_ARGS) | MAILBOX_TOOLS | SHARED_TOOLS | SHARED_WRITE_TOOLS,
+    | SHARED_WRITE_TOOLS
+    | DROP_SEND_TOOLS
+    | UPLOAD_TOOLS,
+    Role.ADMIN: set(VALID_ARGS)
+    | MAILBOX_TOOLS
+    | SHARED_TOOLS
+    | SHARED_WRITE_TOOLS
+    | NOTION_READ_TOOLS
+    | ONEDRIVE_READ_TOOLS
+    | DROP_READ_TOOLS
+    | DROP_SEND_TOOLS
+    | UPLOAD_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")
@@ -110,7 +140,8 @@ async def test_registered_tools_are_exactly_the_role_map(service) -> None:
     mcp = create_mcp(service)
     tools = {t.name: t for t in mcp._tool_manager.list_tools()}
     names = set(tools)
-    assert names == set(ADMIN_TOOLS)
+    # Notion's and OneDrive's tools exist only when each is configured.
+    assert names == set(ADMIN_TOOLS) - OPTIONAL_TOOLS
     assert GUEST_TOOLS == SHARED_TOOLS
     assert GUEST_WRITE_TOOLS == SHARED_WRITE_TOOLS
     for name in names - GUEST_TOOLS - GUEST_WRITE_TOOLS:
@@ -123,7 +154,6 @@ async def test_registered_tools_are_exactly_the_role_map(service) -> None:
     # Writing into another person's share: content only, never sharing, moving or deleting.
     for name in GUEST_WRITE_TOOLS:
         assert not any(w in name for w in ("move", "permission", "delete", "parent", "trash"))
-        assert "trash" not in name
 
 
 @pytest.mark.anyio
@@ -159,7 +189,7 @@ async def test_list_tools_filtered_by_role(service) -> None:
             names = {t.name for t in await mcp.list_tools()}
         finally:
             current_principal.reset(token)
-        assert names == EXPECTED[role]
+        assert names == EXPECTED[role] - OPTIONAL_TOOLS
     assert await mcp.list_tools() == []
 
 

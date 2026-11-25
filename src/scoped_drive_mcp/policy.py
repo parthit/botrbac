@@ -14,6 +14,8 @@ from .audit import audit
 from .auth import Principal, current_principal
 from .config import Role
 from .drive_client import BotNotConnectedError
+from .notion_client import NotionApiError
+from .onedrive_client import OneDriveApiError
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 
 logger = logging.getLogger(__name__)
@@ -30,26 +32,44 @@ GUEST_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-VIEWER_TOOLS: frozenset[str] = GUEST_TOOLS | frozenset(
-    {
-        "search_files",
-        "list_folder",
-        "get_metadata",
-        "read_file",
-        "download_file",
-        "request_access",
-        "check_access_request",
-        "request_link",
-        "list_links",
-        "send_message",
-        "list_inbox",
-        "check_messages",
-        "reply",
-        "mark_read",
-        "get_webhook",
-        "set_webhook",
-        "clear_webhook",
-    }
+# Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
+NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
+
+# Reading the person's own OneDrive, limited to what they allowed (onedrive.py). Read-only.
+ONEDRIVE_TOOLS: frozenset[str] = frozenset(
+    {"onedrive_list_folder", "onedrive_read_file", "onedrive_download_file", "onedrive_search"}
+)
+
+VIEWER_TOOLS: frozenset[str] = (
+    GUEST_TOOLS
+    | NOTION_TOOLS
+    | ONEDRIVE_TOOLS
+    | frozenset(
+        {
+            "search_files",
+            "list_folder",
+            "get_metadata",
+            "read_file",
+            "download_file",
+            "export_file",
+            "request_access",
+            "check_access_request",
+            "request_link",
+            "list_links",
+            "send_message",
+            "list_inbox",
+            "check_messages",
+            "reply",
+            "mark_read",
+            "get_webhook",
+            "set_webhook",
+            "clear_webhook",
+            # Files paired people sent this human (drops.py), marked untrusted.
+            "list_drops",
+            "read_drop",
+            "download_drop",
+        }
+    )
 )
 # Writing into an item another person shared with this person's assistant and marked
 # editable. The owner's "edit" setting is checked on the server for every call; the
@@ -63,10 +83,20 @@ GUEST_WRITE_TOOLS: frozenset[str] = frozenset(
         "rename_shared_file",
     }
 )
+# A file sent in pieces (uploads.py), and a Google file exported and saved as a new file.
+# The same scope checks as upload_file, so the same role.
+UPLOAD_TOOLS: frozenset[str] = frozenset(
+    {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
+)
+# Sending one file to a paired person (drops.py), and saving one sent to this human into
+# their own Drive. Like the writes above, only for a connection allowed to edit.
+DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
 
 EDITOR_TOOLS: frozenset[str] = (
     VIEWER_TOOLS
     | GUEST_WRITE_TOOLS
+    | DROP_TOOLS
+    | UPLOAD_TOOLS
     | {
         "create_folder",
         "create_doc",
@@ -105,7 +135,15 @@ AGENT_ROLE_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id", "owner")
+_AUDITED_ID_ARGS = (
+    "file_id",
+    "folder_id",
+    "parent_id",
+    "request_id",
+    "owner",
+    "page_id",
+    "upload_id",
+)
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
 ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]
@@ -248,6 +286,21 @@ def require(
             except BotNotConnectedError as exc:
                 audit(tool=tool, decision="error", reason="bot_not_connected", **who, **ids)
                 raise ToolError(exc.user_message) from None
+            except NotionApiError as exc:
+                audit(tool=tool, decision="error", reason="notion_error", **who, **ids)
+                logger.warning("tool %s: %s", tool, exc)
+                if getattr(exc, "code", "") == "validation_error":
+                    # On API version 2022-06-28, a database with more than one data source
+                    # answers with a validation error.
+                    raise ToolError(
+                        "Notion refused that request. A database with more than one data "
+                        "source can't be read yet."
+                    ) from None
+                raise ToolError("Notion request failed. Try again in a moment.") from None
+            except OneDriveApiError as exc:
+                audit(tool=tool, decision="error", reason="onedrive_error", **who, **ids)
+                logger.warning("tool %s: %s", tool, exc)
+                raise ToolError("OneDrive request failed. Try again in a moment.") from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)
@@ -256,6 +309,17 @@ def require(
                 # Lets Activity name the row from the request ("asked for … budget sheet").
                 rid = result.get("request_id")
                 ids["request_id"] = rid if isinstance(rid, str) else None
+            if tool == "start_upload" and isinstance(result, dict):
+                # Ties the start, the pieces and the finish of one upload together in the log.
+                uid = result.get("upload_id")
+                ids["upload_id"] = uid if isinstance(uid, str) else None
+                if not ids.get("parent_id") and isinstance(result.get("parent_id"), str):
+                    ids["parent_id"] = result["parent_id"]
+            if tool in ("finish_upload", "save_export") and isinstance(result, dict):
+                # The new file, so Activity can name what was written.
+                fid = result.get("id")
+                if isinstance(fid, str) and not ids.get("file_id"):
+                    ids["file_id"] = fid
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 

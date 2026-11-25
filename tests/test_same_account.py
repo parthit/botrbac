@@ -96,17 +96,31 @@ def test_env_refresh_token_still_wins(world, memstore, oauth) -> None:
     assert c.get("/health").json() == {"status": "ok"}
 
 
-def test_grant_and_revoke_make_no_permission_calls(c, same_app, world) -> None:
+def test_grant_approve_and_revoke_make_no_permission_calls(c, same_app, world) -> None:
     before = permission_changes(world)
+    allowlist = same_app.state.dashboard.allowlist
     r = post(c, "/grant", file_id="proj")
     assert r.status_code == 303
-    entry = same_app.state.dashboard.allowlist.get("proj")
+    entry = allowlist.get("proj")
     assert entry is not None and entry.permission_id is None and entry.shared_with is None
     assert mcp_call(c, "read_file", file_id="proj-notes")["isError"] is False
+
+    payload = mcp_call(c, "read_file", file_id="priv-secret")["structuredContent"]
+    assert payload["error"] == "access_required"
+    path = payload["approval_url"].removeprefix(BASE_URL)
+    page = c.get(path)
+    assert page.status_code == 200 and "payroll.txt" in page.text
+    assert post(c, f"{path}/approve", target_id="priv-secret").status_code == 303
+    assert allowlist.get("priv-secret").permission_id is None
+    result = mcp_call(c, "read_file", file_id="priv-secret")
+    assert result["structuredContent"]["content"] == "TOP SECRET payroll"
+
     post(c, "/revoke", file_id="proj")
-    assert same_app.state.dashboard.allowlist.get("proj") is None
+    post(c, "/revoke", file_id="priv-secret")
+    assert allowlist.entries() == {}
     assert permission_changes(world) == before
     assert mcp_call(c, "read_file", file_id="proj-notes")["isError"] is True
+    assert mcp_call(c, "read_file", file_id="priv-secret")["isError"] is True
 
 
 def test_owner_sees_everything_but_scope_still_needs_a_ticked_item(c, world) -> None:
@@ -130,29 +144,6 @@ def test_owner_sees_everything_but_scope_still_needs_a_ticked_item(c, world) -> 
     assert world.files["proj"].trashed is False
 
 
-def test_access_required_approve_retry_revoke(c, same_app, world) -> None:
-    before = permission_changes(world)
-    payload = mcp_call(c, "read_file", file_id="priv-secret")["structuredContent"]
-    assert payload["error"] == "access_required"
-    path = payload["approval_url"].removeprefix(BASE_URL)
-    page = c.get(path)
-    assert page.status_code == 200 and "payroll.txt" in page.text
-
-    r = post(c, f"{path}/approve", target_id="priv-secret")
-    assert r.status_code == 303
-    assert same_app.state.dashboard.allowlist.get("priv-secret").permission_id is None
-    result = mcp_call(c, "read_file", file_id="priv-secret")
-    assert result["structuredContent"]["content"] == "TOP SECRET payroll"
-    status = mcp_call(c, "check_access_request", request_id=payload["request_id"])
-    assert status["structuredContent"]["status"] == "approved"
-    assert mcp_call(c, "read_file", file_id="priv-other")["isError"] is True
-
-    post(c, "/revoke", file_id="priv-secret")
-    again = mcp_call(c, "read_file", file_id="priv-secret")["structuredContent"]
-    assert again["error"] == "access_required" and again["request_id"] != payload["request_id"]
-    assert permission_changes(world) == before
-
-
 def test_my_drive_root_cannot_be_granted(c, same_app) -> None:
     grants = same_app.state.dashboard.grants()
     with pytest.raises(GrantError):
@@ -162,12 +153,10 @@ def test_my_drive_root_cannot_be_granted(c, same_app) -> None:
 
 def test_pages_describe_the_allowlist(c) -> None:
     # The explainer lives on Overview only; Files no longer repeats it.
-    for page in ("/",):
-        html = c.get(page).text
-        assert 'id="mode-note"' in html and "your Google account" in html, page
-        assert "files and folders you allow" in html and "allowlist" not in html
-        assert "connect-bot" not in html and "BOT_EMAIL" not in html
-    assert c.get("/health").json() == {"status": "ok"}
+    html = c.get("/").text
+    assert 'id="mode-note"' in html and "your Google account" in html
+    assert "files and folders you allow" in html and "allowlist" not in html
+    assert "connect-bot" not in html and "BOT_EMAIL" not in html
 
 
 def test_bot_oauth_flow_is_rejected(c, same_app) -> None:

@@ -40,12 +40,18 @@ AUDIENCE_LINKED = "linked"
 # What the people who can see an external entry may do with it.
 ACCESS_READ = "read"
 ACCESS_EDIT = "edit"
+# What this person's assistants may read in Notion (chosen on Files, "From Notion").
+NOTION_ALLOWLIST_KEY = "notion_allowlist"
+# What this person's assistants may read in OneDrive (chosen on Files, "From OneDrive").
+ONEDRIVE_ALLOWLIST_KEY = "onedrive_allowlist"
 ACTIVITY_KEY = "activity"
 ACTIVITY_MAX = 500
 # A paired person's repeated call is written to the owner's Activity this often.
 GUEST_ROW_EVERY = 3600
 OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
 BOT_TOKEN_KEY = "vault:bot_refresh_token"  # noqa: S105 - a key name
+NOTION_TOKEN_KEY = "vault:notion_token"  # noqa: S105 - a key name
+ONEDRIVE_TOKEN_KEY = "vault:onedrive_token"  # noqa: S105 - a key name
 USERS_INDEX = "users:index"
 REDIS_IMPORT_FLAG = "sdm:meta:redis_admin_imported"  # on the raw store, not the sdm: view
 REDIS_IMPORT_LOCK = "sdm:meta:redis_admin_import_lock"  # same raw store; expires if a copy dies
@@ -435,7 +441,15 @@ class PrefixedStore:
 SIGNED_MARK = "s1."
 _MAC_LENGTH = 43  # urlsafe base64 of 32 bytes, without padding
 _MAC_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-_SIGNED_HASHES = frozenset({ALLOWLIST_KEY, EXTERNAL_ALLOWLIST_KEY, AGENT_ROLES_KEY})
+_SIGNED_HASHES = frozenset(
+    {
+        ALLOWLIST_KEY,
+        EXTERNAL_ALLOWLIST_KEY,
+        NOTION_ALLOWLIST_KEY,
+        ONEDRIVE_ALLOWLIST_KEY,
+        AGENT_ROLES_KEY,
+    }
+)
 _SIGNED_PREFIXES = (
     "oauth:",
     "bridge:link:",
@@ -444,8 +458,33 @@ _SIGNED_PREFIXES = (
     "bridge:user:",
     "bridge:invite:",
     "bridge:selfclaim:",
+    # Bot RBAC Terminal: roles, terminals, their tokens and revoked sessions.
+    "term:roles:",
+    "term:terminal:",
+    "term:terminals:",
+    "term:device:",
+    "term:usercode:",
+    "term:at:",
+    "term:rt:",
+    "term:revoked:",
 )
 _TENANT_PREFIX = re.compile(r"^u:[^:]+:")
+# A tenant email becomes part of `u:{email}:`, so it may not hold the ':' delimiter (the
+# prefix would end early and `signs()` would read the rest as the record name), nor
+# whitespace, control characters or Redis glob characters.
+_TENANT_EMAIL = re.compile(r"^[^@:\s\x00-\x1f\x7f*?\[\]\\]+@[^@:\s\x00-\x1f\x7f*?\[\]\\]+$")
+
+
+def usable_email(email: object) -> bool:
+    """Whether `email` can name one person's records (see `tenant_prefix`)."""
+    return isinstance(email, str) and bool(_TENANT_EMAIL.fullmatch(email))
+
+
+def tenant_prefix(email: str) -> str:
+    """`u:{email}:` for one person's keys. Refuses an address that could break the prefix."""
+    if not isinstance(email, str) or not _TENANT_EMAIL.fullmatch(email):
+        raise ValueError("not a usable account address")
+    return f"u:{email}:"
 
 
 def signs(key: str) -> bool:
@@ -458,6 +497,23 @@ def signing_key(encryption_key: str) -> bytes:
     return hmac.new(
         encryption_key.strip().encode(), b"botrbac record signing v1", hashlib.sha256
     ).digest()
+
+
+def purpose_fernet(encryption_key: str, purpose: str) -> Any:
+    """A Fernet made from ENCRYPTION_KEY for one use only (`purpose` names it).
+
+    The Drive sign-in vault uses ENCRYPTION_KEY itself. Everything else that encrypts
+    gets its own derived key, so no other feature can be made to decrypt a vault record,
+    or to produce one, for someone who can write to the store.
+    """
+    from cryptography.fernet import Fernet
+
+    digest = hmac.new(
+        encryption_key.strip().encode(),
+        f"botrbac {purpose} encryption v1".encode(),
+        hashlib.sha256,
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
 
 
 def _looks_signed(raw: str) -> bool:
@@ -643,7 +699,9 @@ def sign_existing_records(
         return fields
 
     for email in dict.fromkeys([*people, *([admin_email] if admin_email else [])]):
-        prefix = "" if email == admin_email else f"u:{email}:"
+        if email != admin_email and not _TENANT_EMAIL.fullmatch(email):
+            continue
+        prefix = "" if email == admin_email else tenant_prefix(email)
         sign_hash(prefix + ALLOWLIST_KEY)
         sign_hash(prefix + EXTERNAL_ALLOWLIST_KEY)
         for link_id in sign_hash(f"bridge:user:{email}"):
@@ -689,7 +747,17 @@ class ActorStore:
         actor = current_actor.get()
         if not actor or actor == self.admin_email:
             return key
-        return f"u:{actor}:{key}"
+        return tenant_prefix(actor) + key
+
+    def hreplace(self, key: str, field: str, old: str, new: str) -> bool:
+        """Change one hash field from `old` to `new` only if it still says `old`. False
+        when it changed meanwhile, or the store below cannot do that in one step."""
+        # `hreplace` first: on a signing store it checks and signs, `hswap` would not.
+        for name in ("hreplace", "hswap"):
+            swap = getattr(self.inner, name, None)
+            if swap is not None:
+                return bool(swap(self._key(key), field, old, new))
+        return False
 
     def get(self, key: str) -> str | None:
         return self.inner.get(self._key(key))
@@ -745,6 +813,32 @@ class ActorStore:
 
     def set_if_absent(self, key: str, value: str, ex: int) -> bool:
         return bool(self.inner.set_if_absent(self._key(key), value, ex))
+
+
+# A fixed window, like Redis and MemoryStore: the expiry is set when the counter starts
+# (a new row, an expired one, or one that did not hold a number) and kept on later hits,
+# so steady traffic cannot keep pushing the window out.
+_PG_INCR_SQL = """
+INSERT INTO sdm_kv (key, value, expires_at)
+VALUES (%s, '1', NOW() + (%s * INTERVAL '1 second'))
+ON CONFLICT (key) DO UPDATE
+SET value = (
+    CASE
+        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW() THEN 1
+        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.value::bigint + 1
+        ELSE 1
+    END
+)::text,
+expires_at = (
+    CASE
+        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW()
+            THEN EXCLUDED.expires_at
+        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.expires_at
+        ELSE EXCLUDED.expires_at
+    END
+)
+RETURNING value
+"""
 
 
 class PostgresStore:
@@ -1043,24 +1137,7 @@ class PostgresStore:
         """Add one in a single statement. An expired row starts again at 1."""
 
         def bump(conn: Any) -> int:
-            row = conn.execute(
-                """
-                INSERT INTO sdm_kv (key, value, expires_at)
-                VALUES (%s, '1', NOW() + (%s * INTERVAL '1 second'))
-                ON CONFLICT (key) DO UPDATE
-                SET value = (
-                    CASE
-                        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW()
-                            THEN 1
-                        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.value::bigint + 1
-                        ELSE 1
-                    END
-                )::text,
-                expires_at = EXCLUDED.expires_at
-                RETURNING value
-                """,
-                (key, ex),
-            ).fetchone()
+            row = conn.execute(_PG_INCR_SQL, (key, ex)).fetchone()
             return int(row[0])
 
         return int(self._run(bump))
@@ -1223,12 +1300,39 @@ class Allowlist:
         nobody, and the Sharing page says so."""
         who = person.strip().lower()
         changed: list[str] = []
-        for file_id, entry in self.entries().items():
-            if entry.for_everyone or who not in entry.audience:  # type: ignore[operator]
-                continue
-            rest = tuple(a for a in entry.audience if a != who)  # type: ignore[union-attr]
-            self.add(replace(entry, audience=rest))
-            changed.append(file_id)
+        swap = getattr(self.store, "hreplace", None) or getattr(self.store, "hswap", None)
+        for file_id in list(self.entries()):
+            # Each item is changed only if it still says what was just read. The owner
+            # may stop sharing it, or change who it names, at the same moment: a plain
+            # write here would put the old entry back.
+            for _attempt in range(5):
+                raw = self.store.hget(self.key, file_id)
+                if not raw:
+                    break
+                try:
+                    entry = AllowEntry.from_json(raw)
+                except (ValueError, KeyError, TypeError):
+                    break
+                if entry.for_everyone or who not in entry.audience:  # type: ignore[operator]
+                    break
+                rest = tuple(a for a in entry.audience if a != who)  # type: ignore[union-attr]
+                updated = replace(entry, audience=rest)
+                if swap is None:
+                    self.add(updated)
+                elif not swap(self.key, file_id, raw, updated.to_json()):
+                    continue
+                changed.append(file_id)
+                break
+            else:
+                # It kept changing, or this store cannot swap. Taking the person off
+                # matters more than the race, so write it plainly, as before.
+                logger.warning("unpair: entry kept changing; written without a swap")
+                # From a fresh read, so what the owner changed meanwhile is kept.
+                latest = self.get(file_id)
+                if latest is not None and not latest.for_everyone and who in latest.audience:  # type: ignore[operator]
+                    rest = tuple(a for a in latest.audience if a != who)  # type: ignore[union-attr]
+                    self.add(replace(latest, audience=rest))
+                    changed.append(file_id)
         return changed
 
 
@@ -1283,6 +1387,29 @@ class TokenVault:
         self._put(OWNER_TOKEN_KEY, token, email, scopes)
 
     def owner(self) -> dict[str, str] | None:
+        """The stored Drive sign-in, only if it is limited to drive.file.
+
+        An older record that carries the full Drive scope, or has no scope stamp, is not
+        returned: the person counts as not connected until they reconnect. Use
+        `legacy_owner()` to find such a record so it can be revoked.
+        """
+        from .drive_client import scopes_acceptable
+
+        record = self._owner_any()
+        if record and not scopes_acceptable(record.get("scopes")):
+            return None
+        return record
+
+    def legacy_owner(self) -> dict[str, str] | None:
+        """A stored sign-in this server no longer uses (full Drive or unstamped), if any."""
+        from .drive_client import scopes_acceptable
+
+        record = self._owner_any()
+        if record and record.get("t") and not scopes_acceptable(record.get("scopes")):
+            return record
+        return None
+
+    def _owner_any(self) -> dict[str, str] | None:
         record = self._take(OWNER_TOKEN_KEY)
         want = self.expected() if self.expected is not None else None
         have = record.get("email") if record else None
@@ -1292,6 +1419,91 @@ class TokenVault:
             logger.warning("stored Drive sign-in belongs to a different account; ignored")
             return None
         return record
+
+    def set_notion(
+        self,
+        access_token: str,
+        refresh_token: str | None,
+        email: str,
+        workspace_id: str = "",
+        workspace_name: str = "",
+    ) -> None:
+        """This person's Notion connection. Encrypted like the Drive token, and naming the
+        account it belongs to, so a record copied into another person's slot is refused."""
+        if self._fernet is None:
+            raise RuntimeError("ENCRYPTION_KEY is not set")
+        payload = {
+            "t": access_token,
+            "email": email,
+            "at": utc_now(),
+            "workspace_id": workspace_id,
+            "workspace_name": workspace_name,
+        }
+        if refresh_token:
+            payload["r"] = refresh_token
+        self.store.set(
+            NOTION_TOKEN_KEY, self._fernet.encrypt(json.dumps(payload).encode()).decode()
+        )
+
+    def notion(self) -> dict[str, str] | None:
+        """The stored Notion connection for the current person, or None."""
+        record = self._take(NOTION_TOKEN_KEY)
+        if not record or not record.get("t"):
+            return None
+        want = self.expected() if self.expected is not None else None
+        have = record.get("email")
+        if want and (not have or str(have).strip().lower() != want.strip().lower()):
+            logger.warning("stored Notion connection belongs to a different account; ignored")
+            return None
+        return record
+
+    def clear_notion(self) -> None:
+        self.store.delete(NOTION_TOKEN_KEY)
+
+    def set_onedrive(
+        self,
+        access_token: str,
+        refresh_token: str | None,
+        email: str,
+        expires_at: float,
+        drive_id: str = "",
+        account: str = "",
+        drive_type: str = "",
+    ) -> None:
+        """This person's OneDrive connection. Encrypted like the Drive token, and naming
+        the account it belongs to, so a record copied into another person's slot is
+        refused."""
+        if self._fernet is None:
+            raise RuntimeError("ENCRYPTION_KEY is not set")
+        payload = {
+            "t": access_token,
+            "email": email,
+            "at": utc_now(),
+            "exp": str(int(expires_at)),
+            "drive_id": drive_id,
+            "account": account,
+            "drive_type": drive_type,
+        }
+        if refresh_token:
+            payload["r"] = refresh_token
+        self.store.set(
+            ONEDRIVE_TOKEN_KEY, self._fernet.encrypt(json.dumps(payload).encode()).decode()
+        )
+
+    def onedrive(self) -> dict[str, str] | None:
+        """The stored OneDrive connection for the current person, or None."""
+        record = self._take(ONEDRIVE_TOKEN_KEY)
+        if not record or not record.get("t"):
+            return None
+        want = self.expected() if self.expected is not None else None
+        have = record.get("email")
+        if want and (not have or str(have).strip().lower() != want.strip().lower()):
+            logger.warning("stored OneDrive connection belongs to a different account; ignored")
+            return None
+        return record
+
+    def clear_onedrive(self) -> None:
+        self.store.delete(ONEDRIVE_TOKEN_KEY)
 
     def set_bot(self, token: str, email: str) -> None:
         self._put(BOT_TOKEN_KEY, token, email)
@@ -1328,7 +1540,12 @@ class ActivityLog:
 
         A rejected bearer token is kept once an hour per reason. A paired person's call
         is kept once an hour per tool and outcome (and per file when it was allowed), so
-        repeating a call does not bury the record of an earlier one."""
+        repeating a call does not bury the record of an earlier one.
+
+        A chunked upload sends hundreds of pieces. Each accepted piece goes to the server
+        log only; its start, its finish and any refused piece are kept here."""
+        if record.get("tool") == "append_chunk" and record.get("decision") == "allow":
+            return False
         guest = record.get("guest")
         if record.get("event") == "auth":
             parts = ["auth", str(record.get("reason"))]
@@ -1404,6 +1621,30 @@ class FirstReads:
 
     def clear(self) -> None:
         self.store.delete(FIRST_READS_KEY)
+
+
+HIDDEN_FILES_KEY = "files_hidden"
+
+
+class HiddenFiles:
+    """Items this person removed from Bot RBAC on Files.
+
+    Google gives an app no way to hand back one file picked in its file picker, so
+    "Remove from Bot RBAC" takes the item off both lists and hides it here. The page says
+    that Google still lists the app as able to open it. Picking it again brings it back.
+    """
+
+    def __init__(self, store: KeyValueStore):
+        self.store = store
+
+    def hide(self, file_id: str) -> None:
+        self.store.hset(HIDDEN_FILES_KEY, file_id, utc_now())
+
+    def unhide(self, file_id: str) -> None:
+        self.store.hdel(HIDDEN_FILES_KEY, file_id)
+
+    def ids(self) -> set[str]:
+        return set(self.store.hgetall(HIDDEN_FILES_KEY))
 
 
 def _copy_string(source: KeyValueStore, dest: KeyValueStore, key: str) -> None:
@@ -1520,7 +1761,7 @@ class TenantDirectory:
     def store_for(self, email: str | None) -> KeyValueStore:
         if email is None or email == self.admin_email:
             return self.store
-        return PrefixedStore(self.store, f"u:{email}:")
+        return PrefixedStore(self.store, tenant_prefix(email))
 
     def vault_for(self, email: str | None) -> TokenVault:
         return TokenVault(
@@ -1547,7 +1788,9 @@ class TenantDirectory:
         return ActorStore(self.store, self.admin_email)
 
     def has_owner_refresh(self, email: str) -> bool:
-        record = self.vault_for(email).owner()
+        """Any stored Drive sign-in, including an old one that is no longer used."""
+        vault = self.vault_for(email)
+        record = vault.owner() or vault.legacy_owner()
         return bool(record and record.get("t"))
 
     def is_known_user(self, email: str) -> bool:

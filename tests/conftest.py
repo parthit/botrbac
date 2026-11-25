@@ -179,7 +179,7 @@ class FakeOAuth:
             "eve-code": (EVE, True),
             "unverified-owner-code": (OWNER_EMAIL, False),
         }
-        self.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
+        self.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive.file"})
 
     def authorization_url(
         self,
@@ -211,8 +211,9 @@ class FakeOAuth:
         email, verified = self.accounts[access_token.removeprefix("at:")]
         return {"email": email, "email_verified": verified}
 
-    def revoke(self, token: str) -> None:
+    def revoke(self, token: str) -> bool:
         self.revoked.append(token)
+        return not getattr(self, "revoke_fails", False)
 
 
 def build_world() -> FakeDrive:
@@ -267,6 +268,15 @@ def memstore() -> MemoryStore:
 @pytest.fixture
 def p2_settings() -> Settings:
     return make_settings(root_folder_id=None, allowlist_cache_ttl=0)
+
+
+# A deployment with records saved before signing existed, run with
+# REQUIRE_SIGNED_RECORDS=0 until /admin has signed them. Apply to a test that uses p2_app.
+before_signing = pytest.mark.parametrize(
+    "p2_settings",
+    [make_settings(root_folder_id=None, allowlist_cache_ttl=0, require_signed_records=False)],
+    ids=["unsigned-accepted"],
+)
 
 
 @pytest.fixture

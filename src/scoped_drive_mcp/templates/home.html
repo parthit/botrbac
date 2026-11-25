@@ -8,7 +8,7 @@
     <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every call.</b> Anything else is refused.</span></li>
   </ul>
   <p class="sub">Bot RBAC is an access-control gateway that sits between AI agents, like Grok and Muse, and your accounts. It starts with Google Drive: you sign in, connect Drive, pick the files and folders an assistant may use, and this server refuses the rest. More services will follow.</p>
-  <p class="disclosure">Signing in asks Google only for your email. Connecting Google Drive is a second, separate step that asks for access to your Drive. This server then lets an assistant use only the files and folders you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
+  <p class="disclosure">Signing in asks Google only for your email. Connecting Google Drive is a second, separate step that asks for access to only the files you pick in Google’s file picker. Google keeps the rest of your Drive closed to Bot RBAC, and this server lets an assistant use only the items you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
   <div class="ctas">
     {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
   </div>

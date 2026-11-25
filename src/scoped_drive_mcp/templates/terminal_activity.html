@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_terminal_tabs.html" import terminal_tabs %}
+{% block title %}Terminal activity{% endblock %}
+{% block content %}
+<h1>Terminal activity</h1>
+<p class="muted">Tool calls on your terminals, newest first, including calls made while a computer was offline. Only tool names and decisions are recorded, never what was sent to a tool.</p>
+{{ terminal_tabs('activity') }}
+{% if total %}
+<form class="actions term-filters" method="get" action="/terminal/activity" aria-label="Filter terminal activity">
+  <label>Terminal
+    <select name="terminal"><option value="">All terminals</option>
+      {% for t in terminals %}<option value="{{ t.id }}"{% if q.terminal == t.id %} selected{% endif %}>{{ t.name }}</option>{% endfor %}
+    </select></label>
+  <label>Agent
+    <select name="agent"><option value="">All agents</option>
+      {% for a in agents %}<option value="{{ a }}"{% if q.agent == a %} selected{% endif %}>{{ a }}</option>{% endfor %}
+    </select></label>
+  <label class="inline"><input type="checkbox" name="blocked" value="1"{% if q.blocked == '1' %} checked{% endif %}> Blocked only</label>
+  <button type="submit">Filter</button>
+  <a class="btn ghost" href="/terminal/activity/export?{{ export_query }}{{ '&' if export_query }}format=csv" id="export-csv">Export CSV</a>
+  <a class="btn ghost" href="/terminal/activity/export?{{ export_query }}{{ '&' if export_query }}format=jsonl">JSON lines</a>
+</form>
+{% endif %}
+{% if rows %}
+<table class="cards term-table term-activity" id="terminal-activity">
+  <thead><tr><th>When</th><th>Terminal</th><th>Agent</th><th>Tool</th><th>Result</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td data-label="When">{{ r.ts | epoch | when }}{% if r.received and r.received - r.ts > 300 %}<br><span class="muted" title="Recorded offline, sent later">synced {{ r.received | epoch | when }}</span>{% endif %}</td>
+    <td data-label="Terminal">{{ r.terminal }}</td>
+    <td data-label="Agent">{{ r.agent or "—" }}</td>
+    <td data-label="Tool">{% if r.decision == 'session' %}started <code>{{ r.program or "a program" }}</code> as <strong>{{ r.role }}</strong>{% else %}<code>{{ r.tool }}</code>{% endif %}
+      {% if r.session_id %}<br><a class="muted" href="/terminal/sessions/{{ r.session_id }}">session …{{ r.session_id[-6:] }}</a>{% endif %}</td>
+    <td data-label="Result">{% if r.decision == 'allow' %}<span class="pill ok">allowed</span>{% elif r.decision == 'deny' %}<span class="pill bad">blocked</span> <span class="muted">{{ r.reason }}</span>{% elif r.decision == 'session' %}<span class="pill">session</span>{% else %}<span class="pill">error</span> <span class="muted">{{ r.reason }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if more %}<p><a class="btn" href="/terminal/activity?{{ export_query }}{{ '&' if export_query }}show={{ limit + 100 }}">Show more</a></p>{% endif %}
+{% elif total %}
+<p class="muted">Nothing matches these filters. <a href="/terminal/activity">Show all activity</a></p>
+{% else %}
+<div class="card empty" id="no-activity">
+  <h2>No activity yet</h2>
+  <p>Tool calls show up here once a connected computer syncs. {% if not terminals %}<a href="/terminal#setup">Connect a computer</a> to start.{% endif %}</p>
+</div>
+{% endif %}
+{% endblock %}

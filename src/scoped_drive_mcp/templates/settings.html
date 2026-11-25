@@ -88,26 +88,21 @@
       {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Not connected</span>{% endif %}
     </div>
     <p class="muted">{{ conn.summary }}</p>
+    {% if row.detail %}<p class="small">{{ row.detail }}</p>{% endif %}
     {% if row.connected %}
-    {% if row.needs_upgrade %}
-    <p class="warn">This connection only covers some of your Drive. Reconnect to allow full Drive access. Your current access keeps working until you do.</p>
-    <p class="disclosure">{{ conn.disclosure }}</p>
-    <form method="post" action="/connect/{{ conn.key }}">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="next" value="{{ next }}">
-      <button class="primary" type="submit">Reconnect {{ conn.name }}</button>
-    </form>
-    {% endif %}
     <form class="inline" method="post" action="/connect/{{ conn.key }}/disconnect" data-confirm="Disconnect {{ conn.name }}? Assistants lose access to it immediately." data-confirm-action="Disconnect">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="danger" type="submit">Disconnect</button>
     </form>
     {% else %}
+    {% if row.needs_upgrade %}
+    <p class="warn" id="old-connection">Your earlier connection could reach your whole Drive, so Bot RBAC no longer uses it. Reconnecting ends it at Google first, then asks for access to only the files you pick. Afterwards, add your files again with <b>Add from Google Drive</b> on Files.</p>
+    {% endif %}
     <p class="disclosure">{{ conn.disclosure }}</p>
     <form method="post" action="/connect/{{ conn.key }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="next" value="{{ next }}">
-      <button class="primary" type="submit">Connect {{ conn.name }}</button>
+      <button class="primary" type="submit">{% if row.needs_upgrade %}Reconnect {{ conn.name }}{% else %}Connect {{ conn.name }}{% endif %}</button>
     </form>
     {% endif %}
   </article>
@@ -143,7 +138,18 @@
   <div class="card-head">
     <h3>{{ assistant_name(a) }}</h3>
   </div>
-  <p class="muted">added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
+  <p class="muted">{% if a.renamed %}registered as {{ a.app_name }} · {% endif %}added {{ a.created_at | when(date_only=True) }} · last used {{ a.last_used | when("never") }}</p>
+  <details class="disclosure-form" id="rename-{{ a.id }}"><summary>Rename<span class="sr-only"> {{ a.name }}</span></summary>
+    <p class="muted">Pick the name you and your other assistants see for this connection, such as Grok Bot. Leave it empty to go back to {{ a.app_name }}.</p>
+    <form class="stack" method="post" action="/oauth/grants/rename">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="grant_id" value="{{ a.id }}">
+      <label>Name
+        <input type="text" name="name" value="{{ a.name if a.renamed else '' }}" placeholder="{{ a.app_name }}" maxlength="60" autocomplete="off">
+      </label>
+      <button type="submit">Save name</button>
+    </form>
+  </details>
   <form class="role-form" method="post" action="/oauth/grants/role" id="role-{{ a.id }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="grant_id" value="{{ a.id }}">
@@ -307,10 +313,10 @@
   </div>
   {% endif %}
   {% if not picker_ready %}
-  <p>The Google Picker is optional. It needs <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code> before the picker button appears. Files and approvals work from the signed-in Drive without it.</p>
+  <p class="warn">Google’s file picker is not set up. Bot RBAC can only open files people pick there, so without it nobody can add files. Set <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code>.</p>
   {% endif %}
   {% if env_token_set %}
-  <p>A refresh token is set in the server environment and overrides this account’s dashboard sign-in. If it was created with only per-file access, replace it with <code>scripts/bootstrap_oauth.py</code> so this server can see that Drive. The allowed-files list still limits assistants.</p>
+  <p>A refresh token is set in the server environment (<code>GOOGLE_OAUTH_REFRESH_TOKEN</code>) and overrides this account’s dashboard sign-in. Bot RBAC only ever asks Google for per-file access with it and refuses anything wider. Remove it to use the dashboard connection instead.</p>
   {% endif %}
   {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}
   <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with assistants. The public site address is <code>APP_BASE_URL</code>.</p>

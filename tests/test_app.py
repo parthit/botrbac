@@ -9,22 +9,8 @@ import pytest
 
 from scoped_drive_mcp.server import build_app
 from tests.conftest import CLIENT_SECRET, REFRESH_TOKEN, TOKENS, make_settings
-
-MCP_HEADERS = {
-    "Accept": "application/json, text/event-stream",
-    "Content-Type": "application/json",
-}
-
-INIT = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {"name": "pytest", "version": "0"},
-    },
-}
+from tests.dash import MCP_HEADERS
+from tests.test_mcp_oauth import INIT
 
 
 def rpc(method: str, params: dict | None = None, id_: int = 2) -> dict:
@@ -49,9 +35,7 @@ async def client(app):
 async def test_health_needs_no_auth(client, drive) -> None:
     r = await client.get("/health")
     assert r.status_code == 200
-    body = r.json()
-    assert body == {"status": "ok"}
-    assert "missing" not in body and "mode" not in body and "store" not in body
+    assert r.json() == {"status": "ok"}
     assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
     assert drive.get_calls == [] and drive.queries == []
 
@@ -82,7 +66,7 @@ async def _initialize(client, role: str) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("role", "count"), [("viewer", 22), ("editor", 32), ("admin", 33)])
+@pytest.mark.parametrize(("role", "count"), [("viewer", 26), ("editor", 43), ("admin", 44)])
 async def test_initialize_and_list_tools(client, role: str, count: int) -> None:
     await _initialize(client, role)
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth(role))
@@ -119,7 +103,7 @@ async def test_tool_calls_over_http(client) -> None:
 async def test_principal_does_not_leak_between_requests(client) -> None:
     await _initialize(client, "admin")
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth("viewer"))
-    assert len(r.json()["result"]["tools"]) == 22
+    assert len(r.json()["result"]["tools"]) == 26
 
 
 def test_starlette_testclient_with_lifespan(app) -> None:
@@ -131,7 +115,7 @@ def test_starlette_testclient_with_lifespan(app) -> None:
         r = tc.post("/mcp", json=INIT, headers=auth("editor"))
         assert r.status_code == 200
         r = tc.post("/mcp", json=rpc("tools/list"), headers=auth("editor"))
-        assert len(r.json()["result"]["tools"]) == 32
+        assert len(r.json()["result"]["tools"]) == 43
 
 
 @pytest.mark.anyio
@@ -145,6 +129,7 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "do-not-leak-this")
+    monkeypatch.setenv("API_TOKENS", "not-a-valid-entry")
     app = build_app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -198,9 +183,8 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
     async with httpx.AsyncClient(transport=transport, base_url="https://x.vercel.app") as c:
         r = await c.get("/health")
         assert r.status_code == 503
-        body = r.json()
-        assert body == {"status": "unavailable"}
-        assert "redis" not in r.text.lower() and "missing" not in body
+        assert r.json() == {"status": "unavailable"}
+        assert "redis" not in r.text.lower()
         assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
         r = await c.post("/mcp", json=INIT, headers=auth("admin"))
         assert r.status_code == 503 and "storage" in r.json()["error"]
@@ -213,17 +197,29 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
     assert drive.get_calls == [] and drive.queries == []
 
 
-def test_local_without_redis_uses_memory(monkeypatch, no_redis_env, drive) -> None:
+def test_memory_store_only_off_vercel(monkeypatch, no_redis_env, drive) -> None:
     monkeypatch.delenv("VERCEL", raising=False)
-    app = build_app(make_settings(), drive)
-    assert app.state.dashboard.store.kind == "memory"
+    assert build_app(make_settings(), drive).state.dashboard.store.kind == "memory"
     monkeypatch.setenv("VERCEL", "")
     assert build_app(make_settings(), drive).state.dashboard.store.kind == "memory"
-
-
-def test_vercel_with_redis_builds_normally(monkeypatch, drive) -> None:
     monkeypatch.setenv("VERCEL", "1")
     settings = make_settings(
         redis_rest_url="https://example.upstash.io", redis_rest_token=secrets.token_urlsafe(16)
     )
     assert build_app(settings, drive).state.dashboard.store.kind == "redis"
+
+
+@pytest.mark.anyio
+async def test_no_api_tokens_rejects_every_bearer(world, memstore, oauth) -> None:
+    """With API_TOKENS unset, a made-up bearer is refused, not let through."""
+    app = build_app(
+        make_settings(api_tokens=""),
+        world.as_user("owner@example.com"),
+        store=memstore,
+        oauth=oauth,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://example.vercel.app") as c:
+        for header in ("Bearer anything", "anything", "Bearer "):
+            r = await c.post("/mcp", json=INIT, headers={**MCP_HEADERS, "Authorization": header})
+            assert r.status_code == 401

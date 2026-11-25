@@ -11,10 +11,10 @@
   <summary><h2>How to pair</h2></summary>
   <ol>
     <li>Ask your assistant to start a pairing. It reads you a short code.</li>
-    <li>Give that code to the other person. Their assistant joins with it.{% if self_pairing %} To pair two of your own assistants, say Claude and Cursor, join from your other assistant.{% endif %}</li>
+    <li>Give that code to the other person. Their assistant joins with it. To pair two of your own assistants, say Claude and Cursor, join from your other assistant.</li>
     <li>Both of you approve here, after you see the other Google account.</li>
   </ol>
-  <p class="muted">A pairing with another person lets each of you read (only read) what the other shares. Nothing else in your Drive is reachable, and your assistants never message each other: another person’s assistant can’t send anything to yours.{% if self_pairing %} Only two of your own assistants can message each other.{% endif %}</p>
+  <p class="muted">A pairing with another person lets each of you read (only read) what the other shares. Nothing else in your Drive is reachable, and your assistants never message each other: another person’s assistant can’t send anything to yours. Only two of your own assistants can message each other.</p>
 </details>
 {% for link in links %}
 {% set peer = link.peer_email %}
@@ -22,10 +22,7 @@
 <div class="card" id="link-{{ link.link_id }}">
   {% if link.same_account %}
   {% set pair = link.assistants | join(" ↔ ") %}
-  {% if link.disabled_by_org and link.status != "revoked" %}
-  {{ head("bad", "!", "Off", pair) }}
-  <p class="muted">Two of your own assistants. Turned off by your organisation.</p>
-  {% elif link.status == "active" %}
+  {% if link.status == "active" %}
   {{ head("ok", "✓", "On", pair) }}
   <p class="muted">Two of your own assistants can message each other. Nothing new is shared.</p>
   {% for m in missing_wakeups if m.link_id == link.link_id %}
@@ -48,7 +45,7 @@
   {{ head("bad", "!", "Off", pair) }}
   <p class="muted">Two of your own assistants. This pairing is off.</p>
   {% endif %}
-  {% if link.status == "active" or (link.disabled_by_org and link.status != "revoked") %}
+  {% if link.status == "active" %}
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Disconnect this pairing? Your two assistants will not be able to message each other.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="actions"><button class="danger" type="submit">Disconnect</button></div>
@@ -72,6 +69,19 @@
   {% else %}
   <p class="muted">You share nothing with {{ peer }} right now. <a href="/sharing?tab=by-me">Share something</a></p>
   {% endif %}
+  {% endif %}
+  {% if drops_on %}
+  {%- set blocked = peer in drops_off %}
+  <form method="post" action="/drops/allow">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="person" value="{{ peer }}">
+    <input type="hidden" name="on" value="{{ '1' if blocked else '0' }}">
+    {% if blocked %}
+    <p>{{ peer }} cannot send you files. <button type="submit">Let them send files</button></p>
+    {% else %}
+    <p>{{ peer }} can send you files. <button type="submit">Stop files from {{ peer }}</button></p>
+    {% endif %}
+  </form>
   {% endif %}
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Disconnect from {{ peer }}? You will each stop being able to read what the other shares.">
     <input type="hidden" name="csrf" value="{{ csrf }}">

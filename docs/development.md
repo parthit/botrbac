@@ -6,9 +6,11 @@ Local setup, tests and pull requests are in [CONTRIBUTING.md](../CONTRIBUTING.md
 
 ```
 api/index.py                  Vercel entry point (app = build_app())
-vercel.json                   routes everything to api/index.py, maxDuration, bundles templates
+api/blob-sign.mjs             Node.js function that signs Vercel Blob URLs for held files (drops)
+package.json                  its one dependency, @vercel/blob (pinned; `npm ci`, `npm test`)
+vercel.json                   routes everything else to api/index.py, maxDuration, bundles templates
 requirements.txt              runtime deps for Vercel (exported from uv.lock)
-scripts/bootstrap_oauth.py    optional: one-time sign-in as yourself → refresh token (phase 1 route)
+scripts/bootstrap_oauth.py    optional: one-time sign-in → refresh token (legacy GOOGLE_OAUTH_REFRESH_TOKEN)
 scripts/make_token.py         generate API tokens + hashes
 scripts/make_secrets.py       generate SESSION_SECRET and ENCRYPTION_KEY
 src/scoped_drive_mcp/
@@ -22,14 +24,31 @@ src/scoped_drive_mcp/
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log
   oauth.py                    Google web OAuth (authorization code) for the dashboard
-  mcp_oauth.py                MCP OAuth 2.1 authorization server (Grok Bot / PKCE)
+  mcp_oauth.py                MCP OAuth 2.1 authorization server (dynamic client registration, PKCE)
   dashboard.py                owner dashboard routes (Starlette)
   templates/                  dashboard HTML (Jinja2)
   auth.py                     bearer-token ASGI middleware for /mcp (API tokens and OAuth access tokens)
   audit.py                    JSON-lines audit log (+ Redis activity sink)
+  extract.py                  text from PDF, Word, PowerPoint, Excel, RTF and .doc bytes, under a work budget
+  extract_worker.py           runs extract.py in a child process with memory, CPU and time limits
   service.py                  tool implementations
   server.py                   FastMCP tools + build_app()
+  terminal/                   Bot RBAC Terminal (docs/terminal.md), server side; `term:` keys only
+    feature.py                  dashboard pages, /api/terminal/*, /terminal/setup.md and install.sh
+    roles.py                    per-person roles (tool patterns), built-ins, tools seen
+    device.py                   device-code login, terminal tokens, terminal records
+    ingest.py                   audit rows from terminals, sessions, revocation
+src/botrbac_cli/              the `botrbac` CLI (also imported by the server for patterns.py)
+  patterns.py                 tool patterns and the session chain check (pure Python)
+  main.py                     commands
+  gateway.py                  stdio MCP gateway in front of upstream MCP servers
+  policy.py                   cached policy, offline grace, enforcement
+  queue.py / sync.py          SQLite audit queue and sending it
+  session.py / shell.py       `botrbac run --role`, `shell-init`
+  coverage.py / check.py / hooks.py   wrap, add-gateway, doctor, hook adapter, Claude Code hook install
+  shellcmd.py                 programs in a shell command, for cmd/<program> patterns
 tests/                        pytest suite with a fake Drive (owner and bot views) and in-memory store
+tests/node/                   node --test suite for api/blob-sign.mjs (Blob SDK faked)
 ```
 
 ### Implementation notes
