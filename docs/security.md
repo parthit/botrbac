@@ -360,9 +360,20 @@ Disconnecting a terminal deletes its record, so its tokens stop working at once.
 10 minutes, are single-use, and polling faster than the interval gets `slow_down`; the open endpoints are
 rate-limited per address and the token endpoints per terminal.
 
-Roles, terminals, tokens, device codes and revoked sessions are stored under `term:` and signed like OAuth
-records. Audit batches are capped (500 rows, 2 MB), every field is stripped to a small character set and
-capped, rows are de-duplicated by the client's event id, and only identifiers and decisions are stored.
+Roles, terminals, tokens, device codes, revoked sessions and the Record commands setting are stored under
+`term:` and signed like OAuth records. Audit batches are capped (500 rows, 2 MB), every field is stripped
+to a small character set and capped, rows are de-duplicated by the client's event id, and only identifiers
+and decisions are stored in the clear.
+
+**Record commands** (off by default, per person) adds what the agent ran to each row: the command, or
+the tool's input, never the result. The policy, signed as above, carries an X25519 public key derived
+from `ENCRYPTION_KEY`; the CLI seals each command to it (HKDF-SHA256, AES-GCM, the row's event id as
+associated data) before writing the row to disk, so nothing on the computer can read it back. The server
+keeps a sealed command only while the setting is on and only if it opens for that row, stores it sealed,
+and opens it only for its owner's Activity page and exports. Commands are cut at 8,000 characters. A
+recorded command is what the computer reported, not proof of what ran: the public key is enough to seal,
+so a hostile agent on the computer can seal whatever it likes onto rows, as it can already forge rows. See
+[terminal.md](terminal.md#record-commands) for what this does and does not hide.
 CSV export prefixes cells that would start a spreadsheet formula.
 
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
@@ -390,7 +401,7 @@ which tools run, not which files a tool such as Claude Code's Read can open.
 role in force has any, the hook reads the command and blocks it unless every program in it is allowed; a
 command it cannot follow (command or process substitution, backticks, `eval`, `sh -c`/`bash -c`, subshells,
 shell control flow such as `if`/`for`/`while`, a variable as the program, unbalanced quotes) is blocked, and
-only program names are logged. Wrappers such as `sudo`, `env`, `xargs`, `nice` and `stdbuf` must be allowed themselves as well
+only program names go in the row's reason (the command itself only sealed, with Record commands on). Wrappers such as `sudo`, `env`, `xargs`, `nice` and `stdbuf` must be allowed themselves as well
 as the program they run. This too
 protects against the agent, not the machine's owner, and it goes by name: a file called `gh` anywhere counts
 as `gh`, and a program that starts others (`make`, `npm run`, `find -exec`, `timeout`, `git` aliases, a
