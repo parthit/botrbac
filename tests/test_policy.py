@@ -24,6 +24,8 @@ VALID_ARGS = {
     "get_metadata": {"file_id": "notes-txt"},
     "read_file": {"file_id": "notes-txt"},
     "download_file": {"file_id": "notes-txt"},
+    "export_file": {"file_id": "sheet-1", "format": "csv"},
+    "save_export": {"file_id": "sheet-1", "format": "csv"},
     "create_folder": {"name": "New folder"},
     "create_doc": {"title": "New doc", "content": "hello"},
     "upload_file": {"name": "a.txt", "mime_type": "text/plain", "content_text": "x"},
@@ -66,6 +68,7 @@ ONEDRIVE_READ_TOOLS = {
     "onedrive_search",
 }
 OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS
+UPLOAD_TOOLS = {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 SHARED_WRITE_TOOLS = {
     "create_shared_doc",
     "create_shared_folder",
@@ -80,6 +83,7 @@ VIEWER_EXPECTED = (
         "get_metadata",
         "read_file",
         "download_file",
+        "export_file",
         "request_access",
         "check_access_request",
     }
@@ -100,7 +104,8 @@ EXPECTED = {
         "rename_file",
     }
     | SHARED_WRITE_TOOLS
-    | DROP_SEND_TOOLS,
+    | DROP_SEND_TOOLS
+    | UPLOAD_TOOLS,
     Role.ADMIN: set(VALID_ARGS)
     | MAILBOX_TOOLS
     | SHARED_TOOLS
@@ -108,7 +113,8 @@ EXPECTED = {
     | NOTION_READ_TOOLS
     | ONEDRIVE_READ_TOOLS
     | DROP_READ_TOOLS
-    | DROP_SEND_TOOLS,
+    | DROP_SEND_TOOLS
+    | UPLOAD_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")
