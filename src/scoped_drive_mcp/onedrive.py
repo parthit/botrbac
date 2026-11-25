@@ -38,6 +38,7 @@ from .onedrive_client import (
     PACKAGE,
     READ_SCOPES,
     SCOPES,
+    WRITE_SCOPE,
     OneDriveAccount,
     OneDriveApi,
     OneDriveApiError,
@@ -241,12 +242,17 @@ class OneDriveService:
         )
 
     def _store(self, vault: TokenVault, record: dict[str, str], tokens: Any) -> str:
-        # A refresh answer with no scope list is taken as unchanged.
-        scopes = (
-            " ".join(sorted(normalize_scopes(tokens.scopes)))
-            if tokens.scopes
-            else record.get("scp", "")
-        )
+        # A refresh answer with no scope list is taken as unchanged. A refresh never turns
+        # writing on: only connecting with editing chosen and granted does. (Microsoft may
+        # list Files.ReadWrite on a token for someone who approved it once and later chose
+        # to connect for reading only.)
+        if tokens.scopes:
+            granted = normalize_scopes(tokens.scopes)
+            if not can_write(record):
+                granted.discard(WRITE_SCOPE)
+            scopes = " ".join(sorted(granted))
+        else:
+            scopes = record.get("scp", "")
         vault.set_onedrive(
             tokens.access_token,
             tokens.refresh_token or record.get("r"),

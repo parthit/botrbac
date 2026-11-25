@@ -14,6 +14,13 @@
     <input type="hidden" name="next" value="/files?tab=onedrive">
     <button class="primary" type="submit">Connect OneDrive</button>
   </form>
+  <form method="post" action="/connect/onedrive" id="onedrive-connect-read-only">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="/files?tab=onedrive">
+    <input type="hidden" name="access" value="read">
+    <button type="submit">Connect for reading only</button>
+  </form>
+  <p class="muted small">Reading only asks Microsoft just to read your files, and no assistant can add or change anything. Use it if you only want assistants to read, or if your school or work account doesn’t let you approve editing.</p>
 </div>
 {% else %}
 {% if onedrive_can_write %}
@@ -21,7 +28,7 @@
 {% else %}
 <p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder.{% if account %} Account: <b>{{ account }}</b>.{% endif %}</p>
 <div class="card" id="onedrive-read-only">
-  <p>OneDrive is connected for reading only, so no assistant can add or change files. To let assistants that may edit do that inside what you allow, connect OneDrive again and approve editing. Your allowed list is kept.</p>
+  <p>OneDrive is connected for reading only, so no assistant can add or change files. To let assistants that may edit do that inside what you allow, connect OneDrive again and approve editing. Your allowed list is kept. If you chose reading only on purpose, leave it as it is.</p>
   <form method="post" action="/connect/onedrive">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="next" value="/files?tab=onedrive">

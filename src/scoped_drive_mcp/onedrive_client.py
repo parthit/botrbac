@@ -189,13 +189,14 @@ class OneDriveOAuth:
         self.redirect_uri = redirect_uri
         self.timeout = timeout
 
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scopes: tuple[str, ...] = SCOPES) -> str:
+        """Microsoft's consent screen. READ_SCOPES for a connection made for reading only."""
         params = {
             "client_id": self.client_id,
             "response_type": "code",
             "redirect_uri": self.redirect_uri,
             "response_mode": "query",
-            "scope": " ".join(SCOPES),
+            "scope": " ".join(scopes),
             "state": state,
             # Let the person choose the account instead of silently using the one the
             # browser is signed in with.
@@ -236,13 +237,14 @@ class OneDriveOAuth:
         except (ValueError, KeyError, TypeError, AttributeError):
             raise OneDriveOAuthError("Microsoft returned an unexpected response") from None
 
-    def exchange_code(self, code: str) -> OneDriveTokens:
+    def exchange_code(self, code: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
         return self._token_call(
             {
                 "grant_type": "authorization_code",
                 "code": code,
                 "redirect_uri": self.redirect_uri,
-            }
+            },
+            scopes,
         )
 
     def refresh(self, refresh_token: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:

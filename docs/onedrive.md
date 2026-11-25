@@ -23,6 +23,17 @@ Microsoft has no way for this kind of app to revoke a token. To remove the permi
 the person goes to account.live.com/consent/Manage (personal account) or myapps.microsoft.com (work or
 school account). The dashboard says so when they disconnect.
 
+### Connecting for reading only
+
+**Connect OneDrive** asks for `Files.ReadWrite`. **Connect for reading only** (next to it on Files → From
+OneDrive, Settings and the first-run page) asks only for `Files.Read`, `User.Read` and `offline_access`:
+use it when assistants should only read, or when a school or work account lets people approve reading
+but not editing. The Microsoft error page for "your organization has to approve" points to it. The choice
+travels in the signed `state`. A connection made for reading only never writes, even if Microsoft's token
+lists `Files.ReadWrite` (someone who approved editing once before), and no refresh turns writing on: only
+connecting again with editing chosen and granted does. Switching either way on the same account keeps the
+allowed list.
+
 ### Read-only connections
 
 Connections made before writing existed were granted `Files.Read`. They keep working for reading, and are

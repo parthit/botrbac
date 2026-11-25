@@ -235,14 +235,18 @@ class FakeOneDriveOAuth:
         self.states: list[str] = []
         self.refreshed: list[str] = []
         self.refresh_scopes: list[tuple[str, ...]] = []
+        self.asked: list[tuple[str, ...]] = []
+        self.exchanged: list[tuple[str, ...]] = []
         self.scopes: tuple[str, ...] = ("Files.ReadWrite", "User.Read", "offline_access")
         self.expires_in = 3600
 
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scopes: tuple[str, ...] = SCOPES) -> str:
         self.states.append(state)
+        self.asked.append(scopes)
         return f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?state={state}"
 
-    def exchange_code(self, code: str) -> OneDriveTokens:
+    def exchange_code(self, code: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
+        self.exchanged.append(scopes)
         if code != "ms-code":
             raise OneDriveOAuthError("Microsoft rejected the connection code")
         return OneDriveTokens(
@@ -286,16 +290,19 @@ def c(app):
     return c
 
 
-def start_connect(c) -> str:
+def start_connect(c, access: str | None = None) -> str:
     token = csrf(c, "/settings")
-    r = c.post("/connect/onedrive", data={"csrf": token, "next": "/settings"})
+    data = {"csrf": token, "next": "/settings"}
+    if access:
+        data["access"] = access
+    r = c.post("/connect/onedrive", data=data)
     assert r.status_code == 303, r.text
     assert r.headers["location"].startswith("https://login.microsoftonline.com/")
     return parse_qs(urlparse(r.headers["location"]).query)["state"][0]
 
 
-def connect(c, code: str = "ms-code"):
-    state = start_connect(c)
+def connect(c, code: str = "ms-code", access: str | None = None):
+    state = start_connect(c, access)
     return c.get("/connect/onedrive/callback", params={"code": code, "state": state})
 
 
@@ -1397,3 +1404,98 @@ def test_a_connection_stored_before_writing_existed_keeps_working(c, drive, ms_o
     out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
     assert error_of(out) == "onedrive_read_only"
     assert drive.writes() == []
+
+
+# ---- connecting for reading only ---------------------------------------------------------
+
+
+def test_connect_for_reading_only_asks_only_to_read(c, drive, ms_oauth, memstore) -> None:
+    ms_oauth.scopes = READ_SCOPES
+    r = connect(c, access="read")
+    assert r.status_code == 303
+    assert ms_oauth.asked == [READ_SCOPES] and ms_oauth.exchanged == [READ_SCOPES]
+    allow(c, SCHOOL)
+    assert (
+        "my essay" in result(c, "onedrive_read_file", file_id=ESSAY)["structuredContent"]["content"]
+    )
+    out = write(c, "onedrive_upload_file", name="a.txt", content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+    drive.tokens.clear()
+    result(c, "onedrive_read_file", file_id=ESSAY)
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+
+
+def test_editing_is_the_default_choice(c, ms_oauth) -> None:
+    connect(c)
+    assert ms_oauth.asked == [SCOPES]
+    for odd in ("edit", "READ", "write", "anything"):
+        connect(c, access=odd)
+    assert ms_oauth.asked == [SCOPES] * 5
+
+
+def test_reading_only_stays_so_when_microsoft_lists_readwrite(c, drive, ms_oauth) -> None:
+    # Someone who approved editing once and now chooses reading only: Microsoft may still
+    # list Files.ReadWrite on the token. Bot RBAC never writes for that connection, and a
+    # refresh does not turn writing on.
+    ms_oauth.scopes = ("Files.Read", "Files.ReadWrite", "User.Read", "offline_access")
+    connect(c, access="read")
+    allow(c, SCHOOL)
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    drive.tokens.clear()
+    result(c, "onedrive_read_file", file_id=ESSAY)  # refreshed; Microsoft lists ReadWrite
+    assert ms_oauth.refresh_scopes == [READ_SCOPES]
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+    assert 'id="onedrive-read-only"' in c.get("/files?tab=onedrive").text
+
+
+def test_reading_only_then_editing_keeps_the_list(c, drive, ms_oauth, memstore) -> None:
+    ms_oauth.scopes = READ_SCOPES
+    connect(c, access="read")
+    allow(c, SCHOOL)
+    ms_oauth.scopes = SCOPES
+    connect(c)
+    assert set(stored_allowlist(memstore)) == {SCHOOL}
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="edited")
+    assert not out["isError"]
+    # And back: choosing reading only again turns writing off, list kept.
+    connect(c, access="read")
+    assert set(stored_allowlist(memstore)) == {SCHOOL}
+    out = write(c, "onedrive_update_file", file_id=ESSAY, content_text="again")
+    assert error_of(out) == "onedrive_read_only"
+
+
+def test_the_choice_cannot_be_swapped_in_the_state(c, ms_oauth) -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveOAuth
+
+    state = start_connect(c, access="read")
+    forged = state[:-4] + ("AAAA" if not state.endswith("AAAA") else "BBBB")
+    r = c.get("/connect/onedrive/callback", params={"code": "ms-code", "state": forged})
+    assert r.status_code == 400
+    url = OneDriveOAuth("id", "secret", "https://x.example/cb").authorization_url("s", READ_SCOPES)
+    scope = parse_qs(urlparse(url).query)["scope"][0]
+    assert "Files.Read" in scope.split() and "Files.ReadWrite" not in scope
+
+
+def test_read_only_buttons_are_offered(c) -> None:
+    assert 'id="onedrive-connect-read-only"' in c.get("/files?tab=onedrive").text
+    settings = c.get("/settings").text
+    assert 'name="access" value="read"' in settings
+    assert "Connect for reading only" in settings
+
+
+def test_admin_consent_error_offers_reading_only(c) -> None:
+    start_connect(c)
+    r = c.get(
+        "/connect/onedrive/callback",
+        params={
+            "error": "access_denied",
+            "error_description": "AADSTS65001: The user or administrator has not consented.",
+            "state": "x",
+        },
+    )
+    assert "Connect for reading only" in r.text
+    assert "/files?tab=onedrive#onedrive-connect" in r.text

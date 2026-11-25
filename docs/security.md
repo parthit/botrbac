@@ -370,7 +370,10 @@ A token whose granted scopes include neither `Files.Read` nor `Files.ReadWrite`,
 on connect and on every refresh. (Microsoft lists the scopes in every answer; a refresh answer with no list at
 all is taken as unchanged.) The granted scopes are stored with the token; a connection without
 `Files.ReadWrite` (including every connection made before writing existed) is refused by the write tools
-before Graph is called, and is refreshed with only the read scopes it was granted. File text is wrapped in
+before Graph is called, and is refreshed with only the read scopes it was granted. A person can also
+connect for reading only (only `Files.Read` is asked for; the choice is carried in the signed `state`); such
+a connection stores no write scope even if Microsoft lists one, and a refresh never adds the write scope to
+a connection that lacked it. File text is wrapped in
 untrusted-content markers. The tokens are encrypted with `ENCRYPTION_KEY` and name the account they belong to.
 The connect flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
 
