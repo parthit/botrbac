@@ -10,7 +10,7 @@ that use it; the sign-in step does not change.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .drive_client import ACCEPTABLE_SCOPES, DRIVE_FILE_SCOPE
 from .onedrive_client import ALLOWED_SCOPES as ONEDRIVE_ALLOWED_SCOPES
@@ -72,6 +72,19 @@ NOTION = Connection(
         "Notion will ask which pages to share with Bot RBAC. Bot RBAC can read only those "
         "pages and what is inside them, and never edits Notion. An assistant still reaches "
         "only the pages you allow on Files."
+    ),
+)
+
+# What Notion's card says on a deployment that turned page creation on
+# (NOTION_ALLOW_CREATE). Shown in place of NOTION; everything else is the same.
+NOTION_WITH_CREATE = replace(
+    NOTION,
+    summary="Only the Notion pages you pick: to read, and to add new pages under them.",
+    disclosure=(
+        "Notion will ask which pages to share with Bot RBAC. Bot RBAC can read only those "
+        "pages and what is inside them. An assistant you let edit can also add a new page "
+        "under one. Bot RBAC never changes or deletes existing Notion pages. An assistant "
+        "still reaches only the pages you allow on Files."
     ),
 )
 

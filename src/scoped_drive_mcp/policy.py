@@ -34,6 +34,9 @@ GUEST_TOOLS: frozenset[str] = frozenset(
 
 # Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
 NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
+# Creating a new page under an allowed Notion page (notion.py). Never edits or deletes one.
+# Off unless the deployment sets NOTION_ALLOW_CREATE: see OPT_IN_TOOLS below.
+NOTION_WRITE_TOOLS: frozenset[str] = frozenset({"notion_create_page"})
 
 # Reading the person's own OneDrive, limited to what they allowed (onedrive.py). Read-only.
 ONEDRIVE_TOOLS: frozenset[str] = frozenset(
@@ -126,6 +129,16 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
+# Tools that are not in the role sets above and exist only when a deployment turns them on
+# with a setting; server.py registers them only then. Until it does, there is no such tool
+# to list or call, whatever this says. Like create_doc, they are for connections that may
+# edit.
+OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
+    Role.EDITOR: NOTION_WRITE_TOOLS,
+    Role.ADMIN: NOTION_WRITE_TOOLS,
+}
+_OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
+
 # Tools whose result is a new item: its id goes into the audit record.
 NEW_ITEM_TOOLS: frozenset[str] = frozenset(
     {"finish_upload", "save_export", "onedrive_create_folder", "onedrive_upload_file"}
@@ -138,6 +151,7 @@ _AUDITED_ID_ARGS = (
     "request_id",
     "owner",
     "page_id",
+    "parent_page_id",
     "upload_id",
 )
 
@@ -156,9 +170,10 @@ def is_allowed(role: Role | str | None, tool: str) -> bool:
     if role is None:
         return False
     try:
-        return tool in ROLE_TOOLS[Role(role)]
+        known = Role(role)
     except ValueError:
         return False
+    return tool in ROLE_TOOLS[known] or tool in OPT_IN_TOOLS.get(known, frozenset())
 
 
 def check_permission(principal: Principal | None, tool: str) -> Principal:
@@ -210,7 +225,7 @@ def require(
     The wrapper keeps the original signature (via functools.wraps) so FastMCP still
     generates the right input schema.
     """
-    if tool not in ALL_TOOLS:
+    if tool not in ALL_TOOLS and tool not in _OPT_IN_NAMES:
         raise ValueError(f"tool {tool!r} is not in the role map")
 
     def decorator(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -295,6 +310,10 @@ def require(
                 fid = result.get("id")
                 if isinstance(fid, str) and not ids.get("file_id"):
                     ids["file_id"] = fid
+            if tool == "notion_create_page" and isinstance(result, dict):
+                # The new page, next to the parent it was asked for (parent_page_id).
+                pid = result.get("id")
+                ids["page_id"] = pid if isinstance(pid, str) else None
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 

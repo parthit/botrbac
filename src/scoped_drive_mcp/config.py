@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     # Notion is offered on Settings only when both are set.
     notion_oauth_client_id: SecretStr | None = None
     notion_oauth_client_secret: SecretStr | None = None
+    # Off: Notion is read-only, as it always was. On: connections that may edit get
+    # notion_create_page (a new page under an allowed page). It also needs the "Insert
+    # content" capability on the connection in Notion. See docs/notion.md.
+    notion_allow_create: bool = False
     # Optional: Microsoft OneDrive (an app registered in Microsoft Entra). Offered on
     # Settings only when both are set. Read-only (Files.Read).
     onedrive_oauth_client_id: SecretStr | None = None

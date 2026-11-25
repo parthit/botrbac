@@ -55,7 +55,7 @@ from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
 from .config import Settings
-from .connections import CONNECTIONS, Connection, get_connection
+from .connections import CONNECTIONS, NOTION_WITH_CREATE, Connection, get_connection
 from .drive_client import (
     FOLDER_MIME,
     SHORTCUT_MIME,
@@ -277,6 +277,9 @@ class DashboardContext:
     hidden: Any = None
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
+    # NOTION_ALLOW_CREATE: assistants that may edit can add Notion pages. Changes only
+    # what the pages say about Notion; the tool itself is registered in server.py.
+    notion_create: bool = False
     # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
     onedrive: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
@@ -410,6 +413,8 @@ class DashboardContext:
                 if record and record.get("workspace_name"):
                     detail = f"Workspace: {record['workspace_name']}"
                 needs_upgrade = False
+                if self.notion_create:
+                    conn = NOTION_WITH_CREATE
             elif conn.provider == "microsoft":
                 if self.onedrive is None:
                     continue
@@ -680,6 +685,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
     ctx.setdefault("onedrive_tab", getattr(request.state, "onedrive_tab", False))
     ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
+    ctx.setdefault("notion_create", getattr(request.app.state, "notion_create", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -711,8 +717,10 @@ async def terms_page(_: Request) -> Response:
     return render_plain("terms.html")
 
 
-async def privacy_page(_: Request) -> Response:
-    return render_plain("privacy.html")
+async def privacy_page(request: Request) -> Response:
+    return render_plain(
+        "privacy.html", notion_create=getattr(request.app.state, "notion_create", False)
+    )
 
 
 @functools.lru_cache(maxsize=16)
@@ -4095,6 +4103,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     )
     app.state.owner_email = settings.owner_email
     app.state.terminal_tab = ctx.terminal is not None
+    app.state.notion_create = ctx.notion_create
     # Mount("/") serves this app, so request.app is this app, not the outer one.
     app.state.dashboard = ctx
     return app
