@@ -32,7 +32,8 @@ def _locked(method):
 class AuditQueue:
     """One connection, shared by the gateway's event loop (which adds rows) and the
     worker thread that syncs them (asyncio.to_thread), hence check_same_thread=False
-    and a lock around every use."""
+    and a lock around every use. The lock is not re-entrant: a locked method must not
+    call another one."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or state.home() / "audit.db"

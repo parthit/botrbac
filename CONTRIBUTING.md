@@ -27,7 +27,8 @@ uv run ruff format --check .
 
 `tests/test_store_backends.py` also checks the Postgres and Redis stores against real servers when
 `TEST_DATABASE_URL` (e.g. `postgresql://postgres@127.0.0.1:5432/postgres`) and `TEST_REDIS_URL`
-(e.g. `redis://127.0.0.1:6379`) are set; without them those cases are skipped. CI sets both.
+(e.g. `redis://127.0.0.1:6379`) are set; without them those cases are skipped. CI sets both. Use
+throwaway servers: each test writes under its own random key prefix and nothing is cleaned up.
 
 CI runs these on every pull request and on `main` (`.github/workflows/ci.yml`). Run ruff through `uv run`,
 not a globally installed copy: CI uses the version locked in `uv.lock`.
