@@ -3524,6 +3524,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return connect_redirect(request)
             # The form carries this id back, so Allow only ever approves the request this
             # page describes. A second authorize request in another tab replaces it.
+            # Signing in through a named role's address: say so, and refuse a role this
+            # person does not have instead of approving a connection that reaches nothing.
+            role_slug = ctx.mcp_oauth.bound_role(pending.resource)
+            agent_role = None
+            if role_slug:
+                if ctx.agent_roles is not None:
+                    agent_role = await blocking(ctx.agent_roles.get, role_slug)
+                if agent_role is None:
+                    return render(
+                        request,
+                        "error.html",
+                        404,
+                        message=f"You have no role named “{role_slug}”. Make it in Settings, "
+                        "under Roles, then connect again.",
+                    )
             consent_id = secrets.token_urlsafe(16)
             request.session["mcp_auth"] = {**pending.to_dict(), "consent_id": consent_id}
             await remember_pending(request)
@@ -3541,8 +3556,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return_host=return_host,
                 consent_id=consent_id,
                 switch_next=here,
-                mailbox_on=ctx.mailbox is not None,
-                shared_on=ctx.shared_with_me is not None,
+                agent_role=agent_role,
+                mailbox_on=ctx.mailbox is not None and agent_role is None,
+                shared_on=ctx.shared_with_me is not None and agent_role is None,
             )
         finally:
             current_actor.reset(reset)
@@ -3648,6 +3664,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "name": g.client_name,
                     "app_name": g.app_name or g.client_name,
                     "renamed": g.renamed,
+                    "agent_role": g.agent_role,
                     "created_at": g.created_at,
                     "last_used": g.last_used,
                     "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,

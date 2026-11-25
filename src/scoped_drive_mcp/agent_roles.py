@@ -17,10 +17,12 @@ A role only ever narrows the connection it is used through:
 A role that does not exist, or whose record cannot be read, refuses the call: a missing
 record is never treated as "no narrowing".
 
-The role is chosen by the address, and the address is part of the MCP server
-configuration, which the model does not write. The same bearer token still works on
-`/mcp` without the role, so this limits an agent that was given the role's address. It
-does not limit someone who holds the token itself.
+An app that signs in through a role's address gets a connection for that role only
+(mcp_oauth.py records the role on the grant). Its tokens are refused on plain `/mcp` and
+on every other role, and an app connected to plain `/mcp` is refused on a role's
+address. So the role holds against someone who has copied the token, not only against an
+agent configured with the address. Pre-shared `API_TOKENS` are not connections and
+cannot be bound: on a role's address they are narrowed, and they still work on `/mcp`.
 """
 
 import json
@@ -34,14 +36,14 @@ import anyio.to_thread
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .audit import audit_auth_failure
-from .auth import current_principal
+from .auth import ROLE_PATH_PARAM, current_principal
+from .auth import ROLE_SLUG as SLUG
 from .config import Role
 from .store import AGENT_ROLES_KEY, KeyValueStore, utc_now
 
 logger = logging.getLogger(__name__)
 
-ROLE_PATH_PARAM = "agent_role"
-SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
+__all__ = ["ROLE_PATH_PARAM", "SLUG"]
 _ITEM_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 MAX_NAME = 40
 MAX_ROLES = 20
@@ -186,11 +188,26 @@ class AgentRoleMiddleware:
         self.roles = roles
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        slug = (scope.get("path_params") or {}).get(ROLE_PATH_PARAM)
-        if scope["type"] != "http" or slug is None:
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        slug = (scope.get("path_params") or {}).get(ROLE_PATH_PARAM)
         principal = current_principal.get()
+        bound = None if principal is None else principal.bound_role
+        # A connection works only at the address it was approved for: a role's on that
+        # role, a plain one on `/mcp`. API tokens (no grant) are not connections.
+        connection = principal is not None and principal.grant_id is not None
+        if bound != slug and (connection or bound is not None):
+            audit_auth_failure("role_mismatch", str(scope.get("path", ""))[:200])
+            await _refused(
+                send,
+                "role_mismatch",
+                "This connection was approved for another address. Sign in again from this one.",
+            )
+            return
+        if slug is None:
+            await self.app(scope, receive, send)
+            return
         role: AgentRole | None = None
         if principal is not None:
             try:
@@ -200,7 +217,11 @@ class AgentRoleMiddleware:
                 logger.warning("could not read a named role; refusing the call", exc_info=True)
         if principal is None or role is None:
             audit_auth_failure("unknown_role", str(scope.get("path", ""))[:200])
-            await _refused(send)
+            await _refused(
+                send,
+                "unknown_role",
+                "This account has no role with that name. Roles are made in Settings.",
+            )
             return
         reset_principal = current_principal.set(
             replace(principal, role=narrowed(principal.role, role.level), agent_role=role.slug)
@@ -213,14 +234,9 @@ class AgentRoleMiddleware:
             current_principal.reset(reset_principal)
 
 
-async def _refused(send: Send) -> None:
+async def _refused(send: Send, error: str, message: str) -> None:
     # 403, not 404: an MCP client reads 404 on its endpoint as an expired session.
-    body = json.dumps(
-        {
-            "error": "unknown_role",
-            "message": "This account has no role with that name. Roles are made in Settings.",
-        }
-    ).encode()
+    body = json.dumps({"error": error, "message": message}).encode()
     await send(
         {
             "type": "http.response.start",

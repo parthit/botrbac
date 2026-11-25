@@ -486,15 +486,16 @@ def describe(
     if event == "owner":
         return _owner_row(record, names, request_names)
     if event == "auth":
-        unknown_role = record.get("reason") == "unknown_role"
+        role_text = {
+            "unknown_role": "An assistant asked for a role that does not exist. "
+            "The call was refused.",
+            "role_mismatch": "An assistant used its connection at an address it was not "
+            "approved for. The call was refused.",
+        }.get(str(record.get("reason") or ""))
         return ActivityRow(
             ts=str(record.get("ts") or ""),
-            who="An assistant" if unknown_role else "Unknown app",
-            text=(
-                "An assistant asked for a role that does not exist. The call was refused."
-                if unknown_role
-                else "An app tried to connect with a missing, wrong or expired key."
-            ),
+            who="An assistant" if role_text else "Unknown app",
+            text=role_text or "An app tried to connect with a missing, wrong or expired key.",
             badge=_BLOCKED,
             group="security",
             # Refused already and nothing for the person to do, so it does not count

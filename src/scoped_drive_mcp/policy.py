@@ -165,9 +165,15 @@ def is_allowed(role: Role | str | None, tool: str) -> bool:
         return False
 
 
+def off_its_role(principal: Principal) -> bool:
+    """A connection approved for one named role, on a call not running under that role.
+    AgentRoleMiddleware refuses these before any tool; this is the same check again."""
+    return principal.bound_role is not None and principal.agent_role != principal.bound_role
+
+
 def may_call(principal: Principal | None, tool: str) -> bool:
     """The level check, plus the shorter tool list of a call made through a named role."""
-    if principal is None:
+    if principal is None or off_its_role(principal):
         return False
     if principal.agent_role is not None and tool not in AGENT_ROLE_TOOLS:
         return False
@@ -177,6 +183,8 @@ def may_call(principal: Principal | None, tool: str) -> bool:
 def check_permission(principal: Principal | None, tool: str) -> Principal:
     if principal is None:
         raise PermissionDeniedError("not authenticated")
+    if off_its_role(principal):
+        raise PermissionDeniedError("this connection only works through its named role")
     if principal.agent_role is not None and tool not in AGENT_ROLE_TOOLS:
         raise PermissionDeniedError(f"'{tool}' is not available through a named role")
     if not is_allowed(principal.role, tool):

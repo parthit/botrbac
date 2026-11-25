@@ -12,12 +12,35 @@ from scoped_drive_mcp.agent_roles import (
     narrowed,
     slugify,
 )
+from scoped_drive_mcp.auth import Principal
 from scoped_drive_mcp.config import Role
-from scoped_drive_mcp.policy import AGENT_ROLE_TOOLS
+from scoped_drive_mcp.mcp_oauth import OAuthGrant
+from scoped_drive_mcp.policy import (
+    AGENT_ROLE_TOOLS,
+    PermissionDeniedError,
+    check_permission,
+    may_call,
+)
 from scoped_drive_mcp.store import AGENT_ROLES_KEY, MemoryStore, PrefixedStore
-from tests.conftest import TOKENS
+from tests.conftest import BASE_URL, OWNER_EMAIL, TOKENS
 from tests.dash import MCP_HEADERS, client, login, mcp_call, post
-from tests.test_mcp_oauth import INIT, LIST
+from tests.test_mcp_oauth import (
+    GROK,
+    INIT,
+    LIST,
+    METADATA,
+    RESOURCE,
+    auth_params,
+    bearer,
+    call_tool,
+    code_from,
+    connect,
+    exchange,
+    posted_redirect,
+    refresh,
+    register,
+    tool_names,
+)
 
 WRITE_TOOLS = {"create_folder", "create_doc", "upload_file", "update_file_content", "rename_file"}
 
@@ -268,3 +291,169 @@ def test_activity_names_the_role(owner_c, p2_app) -> None:
     assert (allowed["agent_role"], allowed["decision"]) == ("researcher", "allow")
     assert (denied["agent_role"], denied["decision"]) == ("researcher", "deny")
     assert "(role researcher)" in owner_c.get("/activity").text
+
+
+# ---- a connection is bound to the role it signed in through -----------------
+
+ROLE_RESOURCE = f"{RESOURCE}/role/"
+
+
+def role_connect(c, slug: str, **decision) -> tuple[str, dict]:
+    """Register, approve and exchange at a role's address: (client_id, token response)."""
+    resource = ROLE_RESOURCE + slug
+    client_id = register(c, GROK).json()["client_id"]
+    verifier, params = auth_params(client_id, GROK, resource=resource)
+    page = c.get("/oauth/authorize", params=params)
+    assert page.status_code == 200, page.text
+    allowed = post(c, "/oauth/authorize", decision="allow", **decision)
+    code = code_from(posted_redirect(c, allowed))
+    token = exchange(c, client_id, code, verifier, GROK, resource=resource)
+    assert token.status_code == 200, token.text
+    return client_id, token.json()
+
+
+def status_at(c, path: str, token: str) -> tuple[int, str]:
+    r = c.post(path, json=LIST, headers=bearer(token))
+    return r.status_code, (r.json().get("error", "") if r.status_code == 403 else "")
+
+
+def test_a_role_address_has_its_own_metadata(owner_c) -> None:
+    bare = owner_c.post("/mcp/role/researcher", json=INIT, headers=MCP_HEADERS)
+    assert bare.status_code == 401
+    assert bare.headers["www-authenticate"] == (
+        f'Bearer resource_metadata="{METADATA}/role/researcher"'
+    )
+    for path in (
+        "/.well-known/oauth-protected-resource/mcp/role/researcher",
+        "/mcp/role/researcher/.well-known/oauth-protected-resource",
+    ):
+        body = owner_c.get(path).json()
+        assert body["resource"] == ROLE_RESOURCE + "researcher"
+        assert body["authorization_servers"] == [BASE_URL]
+    assert owner_c.get("/.well-known/oauth-protected-resource/mcp/role/No_Good").status_code == 404
+    # A name that cannot be a role points at the plain metadata; the call is refused anyway.
+    odd = owner_c.post("/mcp/role/No_Good", json=INIT, headers=MCP_HEADERS)
+    assert odd.headers["www-authenticate"] == f'Bearer resource_metadata="{METADATA}"'
+    # Plain /mcp is unchanged.
+    assert owner_c.get("/.well-known/oauth-protected-resource/mcp").json()["resource"] == RESOURCE
+
+
+def test_a_role_connection_is_refused_everywhere_else(owner_c, p2_app) -> None:
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    save_role(owner_c, "Projects", "viewer", "proj")
+    _client, tokens = role_connect(owner_c, "researcher", role="admin")
+    token = tokens["access_token"]
+    assert status_at(owner_c, "/mcp/role/researcher", token) == (200, "")
+    # Not on plain /mcp, whatever level was chosen, and not on another role.
+    assert status_at(owner_c, "/mcp", token) == (403, "role_mismatch")
+    assert status_at(owner_c, "/mcp/role/projects", token) == (403, "role_mismatch")
+    assert status_at(owner_c, "/mcp/role/nobody", token) == (403, "role_mismatch")
+    # Through its own address it is the role: its files, its level.
+    body = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": "read_file", "arguments": {"file_id": "loose-two"}},
+    }
+    refused = owner_c.post("/mcp/role/researcher", json=body, headers=bearer(token)).json()
+    assert "role 'researcher'" in error_text(refused["result"])
+    body["params"]["arguments"]["file_id"] = "loose-doc"
+    read = owner_c.post("/mcp/role/researcher", json=body, headers=bearer(token)).json()
+    assert read["result"]["isError"] is False
+    grant = p2_app.state.dashboard.mcp_oauth.list_grants(OWNER_EMAIL)[0]
+    assert grant.agent_role == "researcher"
+    assert "Connected through the role <b>researcher</b>" in owner_c.get("/settings").text
+    assert "not approved for" in owner_c.get("/activity").text
+
+
+def test_a_deleted_role_cuts_off_its_connection(owner_c) -> None:
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    _client, tokens = role_connect(owner_c, "researcher", role="admin")
+    token = tokens["access_token"]
+    assert status_at(owner_c, "/mcp/role/researcher", token) == (200, "")
+    assert post(owner_c, "/roles/delete", slug="researcher").status_code == 303
+    assert status_at(owner_c, "/mcp/role/researcher", token) == (403, "unknown_role")
+    # It never falls back to the whole allowlist.
+    assert status_at(owner_c, "/mcp", token) == (403, "role_mismatch")
+
+
+def test_a_role_connection_refreshes_only_for_its_address(owner_c) -> None:
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    client_id, tokens = role_connect(owner_c, "researcher")
+
+    def renew(refresh_token: str, resource: str):
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "resource": resource,
+        }
+        return owner_c.post("/oauth/token", data=data)
+
+    # Asking for plain /mcp, or another role, gets nothing and does not spend the token.
+    assert renew(tokens["refresh_token"], RESOURCE).status_code == 400
+    assert renew(tokens["refresh_token"], ROLE_RESOURCE + "projects").status_code == 400
+    again = renew(tokens["refresh_token"], ROLE_RESOURCE + "researcher")
+    assert again.status_code == 200, again.text
+    fresh = again.json()["access_token"]
+    assert status_at(owner_c, "/mcp/role/researcher", fresh) == (200, "")
+    assert status_at(owner_c, "/mcp", fresh) == (403, "role_mismatch")
+
+
+def test_a_code_for_a_role_is_not_exchanged_for_plain_mcp(owner_c) -> None:
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    client_id = register(owner_c, GROK).json()["client_id"]
+    verifier, params = auth_params(client_id, GROK, resource=ROLE_RESOURCE + "researcher")
+    assert owner_c.get("/oauth/authorize", params=params).status_code == 200
+    allowed = post(owner_c, "/oauth/authorize", decision="allow")
+    code = code_from(posted_redirect(owner_c, allowed))
+    swapped = exchange(owner_c, client_id, code, verifier, GROK)  # resource = plain /mcp
+    assert swapped.status_code == 400
+    assert swapped.json()["error"] == "invalid_target"
+
+
+def test_a_plain_connection_works_on_mcp_as_before_and_not_on_a_role(owner_c, p2_app) -> None:
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    client_id, tokens = connect(owner_c, role="editor")
+    token = tokens["access_token"]
+    # Unbound: the whole allowlist at its own level on plain /mcp.
+    assert call_tool(owner_c, token, "read_file", file_id="loose-two")["isError"] is False
+    assert "create_doc" in tool_names(owner_c, token)
+    assert p2_app.state.dashboard.mcp_oauth.list_grants(OWNER_EMAIL)[0].agent_role is None
+    renewed = refresh(owner_c, client_id, tokens["refresh_token"])
+    assert renewed.status_code == 200
+    assert status_at(owner_c, "/mcp", renewed.json()["access_token"]) == (200, "")
+    # A role's address wants a connection made for it.
+    assert status_at(owner_c, "/mcp/role/researcher", token) == (403, "role_mismatch")
+
+
+def test_a_grant_saved_before_binding_is_unbound() -> None:
+    old = json.dumps({"id": "g1", "client_id": "c", "email": "a@example.com", "roles": True})
+    assert OAuthGrant.from_json(old).agent_role is None
+
+
+def test_consent_names_the_role_and_refuses_one_you_do_not_have(owner_c) -> None:
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    client_id = register(owner_c, GROK).json()["client_id"]
+    _v, params = auth_params(client_id, GROK, resource=ROLE_RESOURCE + "researcher")
+    page = owner_c.get("/oauth/authorize", params=params)
+    assert page.status_code == 200 and 'id="consent-agent-role"' in page.text
+    assert "Researcher" in page.text and "Use your Mailbox" not in page.text
+    _v, params = auth_params(client_id, GROK, resource=ROLE_RESOURCE + "nobody")
+    missing = owner_c.get("/oauth/authorize", params=params)
+    assert missing.status_code == 404 and "no role named" in missing.text
+    _v, params = auth_params(client_id, GROK, resource=ROLE_RESOURCE + "Bad_Slug")
+    bad = owner_c.get("/oauth/authorize", params=params)
+    assert bad.status_code == 303 and "invalid_target" in bad.headers["location"]
+
+
+def test_the_tool_check_refuses_a_bound_connection_off_its_role() -> None:
+    bound = Principal(token_name="app", role=Role.ADMIN, bound_role="researcher")
+    assert may_call(bound, "read_file") is False
+    with pytest.raises(PermissionDeniedError):
+        check_permission(bound, "read_file")
+    on_role = Principal(
+        token_name="app", role=Role.VIEWER, bound_role="researcher", agent_role="researcher"
+    )
+    assert may_call(on_role, "read_file") is True
+    assert may_call(Principal(token_name="app", role=Role.VIEWER), "read_file") is True

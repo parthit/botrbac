@@ -60,10 +60,15 @@ If the main session should not reach the rest of your allowed list either, do no
 
 ## Limits to know about
 
-- **The address picks the role, not the token.** A token issued through a role's address also works on plain
-  `/mcp` at the connection's own level. An agent cannot change the address it was configured with, so this
-  holds against a model that is told to misbehave. It does not hold against someone who has copied the token.
-  Binding a connection to its role at sign-in is planned.
+- **A connection belongs to the address it signed in through.** An app that signs in at a role's address is
+  bound to that role: its tokens are refused (`403 role_mismatch`) on plain `/mcp` and on every other role,
+  and it can only refresh for that address. An app connected to plain `/mcp` is refused on a role's address;
+  add the role's address as its own server and sign in there. The consent page names the role, and refuses a
+  role you do not have. This relies on the app asking for the address it was given (the OAuth `resource`
+  parameter, which it reads from the role's own metadata); an app that asks for plain `/mcp` instead gets a
+  plain connection, which a role's address refuses.
+- **Pre-shared `API_TOKENS` cannot be bound.** They are the admin's own keys, not connections. On a role's
+  address they are narrowed to the role; on plain `/mcp` they work as before.
 - **Role changes take effect on the next call**, or within `ALLOWLIST_CACHE_TTL` seconds (default 2) on another
   server instance.
 - Role names become the address: `Research Reader` is `research-reader`. Saving a role under an existing name

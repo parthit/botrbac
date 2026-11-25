@@ -33,7 +33,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
-from .auth import Principal, hash_token
+from .auth import ROLE_PATH_PARAM, ROLE_SLUG, Principal, hash_token, role_metadata_url
 from .config import Role
 from .ratelimit import allow, ip_identity
 from .store import KeyValueStore, purpose_fernet, utc_now
@@ -224,6 +224,9 @@ class OAuthGrant:
     # Set on every approval since apps have roles. A grant without it predates roles and
     # keeps full access; a grant with it whose role key is missing fails closed to read.
     roles: bool = False
+    # The named role (agent_roles.py) this connection was approved for, when the app
+    # signed in through `/mcp/role/<slug>`. None is a connection to plain `/mcp`.
+    agent_role: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -246,6 +249,7 @@ class OAuthGrant:
             code_hash=data.get("code_hash"),
             refresh_until=int(data.get("refresh_until") or 0),
             roles=bool(data.get("roles", False)),
+            agent_role=str(data["agent_role"]) if data.get("agent_role") else None,
         )
 
 
@@ -262,6 +266,8 @@ class GrantView:
     # own name for the connection when they gave it one, otherwise this.
     app_name: str = ""
     renamed: bool = False
+    # The named role this connection is limited to, if it signed in through one.
+    agent_role: str | None = None
 
 
 # What a connected app may do, chosen by the owner on the consent page and changeable
@@ -613,9 +619,22 @@ class McpOAuth:
 
     # ---- metadata --------------------------------------------------------
 
-    def protected_resource_metadata(self) -> dict[str, Any]:
+    def role_resource(self, slug: str | None) -> str:
+        """The resource a connection is for: the MCP endpoint, or one role's address."""
+        return f"{self.resource}/role/{slug}" if slug else self.resource
+
+    def bound_role(self, resource: str | None) -> str | None:
+        """Which named role a `resource` asks for: "" for the MCP endpoint itself, the
+        slug for a role's address, None for anything else (which is refused)."""
+        if resource == self.resource:
+            return ""
+        prefix = f"{self.resource}/role/"
+        slug = resource[len(prefix) :] if resource and resource.startswith(prefix) else ""
+        return slug if ROLE_SLUG.fullmatch(slug) else None
+
+    def protected_resource_metadata(self, role: str | None = None) -> dict[str, Any]:
         return {
-            "resource": self.resource,
+            "resource": self.role_resource(role),
             "authorization_servers": [self.base_url],
             "bearer_methods_supported": ["header"],
             "scopes_supported": [SCOPE],
@@ -640,15 +659,30 @@ class McpOAuth:
     def routes(self) -> list[Route]:
         return [
             *[Route(path, self._prm, methods=["GET"]) for path in PRM_PATHS],
+            # Each named role's address is its own resource (RFC 9728 path-scoped).
+            *[
+                Route(role_metadata_url(path, f"{{{ROLE_PATH_PARAM}}}"), self._prm, methods=["GET"])
+                for path in PRM_PATHS[1:2]
+            ],
+            Route(
+                f"/mcp/role/{{{ROLE_PATH_PARAM}}}/.well-known/oauth-protected-resource",
+                self._prm,
+                methods=["GET"],
+            ),
             *[Route(path, self._asm, methods=["GET"]) for path in AS_PATHS],
             Route("/oauth/register", self._register, methods=["POST"]),
             Route("/oauth/token", self._token, methods=["POST"]),
             *([Route("/oauth/done", self._done, methods=["GET"])] if self.test_callback else []),
         ]
 
-    async def _prm(self, _: Request) -> JSONResponse:
+    async def _prm(self, request: Request) -> JSONResponse:
+        # Any well-formed role name gets metadata: whose role it is, and whether it
+        # exists, is only known after sign-in.
+        role = request.path_params.get(ROLE_PATH_PARAM)
+        if role is not None and ROLE_SLUG.fullmatch(role) is None:
+            return _oauth_error("not_found", "No such resource.", 404)
         return JSONResponse(
-            self.protected_resource_metadata(),
+            self.protected_resource_metadata(role),
             headers={
                 "cache-control": "public, max-age=300",
                 "access-control-allow-origin": "*",
@@ -893,7 +927,7 @@ class McpOAuth:
                 state=state,
             )
         resource = _only(params, "resource")
-        if resource != self.resource:
+        if resource is None or self.bound_role(resource) is None:
             raise AuthorizeError(
                 "invalid_target",
                 "resource must be the MCP endpoint.",
@@ -946,6 +980,8 @@ class McpOAuth:
             email=email,
             created_at=utc_now(),
             roles=True,
+            # Signing in through a role's address binds the connection to that role.
+            agent_role=self.bound_role(pending.resource) or None,
         )
         code = secrets.token_urlsafe(32)
         digest = hash_token(code)
@@ -1020,10 +1056,9 @@ class McpOAuth:
                 raise TokenError("invalid_grant", "code was issued to a different client")
             if not _same(str(saved.get("redirect_uri", "")), form.get("redirect_uri") or ""):
                 raise TokenError("invalid_grant", "redirect_uri does not match")
-            if (
-                str(saved.get("resource", "")) != self.resource
-                or form.get("resource") != self.resource
-            ):
+            # The address that was approved, which for a role is the role's own.
+            resource = self.role_resource(grant.agent_role)
+            if str(saved.get("resource", "")) != resource or form.get("resource") != resource:
                 raise TokenError("invalid_target", "resource must be the MCP endpoint")
             verifier = form.get("code_verifier") or ""
             challenge = str(saved.get("code_challenge", ""))
@@ -1047,7 +1082,7 @@ class McpOAuth:
         token = form.get("refresh_token") or ""
         if not token:
             raise TokenError("invalid_request", "refresh_token is required")
-        if form.get("resource") != self.resource:
+        if self.bound_role(form.get("resource")) is None:
             raise TokenError("invalid_target", "resource must be the MCP endpoint")
         digest = hash_token(token)
         raw = self._consume(_rt_key(digest))
@@ -1067,6 +1102,8 @@ class McpOAuth:
             or not _same(grant.client_id, client_id)
             or grant.refresh_hash is None
             or not _same(grant.refresh_hash, digest)
+            # A connection refreshes only for the address it was approved for.
+            or form.get("resource") != self.role_resource(grant.agent_role)
         ):
             if grant is not None and grant.refresh_hash is not None:
                 if not _same(grant.refresh_hash, digest):
@@ -1169,6 +1206,7 @@ class McpOAuth:
             email=grant.email,
             grant_id=grant.id,
             client_name=self.display_name(grant),
+            bound_role=grant.agent_role,
         )
 
     def list_grants(self, email: str | None) -> list[GrantView]:
@@ -1193,6 +1231,7 @@ class McpOAuth:
                         legacy_full=self._legacy_full(grant),
                         app_name=grant.client_name,
                         renamed=label is not None,
+                        agent_role=grant.agent_role,
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
