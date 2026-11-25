@@ -87,7 +87,11 @@ def seal(public_key: str, event_id: str, text: str) -> str:
     eph_raw, rec_raw = _raw(ephemeral.public_key()), _raw(recipient)
     nonce = os.urandom(12)
     sealed = _aead(ephemeral.exchange(recipient), eph_raw, rec_raw).encrypt(
-        nonce, clip(text).encode(), event_id.encode()
+        # A lone surrogate (from JSON "\ud800", or argv that was not UTF-8) becomes "?":
+        # the command is still recorded, and sealing never raises on its text.
+        nonce,
+        clip(text).encode("utf-8", errors="replace"),
+        event_id.encode(),
     )
     return PREFIX + base64.b64encode(eph_raw + nonce + sealed).decode()
 

@@ -56,9 +56,15 @@ class AuditQueue:
         never written to this file as text."""
         row = {"event_id": uuid.uuid4().hex, "ts": time.time(), **fields}
         if command is not None:
-            key = policy.command_key()
-            if key:
-                row["command"] = sealing.seal(key, row["event_id"], command)
+            # Recording must never cost the row: if the key or the sealing fails, the
+            # row is kept without the command, marked so the owner sees one is missing.
+            try:
+                key = policy.command_key()
+                if key:
+                    row["command"] = sealing.seal(key, row["event_id"], str(command))
+            except Exception as exc:  # noqa: BLE001
+                row.pop("command", None)
+                row["command_error"] = type(exc).__name__
         return self._insert(row)
 
     @_locked

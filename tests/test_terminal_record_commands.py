@@ -231,3 +231,62 @@ def test_a_rotated_key_drops_the_command_and_never_errors() -> None:
     assert shown["command"] is None and shown["command_unreadable"]
     (shown,) = TerminalFeature(MemoryStore(), signing_secret="test secret").open_commands([old])
     assert shown["command"] == "sealed to the old key"
+
+
+# ---- recording can never cost the row ------------------------------------------------
+
+SURROGATE = json.loads('"echo \\ud800 done"')  # a lone surrogate, as JSON can carry
+
+
+def _recording(patterns, key=PUBLIC):
+    cache_policy(patterns, name="Full", roles=[{"id": "r", "name": "Full", "patterns": patterns}])
+    data = state.read_json("policy.json")
+    data["policy"]["command_key"] = key
+    state.write_json("policy.json", data)
+
+
+def test_hook_keeps_the_row_for_unencodable_text() -> None:
+    _recording(["claude-code/*"])
+    assert check("claude-code", json.dumps({"tool_name": "Bash", "tool_input": {
+        "command": SURROGATE}}), None, False)[0]  # fmt: skip
+    write = {"tool_name": "Write", "tool_input": {"file_path": "a", "content": SURROGATE}}
+    assert check("claude-code", json.dumps(write), None, False)[0]
+    rows = AuditQueue().pending()
+    assert len(rows) == 2 and all("command_error" not in r for r in rows)
+    assert sealing.open_sealed(KEY, rows[0]["event_id"], rows[0]["command"]) == "echo ? done"
+
+
+@pytest.mark.anyio
+async def test_gateway_allow_path_keeps_the_row_and_the_result() -> None:
+    _recording(["github/*"])
+    gw = Gateway(policy.Enforcer(), AuditQueue())
+    gw.add(stub_upstream("github", "create_issue"))
+    result = await gw.call("github__create_issue", {"title": SURROGATE})
+    assert not result.isError
+    (row,) = AuditQueue().pending()
+    assert row["decision"] == "allow" and "?" in sealing.open_sealed(
+        KEY, row["event_id"], row["command"]
+    )
+
+
+def test_session_start_with_non_utf8_argv() -> None:
+    import os
+
+    from botrbac_cli import session
+
+    _recording(["claude-code/*"])
+    started = session.start("Full", "claude", None, ["claude", os.fsdecode(b"--x=\xff")])
+    (row,) = AuditQueue().pending()
+    assert row["session_id"] == started["id"] and row["decision"] == "session"
+    assert sealing.open_sealed(KEY, row["event_id"], row["command"]).startswith("claude ")
+
+
+def test_a_bad_key_keeps_the_row_marked() -> None:
+    _recording(["claude-code/*"], key="not a key")
+    assert check("claude-code", _bash("ls"), None, False)[0]
+    (row,) = AuditQueue().pending()
+    assert row["decision"] == "allow" and "command" not in row
+    assert row["command_error"] == "SealError"
+    # The site shows the marker only while recording is on, and never a command.
+    assert clean_row(row, NOW, KEY)["command_error"] == "SealError"
+    assert "command_error" not in clean_row(row, NOW)

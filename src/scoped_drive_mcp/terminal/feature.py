@@ -599,9 +599,9 @@ class TerminalFeature:
             rows = filtered(request, await _run(self.activity.recent, _me()))
             rows = self.open_commands(rows)
             fields = [
-                "ts", "terminal", "terminal_id", "agent", "tool", "command", "decision",
-                "reason", "role", "session_id", "parent_session_id", "via", "event_id",
-                "received",
+                "ts", "terminal", "terminal_id", "agent", "tool", "command",
+                "command_error", "decision", "reason", "role", "session_id",
+                "parent_session_id", "via", "event_id", "received",
             ]  # fmt: skip
             if request.query_params.get("format") == "jsonl":
                 text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)

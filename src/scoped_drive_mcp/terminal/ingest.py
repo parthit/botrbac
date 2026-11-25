@@ -89,6 +89,9 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
             pass
         else:
             row["command"] = command
+    if command_key is not None and raw.get("command_error") and "command" not in row:
+        # The computer could not seal this one: say so, without any of the command.
+        row["command_error"] = _word(raw.get("command_error"), 40) or "error"
     if decision == "session":
         # In the clear, only the program's name: arguments can hold secrets. The whole
         # command line is in the sealed `command` when recording is on.
