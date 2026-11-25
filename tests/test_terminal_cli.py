@@ -279,6 +279,32 @@ async def test_gateway_filters_and_blocks() -> None:
 
 
 @pytest.mark.anyio
+async def test_gateway_syncs_in_the_background(monkeypatch) -> None:
+    """The running gateway sends its own rows: sync runs in a worker thread while the
+    event loop keeps adding rows to the same queue (a SQLite connection that refused
+    other threads once made every background sync fail, silently)."""
+    monkeypatch.setattr("botrbac_cli.gateway.SYNC_EVERY", 0.01)
+    cache_policy(["github/*"])
+    api = FakeApi()
+    queue = AuditQueue()
+    gateway = Gateway(policy.Enforcer(), queue, agent="test-agent", api=api)
+    gateway.add(stub_upstream("github", "get_issue"))
+    syncer = asyncio.create_task(gateway.keep_synced())
+    try:
+        for n in range(20):
+            await gateway.call("github__get_issue", {"number": n})
+            await asyncio.sleep(0)
+        for _ in range(200):
+            if queue.waiting() == 0:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        syncer.cancel()
+    sent = [row["event_id"] for body in api.bodies for row in body["rows"]]
+    assert queue.waiting() == 0 and len(sent) == len(set(sent)) == 20
+
+
+@pytest.mark.anyio
 async def test_gateway_over_stdio(botrbac_home) -> None:
     """The real `botrbac gateway` process, as an agent starts it."""
     cache_policy(["github/get_*"])
