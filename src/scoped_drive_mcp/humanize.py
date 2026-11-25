@@ -270,6 +270,7 @@ _REFUSALS = {
     "onedrive_not_connected": "OneDrive isn’t connected",
     "onedrive_reconnect": "OneDrive needs to be connected again",
     "onedrive_error": "OneDrive returned an error",
+    "onedrive_unavailable": "Microsoft wasn’t answering",
 }
 
 

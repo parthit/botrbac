@@ -47,12 +47,20 @@ ITEM_FIELDS = (
 )
 # OneDrive item ids: personal accounts use "HEX!123" (and some newer forms with other
 # letters), work and school accounts a 34-character base32-like string. Never "/", "?",
-# "#", "%", spaces or quotes, so an id can be put into a Graph path as it is.
-_ITEM_ID = re.compile(r"^[A-Za-z0-9!._\-]{1,256}$")
+# "#", "%", spaces or quotes, and at least one letter or digit (so never "." or "..", which
+# an HTTP client would treat as a path step), so an id can be put into a Graph path as it is.
+_ITEM_ID = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9!._\-]{1,256}$")
+# Redirects a download may follow after Graph's own redirect.
+MAX_DOWNLOAD_REDIRECTS = 3
 
 
 class OneDriveOAuthError(Exception):
     """The OAuth exchange with Microsoft failed; the message is safe to show."""
+
+
+class OneDriveOAuthUnavailableError(OneDriveOAuthError):
+    """Microsoft could not be reached, or answered with a server error. Trying again later
+    may work; the connection itself may be fine."""
 
 
 class OneDriveApiError(Exception):
@@ -153,7 +161,9 @@ class OneDriveOAuth:
         try:
             resp = httpx.post(TOKEN_URL, data=form, timeout=self.timeout)
         except httpx.HTTPError:
-            raise OneDriveOAuthError("could not reach Microsoft") from None
+            raise OneDriveOAuthUnavailableError("could not reach Microsoft") from None
+        if resp.status_code >= 500 or resp.status_code == 429:
+            raise OneDriveOAuthUnavailableError("Microsoft is not answering right now")
         if resp.status_code != 200:
             raise OneDriveOAuthError("Microsoft rejected the connection code")
         try:
@@ -198,13 +208,21 @@ class OneDriveApi(Protocol):
 class HttpOneDriveApi:
     """Microsoft Graph with one access token, limited to the signed-in person's drive."""
 
-    def __init__(self, access_token: str, timeout: float = 20) -> None:
+    def __init__(
+        self,
+        access_token: str,
+        timeout: float = 20,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        # `transport` is for tests; it is used for Graph and for download addresses.
         self._client = httpx.Client(
             base_url=GRAPH,
             headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
             timeout=timeout,
+            transport=transport,
         )
         self._timeout = timeout
+        self._transport = transport
 
     def close(self) -> None:
         self._client.close()
@@ -269,27 +287,39 @@ class HttpOneDriveApi:
 
     def download(self, item_id: str, limit: int) -> bytes:
         """Up to `limit` bytes of a file. Graph answers with a redirect to a short-lived,
-        pre-authorized download address; that address is fetched without the token."""
-        resp = self._client.get(f"/me/drive/items/{item_id}/content", follow_redirects=False)
-        if resp.status_code in (301, 302, 303, 307, 308):
+        pre-authorized download address; that address is fetched without the token, with
+        a capped number of further redirects. Bodies are streamed and cut at `limit`."""
+        path = f"/me/drive/items/{item_id}/content"
+        with self._client.stream("GET", path, follow_redirects=False) as resp:
+            if resp.status_code == 200:
+                return _read_capped(resp, limit)
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                resp.read()
+                self._raise(resp)
             location = resp.headers.get("location") or ""
-            if urlsplit(location).scheme != "https":
-                raise OneDriveApiError(resp.status_code, "bad_download_url")
-            out = bytearray()
-            with httpx.stream(
-                "GET", location, timeout=self._timeout, follow_redirects=True
-            ) as body:
-                if body.status_code != 200:
-                    raise OneDriveApiError(body.status_code, "download_failed")
-                for chunk in body.iter_bytes():
-                    out.extend(chunk)
-                    if len(out) >= limit:
-                        break
-            return bytes(out[:limit])
-        if resp.status_code == 200:
-            return resp.content[:limit]
-        self._raise(resp)
-        raise AssertionError("unreachable")
+        if urlsplit(location).scheme != "https":
+            raise OneDriveApiError(302, "bad_download_url")
+        with (
+            httpx.Client(
+                timeout=self._timeout,
+                follow_redirects=True,
+                max_redirects=MAX_DOWNLOAD_REDIRECTS,
+                transport=self._transport,
+            ) as plain,
+            plain.stream("GET", location) as body,
+        ):
+            if body.status_code != 200:
+                raise OneDriveApiError(body.status_code, "download_failed")
+            return _read_capped(body, limit)
+
+
+def _read_capped(resp: httpx.Response, limit: int) -> bytes:
+    out = bytearray()
+    for chunk in resp.iter_bytes():
+        out.extend(chunk)
+        if len(out) >= limit:
+            break
+    return bytes(out[:limit])
 
 
 # ---- reading OneDrive items ----------------------------------------------------------

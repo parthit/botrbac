@@ -579,3 +579,115 @@ def test_another_persons_onedrive_is_separate(app, allowed) -> None:
     page = eve.get("/files?tab=onedrive").text
     assert 'id="onedrive-connect"' in page
     assert "School" not in page
+
+
+# ---- review fixes ----------------------------------------------------------------------
+
+
+def test_ids_made_only_of_dots_are_refused() -> None:
+    for bad in (".", "..", "...", "-", "_.!"):
+        assert normalize_item_id(bad) is None
+
+
+def test_not_connected_is_said_before_not_allowed(c) -> None:
+    for tool in ("onedrive_read_file", "onedrive_download_file"):
+        out = result(c, tool, file_id=ESSAY)
+        assert out["structuredContent"]["error"] == "onedrive_not_connected"
+    out = result(c, "onedrive_list_folder", folder_id=SCHOOL)
+    assert out["structuredContent"]["error"] == "onedrive_not_connected"
+
+
+def test_a_refresh_with_wider_scopes_drops_token_and_list(allowed, drive, ms_oauth, memstore):
+    drive.tokens.clear()
+    ms_oauth.scopes = ("Files.Read", "Files.Read.All", "offline_access")
+    out = result(allowed, "onedrive_read_file", file_id=ESSAY)
+    assert out["structuredContent"]["error"] == "onedrive_reconnect"
+    assert memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}") is None
+    assert stored_allowlist(memstore) == {}
+
+
+def test_a_list_without_a_usable_connection_is_not_inherited(allowed, memstore) -> None:
+    assert stored_allowlist(memstore)
+    memstore.delete(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}")  # e.g. ignored as another account's
+    connect(allowed)
+    assert stored_allowlist(memstore) == {}
+
+
+def test_microsoft_being_down_is_not_a_reconnect(allowed, drive, ms_oauth, memstore) -> None:
+    from scoped_drive_mcp.onedrive_client import OneDriveOAuthUnavailableError
+
+    drive.tokens.clear()
+
+    def down(token):
+        raise OneDriveOAuthUnavailableError("could not reach Microsoft")
+
+    ms_oauth.refresh = down
+    out = result(allowed, "onedrive_read_file", file_id=ESSAY)
+    assert out["structuredContent"]["error"] == "onedrive_unavailable"
+    assert memstore.get(f"{KEY_PREFIX}{ONEDRIVE_TOKEN_KEY}") is not None
+    assert stored_allowlist(memstore)
+
+
+def test_search_stops_at_its_time_limit(allowed, monkeypatch) -> None:
+    import scoped_drive_mcp.onedrive as od
+
+    # Calls: set the deadline, check before the first page, then inside it (time is up).
+    clock = iter([0.0, 0.0, 1000.0])
+    monkeypatch.setattr(od, "_clock", lambda: next(clock, 1000.0))
+    out = result(allowed, "onedrive_search", query="essay")["structuredContent"]
+    assert out["results"] == [] and "could not be checked" in out["note"]
+
+
+# ---- the Graph client's download, over HTTP ------------------------------------------------
+
+
+def _graph(handler):
+    import httpx
+
+    from scoped_drive_mcp.onedrive_client import HttpOneDriveApi
+
+    return HttpOneDriveApi("tok-secret", transport=httpx.MockTransport(handler))
+
+
+def test_download_follows_the_redirect_without_the_token_and_caps_bytes() -> None:
+    import httpx
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "graph.microsoft.com":
+            return httpx.Response(302, headers={"location": "https://dl.example/f?sig=1"})
+        return httpx.Response(200, content=b"x" * 5000)
+
+    data = _graph(handler).download(ESSAY, 100)
+    assert data == b"x" * 100
+    assert seen[0].headers["authorization"] == "Bearer tok-secret"
+    assert "authorization" not in seen[1].headers
+
+
+def test_download_refuses_a_plain_http_address_and_endless_redirects() -> None:
+    import httpx
+
+    from scoped_drive_mcp.onedrive_client import OneDriveApiError
+
+    def to_http(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "http://dl.example/f"})
+
+    with pytest.raises(OneDriveApiError):
+        _graph(to_http).download(ESSAY, 100)
+
+    def loop(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://dl.example/again"})
+
+    with pytest.raises(httpx.TooManyRedirects):
+        _graph(loop).download(ESSAY, 100)
+
+
+def test_download_served_directly_is_capped_too() -> None:
+    import httpx
+
+    def direct(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"y" * 5000)
+
+    assert _graph(direct).download(ESSAY, 10) == b"y" * 10

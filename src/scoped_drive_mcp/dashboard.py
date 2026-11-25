@@ -1691,8 +1691,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 actions=retry_actions,
             )
         previous = await blocking(ctx.onedrive_record)
-        if previous and previous.get("drive_id") != account.drive_id:
-            # Another account: the old list names items that are not in this drive.
+        if previous is None or previous.get("drive_id") != account.drive_id:
+            # A list is kept only when the same drive reconnects. With no usable earlier
+            # connection we can't tell which account the list was chosen for, so it goes.
             await blocking(ctx.onedrive.clear)
         await blocking(
             ctx.vault.set_onedrive,
