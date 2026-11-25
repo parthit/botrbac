@@ -225,7 +225,9 @@ it only to show it to you on the Activity page and in exports. The private key i
 site's `ENCRYPTION_KEY`; change that and earlier commands can no longer be opened.
 
 What this does not do: hide a command from the agent that ran it (it wrote it), or from whoever runs the
-site, which can open what it stores. Turning it off stops new commands at once on the site (a computer
+site, which can open what it stores. Nor is it proof of what ran: sealing needs only the public key, so an
+agent that can run its own code on the computer can write rows with any command it likes, as it could
+already write any row. The recorded command is what the computer reported. Turning it off stops new commands at once on the site (a computer
 stops sealing them at its next check-in). Commands already recorded stay until they age out of the log
 (the newest 2,000 rows are kept).
 

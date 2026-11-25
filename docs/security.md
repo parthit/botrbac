@@ -324,7 +324,9 @@ the tool's input, never the result. The policy, signed as above, carries an X255
 from `ENCRYPTION_KEY`; the CLI seals each command to it (HKDF-SHA256, AES-GCM, the row's event id as
 associated data) before writing the row to disk, so nothing on the computer can read it back. The server
 keeps a sealed command only while the setting is on and only if it opens for that row, stores it sealed,
-and opens it only for its owner's Activity page and exports. Commands are cut at 8,000 characters. See
+and opens it only for its owner's Activity page and exports. Commands are cut at 8,000 characters. A
+recorded command is what the computer reported, not proof of what ran: the public key is enough to seal,
+so a hostile agent on the computer can seal whatever it likes onto rows, as it can already forge rows. See
 [terminal.md](terminal.md#record-commands) for what this does and does not hide.
 CSV export prefixes cells that would start a spreadsheet formula.
 
