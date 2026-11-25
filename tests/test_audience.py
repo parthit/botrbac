@@ -69,7 +69,6 @@ def _sharing_grants(world, ext: Allowlist | None = None) -> GrantService:
         lambda: world.as_user(OWNER_EMAIL),
         ext or Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY),
         AccessRequests(MemoryStore()),
-        None,
         audience=AUDIENCE_LINKED,
     )
 

@@ -39,7 +39,6 @@ def grants(owner, allowlist, kv, p2_guard) -> GrantService:
         lambda: owner,
         allowlist,
         AccessRequests(kv),
-        None,
         on_change=p2_guard.invalidate_allowlist,
     )
 

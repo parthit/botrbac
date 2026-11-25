@@ -16,7 +16,7 @@ from tests.dash import client, login, post
 def _grants(world, ids):
     owner = world.as_user(OWNER_EMAIL)
     kv = PrefixedStore(MemoryStore())
-    grants = GrantService(lambda: owner, Allowlist(kv), AccessRequests(kv), None)
+    grants = GrantService(lambda: owner, Allowlist(kv), AccessRequests(kv))
     for fid in ids:
         grants.grant(fid)
     return owner, grants
