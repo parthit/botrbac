@@ -281,8 +281,8 @@ def create_mcp(
         """Export a shared Google Doc, Sheet or Slides through Google Drive, with its real
         fonts and layout, and return the bytes as base64. format: Docs pdf, docx, odt, rtf,
         txt, md, html (zip), epub; Sheets pdf, xlsx, ods, csv, tsv; Slides pdf, pptx, odp,
-        txt. The same cap as download_file applies; a larger export returns no bytes, so use
-        save_export to keep it in Drive."""
+        txt. The same cap as download_file applies; a larger export returns no bytes, so for
+        a long document or a PDF you mean to keep, call save_export instead."""
         return await _run(service.export_file, file_id, format)
 
     @mcp.tool(annotations=WRITE)

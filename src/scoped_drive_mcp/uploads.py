@@ -35,8 +35,12 @@ MIN_CHUNK = 1024
 MAX_CHUNK = 512 * 1024
 # 6 KiB of bytes is exactly 8,192 base64 characters per call.
 DEFAULT_CHUNK = 6 * 1024
-# Uploads one account may start in UPLOAD_TTL seconds.
+# Pieces in one upload. With MAX_BYTES up to 50 MiB, chunk_size must grow with the file, so
+# finishing or cancelling never takes more than this many store round trips.
+MAX_CHUNKS = 1024
+# Uploads one account may start in UPLOAD_TTL seconds, and have open at once.
 MAX_STARTS = 10
+MAX_OPEN = 3
 # How many missing piece numbers an error lists.
 MISSING_SHOWN = 50
 
@@ -103,6 +107,26 @@ class UploadSessions:
     def _claim_key(upload_id: str) -> str:
         return f"{KEY}{upload_id}:finishing"
 
+    @staticmethod
+    def _open_key(email: str) -> str:
+        return f"{KEY}open:{email}"
+
+    def _open_uploads(self, email: str) -> int:
+        """Uploads this account has open, dropping ones that have expired."""
+        key = self._open_key(email)
+        now = self.clock()
+        live = 0
+        for upload_id, expires in self.store.hgetall(key).items():
+            try:
+                alive = float(expires) > now
+            except ValueError:
+                alive = False
+            if alive:
+                live += 1
+            else:
+                self.store.hdel(key, upload_id)
+        return live
+
     # ---- sessions --------------------------------------------------------------------
 
     def start(
@@ -139,6 +163,20 @@ class UploadSessions:
         if not isinstance(sha256, str) or not _SHA_RE.fullmatch(sha256.strip().lower()):
             raise UploadError("invalid_input", "sha256 must be 64 hex characters")
         sha256 = sha256.strip().lower()
+        chunk_count = math.ceil(size / chunk_size)
+        if chunk_count > MAX_CHUNKS:
+            raise UploadError(
+                "invalid_input",
+                f"a file of {size} bytes needs chunk_size of at least "
+                f"{math.ceil(size / MAX_CHUNKS)} (at most {MAX_CHUNKS} chunks per upload)",
+                min_chunk_size=math.ceil(size / MAX_CHUNKS),
+            )
+        email = str(who["email"])
+        if self._open_uploads(email) >= MAX_OPEN:
+            raise UploadError(
+                "too_many_uploads",
+                f"At most {MAX_OPEN} uploads can be open at once. Finish or cancel one first.",
+            )
 
         starts = self.store.incr(f"{KEY}starts:{who['email']}", self.ttl)
         if starts > MAX_STARTS:
@@ -151,7 +189,6 @@ class UploadSessions:
         upload_id = secrets.token_urlsafe(18)
         now = self.clock()
         expires_at = now + self.ttl
-        chunk_count = math.ceil(size / chunk_size)
         meta = {
             "email": who.get("email"),
             "token_name": who.get("token_name"),
@@ -167,6 +204,7 @@ class UploadSessions:
             "expires_at": expires_at,
         }
         self.store.set(self._meta_key(upload_id), json.dumps(meta), ex=self.ttl)
+        self.store.hset(self._open_key(email), upload_id, str(expires_at))
         return {
             "upload_id": upload_id,
             "chunk_size": chunk_size,
@@ -239,6 +277,10 @@ class UploadSessions:
                 index=index,
                 expected_bytes=expected,
             )
+        if self.store.get(self._claim_key(upload_id)) is not None:
+            raise UploadError(
+                "upload_busy", "This upload is being finished; no more chunks are taken."
+            )
         stored = base64.b64encode(data).decode("ascii")
         key = self._chunk_key(upload_id, index)
         duplicate = False
@@ -251,6 +293,10 @@ class UploadSessions:
                     index=index,
                 )
             duplicate = True  # a retry of the same piece is harmless
+        elif self.store.get(self._meta_key(upload_id)) is None:
+            # Cancelled or finished while this piece was on its way: don't leave it behind.
+            self.store.delete(key)
+            raise _not_found()
         return {
             "upload_id": upload_id,
             "index": index,
@@ -293,7 +339,10 @@ class UploadSessions:
             raise
         digest = hashlib.sha256(data).hexdigest()
         if len(data) != meta["size"] or digest != meta["sha256"]:
-            self.discard(upload_id, meta)
+            try:
+                self.discard(upload_id, meta)
+            finally:
+                self.release(upload_id)
             raise UploadError(
                 "integrity_mismatch",
                 "The assembled file does not match the declared size and sha256, so nothing "
@@ -314,6 +363,8 @@ class UploadSessions:
             meta = json.loads(raw) if raw else {}
         # Delete the session first, so nothing can use the pieces while they go.
         self.store.delete(self._meta_key(upload_id))
+        if meta.get("email"):
+            self.store.hdel(self._open_key(str(meta["email"])), upload_id)
         for index in range(int(meta.get("chunk_count") or 0)):
             self.store.delete(self._chunk_key(upload_id, index))
         self.store.delete(self._claim_key(upload_id))

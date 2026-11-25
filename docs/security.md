@@ -270,7 +270,8 @@
   token and connected app that started it (anyone else gets `upload_not_found` for its id). Every piece but
   the last has the declared `chunk_size`, so a session holds at most its declared size. Nothing is written
   to Drive until all pieces are there and the assembled bytes match the declared size and SHA-256; on a
-  mismatch the session is discarded. One account can start at most 10 uploads in 15 minutes. Start,
+  mismatch the session is discarded. An upload has at most 1,024 pieces, so finishing it is a bounded
+  number of store calls. One account can have at most 3 uploads open and start at most 10 in 15 minutes. Start,
   finish, cancel and refused pieces are on the Activity page; accepted pieces go only to the server log.
 - `export_file` and `save_export` run Drive's export on a Google file that passes the same check as
   `read_file`; `save_export` also checks its target folder like any other create.

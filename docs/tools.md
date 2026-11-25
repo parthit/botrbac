@@ -96,7 +96,8 @@ assistant generated: it would have to copy every base64 character into the call.
    the upload is discarded. If Drive fails, `finish_upload` can be called again.
 
 `cancel_upload(upload_id)` discards an upload. An upload expires 15 minutes after it starts. It is capped
-at `MAX_BYTES` (5 MiB by default) and can only be used by the sign-in that started it.
+at `MAX_BYTES` (5 MiB by default) and 1,024 pieces (a bigger file needs a bigger `chunk_size`), and can only
+be used by the sign-in that started it. An account can have 3 uploads open at once.
 
 ```sh
 # in the assistant's sandbox

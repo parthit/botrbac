@@ -15,7 +15,14 @@ from scoped_drive_mcp.scope import InvalidInputError, OutOfScopeError, ScopeGuar
 from scoped_drive_mcp.server import create_mcp
 from scoped_drive_mcp.service import DOC_MIME, PDF_MIME, DriveService
 from scoped_drive_mcp.store import ActivityLog, MemoryStore
-from scoped_drive_mcp.uploads import MAX_STARTS, UPLOAD_TTL, UploadError, UploadSessions
+from scoped_drive_mcp.uploads import (
+    MAX_CHUNKS,
+    MAX_OPEN,
+    MAX_STARTS,
+    UPLOAD_TTL,
+    UploadError,
+    UploadSessions,
+)
 from tests.conftest import OWNER_EMAIL, ROOT, make_settings
 from tests.dash import mcp_call  # noqa: F401  (keeps the shared helpers importable)
 from tests.test_external_sharing import _error
@@ -197,7 +204,8 @@ def test_start_checks_its_input(sessions, overrides, code) -> None:
 
 def test_starts_are_limited_per_account(sessions, clock) -> None:
     for _ in range(MAX_STARTS):
-        _start(sessions, b"x" * 10)
+        uid = _start(sessions, b"x" * 10)["upload_id"]
+        sessions.cancel(ME, uid)  # keep under the open-upload cap
     with pytest.raises(UploadError) as exc:
         _start(sessions, b"x" * 10)
     assert _code(exc) == "too_many_uploads"
@@ -205,6 +213,67 @@ def test_starts_are_limited_per_account(sessions, clock) -> None:
     _start(sessions, b"x" * 10, who={**ME, "email": "eve@example.com"})
     clock.advance(UPLOAD_TTL + 1)
     _start(sessions, b"x" * 10)
+
+
+def test_open_uploads_are_capped_until_one_ends_or_expires(sessions, clock) -> None:
+    open_ids = [_start(sessions, b"x" * 10)["upload_id"] for _ in range(MAX_OPEN)]
+    with pytest.raises(UploadError) as exc:
+        _start(sessions, b"x" * 10)
+    assert _code(exc) == "too_many_uploads"
+    sessions.cancel(ME, open_ids[0])
+    _start(sessions, b"x" * 10)
+    clock.advance(UPLOAD_TTL + 1)
+    for _ in range(MAX_OPEN):
+        _start(sessions, b"x" * 10)
+
+
+def test_chunk_count_is_capped(clock) -> None:
+    big = UploadSessions(MemoryStore(clock), max_bytes=4 * 1024 * 1024, clock=clock)
+    size = MAX_CHUNKS * 1024 + 1
+    with pytest.raises(UploadError) as exc:
+        big.start(
+            ME,
+            name="a",
+            mime_type="a/b",
+            parent_id="p",
+            size=size,
+            sha256="0" * 64,
+            chunk_size=1024,
+        )
+    assert _code(exc) == "invalid_input"
+    assert exc.value.details["min_chunk_size"] == 1025
+    big.start(
+        ME, name="a", mime_type="a/b", parent_id="p", size=size, sha256="0" * 64, chunk_size=1025
+    )
+
+
+def test_no_pieces_are_taken_while_finishing(sessions) -> None:
+    data = os.urandom(2048)
+    uid = _start(sessions, data)["upload_id"]
+    sessions.append(ME, uid, 0, pieces(data, 1024)[0])
+    with pytest.raises(UploadError):
+        sessions.take(ME, uid)  # missing chunk 1; releases the claim
+    sessions.store.set(f"upload:{uid}:finishing", "1", ex=60)
+    with pytest.raises(UploadError) as exc:
+        sessions.append(ME, uid, 1, pieces(data, 1024)[1])
+    assert _code(exc) == "upload_busy"
+
+
+def test_a_piece_racing_a_cancel_is_not_left_behind(sessions, monkeypatch) -> None:
+    data = os.urandom(2048)
+    uid = _start(sessions, data)["upload_id"]
+    real_load = sessions._load
+
+    def load_then_cancel(who, upload_id):
+        meta = real_load(who, upload_id)
+        sessions.discard(upload_id, meta)  # the cancel lands between load and write
+        return meta
+
+    monkeypatch.setattr(sessions, "_load", load_then_cancel)
+    with pytest.raises(UploadError) as exc:
+        sessions.append(ME, uid, 0, pieces(data, 1024)[0])
+    assert _code(exc) == "upload_not_found"
+    assert not [k for k in sessions.store._values if k.startswith(f"upload:{uid}")]
 
 
 def test_a_finish_in_progress_blocks_a_second_one(sessions) -> None:
