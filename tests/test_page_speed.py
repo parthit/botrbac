@@ -3,6 +3,8 @@
 Each round trip is a network call in production (Drive API, Upstash REST), so these pin the
 number of lookups, not timings."""
 
+import pytest
+
 from scoped_drive_mcp.access import AccessRequests
 from scoped_drive_mcp.dashboard import fetch_parents
 from scoped_drive_mcp.grants import GrantService
@@ -63,7 +65,16 @@ def test_entry_status_failed_lookup_gives_no_answer(world) -> None:
     assert covers == {} and not_found == set()
 
 
-def _counting(world):
+@pytest.fixture
+def owner_c(p2_app):
+    c = client(p2_app)
+    login(c)
+    return c
+
+
+@pytest.fixture
+def get_file_calls(world, monkeypatch) -> list[tuple[str, str]]:
+    """Every (file_id, fields) the dashboard asks Drive for, from when it is used."""
     calls: list[tuple[str, str]] = []
     original = type(world).get_file
 
@@ -71,12 +82,12 @@ def _counting(world):
         calls.append((file_id, fields))
         return original(self, file_id, fields)
 
-    return calls, get_file
+    monkeypatch.setattr(type(world), "get_file", get_file)
+    return calls
 
 
-def test_allowed_tab_notes_covered_items(p2_app) -> None:
-    c = client(p2_app)
-    login(c)
+def test_allowed_tab_notes_covered_items(owner_c) -> None:
+    c = owner_c
     for fid in ("proj", "proj-sub", "loose-doc"):
         post(c, "/grant", file_id=fid)
     page = c.get("/files?tab=allowed").text
@@ -85,37 +96,28 @@ def test_allowed_tab_notes_covered_items(p2_app) -> None:
     assert 'id="needs-pick"' not in page
 
 
-def test_allowed_tab_reads_each_item_once(p2_app, world, monkeypatch) -> None:
-    c = client(p2_app)
-    login(c)
+def test_allowed_tab_reads_each_item_once(owner_c, request) -> None:
     for fid in ("proj-notes", "proj-deep-doc", "loose-doc", "loose-two"):
-        post(c, "/grant", file_id=fid)
-    calls, get_file = _counting(world)
-    monkeypatch.setattr(type(world), "get_file", get_file)
-    assert c.get("/files?tab=allowed").status_code == 200
+        post(owner_c, "/grant", file_id=fid)
+    calls = request.getfixturevalue("get_file_calls")  # count from here on
+    assert owner_c.get("/files?tab=allowed").status_code == 200
     ids = [fid for fid, _ in calls]
     assert len(ids) == len(set(ids)), ids
 
 
-def test_files_asks_for_my_drive_once(p2_app, world, monkeypatch) -> None:
-    c = client(p2_app)
-    login(c)
-    calls, get_file = _counting(world)
-    monkeypatch.setattr(type(world), "get_file", get_file)
+def test_files_asks_for_my_drive_once(owner_c, get_file_calls) -> None:
+    calls = get_file_calls
     for _ in range(3):
-        assert c.get("/files").status_code == 200
+        assert owner_c.get("/files").status_code == 200
     assert [fid for fid, _ in calls].count("root") == 1
     assert "owner-root" not in [fid for fid, _ in calls]
 
 
-def test_files_by_my_drive_id_matches_the_top(p2_app, world, monkeypatch) -> None:
-    c = client(p2_app)
-    login(c)
-    top = c.get("/files")
+def test_files_by_my_drive_id_matches_the_top(owner_c, request) -> None:
+    top = owner_c.get("/files")
     assert top.status_code == 200
-    calls, get_file = _counting(world)
-    monkeypatch.setattr(type(world), "get_file", get_file)
-    by_id = c.get("/files?folder=owner-root")
+    calls = request.getfixturevalue("get_file_calls")  # count from here on
+    by_id = owner_c.get("/files?folder=owner-root")
     assert by_id.status_code == 200
     # My Drive by its real id: no lookup of the folder itself, and the same breadcrumb.
     assert "owner-root" not in [fid for fid, _ in calls]
@@ -124,9 +126,8 @@ def test_files_by_my_drive_id_matches_the_top(p2_app, world, monkeypatch) -> Non
         assert (name in by_id.text) == (name in top.text), name
 
 
-def test_allowed_tab_logs_failed_lookups(p2_app, world, monkeypatch, caplog) -> None:
-    c = client(p2_app)
-    login(c)
+def test_allowed_tab_logs_failed_lookups(owner_c, world, monkeypatch, caplog) -> None:
+    c = owner_c
     for fid in ("proj", "proj-notes"):
         post(c, "/grant", file_id=fid)
     original = type(world).get_file

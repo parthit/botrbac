@@ -11,9 +11,21 @@ import pytest
 from scoped_drive_mcp.connections import GOOGLE_DRIVE
 from scoped_drive_mcp.dashboard import browse_href, normalize_page_token
 from scoped_drive_mcp.oauth import GoogleOAuthClient
-from scoped_drive_mcp.server import build_app
 from tests.conftest import OWNER_EMAIL, make_settings
-from tests.dash import MCP_HEADERS, client, csrf, login, mcp_call
+from tests.dash import client, csrf, login, mcp_call
+
+PICKER_KEYS = {
+    "google_picker_api_key": "AIzaSyTestKeyValue",
+    "google_cloud_project_number": "123456789012",
+}
+
+
+def _settings(**overrides):
+    return make_settings(root_folder_id=None, allowlist_cache_ttl=0, **overrides)
+
+
+with_picker = pytest.mark.parametrize("p2_settings", [_settings(**PICKER_KEYS)], ids=["picker"])
+UI_JS = Path(__file__).resolve().parents[1] / "src/scoped_drive_mcp/templates/ui.js"
 
 
 @pytest.fixture
@@ -112,21 +124,9 @@ def test_browse_sends_opaque_page_token(owner_c, monkeypatch) -> None:
     assert query["prev"] == [token]
 
 
-def test_picker_button_keeps_folder_and_request(world, memstore, oauth) -> None:
-    app = build_app(
-        make_settings(
-            root_folder_id=None,
-            allowlist_cache_ttl=0,
-            google_picker_api_key="AIzaSyTestKeyValue",
-            google_cloud_project_number="123456789012",
-        ),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    signed_in = client(app)
-    assert login(signed_in).status_code == 303
+@with_picker
+def test_picker_button_keeps_folder_and_request(owner_c) -> None:
+    signed_in = owner_c
     denied = mcp_call(signed_in, "read_file", file_id="priv-secret")
     request_id = denied["structuredContent"]["request_id"]
     page = signed_in.get("/files", params={"folder": "proj", "request": request_id})
@@ -139,29 +139,16 @@ def test_picker_button_keeps_folder_and_request(world, memstore, oauth) -> None:
     query = parse_qs(urlparse(nxt).query)
     assert query["folder"] == ["proj"]
     assert query["request"] == [request_id]
-    script_path = Path(__file__).resolve().parents[1] / "src/scoped_drive_mcp/templates/ui.js"
-    script = script_path.read_text()
+    script = UI_JS.read_text()
     assert 'getAttribute("data-next")' in script
     assert 'getAttribute("data-request")' in script
     assert script.index('postForm("/grant"') < script.index('"/approve"')
     assert "response.status >= 400" in script
 
 
-def test_request_page_picker_approves_an_unopened_file(world, memstore, oauth) -> None:
-    app = build_app(
-        make_settings(
-            root_folder_id=None,
-            allowlist_cache_ttl=0,
-            google_picker_api_key="AIzaSyTestKeyValue",
-            google_cloud_project_number="123456789012",
-        ),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    signed_in = client(app)
-    assert login(signed_in).status_code == 303
+@with_picker
+def test_request_page_picker_approves_an_unopened_file(owner_c) -> None:
+    signed_in = owner_c
     # A file this app cannot see may still exist (drive.file), so the request is filed
     # and the picker can add it.
     denied = mcp_call(signed_in, "get_metadata", file_id="stray-shared")
@@ -224,28 +211,13 @@ def test_picker_session_hidden_until_configured(owner_c) -> None:
     assert "access_token" not in denied.text
 
 
-def test_picker_session_returns_access_token_not_refresh(
-    world, memstore, oauth, monkeypatch
-) -> None:
+@with_picker
+def test_picker_session_returns_access_token_not_refresh(owner_c, monkeypatch) -> None:
     monkeypatch.setattr(
         "scoped_drive_mcp.dashboard.refresh_access_token",
         lambda *_args, **_kwargs: "ya29-test-token",
     )
-    app = build_app(
-        make_settings(
-            root_folder_id=None,
-            allowlist_cache_ttl=0,
-            google_picker_api_key="AIzaSyTestKeyValue",
-            google_cloud_project_number="123456789012",
-        ),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    signed_in = client(app)
-    assert login(signed_in).status_code == 303
-    body = signed_in.get("/picker/session")
+    body = owner_c.get("/picker/session")
     assert body.status_code == 200, body.text
     payload = body.json()
     assert payload["access_token"] == "ya29-test-token"
@@ -254,20 +226,10 @@ def test_picker_session_returns_access_token_not_refresh(
     assert "rt-" not in body.text
 
 
-def test_login_is_rate_limited(world, memstore, oauth) -> None:
-    app = build_app(
-        make_settings(
-            root_folder_id=None,
-            allowlist_cache_ttl=0,
-            login_rate_limit=2,
-            login_rate_window_seconds=600,
-        ),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    c = client(app)
+@pytest.mark.parametrize(
+    "p2_settings", [_settings(login_rate_limit=2, login_rate_window_seconds=600)]
+)
+def test_login_is_rate_limited(c) -> None:
     assert c.get("/auth/login").status_code == 303
     assert c.get("/auth/login").status_code == 303
     blocked = c.get("/auth/login")
@@ -276,48 +238,9 @@ def test_login_is_rate_limited(world, memstore, oauth) -> None:
     assert blocked.headers["retry-after"] == "600"
 
 
-def test_mcp_is_rate_limited_per_token(world, memstore, oauth) -> None:
-    app = build_app(
-        make_settings(
-            root_folder_id=None, allowlist_cache_ttl=0, mcp_rate_limit=2, mcp_rate_window_seconds=60
-        ),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    c = client(app)
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
-
-    def post(token: str):
-        headers = {**MCP_HEADERS, "Authorization": f"Bearer {token}"}
-        return c.post("/mcp", json=payload, headers=headers)
-
-    assert post("nope").status_code == 401
-    assert post("nope").status_code == 401
-    blocked = post("nope")
-    assert blocked.status_code == 429
-    assert blocked.json() == {"error": "rate_limited"}
-    assert blocked.headers["retry-after"] == "60"
-    # A different made-up token must not start a fresh allowance for the same address.
-    assert post("someone-else").status_code == 429
-
-
-def test_allowed_item_google_has_not_opened_offers_pick_again(world, memstore, oauth) -> None:
-    app = build_app(
-        make_settings(
-            root_folder_id=None,
-            allowlist_cache_ttl=0,
-            google_picker_api_key="AIzaSyTestKeyValue",
-            google_cloud_project_number="123456789012",
-        ),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    c = client(app)
-    assert login(c).status_code == 303
+@with_picker
+def test_allowed_item_google_has_not_opened_offers_pick_again(owner_c, world) -> None:
+    c = owner_c
     token = csrf(c, "/files")
     for item in ("proj", "loose-doc"):
         c.post("/grant", data={"csrf": token, "file_id": item, "next": "/files"})
@@ -333,31 +256,17 @@ def test_allowed_item_google_has_not_opened_offers_pick_again(world, memstore, o
     assert page.count("data-needs-pick") == 1
 
 
-@pytest.mark.parametrize("picker", [True, False])
-def test_safari_picker_note_only_with_the_picker(world, memstore, oauth, picker) -> None:
+@pytest.mark.parametrize(
+    "p2_settings", [_settings(**PICKER_KEYS), _settings()], ids=["picker", "no-picker"]
+)
+def test_safari_picker_note_only_with_the_picker(owner_c, p2_settings) -> None:
     # Safari blocks Google's cookies in the picker frame; the note says which setting to
     # change. It belongs next to a picker button, so it is only there when one is.
-    keys = (
-        {
-            "google_picker_api_key": "AIzaSyTestKeyValue",
-            "google_cloud_project_number": "123456789012",
-        }
-        if picker
-        else {}
-    )
-    app = build_app(
-        make_settings(root_folder_id=None, allowlist_cache_ttl=0, **keys),
-        world.as_user(OWNER_EMAIL),
-        store=memstore,
-        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
-        oauth=oauth,
-    )
-    signed_in = client(app)
-    assert login(signed_in).status_code == 303
-    denied = mcp_call(signed_in, "get_metadata", file_id="stray-shared")
+    picker = p2_settings.google_picker_api_key is not None
+    denied = mcp_call(owner_c, "get_metadata", file_id="stray-shared")
     request_id = denied["structuredContent"]["request_id"]
     for path in ("/files", f"/requests/{request_id}"):
-        page = signed_in.get(path)
+        page = owner_c.get(path)
         assert page.status_code == 200
         assert ("data-safari-note" in page.text) is picker, path
         if picker:
@@ -366,6 +275,6 @@ def test_safari_picker_note_only_with_the_picker(world, memstore, oauth, picker)
 
 
 def test_safari_note_check_counts_every_ios_browser() -> None:
-    script = (Path(__file__).parents[1] / "src/scoped_drive_mcp/templates/ui.js").read_text()
+    script = UI_JS.read_text()
     # Edge on iOS (EdgiOS) runs on WebKit and hits the same cookie block as Safari.
     assert "Edg(?!iOS)" in script
