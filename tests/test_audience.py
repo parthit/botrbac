@@ -63,14 +63,31 @@ def _stored(memstore, file_id: str) -> dict:
     return json.loads(raw)
 
 
-def test_new_items_are_shared_with_everyone_paired(three) -> None:
-    _app_, _owner, eve, carol = three
-    assert LOOSE_TEXT in json.dumps(_read(eve))
-    assert LOOSE_TEXT in json.dumps(_read(carol))
+def _sharing_grants(world, ext: Allowlist | None = None) -> GrantService:
+    """The owner's Sharing list (no dashboard), as the share routes build it."""
+    return GrantService(
+        lambda: world.as_user(OWNER_EMAIL),
+        ext or Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY),
+        AccessRequests(MemoryStore()),
+        None,
+        audience=AUDIENCE_LINKED,
+    )
+
+
+def _active_link(box, peer: str) -> str:
+    return next(
+        link["link_id"]
+        for link in box.list_links(OWNER_EMAIL)["links"]
+        if link.get("peer_email") == peer and link["status"] == "active"
+    )
 
 
 def test_an_item_shared_with_one_person_is_invisible_to_the_other(three, memstore) -> None:
-    app, owner, eve, carol = three
+    _app_, owner, eve, carol = three
+    # A new item is shared with everyone paired.
+    assert LOOSE_TEXT in json.dumps(_read(eve))
+    assert LOOSE_TEXT in json.dumps(_read(carol))
+
     assert _audience(owner, "loose-doc", "people", [EVE]).status_code == 303
     assert _stored(memstore, "loose-doc")["audience"] == [EVE]
 
@@ -107,13 +124,15 @@ def test_an_item_shared_with_one_person_is_invisible_to_the_other(three, memstor
     assert LOOSE_TEXT in json.dumps(_read(carol))
 
 
-def test_only_people_you_are_paired_with_can_be_named(three, memstore) -> None:
+def test_only_people_you_are_paired_with_and_real_dates_are_taken(three, memstore) -> None:
     _app_, owner, _eve, _carol = three
     _audience(owner, "loose-doc", "people", [EVE, "mallory@example.com"])
     assert _stored(memstore, "loose-doc")["audience"] == [EVE]
     # Naming nobody is refused; the item keeps its audience.
     _audience(owner, "loose-doc", "people", ["mallory@example.com"])
     assert _stored(memstore, "loose-doc")["audience"] == [EVE]
+    _audience(owner, "loose-doc", "everyone", expires_on="next week")
+    assert _stored(memstore, "loose-doc").get("expires_at") is None
 
 
 def test_a_share_ends_on_its_date(three, memstore) -> None:
@@ -130,12 +149,6 @@ def test_a_share_ends_on_its_date(three, memstore) -> None:
 
     page = owner.get("/sharing?tab=by-me")
     assert "Ended 2020-01-01" in page.text
-
-
-def test_a_bad_date_is_refused(three, memstore) -> None:
-    _app_, owner, _eve, _carol = three
-    _audience(owner, "loose-doc", "everyone", expires_on="next week")
-    assert _stored(memstore, "loose-doc").get("expires_at") is None
 
 
 def test_sharing_page_and_pairing_cards_say_who_sees_what(three) -> None:
@@ -218,12 +231,7 @@ def test_unpairing_takes_a_person_off_items_so_re_pairing_starts_fresh(three, me
     _audience(owner, "loose-doc", "people", [EVE, CAROL])
     _audience(owner, "loose-two", "people", [EVE])
     box = app.state.mailbox
-    eve_link = next(
-        link["link_id"]
-        for link in box.list_links(OWNER_EMAIL)["links"]
-        if link.get("peer_email") == EVE and link["status"] == "active"
-    )
-    box.revoke(EVE, eve_link)
+    box.revoke(EVE, _active_link(box, EVE))
 
     # Eve is no longer named anywhere; Carol keeps her share.
     assert _stored(memstore, "loose-doc")["audience"] == [CAROL]
@@ -239,13 +247,10 @@ def test_unpairing_takes_a_person_off_items_so_re_pairing_starts_fresh(three, me
 
 
 def test_sharing_an_item_again_with_an_audience_applies_it(world) -> None:
-    grants = GrantService(
-        lambda: world.as_user(OWNER_EMAIL),
-        Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY),
-        AccessRequests(MemoryStore()),
-        None,
-        audience=AUDIENCE_LINKED,
-    )
+    grants = _sharing_grants(world)
+    # A new item shared with nobody is refused.
+    with pytest.raises(GrantError):
+        grants.grant("loose-doc", audience=())
     first = grants.grant("loose-doc", expires_at="2099-12-31T23:59:59+00:00")
     assert first.for_everyone and first.expires_at
     # Again with an audience: applied, and the end date is kept.
@@ -260,15 +265,8 @@ def test_sharing_an_item_again_with_an_audience_applies_it(world) -> None:
 
 
 def test_an_item_that_names_nobody_is_never_widened_to_everyone(world) -> None:
-    store = MemoryStore()
-    ext = Allowlist(store, EXTERNAL_ALLOWLIST_KEY)
-    grants = GrantService(
-        lambda: world.as_user(OWNER_EMAIL),
-        ext,
-        AccessRequests(MemoryStore()),
-        None,
-        audience=AUDIENCE_LINKED,
-    )
+    ext = Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY)
+    grants = _sharing_grants(world, ext)
     grants.grant("loose-doc", audience=(EVE,))
     assert ext.forget_person(EVE) == ["loose-doc"]
     assert ext.get("loose-doc").audience == ()
@@ -296,12 +294,7 @@ def test_a_failed_prune_on_one_side_still_prunes_the_other(three, memstore, monk
 
     monkeypatch.setattr(Allowlist, "forget_person", flaky)
     box = app.state.mailbox
-    link = next(
-        link["link_id"]
-        for link in box.list_links(OWNER_EMAIL)["links"]
-        if link.get("peer_email") == EVE and link["status"] == "active"
-    )
-    box.revoke(EVE, link)  # the pairing still turns off
+    box.revoke(EVE, _active_link(box, EVE))  # the pairing still turns off
     assert box.is_linked(OWNER_EMAIL, EVE) is False
     # Eve's side was still pruned even though the owner's side failed.
     eve_raw = unsealed(memstore.hget(f"{KEY_PREFIX}u:{EVE}:{EXTERNAL_ALLOWLIST_KEY}", EVE_DOC))
@@ -322,18 +315,6 @@ def test_a_wider_folder_above_still_shares_a_narrowed_item_and_the_page_says_so(
     page = owner.get(done.headers["location"]).text
     assert "which is also on your Sharing list" in page
     assert "Also visible through “Projects” to everyone you are paired with" in page
-
-
-def test_a_new_item_shared_with_nobody_is_refused(world) -> None:
-    grants = GrantService(
-        lambda: world.as_user(OWNER_EMAIL),
-        Allowlist(MemoryStore(), EXTERNAL_ALLOWLIST_KEY),
-        AccessRequests(MemoryStore()),
-        None,
-        audience=AUDIENCE_LINKED,
-    )
-    with pytest.raises(GrantError):
-        grants.grant("loose-doc", audience=())
 
 
 def test_a_dead_folder_above_does_not_count_but_a_live_one_further_up_does(three, memstore) -> None:
@@ -364,8 +345,6 @@ def test_change_opens_one_items_panel_without_js(three) -> None:
 def test_unpairing_does_not_put_back_an_item_removed_at_the_same_moment() -> None:
     # The owner stops sharing an item just as an unpair is taking a person off it. The
     # unpair must not write the entry it read a moment earlier back onto the list.
-    from scoped_drive_mcp.store import AllowEntry
-
     class RemovedMidway(MemoryStore):
         def hget(self, key, field):
             raw = super().hget(key, field)
@@ -380,8 +359,6 @@ def test_unpairing_does_not_put_back_an_item_removed_at_the_same_moment() -> Non
 
 
 def test_unpairing_still_takes_the_person_off_when_the_store_cannot_swap() -> None:
-    from scoped_drive_mcp.store import AllowEntry
-
     class NeverSwaps(MemoryStore):
         def hswap(self, key, field, old, new):
             return False

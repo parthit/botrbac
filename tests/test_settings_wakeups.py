@@ -34,6 +34,20 @@ def _setup(world, memstore, oauth, names=("Claude", "Cursor")):
     return app, owner, ids
 
 
+def _json_sender(owner):
+    """Post to /bridge/webhook as ui.js does, asking for a JSON answer."""
+    token = csrf(owner, "/settings")
+
+    def send(**form):
+        return owner.post(
+            "/bridge/webhook",
+            data={"csrf": token, **form},
+            headers={"Accept": "application/json"},
+        )
+
+    return send
+
+
 def _card(page: str, grant: str) -> str:
     start = page.index(f'id="app-{grant}"')
     return page[start : page.index("</article>", start)]
@@ -89,11 +103,7 @@ def test_a_wakeup_is_offered_only_to_assistants_without_one(world, memstore, oau
 
 def test_wakeup_actions_answer_json_for_in_place_updates(world, memstore, oauth) -> None:
     _app_, owner, ids = _setup(world, memstore, oauth)
-    token = csrf(owner, "/settings")
-    json_headers = {"Accept": "application/json"}
-
-    def send(**form):
-        return owner.post("/bridge/webhook", data={"csrf": token, **form}, headers=json_headers)
+    send = _json_sender(owner)
 
     r = send(action="save", app=ids["Claude"], url=HOOK + "c", sender_key="k-1234")
     assert r.status_code == 200 and r.json()["ok"] is True and r.json()["changed"] is True
@@ -118,11 +128,7 @@ def test_primary_action_is_gone_and_the_account_slot_cannot_be_saved(
 ) -> None:
     app, owner, ids = _setup(world, memstore, oauth)
     box = app.state.mailbox
-    token = csrf(owner, "/settings")
-    json_headers = {"Accept": "application/json"}
-
-    def send(**form):
-        return owner.post("/bridge/webhook", data={"csrf": token, **form}, headers=json_headers)
+    send = _json_sender(owner)
 
     # There is no Primary app: mail from other people does not exist.
     for chosen in (ids["Claude"], ""):

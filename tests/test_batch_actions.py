@@ -24,7 +24,7 @@ def allowed(app) -> set[str]:
     return set(app.state.dashboard.allowlist.entries())
 
 
-def test_batch_needs_csrf_and_a_known_action(owner_c) -> None:
+def test_batch_refusals(owner_c) -> None:
     r = owner_c.post("/files/batch", data={"action": "remove", "file_id": ["proj"]})
     assert r.status_code == 403
     r = batch(owner_c, "delete", "proj")
@@ -33,6 +33,10 @@ def test_batch_needs_csrf_and_a_known_action(owner_c) -> None:
     r = batch(owner_c, "remove", "loose-doc", "bad id")
     assert r.status_code == 303
     assert "One of the ticked items is not a Drive item" in owner_c.get("/files").text
+    batch(owner_c, "remove", "loose-doc")
+    assert "None of the ticked items needed that change" in owner_c.get("/files").text
+    batch(owner_c, "remove", *[f"file{i:03d}" for i in range(60)])
+    assert "at most 50 items" in owner_c.get("/files").text
 
 
 def test_allow_and_remove_several(owner_c, p2_app) -> None:
@@ -50,24 +54,6 @@ def test_allow_and_remove_several(owner_c, p2_app) -> None:
     assert "Removed 2 items" in page
     result = mcp_call(owner_c, "read_file", file_id="loose-two")
     assert result["structuredContent"]["error"] == "access_required"
-
-
-def test_remove_says_when_a_folder_still_covers_an_item(owner_c, p2_app) -> None:
-    batch(owner_c, "allow", "proj", "proj-notes")
-    batch(owner_c, "remove", "proj-notes")
-    assert "because “Projects” is allowed" in owner_c.get("/files").text
-    assert mcp_call(owner_c, "read_file", file_id="proj-notes")["isError"] is False
-
-
-def test_remove_with_nothing_to_change_is_an_error(owner_c) -> None:
-    batch(owner_c, "remove", "loose-doc")
-    assert "None of the ticked items needed that change" in owner_c.get("/files").text
-
-
-def test_batch_is_capped(owner_c) -> None:
-    ids = [f"file{i:03d}" for i in range(60)]
-    batch(owner_c, "remove", *ids)
-    assert "at most 50 items" in owner_c.get("/files").text
 
 
 def test_allowed_tab_has_the_bar_and_a_checkbox_per_row(owner_c) -> None:
@@ -109,6 +95,12 @@ def test_forget_takes_an_item_off_both_lists_and_hides_it(people, world) -> None
     page = owner.get("/files").text
     assert 'value="loose-doc"' in page and "removed from Bot RBAC" not in page
 
+    # Forgetting an item on neither list still hides it; sharing it brings it back.
+    batch(owner, "forget", "proj")
+    assert 'value="proj"' not in owner.get("/files").text
+    batch(owner, "share", "proj")
+    assert 'value="proj"' in owner.get("/files").text
+
 
 def test_stop_sharing_several_leaves_allowed_alone(people) -> None:  # noqa: F811
     app, owner, _, _ = people
@@ -136,17 +128,7 @@ def test_stop_sharing_several_leaves_allowed_alone(people) -> None:  # noqa: F81
     assert "Stopped sharing 2 items" in owner.get("/sharing?tab=by-me").text
 
 
-def test_folder_note_counts_only_items_that_were_removed(owner_c) -> None:
-    # proj-notes sits inside the allowed folder but has no entry of its own, so Remove
-    # skips it; the result must not warn about it.
-    batch(owner_c, "allow", "proj", "loose-doc")
-    batch(owner_c, "remove", "loose-doc", "proj-notes")
-    page = owner_c.get("/files").text
-    assert "Removed “Loose memo”. Your assistants can no longer use it." in page
-    assert "can still use" not in page
-
-
-def test_folder_note_wording_for_several(owner_c) -> None:
+def test_remove_says_when_a_folder_still_covers_an_item(owner_c) -> None:
     batch(owner_c, "allow", "proj", "proj-notes", "loose-doc")
     batch(owner_c, "remove", "proj-notes", "loose-doc")
     page = owner_c.get("/files").text
@@ -154,15 +136,19 @@ def test_folder_note_wording_for_several(owner_c) -> None:
         "Removed 2 items, but your assistants can still use 1 of them through “Projects”, "
         "which stays allowed." in page
     )
+    assert mcp_call(owner_c, "read_file", file_id="proj-notes")["isError"] is False
 
+    # proj-notes sits inside the allowed folder but has no entry of its own now, so Remove
+    # skips it; the result must not warn about it.
+    batch(owner_c, "allow", "loose-doc")
+    batch(owner_c, "remove", "loose-doc", "proj-notes")
+    page = owner_c.get("/files").text
+    assert "Removed “Loose memo”. Your assistants can no longer use it." in page
+    assert "can still use" not in page
 
-def test_sharing_a_hidden_item_brings_it_back(people) -> None:  # noqa: F811
-    app, owner, _, _ = people
-    _pair(app, OWNER_EMAIL, EVE)
-    batch(owner, "forget", "loose-two")
-    assert 'value="loose-two"' not in owner.get("/files").text
-    batch(owner, "share", "loose-two")
-    assert 'value="loose-two"' in owner.get("/files").text
+    batch(owner_c, "allow", "proj-notes")
+    batch(owner_c, "remove", "proj-notes")
+    assert "because “Projects” is allowed" in owner_c.get("/files").text
 
 
 def test_remove_does_not_claim_unreachable_when_drive_cannot_be_asked(owner_c, monkeypatch) -> None:

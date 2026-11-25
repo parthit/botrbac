@@ -51,15 +51,12 @@ def test_requests_last_column_has_a_header(owner_c) -> None:
     assert 'Approve or deny<span class="sr-only"> the Q3 memo</span>' in page
 
 
-def test_not_found_page_says_so(owner_c) -> None:
+def test_not_found_page_says_so_and_other_errors_stay_generic(owner_c) -> None:
     page = owner_c.get("/no-such-page")
     assert page.status_code == 404
     assert "<title>Page not found · Bot RBAC</title>" in page.text
     assert "<h1>Page not found</h1>" in page.text
     assert "Something went wrong" not in page.text
-
-
-def test_other_errors_stay_generic(owner_c) -> None:
     # A sign-in callback with a forged state is a plain error, not a missing page.
     page = owner_c.get("/auth/callback", params={"code": "owner-code", "state": "forged"})
     assert page.status_code == 400
