@@ -119,7 +119,12 @@ def principal_identity(_scope: Scope) -> str | None:
 
 def _key(name: str, ident: str, window: int, now: float | None = None) -> str:
     bucket = int((now if now is not None else time.time()) // window)
-    safe = "".join(ch for ch in ident if ch.isalnum() or ch in ":-_@./")[:80] or "anon"
+    safe = "".join(ch for ch in ident if ch.isascii() and (ch.isalnum() or ch in ":-_@./"))
+    if safe != ident or len(safe) > 80:
+        # Dropping or cutting characters would give two identities (a+b@x and ab@x) one
+        # counter, so one could use up the other's allowance. A hash keeps them apart.
+        safe = "h:" + hashlib.sha256(ident.encode("utf-8", "surrogatepass")).hexdigest()[:40]
+    safe = safe or "anon"
     return f"rl:{name}:{safe}:{bucket}"
 
 

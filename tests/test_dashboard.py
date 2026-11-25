@@ -1058,3 +1058,15 @@ def test_mailbox_empty_state_is_plain_language(owner_c) -> None:
     page = owner_c.get("/sharing?tab=people").text
     assert "request_link" not in page
     assert "Ask your assistant to start a pairing" in page
+
+
+def test_login_page_forgets_an_account_whose_session_has_ended(owner_c, p2_app) -> None:
+    """The cookie still names the account after the server session is gone. The sign-in
+    page must not show that address to whoever is at the browser now."""
+    from tests.conftest import OWNER_EMAIL
+
+    assert OWNER_EMAIL in owner_c.get("/").text
+    directory = p2_app.state.dashboard.directory
+    directory.session_alive = lambda sid, owner: False
+    page = owner_c.get("/login")
+    assert page.status_code == 200 and OWNER_EMAIL not in page.text
