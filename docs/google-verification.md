@@ -43,7 +43,8 @@ deployment, use a separate production project, not one used for experiments.
    - **Application restrictions:** Websites → `https://your-domain/*` and `https://docs.google.com/*`
      (add `http://localhost:8000/*` only on a development project). The picker runs in a frame on
      `docs.google.com`, and Safari can send that address to Google instead of yours. Without it, Safari
-     users see "The API developer key is invalid".
+     users see "The API developer key is invalid". A development project's key needs
+     `https://docs.google.com/*` too.
    - **API restrictions:** Restrict key → **Google Picker API** only.
 
    Save. The key is `GOOGLE_PICKER_API_KEY`.
