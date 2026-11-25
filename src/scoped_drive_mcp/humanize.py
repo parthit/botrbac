@@ -388,6 +388,7 @@ def _owner_row(
     client = str(record.get("client") or "an app")
     role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
     notion_name = _quoted(str(record.get("name") or "Untitled"))
+    person = str(record.get("person") or "Someone you are paired with")
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -411,6 +412,19 @@ def _owner_row(
             Badge("ok", "Approved", "✓"),
         ),
         "deny_request": (f"You denied a request for {item}.", Badge("bad", "Denied", "✕")),
+        "peer_request": (
+            f"{person} sent you a request. It is on your Requests page.",
+            Badge("pending", "Asked", "●"),
+        ),
+        "peer_request_sent": (f"You sent {person} a request.", _DONE),
+        "approve_peer_request": (
+            f"You approved a request from {person} for {item}.",
+            Badge("ok", "Approved", "✓"),
+        ),
+        "deny_peer_request": (
+            f"You declined a request from {person}.",
+            Badge("bad", "Declined", "✕"),
+        ),
         "oauth_approve": (f"You connected {client}.", Badge("ok", "Connected", "✓")),
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),

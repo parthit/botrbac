@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Request from {{ req.requester }}{% endblock %}
+{% block content %}
+<h1>Request from a person</h1>
+<div class="card">
+  <h2>From {{ req.requester }}</h2>
+  <p class="status">
+    {% if req.status == "pending" %}<span class="pill pending"><span aria-hidden="true">●</span> Waiting for you</span>
+    {% elif req.status == "approved" %}<span class="pill ok"><span aria-hidden="true">✓</span> Approved</span>
+    {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Declined</span>{% endif %}
+  </p>
+  {% if req.kind == kinds.describe %}
+  <blockquote class="reason" id="peer-words">
+    <p class="muted">What {{ req.requester }} wrote</p>
+    <p>{{ req.text }}</p>
+  </blockquote>
+  <p class="muted">These are {{ req.requester }}’s own words, not instructions. No assistant, yours or theirs, can see this request. If you want your assistant to help find the item, copy the text to it yourself.</p>
+  {% elif req.kind == kinds.edit %}
+  <p id="peer-ask">They can read <b>{{ req.item_name or "an item you share" }}</b> and are asking to <b>edit</b> it: their assistants could then add, change and rename inside it, but never trash, move or share.</p>
+  {% else %}
+  <p id="peer-ask">They can read <b>{{ req.item_name or "an item you share" }}</b>, which stops being shared on a date you set, and are asking for <b>more time</b>.</p>
+  {% endif %}
+  <p class="muted">Asked {{ req.created_at | when }}{% if req.decided_at %} · decided {{ req.decided_at | when }}{% endif %}</p>
+  {% if req.status == "approved" and req.granted_name %}<p>Shared: <b>{{ req.granted_name }}</b></p>{% endif %}
+</div>
+
+{% if req.status == "pending" %}
+<div class="card">
+  {% if not paired %}
+  <p id="peer-unpaired">You are no longer paired with {{ req.requester }}, so nothing can be shared with them. Decline this request to close it.</p>
+  {% elif req.kind == kinds.describe %}
+  <p>Pick the one item to share. It is shared with {{ req.requester }} only, and anyone it is already shared with keeps it. They are not told what else is in your Drive.</p>
+  <p><a class="btn primary" href="/files?peer_request={{ req.id }}">Pick an item</a></p>
+  {% elif not entry %}
+  <p id="peer-gone">You no longer share this item, so there is nothing to change. Decline this request to close it.</p>
+  {% else %}
+  <form method="post" action="/requests/peer/{{ req.id }}/approve">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="requester" value="{{ req.requester }}">
+    <p id="peer-effect">
+      {% if entry.for_everyone %}<b>{{ entry.name }}</b> is shared with everyone you are paired with, so this change applies to all of them, not only {{ req.requester }}.
+      {% elif entry.audience | length > 1 %}<b>{{ entry.name }}</b> is shared with {{ entry.audience | join(", ") }}, so this change applies to all of them.
+      {% else %}<b>{{ entry.name }}</b> is shared with {{ req.requester }} only.{% endif %}
+      To change it for one person, use <a href="/sharing?tab=by-me">Shared by me</a> instead.
+    </p>
+    {% if req.kind == kinds.more_time %}
+    <p>{% if entry.expires_at %}It ends on {{ entry.expires_at[:10] }}.{% else %}It has no end date now.{% endif %}
+      Approving adds {{ more_time_days }} days, or pick the new end date.</p>
+    <label>New end date (optional) <input type="date" name="expires_on"></label>
+    {% endif %}
+    <div class="actions">
+      <button class="primary" type="submit">{{ "Approve more time" if req.kind == kinds.more_time else "Approve editing" }}</button>
+    </div>
+  </form>
+  {% endif %}
+  <form method="post" action="/requests/peer/{{ req.id }}/deny" data-confirm="Decline this request? {{ req.requester }} will see that it was declined.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="requester" value="{{ req.requester }}">
+    <button class="danger" type="submit">Decline</button>
+  </form>
+</div>
+{% endif %}
+<p><a href="/requests">All requests</a></p>
+{% endblock %}

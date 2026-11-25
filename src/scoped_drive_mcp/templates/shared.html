@@ -69,6 +69,47 @@
 </div>
 {% endif %}
 
+{% if ask_on and peers %}
+<div class="card" id="ask">
+  <h2>Request something</h2>
+  <p class="muted">Ask someone you are paired with for something they haven’t shared with you. Describe it in your own
+    words. Only they see it, on their dashboard: no assistant, yours or theirs, can read it. You are told “Request sent”
+    whatever they have, and at most 3 requests a day reach each person.</p>
+  <form class="stack" method="post" action="/shared/request">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="kind" value="describe">
+    <label>To
+      <select name="owner" required>
+        {% for peer in peers %}<option value="{{ peer }}">{{ peer }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>What you are asking for
+      <input type="text" name="text" maxlength="500" required placeholder="For example: your 2025 tax folder">
+    </label>
+    <div class="actions"><button class="primary" type="submit">Send request</button></div>
+  </form>
+  {% if ask_sent %}
+  <h3>Your requests</h3>
+  <ul class="files" id="ask-sent">
+    {% for s in ask_sent %}
+    <li class="file">
+      <div class="file-name">
+        {%- if s.kind == "describe" %}{{ s.text }}
+        {%- elif s.kind == "edit" %}Edit access to “{{ s.item_name or "an item" }}”
+        {%- else %}More time on “{{ s.item_name or "an item" }}”{% endif -%}
+      </div>
+      <div class="file-meta"><span>To {{ s.to }}</span><span>{{ s.created_at | when }}</span>
+        {% if s.status == "pending" %}<span class="pill pending"><span aria-hidden="true">●</span> Waiting</span>
+        {% elif s.status == "approved" %}<span class="pill ok"><span aria-hidden="true">✓</span> Approved</span>
+        {% else %}<span class="pill bad"><span aria-hidden="true">!</span> Declined</span>{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if people %}
   {% for p in people %}
   <section class="card">
@@ -89,6 +130,19 @@
           <a class="btn" href="{{ shared_href('browse', g.source.key, p.owner, n.id) }}">Open {{ g.source.container_noun }}</a>
           {% else %}
           <a class="btn" href="{{ shared_href('open', g.source.key, p.owner, n.id) }}">Open</a>
+          {% endif %}
+          {% if ask_on and g.source.key == "google_drive" %}
+          {% for kind, label in (("edit", "Ask for edit"), ("more_time", "Ask for more time")) %}
+          {% if kind in askable.get(p.owner, {}).get(n.id, ()) %}
+          <form class="inline" method="post" action="/shared/request">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="owner" value="{{ p.owner }}">
+            <input type="hidden" name="kind" value="{{ kind }}">
+            <input type="hidden" name="item" value="{{ n.id }}">
+            <button type="submit">{{ label }}<span class="sr-only"> on {{ n.name or n.id }}</span></button>
+          </form>
+          {% endif %}
+          {% endfor %}
           {% endif %}
         </div>
       </li>
