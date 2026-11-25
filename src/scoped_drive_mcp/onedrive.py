@@ -670,6 +670,23 @@ class OneDriveService:
                         "message": "The item changed while this was checked. Try again.",
                     }
                 ) from None
+            if exc.status == 423:
+                raise PayloadToolError(
+                    {
+                        "error": "onedrive_locked",
+                        "message": "The file is open or locked in OneDrive. Try again later.",
+                    }
+                ) from None
+            if exc.status == 0 and exc.code == "unreachable":
+                raise PayloadToolError(
+                    {
+                        "error": "onedrive_unavailable",
+                        "message": (
+                            "Microsoft didn’t answer, so the change may or may not have been "
+                            "made. Check with onedrive_list_folder before trying again."
+                        ),
+                    }
+                ) from None
             if exc.status == 507:
                 raise PayloadToolError(
                     {"error": "onedrive_full", "message": "The person's OneDrive is full."}
@@ -679,11 +696,32 @@ class OneDriveService:
     @staticmethod
     def _check_placed(written: dict[str, Any], parent_id: str | None) -> None:
         """What Graph wrote must sit where it was checked. It always should (names can't
-        hold a path); this is the belt to validate_item_name's braces."""
+        hold a path); this is the belt to validate_item_name's braces. It runs after the
+        write, so it reports a misplaced write rather than preventing one."""
         placed = parent_id_of(written)
         if not parent_id or not placed or placed.lower() != parent_id.lower():
-            logger.error("OneDrive write landed outside the checked folder")
-            raise OneDriveApiError(0, "unexpected_parent")
+            logger.error(
+                "OneDrive write was applied but landed outside the checked folder: item %s",
+                written.get("id"),
+            )
+            raise PayloadToolError(
+                {
+                    "error": "onedrive_unexpected",
+                    "message": (
+                        "Microsoft made the change but not where it was checked. Tell the "
+                        "person; it has been logged. Do not try again."
+                    ),
+                    "file_id": written.get("id"),
+                }
+            )
+
+    @staticmethod
+    def _etag(item: dict[str, Any]) -> str:
+        """The version to make a write conditional on. Without one there is no write."""
+        etag = item.get("eTag")
+        if not isinstance(etag, str) or not etag:
+            raise OneDriveApiError(0, "missing_etag")
+        return etag
 
     def _writable_folder(self, api: OneDriveApi, parent_id: str) -> dict[str, Any]:
         folder = self._allowed_item(api, parent_id)
@@ -745,11 +783,8 @@ class OneDriveService:
                 raise PayloadToolError(
                     {"error": "invalid_input", "message": "Only files can be updated."}
                 )
-            etag = item.get("eTag")
-            updated = self._write_call(
-                item_id,
-                lambda: api.replace_content(item_id, data, etag if isinstance(etag, str) else None),
-            )
+            etag = self._etag(item)
+            updated = self._write_call(item_id, lambda: api.replace_content(item_id, data, etag))
             self._check_placed(updated, parent_id_of(item))
             return public_item(updated)
 
@@ -764,7 +799,9 @@ class OneDriveService:
 
         def run(api: OneDriveApi) -> dict[str, Any]:
             item = self._allowed_item(api, item_id)
-            if item_id in self.allowlist.entries():
+            # Graph's own id for the item, not the string the assistant sent.
+            real_id = str(item.get("id") or item_id).lower()
+            if any(real_id == allowed.lower() for allowed in self.allowlist.entries()):
                 raise PayloadToolError(
                     {
                         "error": "invalid_input",
@@ -774,11 +811,8 @@ class OneDriveService:
                         ),
                     }
                 )
-            etag = item.get("eTag")
-            updated = self._write_call(
-                item_id,
-                lambda: api.rename(item_id, clean, etag if isinstance(etag, str) else None),
-            )
+            etag = self._etag(item)
+            updated = self._write_call(item_id, lambda: api.rename(item_id, clean, etag))
             self._check_placed(updated, parent_id_of(item))
             return public_item(updated)
 

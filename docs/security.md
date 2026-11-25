@@ -317,7 +317,14 @@ was checked as `If-Match`, so an item moved out of an allowed folder (or changed
 write is not written. Names are validated before any Graph call (no `/`, `\`, `:`, `%`, `#`, control
 characters or OneDrive's reserved names) and percent-encoded in the one path that carries a name; the
 item Graph returns must sit in the folder that was checked. An item the person allowed directly can't be
-renamed. Write requests don't follow redirects, so the token only goes to Graph.
+renamed. Write requests don't follow redirects, so the token only goes to Graph. A write with no `eTag` to
+send is not made. A 401 during a write refreshes the token and runs the whole call again, allowlist check
+included.
+
+Known limit: `If-Match` pins only the item being changed. If the person moves a folder *above* it out of an
+allowed folder in the milliseconds between the check and the write, that one write still lands (and a new
+item is created in a folder the person just moved). It needs the person's own action at that moment and is
+not reachable by an assistant.
 
 A token whose granted scopes include neither `Files.Read` nor `Files.ReadWrite`, or anything beyond those,
 `User.Read`, `offline_access` and the OpenID scopes (for example any `.All` scope), is refused and not stored,

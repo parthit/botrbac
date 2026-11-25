@@ -66,7 +66,7 @@ MAX_DOWNLOAD_REDIRECTS = 3
 # Names a write may give an item. OneDrive refuses these characters; "%" and "#" are
 # refused too so a name put into a Graph path can never be read as anything but a name.
 MAX_NAME_LEN = 255
-_BAD_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f"*:<>?/\\|%#]')
+_BAD_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f"*:<>?/\\|%#]')
 _RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul", ".lock", "desktop.ini"}
     | {f"com{i}" for i in range(10)}
@@ -405,11 +405,13 @@ class HttpOneDriveApi:
         overwritten. `name` must have passed validate_item_name (no "/" or "%"); it is
         percent-encoded as well."""
         validate_item_name(name)
+        # The query is written out with a literal "@": Graph documents the key that way,
+        # and a percent-encoded key is not guaranteed to be read as the same one.
         return self._write(
             "PUT",
-            f"/me/drive/items/{parent_id}:/{quote(name, safe='')}:/content",
+            f"/me/drive/items/{parent_id}:/{quote(name, safe='')}:/content"
+            "?@microsoft.graph.conflictBehavior=fail",
             content=data,
-            params={"@microsoft.graph.conflictBehavior": "fail"},
         )
 
     def replace_content(self, item_id: str, data: bytes, if_match: str | None) -> dict[str, Any]:

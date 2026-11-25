@@ -286,6 +286,8 @@ _REFUSALS = {
     "onedrive_refused": "Microsoft refused the change",
     "onedrive_changed": "the OneDrive item changed meanwhile",
     "onedrive_full": "OneDrive is full",
+    "onedrive_locked": "the OneDrive file was locked",
+    "onedrive_unexpected": "Microsoft put the change somewhere unexpected",
     "name_taken": "that name is already taken",
 }
 

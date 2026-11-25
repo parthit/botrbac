@@ -78,4 +78,6 @@ organization has to approve Bot RBAC" and their IT administrator has to grant co
 for example with `https://login.microsoftonline.com/<tenant>/adminconsent?client_id=<client id>`. Microsoft
 also usually blocks unverified multitenant apps for users of other organizations, so complete **publisher
 verification** (Branding & properties, with a Microsoft AI Cloud Partner Program ID) before offering
-OneDrive to schools. Personal Microsoft accounts need neither.
+OneDrive to schools. Personal Microsoft accounts need neither. An organization that lets people approve apps themselves only for
+low-risk permissions may allow `Files.Read` but not `Files.ReadWrite`; new connections there then need the
+administrator's consent too. Connections already made keep reading.

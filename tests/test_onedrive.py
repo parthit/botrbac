@@ -1006,7 +1006,7 @@ def test_wrong_kinds_are_invalid(allowed, drive) -> None:
     "bad",
     ["", "   ", "../x", "a/b", "a\\b", "a:b", "a*b", "a?b", 'a"b', "a<b", "a|b", "a%2Fb",
      "a#b", "x\x00y", "line\nbreak", "con", "CON.txt", "lpt1.md", "ends.", "~$lock.docx",
-     ".lock", "desktop.ini", "a_vti_b", "n" * 256],
+     ".lock", "desktop.ini", "a_vti_b", "n" * 256, "c1\x85ctl"],
 )  # fmt: skip
 def test_bad_names_never_reach_graph(allowed, drive, bad) -> None:
     for tool, args in (
@@ -1179,7 +1179,7 @@ def test_upload_new_encodes_the_name_and_never_overwrites() -> None:
     assert req.url.raw_path.startswith(
         b"/v1.0/me/drive/items/P!1:/Q3%20report%20%28final%29.docx:/content"
     )
-    assert req.url.params["@microsoft.graph.conflictBehavior"] == "fail"
+    assert req.url.query == b"@microsoft.graph.conflictBehavior=fail"  # a literal "@"
     assert req.headers["authorization"] == "Bearer tok-secret"
     assert req.content == b"bytes"
     with pytest.raises(ValueError):
@@ -1233,3 +1233,90 @@ def test_graph_write_statuses_map_to_errors() -> None:
     status["code"] = 403
     with pytest.raises(OneDriveForbiddenError):
         api.replace_content("F!1", b"x", None)
+
+
+def test_no_etag_means_no_write(allowed, drive) -> None:
+    del drive.items[ESSAY]["eTag"]
+    for tool, args in (
+        ("onedrive_update_file", {"file_id": ESSAY, "content_text": "x"}),
+        ("onedrive_rename_file", {"file_id": ESSAY, "new_name": "x.txt"}),
+    ):
+        out = write(allowed, tool, **args)
+        assert out["isError"], tool
+    assert drive.writes() == []
+
+
+def test_a_401_on_the_write_refreshes_and_checks_again(allowed, drive, ms_oauth, monkeypatch):
+    real = FakeOneDriveApi.replace_content
+    failed: list[bool] = []
+
+    def once_unauthorized(self, item_id, data, if_match):
+        if not failed:
+            failed.append(True)
+            raise OneDriveUnauthorizedError(401, "InvalidAuthenticationToken")
+        return real(self, item_id, data, if_match)
+
+    monkeypatch.setattr(FakeOneDriveApi, "replace_content", once_unauthorized)
+    drive.calls.clear()
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="second try")
+    assert not out["isError"]
+    assert ms_oauth.refreshed == ["ms-refresh-1"]
+    # The allowlist check ran again before the retried write.
+    assert [c[0] for c in drive.calls].count("get_item") >= 4
+    assert drive.content[ESSAY] == b"second try"
+
+
+def test_a_401_retry_does_not_write_outside_after_a_move(allowed, drive, monkeypatch) -> None:
+    real = FakeOneDriveApi.replace_content
+
+    def move_then_401(self, item_id, data, if_match):
+        if drive.items[ESSAY]["parentReference"]["id"] == SCHOOL:
+            drive.items[ESSAY]["parentReference"] = {"id": ROOT, "path": "/drive/root:"}
+            raise OneDriveUnauthorizedError(401, "InvalidAuthenticationToken")
+        return real(self, item_id, data, if_match)
+
+    monkeypatch.setattr(FakeOneDriveApi, "replace_content", move_then_401)
+    out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+    assert error_of(out) == "onedrive_not_allowed"
+    assert drive.content[ESSAY] == b"my essay about rivers"
+
+
+def test_a_misplaced_write_is_reported_not_retried(allowed, drive, monkeypatch) -> None:
+    real = FakeOneDriveApi.upload_new
+
+    def misplaced(self, parent_id, name, data):
+        created = real(self, parent_id, name, data)
+        created["parentReference"] = {"id": ROOT}
+        return created
+
+    monkeypatch.setattr(FakeOneDriveApi, "upload_new", misplaced)
+    out = write(allowed, "onedrive_upload_file", name="a.txt", content_text="x")
+    assert error_of(out) == "onedrive_unexpected"
+    assert out["structuredContent"]["file_id"]
+
+
+def test_an_allowed_item_keeps_its_name_whatever_the_id_case(allowed, drive, monkeypatch):
+    real = FakeOneDriveApi.get_item
+    lower = SCHOOL.lower()
+
+    def case_insensitive(self, item_id):
+        return real(self, SCHOOL if item_id == lower else item_id)
+
+    monkeypatch.setattr(FakeOneDriveApi, "get_item", case_insensitive)
+    out = write(allowed, "onedrive_rename_file", file_id=lower, new_name="Mine")
+    assert out["isError"]
+    assert drive.items[SCHOOL]["name"] == "School"
+
+
+def test_locked_and_unreachable_writes_say_so(allowed, drive, monkeypatch) -> None:
+    for status, code, expected in (
+        (423, "locked", "onedrive_locked"),
+        (0, "unreachable", "onedrive_unavailable"),
+    ):
+
+        def fail(self, item_id, data, if_match, status=status, code=code):
+            raise OneDriveApiError(status, code)
+
+        monkeypatch.setattr(FakeOneDriveApi, "replace_content", fail)
+        out = write(allowed, "onedrive_update_file", file_id=ESSAY, content_text="x")
+        assert error_of(out) == expected
