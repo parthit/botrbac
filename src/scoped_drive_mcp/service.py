@@ -74,6 +74,39 @@ SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SLIDES_MIME = "application/vnd.google-apps.presentation"
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+PDF_MIME = "application/pdf"
+
+# export_file and save_export: the formats Drive can export each Google type to, by the
+# short name an assistant passes (also the new file's extension).
+EXPORT_CHOICES: dict[str, dict[str, str]] = {
+    DOC_MIME: {
+        "pdf": PDF_MIME,
+        "docx": DOCX_MIME,
+        "odt": "application/vnd.oasis.opendocument.text",
+        "rtf": "application/rtf",
+        "txt": "text/plain",
+        "md": "text/markdown",
+        "html": "application/zip",
+        "epub": "application/epub+zip",
+    },
+    SHEET_MIME: {
+        "pdf": PDF_MIME,
+        "xlsx": XLSX_MIME,
+        "ods": "application/vnd.oasis.opendocument.spreadsheet",
+        "csv": "text/csv",
+        "tsv": "text/tab-separated-values",
+    },
+    SLIDES_MIME: {
+        "pdf": PDF_MIME,
+        "pptx": PPTX_MIME,
+        "odp": "application/vnd.oasis.opendocument.presentation",
+        "txt": "text/plain",
+    },
+}
+# Drive refuses to export anything over 10 MB, so a saved export is never larger.
+EXPORT_SAVE_CAP = 10 * 1024 * 1024
 
 # What read_file asks Drive for. A Sheet's CSV export holds only its first tab, so read_file
 # exports the workbook (every tab) and falls back to this CSV only when that cannot be read.
@@ -610,6 +643,79 @@ class DriveService:
         result["byte_count"] = len(data)
         return result
 
+    def _export_target(self, file_id: str, fmt: Any) -> tuple[dict[str, Any], str, str]:
+        """(meta, short format, export mime) for a Google file in scope."""
+        meta = self._get_in_scope(file_id)
+        mime = meta.get("mimeType", "")
+        choices = EXPORT_CHOICES.get(mime)
+        if choices is None:
+            if mime == FOLDER_MIME:
+                raise InvalidInputError("this is a folder; use list_folder")
+            raise InvalidInputError(
+                "only Google Docs, Sheets and Slides can be exported; use download_file for "
+                "other files"
+            )
+        if not isinstance(fmt, str) or fmt.strip().lower().lstrip(".") not in choices:
+            raise InvalidInputError(f"format must be one of: {', '.join(choices)}")
+        fmt = fmt.strip().lower().lstrip(".")
+        return meta, fmt, choices[fmt]
+
+    def _export_bytes(self, file_id: str, export_mime: str) -> bytes:
+        try:
+            return self.drive.export(file_id, export_mime)
+        except DriveExportTooLargeError:
+            raise InvalidInputError(
+                "file is over Google Drive's 10 MB export limit in that format"
+            ) from None
+
+    def export_file(self, file_id: str, format: str = "pdf") -> dict[str, Any]:
+        """A Google Doc, Sheet or Slides exported by Drive (PDF, Office and other formats),
+        as base64 under the same cap as download_file. A larger export returns no bytes:
+        save_export writes it to Drive instead."""
+        meta, fmt, export_mime = self._export_target(file_id, format)
+        data = self._export_bytes(file_id, export_mime)
+        limit = min(self.max_bytes, DOWNLOAD_BYTE_CAP)
+        result: dict[str, Any] = {
+            "file": self._public(meta),
+            "format": fmt,
+            "mime_type": export_mime,
+            "byte_count": len(data),
+            "content_base64": None,
+        }
+        if len(data) > limit:
+            # Part of a PDF or an Office file is not a usable file, so none is returned.
+            result["too_large"] = True
+            result["note"] = (
+                f"the export is {len(data)} bytes, over the {limit}-byte limit for returned "
+                "bytes; use save_export to save it in Drive"
+            )
+            return result
+        result["content_base64"] = base64.b64encode(data).decode("ascii")
+        return result
+
+    def save_export(
+        self,
+        file_id: str,
+        format: str = "pdf",
+        parent_id: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Export a Google Doc, Sheet or Slides and save the result as a new file. Without
+        parent_id it goes next to the original, when that folder is in scope."""
+        meta, fmt, export_mime = self._export_target(file_id, format)
+        if name is None:
+            base = str(meta.get("name") or "Untitled")
+            name = f"{base[: MAX_NAME_LEN - len(fmt) - 1]}.{fmt}"
+        name = validate_name(name)
+        if not parent_id:
+            in_scope = self._public(meta).get("parents") or []
+            parent_id = in_scope[0] if in_scope else None
+        # Check where it goes before asking Drive for the export.
+        parent_id = self.resolve_parent(parent_id)
+        data = self._export_bytes(file_id, export_mime)
+        created = self.upload_bytes(name, export_mime, data, parent_id, max_bytes=EXPORT_SAVE_CAP)
+        return {**created, "exported_from": file_id, "format": fmt, "byte_count": len(data)}
+
     # ---- editor tools ----------------------------------------------------
 
     def _create(
@@ -619,21 +725,26 @@ class DriveService:
         mime: str | None,
         parent_id: str | None,
     ) -> dict[str, Any]:
-        if not parent_id:
-            parent_id = self.guard.default_parent()
-            if parent_id is None:
-                raise InvalidInputError(
-                    "parent_id is required; call list_folder to find a folder you may use"
-                )
-        parent = self.guard.assert_parent_in_scope(parent_id)
-        metadata = {**metadata, "parents": [parent.id], **self._stamp(created=True)}
+        parent = self.resolve_parent(parent_id)
+        metadata = {**metadata, "parents": [parent], **self._stamp(created=True)}
         self._about_to_write()
         created = self.drive.create(metadata, content, mime, fields=META_FIELDS)
         ref = FileRef.from_api(created)
         if ref.is_folder:
             self.guard.remember(ref)
             self.guard.invalidate()
-        return self._public(created, {parent.id: True})
+        return self._public(created, {parent: True})
+
+    def resolve_parent(self, parent_id: str | None) -> str:
+        """The folder a create goes to, after the scope check: parent_id, or the default
+        when there is only one place it could go. Writes nothing."""
+        if not parent_id:
+            parent_id = self.guard.default_parent()
+            if parent_id is None:
+                raise InvalidInputError(
+                    "parent_id is required; call list_folder to find a folder you may use"
+                )
+        return self.guard.assert_parent_in_scope(parent_id).id
 
     def _stamp(self, created: bool = False) -> dict[str, Any]:
         """Metadata that records who wrote a file, when this service writes for a paired

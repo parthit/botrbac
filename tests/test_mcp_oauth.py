@@ -316,6 +316,7 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "get_metadata",
         "read_file",
         "download_file",
+        "export_file",
         "request_access",
         "check_access_request",
         "request_link",
@@ -695,7 +696,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     assert hash_in(access) in stored
 
     names = tool_names(owner_c, access)
-    assert len(names) == 38
+    assert len(names) == 44
     assert "trash_file" in names
     # A real tool call: an allowed file reads; one the owner did not allow does not.
     assert post(owner_c, "/grant", file_id="proj-notes").status_code in (200, 303)

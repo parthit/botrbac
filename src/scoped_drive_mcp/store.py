@@ -1532,7 +1532,12 @@ class ActivityLog:
 
         A rejected bearer token is kept once an hour per reason. A paired person's call
         is kept once an hour per tool and outcome (and per file when it was allowed), so
-        repeating a call does not bury the record of an earlier one."""
+        repeating a call does not bury the record of an earlier one.
+
+        A chunked upload sends hundreds of pieces. Each accepted piece goes to the server
+        log only; its start, its finish and any refused piece are kept here."""
+        if record.get("tool") == "append_chunk" and record.get("decision") == "allow":
+            return False
         guest = record.get("guest")
         if record.get("event") == "auth":
             parts = ["auth", str(record.get("reason"))]

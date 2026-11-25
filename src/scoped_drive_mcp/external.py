@@ -492,6 +492,34 @@ class ExternalShares:
             lambda s: s.upload_file(name, mime_type, content_text, content_base64, parent_id),
         )
 
+    def check_upload_parent(
+        self, caller: str, owner: str, parent_id: str | None, tool: str = "start_upload"
+    ) -> dict[str, Any]:
+        """Whether a chunked upload may go into this folder, before any bytes are sent.
+        The same checks as upload_shared_file; writes nothing and charges no quota."""
+        return self._write(
+            caller, owner, tool, parent_id, lambda s: {"parent_id": s.resolve_parent(parent_id)}
+        )
+
+    def upload_bytes(
+        self,
+        caller: str,
+        owner: str,
+        name: str,
+        mime_type: str,
+        data: bytes,
+        parent_id: str | None,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        """A finished chunked upload, written like upload_shared_file."""
+        return self._write(
+            caller,
+            owner,
+            "upload_shared_file",
+            parent_id,
+            lambda s: s.upload_bytes(name, mime_type, data, parent_id, max_bytes=max_bytes),
+        )
+
     def update_file(self, caller: str, owner: str, file_id: str, content: str) -> dict[str, Any]:
         def update(service: DriveService) -> dict[str, Any]:
             # An item on either of the owner's lists keeps its content, also when it sits

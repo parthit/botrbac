@@ -51,6 +51,7 @@ VIEWER_TOOLS: frozenset[str] = (
             "get_metadata",
             "read_file",
             "download_file",
+            "export_file",
             "request_access",
             "check_access_request",
             "request_link",
@@ -82,6 +83,11 @@ GUEST_WRITE_TOOLS: frozenset[str] = frozenset(
         "rename_shared_file",
     }
 )
+# A file sent in pieces (uploads.py), and a Google file exported and saved as a new file.
+# The same scope checks as upload_file, so the same role.
+UPLOAD_TOOLS: frozenset[str] = frozenset(
+    {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
+)
 # Sending one file to a paired person (drops.py), and saving one sent to this human into
 # their own Drive. Like the writes above, only for a connection allowed to edit.
 DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
@@ -90,6 +96,7 @@ EDITOR_TOOLS: frozenset[str] = (
     VIEWER_TOOLS
     | GUEST_WRITE_TOOLS
     | DROP_TOOLS
+    | UPLOAD_TOOLS
     | {
         "create_folder",
         "create_doc",
@@ -108,7 +115,15 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
-_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id", "owner", "page_id")
+_AUDITED_ID_ARGS = (
+    "file_id",
+    "folder_id",
+    "parent_id",
+    "request_id",
+    "owner",
+    "page_id",
+    "upload_id",
+)
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
 ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]
@@ -253,6 +268,17 @@ def require(
                 # Lets Activity name the row from the request ("asked for … budget sheet").
                 rid = result.get("request_id")
                 ids["request_id"] = rid if isinstance(rid, str) else None
+            if tool == "start_upload" and isinstance(result, dict):
+                # Ties the start, the pieces and the finish of one upload together in the log.
+                uid = result.get("upload_id")
+                ids["upload_id"] = uid if isinstance(uid, str) else None
+                if not ids.get("parent_id") and isinstance(result.get("parent_id"), str):
+                    ids["parent_id"] = result["parent_id"]
+            if tool in ("finish_upload", "save_export") and isinstance(result, dict):
+                # The new file, so Activity can name what was written.
+                fid = result.get("id")
+                if isinstance(fid, str) and not ids.get("file_id"):
+                    ids["file_id"] = fid
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 
