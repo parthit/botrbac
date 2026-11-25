@@ -3,7 +3,7 @@
 {% from "_icons.html" import file_icon %}
 {% from "_batch.html" import batch_bar, batch_check, batch_all with context %}
 {% block title %}Files{% endblock %}
-{% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
+{% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{% if peer_picking %}&peer_request={{ peer_picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
 <h1>Files</h1>
 {{ files_tabs('all', allow_count, notion_tab, onedrive_tab) }}
@@ -15,18 +15,26 @@
   <a href="/requests/{{ picking.id }}">Back to the request</a>
 </div>
 {% endif %}
+{% if peer_picking %}
+<div class="warn" id="peer-picking">Choosing one item to share with <b>{{ peer_picking.requester }}</b> for their request.
+  Choose <b>Share for this request</b> next to the right item. Only that item is shared, and only {{ peer_picking.requester }} is added to it.
+  An item that isn’t listed has to be added on <a href="/files">Files</a> first.
+  <a href="/requests/peer/{{ peer_picking.id }}">Back to the request</a>
+</div>
+{% endif %}
 <form method="get" action="/files" class="actions" role="search">
   {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
+  {% if peer_picking %}<input type="hidden" name="peer_request" value="{{ peer_picking.id }}">{% endif %}
   <label class="sr-only" for="q">Search names</label>
   <input id="q" type="search" name="q" value="{{ q or '' }}" placeholder="Search files you’ve added">
   <button type="submit">Search</button>
   {% if q %}<a href="/files?folder=root{{ keep('') }}">Clear search</a>{% endif %}
-  {% if picker_ready %}
+  {% if picker_ready and not peer_picking %}
   <button type="button" class="primary" id="pick-drive" data-next="{{ here }}"{% if picking %} data-request="{{ picking.id }}"{% endif %}>Add from Google Drive</button>
   {% endif %}
 </form>
 <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>
-{% if picker_ready %}{% include "_safari_note.html" %}{% endif %}
+{% if picker_ready and not peer_picking %}{% include "_safari_note.html" %}{% endif %}
 
 {% if not q %}
 {% if is_root and hidden_count %}<p class="muted" id="hidden-note">{{ hidden_count }} {{ "item" if hidden_count == 1 else "items" }} you removed from Bot RBAC {{ "is" if hidden_count == 1 else "are" }} not listed. Google still lists Bot RBAC as able to open {{ "it" if hidden_count == 1 else "them" }} until you remove the app in your <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">Google Account</a>. Pick an item again with <b>Add from Google Drive</b> to bring it back.</p>{% endif %}
@@ -46,7 +54,7 @@
 {% if covered_by %}
 <div class="actions covered">
   <p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is allowed.</p>
-  {% if covered_id and not picking %}
+  {% if covered_id and not picking and not peer_picking %}
   <form class="inline" method="post" action="/revoke" data-confirm="Remove “{{ covered_by }}” and everything in it from the assistant?">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="file_id" value="{{ covered_id }}">
@@ -71,7 +79,7 @@
   {% endif %}
 </div>
 {% elif rows %}
-{% if not picking %}
+{% if not picking and not peer_picking %}
 {%- set forget_here = is_root or q %}
 {% call batch_bar("batch-files", here, "Change several") %}
   <span class="act-who">Your assistant</span>
@@ -106,7 +114,7 @@
   {%- set t = r.target %}
   <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}" data-acts-on="{{ r.acts_on }}"{% if r.covered_by %} data-covered{% endif %}{% if r.shared_by %} data-shared-under{% endif %}>
     <div class="file-name">
-      {% if not picking %}{{ batch_check("batch-files", r.acts_on, r.name, r.covered_by, r.shared_by) }}{% endif %}
+      {% if not picking and not peer_picking %}{{ batch_check("batch-files", r.acts_on, r.name, r.covered_by, r.shared_by) }}{% endif %}
       {{ file_icon(r.icon or ("folder" if r.is_folder else "file")) }}
       {% if r.is_folder %}<a class="folder-link" href="/files?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}<span class="chev" aria-hidden="true">›</span></a>
       {% elif r.link %}<a href="{{ r.link }}" target="_blank" rel="noopener noreferrer">{{ r.name }}</a>
@@ -134,7 +142,14 @@
       {% if r.shared_by %}<span class="pill ok" data-share-when="off"{% if r.ext_shared %} hidden{% endif %}><span aria-hidden="true">✓</span> Shared via folder “{{ r.shared_by }}”</span>{% endif %}
     </div>
     <div class="file-actions">
-      {% if picking and (r.granted or r.covered_by) %}
+      {% if peer_picking %}
+        <form class="inline" method="post" action="/requests/peer/{{ peer_picking.id }}/approve" data-confirm="Share “{{ r.name }}” with {{ peer_picking.requester }}? Their assistants will be able to read it{% if r.is_folder %}, and everything inside it{% endif %}.">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="requester" value="{{ peer_picking.requester }}">
+          <input type="hidden" name="target_id" value="{{ r.id }}">
+          <button class="primary" type="submit">Share for this request<span class="sr-only"> {{ r.name }}</span></button>
+        </form>
+      {% elif picking and (r.granted or r.covered_by) %}
         <span class="muted">Already allowed</span>
       {% elif picking %}
         <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">

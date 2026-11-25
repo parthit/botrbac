@@ -92,6 +92,9 @@ from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
 from .onedrive_client import OneDriveApiError, OneDriveOAuthError
 from .onedrive_client import normalize_item_id as normalize_onedrive_id
 from .onedrive_client import scopes_acceptable as onedrive_scopes_acceptable
+from .peer_request_pages import Kit as PeerRequestKit
+from .peer_request_pages import page_routes as peer_request_routes
+from .peer_requests import PeerRequestService
 from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
@@ -811,6 +814,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     oauth = ctx.oauth
     serializer = URLSafeTimedSerializer(settings.session_secret.get_secret_value(), STATE_SALT)
     app_origin = origin_of(settings.app_base_url)
+    # Requests between paired people, for people only (peer_requests.py). Off wherever
+    # Sharing is off.
+    peer_requests = (
+        PeerRequestService(ctx.directory, ctx.mailbox)
+        if ctx.directory is not None and ctx.mailbox is not None and ctx.ext_allowlist is not None
+        else None
+    )
 
     async def remember_pending(request: Request) -> None:
         """The nav badges for this page, off the event loop. The three lookups are
@@ -823,6 +833,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         async def pending() -> None:
             try:
                 request.state.pending_count = await blocking(ctx.requests.pending_count)
+                if peer_requests is not None and actor:
+                    request.state.pending_count += await blocking(
+                        peer_requests.pending_count, actor
+                    )
             except Exception:
                 logger.exception("pending request count failed")
 
@@ -2161,6 +2175,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             picking = await blocking(ctx.requests.get, request_id)
             if picking is None or picking.status != PENDING:
                 picking = None
+        # Choosing the one item to share for a paired person's described request.
+        peer_picking = None
+        peer_id = request.query_params.get("peer_request") or None
+        if peer_id and peer_requests is not None:
+            peer_picking = await blocking(
+                peer_requests.get, str(current_actor.get() or ""), peer_id
+            )
+            if peer_picking is None or peer_picking.status != PENDING or peer_picking.text is None:
+                peer_picking = None
+        if peer_picking is not None:
+            picking = None
         try:
             data = await blocking(browse_data, folder, q, page_token)
         except (InvalidInputError, OwnerNotConnectedError):
@@ -2177,6 +2202,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     first["q"] = q
                 if picking:
                     first["request"] = picking.id
+                if peer_picking:
+                    first["peer_request"] = peer_picking.id
                 return RedirectResponse(f"/files?{urlencode(first)}", status_code=303)
             data = {
                 "rows": [],
@@ -2199,6 +2226,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             prev=prev,
             next_token=data.get("next_token"),
         )
+        if peer_picking:
+            keep_peer = "&" + urlencode({"peer_request": peer_picking.id})
+            pager = {k: (v + keep_peer if v else v) for k, v in pager.items()}
         email = str(current_actor.get() or "")
         has_pairing = bool(
             ctx.mailbox is not None
@@ -2212,6 +2242,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             q=q,
             folder=folder,
             picking=picking,
+            peer_picking=peer_picking,
             here=here,
             picker_ready=settings.picker_configured,
             **pager,
@@ -2704,6 +2735,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     }
                     for row in ctx.drops.received(DROPS_SHOWN)
                 ]
+            # Asking a paired person for something (peer_requests.py).
+            data["ask_on"] = peer_requests is not None
+            if peer_requests is not None:
+                data["ask_sent"] = peer_requests.sent(email)
+                data["askable"] = {p: peer_requests.askable(email, p) for p in peers}
             return data
 
         data = await blocking(gather)
@@ -3089,7 +3125,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         pending = [r for r in reqs if r.status == PENDING]
         decided = [r for r in reqs if r.status != PENDING]
         apps = await blocking(my_app_names)
-        return render(request, "requests.html", pending=pending, decided=decided, apps=apps)
+        peer_pending, peer_decided = [], []
+        if peer_requests is not None:
+            peer_pending, peer_decided = await blocking(
+                peer_requests.inbox, str(current_actor.get() or "")
+            )
+        return render(
+            request,
+            "requests.html",
+            pending=pending,
+            decided=decided,
+            apps=apps,
+            peer_on=peer_requests is not None,
+            peer_pending=peer_pending,
+            peer_decided=peer_decided,
+        )
 
     def request_elsewhere(rid: str, email: str | None) -> bool:
         """Whether this request id belongs to another signed-in person. Ids are 192 random
@@ -4064,6 +4114,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         *legal_routes(),
+        *(
+            peer_request_routes(
+                peer_requests,
+                PeerRequestKit(
+                    owner_only, csrf_protected, render, flash, ctx.ext_grants, _end_of_day
+                ),
+            )
+            if peer_requests is not None
+            else []
+        ),
         *(
             ctx.terminal.page_routes(TerminalKit(owner_only, csrf_protected, render, flash))
             if ctx.terminal

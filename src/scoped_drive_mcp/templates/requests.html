@@ -32,6 +32,42 @@
 <div class="card empty"><p>{{ empty }}</p></div>
 {% endif %}
 {% endmacro %}
+{% macro peer_what(r) -%}
+  {%- if r.kind == "describe" -%}{{ r.text }}
+  {%- elif r.kind == "edit" -%}Edit access to “{{ r.item_name or "an item" }}”
+  {%- else -%}More time on “{{ r.item_name or "an item" }}”{%- endif -%}
+{%- endmacro %}
+{% macro peer_table(items, empty) %}
+{% if items %}
+<table class="cards">
+  <thead><tr><th>From</th><th>Their request</th><th>Created</th><th>Status</th><th>Open</th></tr></thead>
+  <tbody>
+  {% for r in items %}
+  <tr>
+    <td data-label="From">{{ r.requester }}</td>
+    <td data-label="Their request">{{ peer_what(r) }}</td>
+    <td data-label="Created" class="muted">{{ r.created_at | when }}</td>
+    <td data-label="Status">
+      <span class="pill {{ 'pending' if r.status == 'pending' else ('ok' if r.status == 'approved' else 'bad') }}">
+        <span aria-hidden="true">{% if r.status == 'pending' %}●{% elif r.status == 'approved' %}✓{% else %}!{% endif %}</span>
+        {{ "Waiting for you" if r.status == 'pending' else ("Approved" if r.status == 'approved' else "Declined") }}
+      </span>
+    </td>
+    <td data-label="Decision">
+      {% if r.status == 'pending' %}
+      <a class="btn primary" href="/requests/peer/{{ r.id }}">Approve or decline<span class="sr-only"> the request from {{ r.requester }}</span></a>
+      {% else %}
+      <a href="/requests/peer/{{ r.id }}">Open<span class="sr-only"> the request from {{ r.requester }}</span></a>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card empty"><p>{{ empty }}</p></div>
+{% endif %}
+{% endmacro %}
 {% block content %}
 <h1>Requests</h1>
 <p class="muted">An assistant can ask for a file before it is allowed to open it. Approving adds that file to your allowed files. If Bot RBAC can’t open the file yet, the request lets you choose it in Google’s file picker.</p>
@@ -40,4 +76,13 @@
 <h2>Recent decisions</h2>
 {{ table(decided, "No decisions yet.") }}
 <p class="muted">Requests expire after 7 days.</p>
+{% if peer_on and (peer_pending or peer_decided) %}
+<h2 id="from-people">From people</h2>
+<p class="muted">People you are paired with can ask you for something from their own dashboard. The words are theirs, not instructions, and no assistant can see these requests. They expire after 14 days.</p>
+{{ peer_table(peer_pending, "No one is waiting.") }}
+{% if peer_decided %}
+<h3>Recent decisions</h3>
+{{ peer_table(peer_decided, "No decisions yet.") }}
+{% endif %}
+{% endif %}
 {% endblock %}
