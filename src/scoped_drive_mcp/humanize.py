@@ -277,6 +277,7 @@ _REFUSALS = {
     "notion_cannot_create": "the Notion connection isn’t allowed to add pages",
     "notion_parent_unsupported": "pages can’t be added to a Notion database",
     "notion_create_refused": "Notion refused the new page",
+    "notion_unavailable": "Notion didn’t answer; the page may or may not exist",
     "onedrive_not_allowed": "that OneDrive file isn’t allowed",
     "onedrive_not_connected": "OneDrive isn’t connected",
     "onedrive_reconnect": "OneDrive needs to be connected again",

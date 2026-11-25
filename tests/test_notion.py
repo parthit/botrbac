@@ -1472,3 +1472,14 @@ def test_creation_needs_notion_itself_to_be_configured(world, p2_settings, memst
     c = client(app)
     login(c)
     assert not any(name.startswith("notion_") for name in _listed(c, "admin"))
+
+
+@with_create
+def test_no_answer_from_notion_says_the_page_may_exist(allowed, monkeypatch) -> None:
+    def silent(self, parent_page_id, title, children):
+        raise NotionApiError(0, "unreachable")
+
+    monkeypatch.setattr(FakeNotionApi, "create_page", silent)
+    out = create(allowed, parent_page_id=TOP, title="x")
+    assert out["structuredContent"]["error"] == "notion_unavailable"
+    assert "may or may not" in out["structuredContent"]["message"]

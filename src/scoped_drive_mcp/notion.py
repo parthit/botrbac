@@ -447,6 +447,19 @@ class NotionService:
             except NotionUnauthorizedError:
                 raise  # _run refreshes the token, or asks to reconnect
             except NotionApiError as exc:
+                if exc.status == 0 and exc.code == "unreachable":
+                    # No answer is not "nothing happened": the page may exist. Notion has
+                    # no idempotency key, so a blind retry could make a second one.
+                    raise PayloadToolError(
+                        {
+                            "error": "notion_unavailable",
+                            "message": (
+                                "Notion didn’t answer, so the page may or may not have been "
+                                "created. Read the parent page with notion_read_page to "
+                                "check before trying again."
+                            ),
+                        }
+                    ) from None
                 if exc.code != "validation_error":
                     raise
                 raise PayloadToolError(
