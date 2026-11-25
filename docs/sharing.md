@@ -110,6 +110,33 @@ a resume that any paired person's assistant may see.
   `content_trust: untrusted_peer`, and `read_file` wraps its text, because its name and content came from that
   person. Drive keeps earlier versions if you need to undo.
 
+## Asking a paired person for something
+
+A paired person's assistant cannot ask you for anything, because nothing it writes may reach your assistant.
+The person can. On **Sharing → Shared with me** they have a **Request something** form: one line in their own
+words, for example "your 2025 tax folder". It lands on your **Requests** page under **From people**.
+
+- **People only.** No MCP tool reads or writes these requests, and `check_access_request` answers
+  `not_found` for their ids, so the words never reach an assistant on either side. If you want your
+  assistant to help find the item, copy the text to it yourself, as that person's words and not as
+  instructions.
+- **It cannot be used to look into your Drive.** A described request carries text only: no file id, no
+  search, no list. The person is told "Request sent" whatever happened, also when they are not paired with
+  you or are over the limit.
+- **Approving** a described request: you pick one item on **Files** and it is shared with that person only.
+  If the item is already on your Sharing list, they are added and everyone who had it keeps it. It has to be
+  an item in your own Drive that Bot RBAC can already open (add it on Files first if it is not listed).
+- **More on something they can already see.** Next to an item you share with them they can **Ask for edit**
+  (when it is read-only) or **Ask for more time** (when it has an end date). You approve these with one
+  click: editing is turned on, or the end date moves 7 days on (or to a date you pick). The change is to the
+  item, so it applies to everyone the item is shared with, and the request says who that is. To change it
+  for one person only, use **Shared by me**.
+- **Declining** is one click. They see "Declined".
+- **Limits.** Only people with an active pairing can ask, and approving is refused once the pairing is off.
+  3 requests a day reach each person. The text is at most 500 characters, shown as plain text and stored
+  encrypted. A request expires after 14 days. Sending, approving and declining are on the Activity page of
+  the person asked, without the words.
+
 ## Sending a file to a paired person
 
 People with an active pairing can send each other a file, for example a PDF. This is separate from sharing: it

@@ -28,6 +28,8 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
 - **An activity log.** Every call, grant, revoke and refusal, without file contents.
 - **Sharing with people you pair with.** Their assistants can read the items you put on a separate Sharing
   list, and edit only where you say so.
+- **Requests between people.** A paired person can ask you, in their own words, for something you haven't
+  shared. Only you see it, on your dashboard: no assistant on either side can read it.
 - **Works with any MCP client** that does OAuth: Claude, ChatGPT, Grok, Cursor and Muse connect to one URL.
 - **Terminal: roles for agents on your own computers.** The `botrbac` CLI puts Claude Code, Codex, Cursor or
   Gemini CLI behind roles you define on the website, works offline and syncs its audit log when it can.
