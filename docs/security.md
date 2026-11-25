@@ -305,10 +305,13 @@ pass the same check. A copy of a synced block inside an allowed page shows conte
 is read only when its original block is itself under an allowed item. A trashed allowed page does not keep
 its children readable. Page text is wrapped in untrusted-content markers.
 
-The only write is `notion_create_page`, which adds a new page and never edits, appends to, moves or
-deletes an existing one. Three things must all hold:
+Notion is read-only by default. The only write is `notion_create_page`, which adds a new page and never
+edits, appends to, moves or deletes an existing one. Four things must all hold:
 
-- **Role.** It is in the `editor` and `admin` tool sets only, next to `create_doc`. A read-only
+- **Server setting.** `NOTION_ALLOW_CREATE` is off by default. Off, the tool is not registered: no role
+  lists it, a call gets the unknown-tool answer, and upgrading the server gives no existing connection a
+  new ability, whatever capabilities its Notion connection happens to have.
+- **Role.** With the setting on it is for `editor` and `admin` only, like `create_doc`. A read-only
   connection is not offered it and is refused with `Permission denied`.
 - **Parent.** The parent is fetched fresh and must pass the same parent-chain check as a read
   (`NotionAccess.covering`): an allowed page or a page under one, not trashed. Otherwise the answer is
@@ -316,9 +319,9 @@ deletes an existing one. Three things must all hold:
   as parents.
 - **Notion's capability.** Notion creates pages only for a connection with **Insert content**. Bot RBAC
   does not request or change capabilities; a connection without it gets Notion's 403, reported as
-  `notion_cannot_create` with what the person has to change. An operator who ticks **Insert content**
-  is making page creation possible for every `editor` and `admin` connection of people who connected
-  Notion; leave it off to keep Notion read-only.
+  `notion_cannot_create` with what the person has to change. An operator who sets the server setting
+  and ticks **Insert content** is making page creation possible for every `editor` and `admin`
+  connection of people who connected Notion.
 
 The body is built by the server from plain text into a fixed set of simple blocks holding plain text
 only (no links, mentions, embeds or child pages); callers cannot pass block JSON. Title (200

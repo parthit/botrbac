@@ -929,6 +929,13 @@ def test_a_page_reads_its_properties_and_nested_blocks(allowed, notion) -> None:
 
 # ---- creating a page ---------------------------------------------------------------
 
+# Page creation is off unless the server sets NOTION_ALLOW_CREATE. These tests turn it on.
+with_create = pytest.mark.parametrize(
+    "p2_settings",
+    [make_settings(root_folder_id=None, allowlist_cache_ttl=0, notion_allow_create=True)],
+    ids=["create-on"],
+)
+
 
 def create(c, role: str = "editor", **args) -> dict:
     return mcp_call(c, "notion_create_page", role=role, **args)
@@ -944,6 +951,7 @@ def audit_rows(capsys) -> list[dict]:
     return rows
 
 
+@with_create
 def test_create_page_under_an_allowed_page(allowed, notion, capsys) -> None:
     capsys.readouterr()
     out = create(
@@ -1012,6 +1020,7 @@ def test_create_page_under_an_allowed_page(allowed, notion, capsys) -> None:
     ] == [TOP]
 
 
+@with_create
 @pytest.mark.parametrize("parent", [CHILD, NESTED, ROW])
 def test_create_page_under_a_page_inside_an_allowed_page(allowed, notion, parent) -> None:
     # Reads work for these (a sub-page, a page in a column block, a database row), so a
@@ -1025,6 +1034,7 @@ def test_create_page_under_a_page_inside_an_allowed_page(allowed, notion, parent
     ]
 
 
+@with_create
 @pytest.mark.parametrize("parent", [OTHER, HIDDEN, nid(99)])
 def test_create_page_outside_the_list_is_refused_like_a_read(allowed, notion, parent) -> None:
     # Shared with Bot RBAC but never allowed, not shared at all, and not existing: the
@@ -1038,6 +1048,7 @@ def test_create_page_outside_the_list_is_refused_like_a_read(allowed, notion, pa
     assert ("create", parent) not in notion.calls
 
 
+@with_create
 def test_create_page_with_nothing_allowed_never_calls_notion(c, notion) -> None:
     connect_notion(c)
     out = create(c, parent_page_id=TOP, title="x")
@@ -1045,6 +1056,7 @@ def test_create_page_with_nothing_allowed_never_calls_notion(c, notion) -> None:
     assert notion.calls == []
 
 
+@with_create
 def test_create_page_stops_when_the_page_is_removed_or_trashed(allowed, notion) -> None:
     notion.objects[TOP]["in_trash"] = True
     assert create(allowed, parent_page_id=CHILD, title="x")["structuredContent"]["error"] == (
@@ -1062,6 +1074,7 @@ def test_create_page_stops_when_the_page_is_removed_or_trashed(allowed, notion) 
     assert notion.created == []
 
 
+@with_create
 def test_create_page_under_a_database_is_not_supported(allowed, notion) -> None:
     out = create(allowed, parent_page_id=DB, title="A row")
     assert out["structuredContent"]["error"] == "notion_parent_unsupported"
@@ -1073,6 +1086,7 @@ def test_create_page_under_a_database_is_not_supported(allowed, notion) -> None:
     assert notion.created == []
 
 
+@with_create
 def test_read_only_connections_cannot_create_pages(allowed, notion, capsys) -> None:
     capsys.readouterr()
     notion.calls.clear()
@@ -1089,6 +1103,7 @@ def test_read_only_connections_cannot_create_pages(allowed, notion, capsys) -> N
     assert [p["title"] for p in notion.created] == ["editor", "admin"]
 
 
+@with_create
 def test_only_editing_roles_are_offered_the_create_tool(allowed) -> None:
     listed = {}
     for role in ("viewer", "editor", "admin"):
@@ -1107,6 +1122,7 @@ def test_only_editing_roles_are_offered_the_create_tool(allowed) -> None:
     assert listed == {"viewer": False, "editor": True, "admin": True}
 
 
+@with_create
 def test_a_connection_without_insert_content_says_what_to_change(allowed, notion, capsys) -> None:
     notion.can_insert = False  # the capability is not ticked on the connection in Notion
     capsys.readouterr()
@@ -1128,6 +1144,7 @@ def test_a_connection_without_insert_content_says_what_to_change(allowed, notion
     assert [h["title"] for h in hits] == ["Team wiki"]
 
 
+@with_create
 def test_a_stored_connection_is_not_changed_by_creating(allowed, notion, memstore) -> None:
     before = memstore.get(f"{KEY_PREFIX}{NOTION_TOKEN_KEY}")
     listed = dict(memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}"))
@@ -1139,6 +1156,7 @@ def test_a_stored_connection_is_not_changed_by_creating(allowed, notion, memstor
     assert dict(memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}")) == listed
 
 
+@with_create
 def test_create_page_refreshes_an_expired_token_and_creates_once(
     allowed, notion, notion_oauth
 ) -> None:
@@ -1149,12 +1167,14 @@ def test_create_page_refreshes_an_expired_token_and_creates_once(
     assert [p["title"] for p in notion.created] == ["After refresh"]
 
 
+@with_create
 def test_create_page_when_notion_is_not_connected(c, notion) -> None:
     out = create(c, parent_page_id=TOP, title="x")
     assert out["structuredContent"]["error"] in ("not_allowed", "notion_not_connected")
     assert notion.calls == []
 
 
+@with_create
 @pytest.mark.parametrize(
     ("args", "word"),
     [
@@ -1174,6 +1194,7 @@ def test_create_page_bounds_its_input(allowed, notion, args, word) -> None:
     assert notion.calls == []  # refused before Notion is asked anything
 
 
+@with_create
 def test_create_page_accepts_input_at_the_limits(allowed, notion) -> None:
     out = create(
         allowed, parent_page_id=TOP, title="t" * 200, content=("- item\n" * 100) + ("c" * 19_000)
@@ -1188,6 +1209,7 @@ def test_create_page_accepts_input_at_the_limits(allowed, notion) -> None:
     assert "".join(p["text"]["content"] for p in pieces) == "c" * 20_000
 
 
+@with_create
 def test_block_json_in_the_text_stays_text(allowed, notion) -> None:
     # A caller cannot hand Notion blocks of its own: whatever it sends is text in a block
     # this server built, with no link, mention or child page.
@@ -1303,6 +1325,7 @@ def test_the_http_client_creates_a_page_as_notion_documents_it() -> None:
         _http_api(refused).create_page(TOP, "x", [])
 
 
+@with_create
 def test_notion_refusing_the_new_page_is_not_reported_as_a_read_problem(
     allowed, monkeypatch
 ) -> None:
@@ -1336,3 +1359,116 @@ def test_activity_names_a_created_notion_page() -> None:
         {**base, "decision": "deny", "reason": "role 'viewer' may not call 'notion_create_page'"}
     )
     assert "tried to create a Notion page" in blocked.text and blocked.badge.label == "Blocked"
+
+
+# ---- page creation is off by default ---------------------------------------------------
+
+
+def _listed(c, role: str) -> dict:
+    r = c.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS[role]}"},
+    )
+    return {t["name"]: t for t in r.json()["result"]["tools"]}
+
+
+def _instructions(c) -> str:
+    r = c.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"},
+            },
+        },
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS['admin']}"},
+    )
+    return r.json()["result"]["instructions"]
+
+
+def test_page_creation_is_off_unless_the_server_turns_it_on() -> None:
+    assert make_settings().notion_allow_create is False
+    assert make_settings(notion_allow_create="1").notion_allow_create is True
+
+
+def test_by_default_no_role_is_offered_or_can_call_create_page(allowed, notion, capsys) -> None:
+    for role in ("viewer", "editor", "admin"):
+        tools = _listed(allowed, role)
+        assert "notion_create_page" not in tools
+        assert {"notion_list_pages", "notion_read_page", "notion_search"} <= set(tools)
+    assert "notion_create_page" not in _instructions(allowed)
+    notion.calls.clear()
+    capsys.readouterr()
+    for role in ("viewer", "editor", "admin"):
+        out = create(allowed, role=role, parent_page_id=TOP, title="x", content="hello")
+        assert out["isError"] is True
+        # The same answer as any tool this server does not have.
+        unknown = mcp_call(allowed, "no_such_tool", role=role)
+        assert (
+            out["content"][0]["text"].replace("notion_create_page", "no_such_tool")
+            == (unknown["content"][0]["text"])
+        )
+        assert "Unknown tool" in out["content"][0]["text"]
+    assert notion.created == [] and notion.calls == []
+    assert audit_rows(capsys) == []
+    # Reading is untouched.
+    top = result(allowed, "notion_read_page", page_id=TOP)["structuredContent"]
+    assert "welcome to the wiki" in top["content"]
+
+
+def test_by_default_the_pages_still_say_notion_is_never_edited(app, allowed) -> None:
+    privacy = allowed.get("/privacy").text
+    assert "and never edits Notion. An assistant can read only" in privacy
+    assert "add a new page" not in privacy
+    tab = allowed.get("/files?tab=notion").text
+    assert "They can’t edit Notion." in tab and "add new pages" not in tab
+    settings = allowed.get("/settings").text
+    assert "Only the Notion pages you pick, and only to read." in settings
+    assert "add a new page" not in settings
+
+
+def test_by_default_a_person_not_yet_connected_is_told_notion_is_never_edited(c) -> None:
+    tab = c.get("/files?tab=notion").text
+    assert "Bot RBAC never edits Notion." in tab
+
+
+@with_create
+def test_with_creation_on_the_pages_say_what_assistants_can_add(allowed) -> None:
+    assert "notion_create_page" in _instructions(allowed)
+    privacy = allowed.get("/privacy").text
+    assert "add a new page under one of those" in privacy
+    assert "never changes or deletes a page that already exists" in privacy
+    assert "never edits Notion" not in privacy
+    tab = allowed.get("/files?tab=notion").text
+    assert "Assistants you let edit can also add new pages under them." in tab
+    assert "They can’t edit Notion." not in tab
+    settings = allowed.get("/settings").text
+    assert "to read, and to add new pages under them." in settings
+    assert "only to read." not in settings
+
+
+@with_create
+def test_with_creation_on_the_connect_card_does_not_say_never_edits(c) -> None:
+    tab = c.get("/files?tab=notion").text
+    assert "Bot RBAC never changes or deletes your existing Notion pages." in tab
+    assert "Bot RBAC never edits Notion." not in tab
+
+
+def test_creation_needs_notion_itself_to_be_configured(world, p2_settings, memstore, oauth) -> None:
+    # The setting alone, with no Notion OAuth client, registers nothing.
+    settings = make_settings(root_folder_id=None, allowlist_cache_ttl=0, notion_allow_create=True)
+    app = build_app(
+        settings,
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    login(c)
+    assert not any(name.startswith("notion_") for name in _listed(c, "admin"))

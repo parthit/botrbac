@@ -35,7 +35,7 @@ GUEST_TOOLS: frozenset[str] = frozenset(
 # Reading the person's own Notion, limited to what they allowed (notion.py). Read-only.
 NOTION_TOOLS: frozenset[str] = frozenset({"notion_list_pages", "notion_read_page", "notion_search"})
 # Creating a new page under an allowed Notion page (notion.py). Never edits or deletes one.
-# Like create_doc, only for a connection allowed to edit.
+# Off unless the deployment sets NOTION_ALLOW_CREATE: see OPT_IN_TOOLS below.
 NOTION_WRITE_TOOLS: frozenset[str] = frozenset({"notion_create_page"})
 
 # Reading the person's own OneDrive, limited to what they allowed (onedrive.py). Read-only.
@@ -97,7 +97,6 @@ DROP_TOOLS: frozenset[str] = frozenset({"send_file", "save_drop"})
 
 EDITOR_TOOLS: frozenset[str] = (
     VIEWER_TOOLS
-    | NOTION_WRITE_TOOLS
     | GUEST_WRITE_TOOLS
     | DROP_TOOLS
     | UPLOAD_TOOLS
@@ -118,6 +117,16 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 }
 
 ALL_TOOLS = ADMIN_TOOLS
+
+# Tools that are not in the role sets above and exist only when a deployment turns them on
+# with a setting; server.py registers them only then. Until it does, there is no such tool
+# to list or call, whatever this says. Like create_doc, they are for connections that may
+# edit.
+OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
+    Role.EDITOR: NOTION_WRITE_TOOLS,
+    Role.ADMIN: NOTION_WRITE_TOOLS,
+}
+_OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
 
 _AUDITED_ID_ARGS = (
     "file_id",
@@ -145,9 +154,10 @@ def is_allowed(role: Role | str | None, tool: str) -> bool:
     if role is None:
         return False
     try:
-        return tool in ROLE_TOOLS[Role(role)]
+        known = Role(role)
     except ValueError:
         return False
+    return tool in ROLE_TOOLS[known] or tool in OPT_IN_TOOLS.get(known, frozenset())
 
 
 def check_permission(principal: Principal | None, tool: str) -> Principal:
@@ -199,7 +209,7 @@ def require(
     The wrapper keeps the original signature (via functools.wraps) so FastMCP still
     generates the right input schema.
     """
-    if tool not in ALL_TOOLS:
+    if tool not in ALL_TOOLS and tool not in _OPT_IN_NAMES:
         raise ValueError(f"tool {tool!r} is not in the role map")
 
     def decorator(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
