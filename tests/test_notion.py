@@ -745,10 +745,17 @@ def test_the_http_client_sends_reads_as_notion_documents_them() -> None:
         (429, {"code": "rate_limited"}, NotionApiError, "rate_limited"),
         (502, b"<html>bad gateway</html>", NotionApiError, ""),
         (200, ["not", "an", "object"], NotionApiError, "bad_response"),
+        (200, b"<html>not json</html>", NotionApiError, "bad_response"),
+        # No answer at all: still a NotionApiError, which the tools and the dashboard
+        # report as Notion not answering, instead of a 500 or "Drive request failed".
+        (0, httpx.ConnectError("refused"), NotionApiError, "unreachable"),
+        (0, httpx.ReadTimeout("slow"), NotionApiError, "unreachable"),
     ],
 )
 def test_the_http_client_maps_notions_errors(status, body, error, code) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
+        if isinstance(body, Exception):
+            raise body
         if isinstance(body, bytes):
             return httpx.Response(status, content=body)
         return httpx.Response(status, json=body)
@@ -856,6 +863,8 @@ def test_blocks_read_as_markdown_like_lines(block, line) -> None:
         ({"type": "number", "number": None}, ""),
         ({"type": "url", "url": "https://x"}, "https://x"),
         ({"type": "people", "people": [{"name": "Ada"}, {"name": "Bo"}]}, "Ada, Bo"),
+        ({"type": "people", "people": [{"name": "Ada"}, {"id": "u2"}, {"name": None}]}, "Ada"),
+        ({"type": "multi_select", "multi_select": [{"name": ""}, {"name": "b"}]}, "b"),
         ({"type": "formula", "formula": {"type": "number", "number": 3}}, "3"),
         ({"type": "formula", "formula": {"type": "string", "string": None}}, ""),
         ({"type": "relation", "relation": [{"id": "x"}]}, ""),
