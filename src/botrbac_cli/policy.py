@@ -9,6 +9,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import signing, state
 from .patterns import chain_allows, chain_allows_command, has_command_rules
@@ -23,6 +24,20 @@ class Decision:
     allowed: bool
     reason: str
     role: str
+
+
+def fix_hint(pattern: str) -> str:
+    """What a blocked agent should tell its person: the pattern to add, and where. Names
+    the site from login (scheme and host only), or the Terminal page when it is unknown."""
+    creds = state.read_json("credentials.json") or {}
+    parts = urlsplit(str(creds.get("server") or "") if isinstance(creds, dict) else "")
+    site = f"{parts.scheme}://{parts.netloc}" if parts.scheme in ("https", "http") else ""
+    roles = f"{site}/terminal/roles" if site else "the Terminal page"
+    return (
+        "This is the person's rule, not a fault to work around. If the tool is needed, ask "
+        f"them to add {pattern} to this computer's role at {roles}, or to give the computer "
+        "a wider role on the Terminal page."
+    )
 
 
 def load_cached() -> dict[str, Any] | None:

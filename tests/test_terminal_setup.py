@@ -359,3 +359,53 @@ def test_roles_explain_themselves_when_nothing_is_connected(world, memstore, oau
     new = c.get("/terminal/roles/new").text
     assert "placeholder=" not in new.split('name="patterns"', 1)[1].split(">", 1)[0]
     assert 'data-insert="cmd/gh"' in new
+
+
+def test_pages_explain_how_roles_tie_to_computers(world, memstore, oauth) -> None:
+    from tests.terminal_helpers import bearer, connect_terminal
+
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    issued = connect_terminal(c)
+    c.post(
+        "/api/terminal/audit", json={"rows": [], "unguarded": ["notion"]}, headers=bearer(issued)
+    )
+    page = c.get("/terminal").text
+    assert 'id="how-it-works"' in page and "Role</b> column" in page
+    assert "Agents can read, not edit or run commands." in page  # Read-only, in plain words
+    # An unguarded server says what it means and how to fix it.
+    assert "<b>notion</b> talks to the agent directly" in page
+    assert "<code>botrbac doctor</code>" in page and "botrbac wrap claude-code --user" in page
+
+    roles = c.get("/terminal/roles").text
+    assert 'id="roles-how"' in roles and "never widen" in roles
+    new = c.get("/terminal/roles/new").text
+    assert 'id="starters"' in new
+    for name in ("Reviewer", "Coding", "Coding, limited shell"):
+        assert f'data-name="{name}"' in new
+    starter = new.split('data-name="Coding"', 1)[0].rsplit("data-insert=", 1)[1]
+    assert "claude-code/Bash\n" in starter and "cmd/" not in starter
+    # An existing role is edited as is, without templates.
+    assert 'id="starters"' not in c.get("/terminal/roles/read-only").text
+
+
+def test_setup_md_explains_roles_and_adds_the_hook_last(world, memstore, oauth) -> None:
+    text = setup_markdown(BASE_URL)
+    assert "## What this is" in text and f"{BASE_URL}/terminal/roles/new" in text
+    assert "Blocked by Bot RBAC" in text and "unguarded server" in text
+    # The hook blocks the agent's own shell under Read-only, so it is the last command.
+    hook = text.index("botrbac hooks install claude-code --user --allow-unguarded")
+    assert hook > text.index("botrbac doctor") and hook > text.index("## 5.")
+
+
+def test_blocked_message_names_the_pattern_and_the_page(tmp_path, monkeypatch) -> None:
+    from botrbac_cli import policy
+
+    monkeypatch.setenv("BOTRBAC_HOME", str(tmp_path))
+    assert "the Terminal page" in policy.fix_hint("github/create_issue")
+    state.write_json("credentials.json", {"server": "https://rbac.example.org/x"}, private=True)
+    hint = policy.fix_hint("github/create_issue")
+    assert (
+        "add github/create_issue to this computer's role at https://rbac.example.org/terminal/roles"
+        in hint
+    )

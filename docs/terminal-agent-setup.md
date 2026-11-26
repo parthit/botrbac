@@ -5,6 +5,27 @@ decide, on the website https://botrbac.com, which tools the AI agents on this co
 install the `botrbac` command, connect this computer to their account, and add `botrbac gateway` to
 your own MCP configuration. The person only has to approve one login code in their browser.
 
+## What this is (read first, and explain it to the person in these terms)
+
+```
+agent (you) ──tool call──► botrbac on this computer ──checks the role──► runs the tool, or blocks it
+```
+
+- **Terminal**: this computer, once it is connected to the person's account.
+- **Role**: a list of allowed tools, such as `claude-code/Edit`, `github/get_*` or `cmd/git`. Anything not
+  on the list is blocked. Each computer has exactly one role, chosen on https://botrbac.com/terminal in the
+  **Role** column (pick, then **Change**). That is the only place a role is tied to a computer.
+- **Built-in roles**: **Read-only** (look, don't change; every new computer starts here), **Full access**
+  (nothing blocked) and **No tools** (pause). The person can make their own on https://botrbac.com/terminal/roles,
+  starting from a template such as *Coding* or *Reviewer*.
+- **Activity** (https://botrbac.com/terminal/activity): every call, allowed or blocked, with the exact tool name.
+- **Unguarded server**: an MCP server the agent talks to directly, not through botrbac, so the role does
+  not cover it. `botrbac doctor` lists them and prints the fix.
+- **`--role`**: `botrbac run --role NAME -- claude` limits one session further. It can only narrow the
+  computer's role, never widen it.
+
+The goal state: every computer on a role that fits its work (not Full access), and no unguarded servers.
+
 Rules:
 
 - **Never print, log or paste tokens.** `botrbac login` stores its tokens in
@@ -70,16 +91,8 @@ To add it for every project rather than this one, check that `claude mcp add --h
 then use `claude mcp add --scope user botrbac -- botrbac gateway`. Check with
 `claude mcp list`.
 
-Then add the hook, so Claude Code's own tools (its shell and file edits) follow the role too. Without
-it, Bot RBAC only sees MCP tools, and `cmd/gh`-style rules have no effect:
-
-```sh
-botrbac hooks install claude-code --user --allow-unguarded
-```
-
-Tell the person: a new computer starts as **Read-only**, so Claude can read but not edit files or run
-commands until they give this computer a wider role on https://botrbac.com/terminal. Undo the hook with
-`botrbac hooks remove claude-code --user`. Skip this step only if the person says so.
+Claude Code also gets a hook so its own shell and file edits follow the role. Add it in step 6, last:
+once it is in place and the role is Read-only, your own shell commands are blocked.
 
 ### Cursor: `~/.cursor/mcp.json`
 
@@ -144,17 +157,38 @@ Good output:
 
 - `status` shows `Account:` with the person's email, `Role:` with a role name, and `Policy: … online`.
 - `doctor` starts with `✓ logged in to https://botrbac.com` and `✓ policy is 0.0 days old`.
-- `! no servers yet` is fine: no MCP servers sit behind the gateway yet (see step 6).
+- `! no servers yet` is fine: no MCP servers sit behind the gateway yet (see step 7).
 - A line `✗ <agent>: <name> in <file> is not behind botrbac` means that MCP server is used directly,
-  without Bot RBAC. That is expected for servers the person has not asked to move; mention it to them.
+  without Bot RBAC (the website shows it as an **unguarded server**). Tell the person which ones, and
+  offer to move them with the `fix:` command `doctor` prints below that line, usually
+  `botrbac wrap claude-code --user`. Run it with `--dry-run` first, show the result, and run it for real
+  only if they agree.
 
-## 5. Restart the agent
+## 5. Tell the person what to do next
 
-Tell the person they may need to restart the agent (or open a new session) so it loads the new
-`botrbac` MCP server. Then the computer is listed on https://botrbac.com/terminal, where they can change its
-role at any time.
+Say this, in your own words, with their real links:
 
-## 6. Optional extras: only if the person asks
+1. This computer is now listed on https://botrbac.com/terminal with the role **Read-only**.
+2. To let agents edit files and run commands, open https://botrbac.com/terminal/roles/new, pick a template
+   (**Coding** is a good start), save it, then on https://botrbac.com/terminal choose it in the **Role** column and
+   press **Change**. **Full access** also works, but blocks nothing.
+3. Restart the agent (or open a new session) so it loads the `botrbac` MCP server and the hook.
+4. When something is blocked, https://botrbac.com/terminal/activity shows the exact tool name to add to the role.
+
+## 6. Claude Code only: add the hook (last)
+
+So Claude Code's own tools (its shell, file edits, web fetch) follow the role too. Without it, Bot RBAC
+only sees MCP tools, and `cmd/gh`-style rules have no effect:
+
+```sh
+botrbac hooks install claude-code --user --allow-unguarded
+```
+
+Run this as your last command: from now on, a role without `claude-code/Bash` blocks your shell, and
+Read-only does. Undo it with `botrbac hooks remove claude-code --user` (the person runs that themselves;
+the hook refuses it from an agent). Skip this step only if the person says so.
+
+## 7. Optional extras: only if the person asks
 
 - **Put existing MCP servers behind Bot RBAC** (so their tools follow the role):
   `botrbac servers add NAME -- <the server's command and arguments>` for each one the person names, or
@@ -177,5 +211,7 @@ role at any time.
 | `This terminal was disconnected on the website` | Run `botrbac login` again. |
 | Bot RBAC tools do not show in the agent | Restart the agent. Check `claude mcp list` or the config file, and that the command path works. |
 | `botrbac: command not found` in the agent | Use the full path from `command -v botrbac` in the config. |
+| A tool call fails with `Blocked by Bot RBAC: …` | Working as intended: the role does not allow that tool. Do not try to get around it. Tell the person the exact pattern the error names (such as `claude-code/Bash` or `cmd/npm`) and that they can add it to the role on https://botrbac.com/terminal/roles, or give this computer another role on https://botrbac.com/terminal. |
+| The website shows "unguarded servers" | Run `botrbac doctor`; it names each one and the `fix:` command. Ask before running it. |
 
 Full documentation: https://github.com/parthit/botrbac/blob/main/docs/terminal.md

@@ -93,13 +93,20 @@
     if (!btn) return;
     var area = document.getElementById(btn.getAttribute("data-target") || "");
     if (!area) return;
-    var line = btn.getAttribute("data-insert") || "";
+    // One pattern, or several separated by new lines (a starter role).
+    var adding = (btn.getAttribute("data-insert") || "").split("\n")
+      .map(function (l) { return l.trim(); }).filter(Boolean);
     var lines = area.value.split("\n").map(function (l) { return l.trim(); });
-    if (lines.indexOf(line) === -1) {
+    adding.forEach(function (line) {
+      if (lines.indexOf(line) !== -1) return;
       area.value = area.value.replace(/\s*$/, "") + (area.value.trim() ? "\n" : "") + line + "\n";
-    }
+      lines.push(line);
+    });
+    var name = btn.getAttribute("data-name");
+    var nameField = name && area.form && area.form.querySelector('input[name="name"]');
+    if (nameField && !nameField.value.trim()) nameField.value = name;
     area.focus();
-    announce("ok", "Added " + line + ".");
+    announce("ok", adding.length === 1 ? "Added " + adding[0] + "." : "Added " + adding.length + " patterns.");
   });
 
   // Terminal setup: an agent picker that rewrites one copyable command. Without
