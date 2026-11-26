@@ -1,17 +1,19 @@
 # Bot RBAC
 
-**Give an AI assistant the Google Drive files you pick, and nothing else.**
+**Give an AI assistant the files and pages you pick, and nothing else.**
 
-When you connect Claude, ChatGPT or Grok to Google Drive, the assistant can usually reach your whole Drive.
-Bot RBAC sits in between as an MCP server. You tick the files and folders an assistant may use, and every
-call is checked against that list before anything is sent to Google. Everything else is refused, with an
-approval link for you instead.
+When you connect Claude, ChatGPT or Grok to Google Drive, Notion or OneDrive, the assistant can usually reach
+everything in that account. Bot RBAC sits in between as an MCP server. You tick the files, folders and pages
+an assistant may use, and every call is checked against that list before anything is sent to the service.
+Everything else is refused, with an approval link for you instead.
+
+Google Drive is the first connection. Notion and OneDrive are optional, each with its own list.
 
 **Use it:** [botrbac.com](https://botrbac.com) (hosted) · **Run your own:** [one Vercel function](#run-your-own-copy),
 or [let your coding agent set it up](docs/agent-setup.md) · MIT licensed
 
 ```
-Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check ──▶ Google Drive (as you)
+Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check ──▶ Google Drive, Notion, OneDrive (as you)
                                      │                │
                                wrong role?      not on your list?
                                  refused        refused, with an approval link for you
@@ -19,15 +21,16 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
 
 ## What you get
 
-- **A list you control.** Allow a file or a folder (a folder includes what is inside it). Untick it and the
-  next call is refused within about 2 seconds.
+- **A list you control, per service.** Allow a Drive or OneDrive file or folder, or a Notion page or
+  database (a folder or page includes what is inside it). Untick it and the next call is refused within
+  about 2 seconds.
 - **Approval links.** When an assistant asks for something not on the list, it gets a link to show you.
   You approve or deny it in the dashboard.
 - **A role for each app.** Read only, read and edit, or full. An app only sees the tools its role allows.
   There are no tools to move, share or permanently delete files.
 - **Named roles for agents and subagents.** A role is a named part of your list with its own level. An agent
   that connects to `/mcp/role/<role>` reaches only that role's files. See [docs/roles.md](docs/roles.md).
-- **An activity log.** Every call, grant, revoke and refusal, without file contents.
+- **An activity log.** Every call, grant, revoke and refusal, without file or page contents.
 - **Sharing with people you pair with.** Their assistants can read the items you put on a separate Sharing
   list, and edit only where you say so.
 - **Requests between people.** A paired person can ask you, in their own words, for something you haven't
@@ -45,20 +48,23 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
 2. **Connect Google Drive** (a second, separate Google permission screen).
 3. On **Files**, click **Add from Google Drive** and pick files or folders in Google's window. Only what
    you pick is ever opened to Bot RBAC.
+   - **Optional:** connect Notion or OneDrive in **Settings → Services**, then choose **Allow** on the
+     pages or folders an assistant may use under **Files → From Notion** or **From OneDrive**.
 4. Add `https://botrbac.com/mcp` to your assistant as a custom connector, sign in when the browser opens,
    and choose what the app may do.
    - **Claude:** Settings → Connectors → Add custom connector.
    - **ChatGPT:** turn on developer mode, then Settings → Apps → Create, and choose OAuth.
    - **Grok Bot:** say "Add this MCP server: https://botrbac.com/mcp" in the chat.
    - **Cursor / Muse:** add a remote MCP server / custom connector with that URL.
-5. Ask the assistant to list your allowed files. Then ask for a file you did not allow: it should come back
-   with an approval link instead of the content.
+5. Ask the assistant to list your allowed files (or Notion pages). Then ask for one you did not allow: it
+   should come back with an approval link or a `not_allowed` refusal instead of the content.
 
-If the assistant has its own built-in Google Drive connector, disconnect it, or it can go around Bot RBAC.
+If the assistant has its own built-in Google Drive, Notion or OneDrive connector, disconnect it, or it can go
+around Bot RBAC.
 
 ## Run your own copy
 
-The hosted version holds an encrypted Google token for your Drive. If you'd rather hold it yourself, run
+The hosted version holds an encrypted token for each service you connect. If you'd rather hold them yourself, run
 your own copy: one Python function on Vercel's free plan, plus Upstash Redis or Postgres.
 
 **With a coding agent (easiest).** Paste this into Claude Code, Cursor, Codex or similar:
@@ -97,7 +103,11 @@ tunnel. The test suite needs no Google account: `uv run pytest`.
   Google's own file picker (`drive.file`). Google enforces that, so a bug in this server, a leaked token, or
   the person running it can't reach the rest of your Drive. The allowlist is a second check on top: an
   assistant only gets the picked items you allowed, with the role you gave it.
-- **Picked files are reachable by the server.** They are read with an encrypted refresh token held by
+- **Notion and OneDrive rely on Bot RBAC's list more.** Notion limits the server to the pages you share on
+  Notion's own screen, then Bot RBAC's list narrows that. OneDrive has no per-file permission for personal
+  accounts, so the server can reach your whole OneDrive and Bot RBAC's list is the only check. See
+  [docs/notion.md](docs/notion.md) and [docs/onedrive.md](docs/onedrive.md).
+- **Allowed items are reachable by the server.** They are read with an encrypted refresh token held by
   whoever runs the server. **Run your own copy** if you'd rather hold that token yourself (above).
 - **Documents are untrusted input.** A file can contain text written to steer an assistant. Give an app
   **Read only** unless it needs to write.
@@ -121,7 +131,7 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/architecture.md](docs/architecture.md) | How it is built: the request path, data model, trade-offs, limits and known debt |
 | [docs/development.md](docs/development.md) | Project layout and implementation notes |
 
-Google Drive is the first connection. More services are planned.
+Google Drive is the first connection, with Notion and OneDrive as optional ones. More services are planned.
 
 ## Contributing
 

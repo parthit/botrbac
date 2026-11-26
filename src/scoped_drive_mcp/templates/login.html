@@ -6,7 +6,7 @@
   <h1>Sign in</h1>
   {% if purpose %}<p class="sub" id="login-purpose"><b>Sign in to {{ purpose }}.</b> {{ purpose_hint }}</p>{% endif %}
   <p class="sub">Sign in with your own Google account so Bot RBAC knows which settings are yours. Each person’s connections and lists stay separate.</p>
-  <p class="disclosure">Signing in asks Google only for your email address. It does not give Bot RBAC access to your Drive or anything else. After you sign in, you choose which services to connect, such as Google Drive, as a separate step. An assistant can then open only the files and folders you allow. Those contents go only to an assistant you connect. They are not sold, not used for advertising, and not used to train a model.</p>
+  <p class="disclosure">Signing in asks Google only for your email address. It does not give Bot RBAC access to your Drive or anything else. After you sign in, you choose which services to connect (Google Drive, and optionally Notion or OneDrive), each as a separate step. An assistant can then open only the files, folders and pages you allow. Those contents go only to an assistant you connect. They are not sold, not used for advertising, and not used to train a model.</p>
   <p class="legal-links">This is described in the <a href="/privacy">privacy policy</a> and the <a href="/terms">terms of service</a>.</p>
   <div class="ctas">
     {% with href="/auth/login?next=" ~ (next | urlencode) %}{% include "_google_button.html" %}{% endwith %}
