@@ -10,6 +10,9 @@
       "maxDuration": 10
     }
   },
+  "crons": [
+    { "path": "/internal/sweep", "schedule": "17 4 * * *" }
+  ],
   "rewrites": [
     { "source": "/((?!api/blob-sign).*)", "destination": "/api/index" }
   ]

@@ -9,6 +9,7 @@ is stored under `u:{email}:` on that same prefixed store.
 """
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -833,8 +834,31 @@ RETURNING value
 """
 
 
+def _close_quietly(conn: Any) -> None:
+    with contextlib.suppress(Exception):  # already unusable; nothing to report
+        conn.close()
+
+
+# An idle Postgres connection is reused only this soon after its last statement. A
+# serverless instance is frozen between requests and the pooler closes idle sockets, so
+# an older one is replaced instead of trusted.
+PG_IDLE_SECONDS = 10.0
+PG_POOL_SIZE = 4
+# Expired rows are only removed when their own key is read again, so keys that are
+# written once (rate-limit windows, idempotency marks, abandoned upload pieces) need a
+# sweep. An instance runs one at most this often, in batches of this many rows.
+PG_SWEEP_EVERY = 3600.0
+PG_SWEEP_BATCH = 5000
+
+
 class PostgresStore:
-    """One short Postgres connection per call. No pool (serverless-friendly)."""
+    """Postgres as a key-value store.
+
+    A few connections are kept per instance and reused while they are fresh, so the ten
+    or so store calls one request makes share one TCP + TLS + auth handshake instead of
+    paying for it each time. Nothing is retried: a statement that fails is reported, as
+    before, and its connection is dropped.
+    """
 
     kind = "postgres"
 
@@ -842,6 +866,10 @@ class PostgresStore:
         self._url = url
         self._ready = False
         self._lock = threading.Lock()
+        self._idle: list[tuple[Any, float]] = []  # (connection, last used), newest last
+        self._idle_lock = threading.Lock()
+        # The first sweep comes a minute into an instance's life, then every PG_SWEEP_EVERY.
+        self._swept_at = time.monotonic() - PG_SWEEP_EVERY + 60
 
     def __repr__(self) -> str:
         return "PostgresStore(kind='postgres')"
@@ -854,7 +882,11 @@ class PostgresStore:
         conn = psycopg.connect(
             self._url, autocommit=True, connect_timeout=5, prepare_threshold=None
         )
-        self._ensure(conn)
+        try:
+            self._ensure(conn)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _ensure(self, conn: Any) -> None:
@@ -892,21 +924,103 @@ class PostgresStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS sdm_list_key_pos ON sdm_list (key, pos DESC)")
+            # For sweep_expired: only rows that can expire are indexed.
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS sdm_kv_expires ON sdm_kv (expires_at)
+                WHERE expires_at IS NOT NULL
+                """
+            )
             self._ready = True
 
+    def _checkout(self) -> Any:
+        stale: list[Any] = []
+        conn = None
+        now = time.monotonic()
+        with self._idle_lock:
+            while self._idle and conn is None:
+                candidate, used = self._idle.pop()
+                if now - used <= PG_IDLE_SECONDS and not candidate.closed:
+                    conn = candidate
+                else:
+                    stale.append(candidate)
+            if conn is not None:
+                # Everything left is older than the one just taken.
+                stale.extend(c for c, used in self._idle if now - used > PG_IDLE_SECONDS)
+                self._idle = [(c, used) for c, used in self._idle if now - used <= PG_IDLE_SECONDS]
+        for old in stale:
+            _close_quietly(old)
+        return conn if conn is not None else self._connect()
+
+    def _checkin(self, conn: Any) -> None:
+        if not conn.closed and not conn.broken:
+            with self._idle_lock:
+                if len(self._idle) < PG_POOL_SIZE:
+                    self._idle.append((conn, time.monotonic()))
+                    return
+        _close_quietly(conn)
+
     def _run(self, fn: Callable[[Any], Any]) -> Any:
-        with self._connect() as conn:
-            return fn(conn)
+        conn = self._checkout()
+        try:
+            result = fn(conn)
+        except BaseException:
+            # The statement may have failed half-way: never hand this connection on.
+            _close_quietly(conn)
+            raise
+        self._checkin(conn)
+        self._maybe_sweep()
+        return result
+
+    def close(self) -> None:
+        """Close the idle connections (tests, and a clean shutdown off serverless)."""
+        with self._idle_lock:
+            idle, self._idle = self._idle, []
+        for conn, _ in idle:
+            _close_quietly(conn)
+
+    def sweep_expired(self, batch: int = PG_SWEEP_BATCH) -> int:
+        """Delete up to `batch` expired rows; returns how many went."""
+
+        def sweep(conn: Any) -> int:
+            done = conn.execute(
+                """
+                DELETE FROM sdm_kv WHERE key IN (
+                    SELECT key FROM sdm_kv
+                    WHERE expires_at IS NOT NULL AND expires_at <= NOW()
+                    LIMIT %s
+                )
+                AND expires_at IS NOT NULL AND expires_at <= NOW()
+                """,
+                (batch,),
+            )
+            return max(int(done.rowcount or 0), 0)
+
+        self._swept_at = time.monotonic()
+        conn = self._checkout()
+        try:
+            removed = sweep(conn)
+        except BaseException:
+            _close_quietly(conn)
+            raise
+        self._checkin(conn)
+        return int(removed)
+
+    def _maybe_sweep(self) -> None:
+        if time.monotonic() - self._swept_at < PG_SWEEP_EVERY:
+            return
+        with self._lock:
+            if time.monotonic() - self._swept_at < PG_SWEEP_EVERY:
+                return
+            self._swept_at = time.monotonic()
+        try:
+            self.sweep_expired()
+        except Exception:  # noqa: BLE001 - housekeeping must not fail the caller's request
+            logging.getLogger(__name__).warning("postgres_sweep_failed", exc_info=True)
 
     def get(self, key: str) -> str | None:
         def read(conn: Any) -> str | None:
-            conn.execute(
-                """
-                DELETE FROM sdm_kv
-                WHERE key = %s AND expires_at IS NOT NULL AND expires_at <= NOW()
-                """,
-                (key,),
-            )
+            # An expired row reads as missing; sweep_expired removes it later.
             found = conn.execute(
                 """
                 SELECT value FROM sdm_kv

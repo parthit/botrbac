@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from scoped_drive_mcp import store as store_module
 from scoped_drive_mcp.store import MemoryStore, PostgresStore, RedisStore
 from tests.conftest import FakeClock
 
@@ -252,3 +253,69 @@ def test_expiry(b: Backend) -> None:
     assert s.set_if_absent(b.k("claim"), "2", ex=60) is True and s.get(b.k("claim")) == "2"
     assert s.incr(b.k("window"), 60) == 1  # a fresh window starts again at one
     assert s.get(b.k("forever")) == "v"
+
+
+# ---- Postgres only: connections are reused, and expired rows are swept ----
+
+
+def test_postgres_reuses_a_fresh_connection(pg_store, monkeypatch) -> None:
+    import psycopg
+
+    opened: list[object] = []
+    real = psycopg.connect
+
+    def counting(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(psycopg, "connect", counting)
+    pg_store.close()
+    key = f"t{uuid.uuid4().hex[:12]}:reuse"
+    for n in range(10):
+        pg_store.set(key, str(n))
+        assert pg_store.get(key) == str(n)
+    pg_store.incr(key + ":n", 60)
+    assert len(opened) == 1
+
+    # One left idle for too long is replaced, not trusted.
+    monkeypatch.setattr(store_module, "PG_IDLE_SECONDS", -1.0)
+    assert pg_store.get(key) == "9"
+    assert len(opened) == 2 and opened[0].closed
+
+
+def test_postgres_drops_a_connection_after_a_failed_statement(pg_store, monkeypatch) -> None:
+    import psycopg
+
+    pg_store.close()
+    with pytest.raises(psycopg.Error):
+        pg_store._run(lambda conn: conn.execute("SELECT * FROM no_such_table_here"))
+    assert pg_store._idle == []
+    key = f"t{uuid.uuid4().hex[:12]}:after"
+    pg_store.set(key, "ok")
+    assert pg_store.get(key) == "ok"
+
+
+def test_postgres_sweeps_expired_rows_nobody_reads_again(pg_store) -> None:
+    ns = f"t{uuid.uuid4().hex[:12]}:"
+    for n in range(5):
+        pg_store.set(f"{ns}gone{n}", "x", ex=1)
+    pg_store.set(f"{ns}kept", "x", ex=600)
+    pg_store.set(f"{ns}forever", "x")
+
+    def rows() -> int:
+        return pg_store._run(
+            lambda conn: conn.execute(
+                "SELECT COUNT(*) FROM sdm_kv WHERE key LIKE %s", (ns + "%",)
+            ).fetchone()[0]
+        )
+
+    assert rows() == 7
+    time.sleep(1.3)
+    # Reading does not delete (one statement per read); the sweep does, in batches.
+    assert pg_store.get(f"{ns}gone0") is None and rows() == 7
+    removed = 0
+    while (batch := pg_store.sweep_expired(batch=2)) > 0:
+        removed += batch
+    assert removed >= 5 and rows() == 2
+    assert pg_store.get(f"{ns}kept") == "x" and pg_store.get(f"{ns}forever") == "x"

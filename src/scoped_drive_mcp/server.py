@@ -79,13 +79,15 @@ from .notion_client import HttpNotionApi, NotionApi, NotionOAuth
 from .oauth import GoogleOAuthClient, OAuthClient
 from .onedrive import OneDriveService
 from .onedrive_client import HttpOneDriveApi, OneDriveApi, OneDriveOAuth
-from .policy import PayloadToolError, is_allowed, require
+from .ops import readiness_route, sweep_route, usable_cron_secret
+from .policy import PayloadToolError, guarded_tool, is_allowed, require
 from .ratelimit import AuthFailureLimitApp, RateLimitApp
 from .scope import ScopeGuard
 from .service import DriveService
 from .shared_sources import DriveSharedSource, SharedWithMe
 from .store import (
     EXTERNAL_ALLOWLIST_KEY,
+    KEY_PREFIX,
     NOTION_ALLOWLIST_KEY,
     ONEDRIVE_ALLOWLIST_KEY,
     ActivityLog,
@@ -94,6 +96,7 @@ from .store import (
     HiddenFiles,
     KeyValueStore,
     MemoryStore,
+    PostgresStore,
     PrefixedStore,
     SignedStore,
     TenantDirectory,
@@ -190,8 +193,28 @@ WATCH_MAIL = (
 )
 
 
+class UnguardedToolError(TypeError):
+    """A tool was registered without the role check for its own name."""
+
+
 class ScopedFastMCP(FastMCP):
-    """FastMCP that only lists the tools the caller's role may use."""
+    """FastMCP that only lists the tools the caller's role may use, and only registers
+    tools that check that role.
+
+    The role check, the audit row and the error mapping all live in `policy.require`.
+    Registration is the one place every tool passes through, so it is where a tool
+    without that wrapper (or wrapped for another tool's name) is refused: the app fails
+    to start instead of serving a tool nothing checks.
+    """
+
+    def add_tool(self, fn: Callable[..., Any], name: str | None = None, **kwargs: Any) -> None:
+        tool = name or fn.__name__
+        if guarded_tool(fn) != tool:
+            raise UnguardedToolError(
+                f"tool {tool!r} must be wrapped with policy.require({tool!r}) "
+                "below @mcp.tool, so its role check and audit row cannot be skipped"
+            )
+        super().add_tool(fn, name=name, **kwargs)
 
     async def list_tools(self) -> list[MCPTool]:
         principal = current_principal.get()
@@ -1067,6 +1090,7 @@ def build_app(
         return _storage_missing_app(settings)
 
     kv = PrefixedStore(store) if store is not None else build_store(settings)
+    backend = kv.inner  # the store itself, under the key prefix and the signing
     enc_key = settings.encryption_key.get_secret_value() if settings.encryption_key else None
     if enc_key:
         # Everything below reads and writes through this, whichever account it is for.
@@ -1469,8 +1493,23 @@ def build_app(
     )
     routes: list[Any] = [
         Route(HEALTH_PATH, health, methods=["GET"]),
+        readiness_route(lambda: backend.get(f"{KEY_PREFIX}meta:ready")),
         Route(MCP_PATH, mcp_endpoint),
     ]
+    cron_secret = usable_cron_secret(
+        settings.cron_secret.get_secret_value() if settings.cron_secret else None
+    )
+    if cron_secret:
+        # Each of these also runs inside ordinary requests. The cron covers a deployment
+        # nobody is writing to: expired rows, held-file pieces and dead approvals still go.
+        jobs: dict[str, Callable[[], int | None]] = {}
+        if isinstance(backend, PostgresStore):
+            jobs["expired_rows"] = backend.sweep_expired
+        if drop_budget is not None:
+            jobs["held_file_pieces"] = drop_budget.maybe_sweep
+        if mcp_oauth is not None:
+            jobs["unused_approvals"] = mcp_oauth.prune
+        routes.append(sweep_route(cron_secret, jobs))
     if mcp_oauth is not None:
         routes.extend(mcp_oauth.routes())
     routes.extend(terminal.api_routes())

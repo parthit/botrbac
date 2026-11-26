@@ -59,6 +59,8 @@ from .connections import CONNECTIONS, Connection, get_connection
 from .drive_client import (
     FOLDER_MIME,
     SHORTCUT_MIME,
+    BotNotConnectedError,
+    DriveAccessError,
     DriveNotFoundError,
     LazyBotDriveClient,
     OwnerDriveClient,
@@ -69,7 +71,6 @@ from .external import SharedAccessError, normalize_email
 from .grants import KEEP, OWNER_FIELDS, GrantError, GrantService
 from .humanize import (
     ACTIVITY_FILTERS,
-    MISSING,
     app_names,
     assistant_label,
     describe,
@@ -143,6 +144,7 @@ def observability_on() -> bool:
 
 
 _env.globals["observability_on"] = observability_on
+_env.globals["asset_url"] = lambda name: asset_url(name)
 
 # Connect Notion posts a form that redirects to Notion's consent screen, which may pass
 # through Notion's sign-in. form-action is checked along that redirect chain.
@@ -471,6 +473,19 @@ class DashboardContext:
         return self.vault.legacy_owner() is not None
 
 
+_GOOGLE_MODULES = ("googleapiclient", "google.auth", "google.oauth2", "httplib2")
+
+
+def is_drive_failure(exc: BaseException) -> bool:
+    """Whether an unexpected error came from talking to Google, as opposed to the store or
+    a bug in this app. The store's clients wrap their network errors in their own types,
+    so a bare OSError (a timeout, a reset, a TLS failure) is the Drive client's."""
+    if isinstance(exc, DriveNotFoundError | DriveAccessError | BotNotConnectedError | OSError):
+        return True
+    module = type(exc).__module__ or ""
+    return any(module == name or module.startswith(name + ".") for name in _GOOGLE_MODULES)
+
+
 async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
 
@@ -718,14 +733,66 @@ def _asset(name: str) -> tuple[bytes, str]:
     return data, '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
 
 
-def _file_response(request: Request, name: str, media: str, cache: str = "no-cache") -> Response:
-    """A bundled asset. `no-cache` still lets the browser keep it: it revalidates with the
-    ETag and gets a 304, so a new deployment's CSS and JS are picked up at once."""
-    data, etag = _asset(name)
+# A page links its CSS and JS as /app.css?v=<hash of the file>. That URL can only ever
+# mean those bytes, so the browser keeps it for a year without asking again, and the CDN
+# (s-maxage) answers for it without starting the function.
+IMMUTABLE = "public, max-age=31536000, s-maxage=31536000, immutable"
+# Fonts never change under the same name.
+FONT_CACHE = "public, max-age=2592000, s-maxage=2592000"
+
+
+def _version(etag: str) -> str:
+    return etag.strip('"')[:16]
+
+
+def asset_url(name: str) -> str:
+    """The versioned URL for a bundled CSS or JS file (a Jinja global)."""
+    if name == CONFIRM_JS_NAME:
+        return f"/{name}?v={_version(CONFIRM_JS_ETAG)}"
+    return f"/{name}?v={_version(_asset(name)[1])}"
+
+
+def _bytes_response(
+    request: Request, data: bytes, etag: str, media: str, cache: str = "no-cache"
+) -> Response:
+    """A bundled asset. Asked for by its versioned URL it is immutable. Asked for any
+    other way (no `v`, or the `v` of another deployment) it is `no-cache`: the browser may
+    keep it but revalidates with the ETag, so it never shows one deployment's page with
+    another's CSS."""
+    if request.query_params.get("v") == _version(etag):
+        cache = IMMUTABLE
     headers = {"etag": etag, "cache-control": cache}
     if etag in (request.headers.get("if-none-match") or ""):
         return Response(status_code=304, headers=headers)
     return Response(data, media_type=media, headers=headers)
+
+
+def _file_response(request: Request, name: str, media: str, cache: str = "no-cache") -> Response:
+    data, etag = _asset(name)
+    return _bytes_response(request, data, etag, media, cache)
+
+
+# Asks before a form marked data-confirm is sent. ui.js asks itself on background
+# (data-async) forms, and lends its in-page dialog when it loaded; otherwise this falls
+# back to the browser's own confirm().
+CONFIRM_JS_NAME = "confirm.js"
+CONFIRM_JS = (
+    b"document.addEventListener('submit',function(e){"
+    b"var f=e.target;if(!f||!f.getAttribute)return;"
+    b"if(window.__asyncForms&&f.hasAttribute('data-async'))return;"
+    b"var m=f.getAttribute('data-confirm');if(!m)return;"
+    b"if(f.__confirmed){f.__confirmed=false;return;}"
+    b"e.preventDefault();var s=e.submitter;"
+    b"var ask=window.__askConfirm||function(x){"
+    b"return Promise.resolve(window.confirm(x.getAttribute('data-confirm')));};"
+    b"ask(f).then(function(ok){if(!ok)return;f.__confirmed=true;"
+    b"if(f.requestSubmit)f.requestSubmit(s||undefined);else f.submit();});});"
+)
+CONFIRM_JS_ETAG = '"' + hashlib.sha256(CONFIRM_JS).hexdigest()[:32] + '"'
+
+
+def confirm_script(request: Request) -> Response:
+    return _bytes_response(request, CONFIRM_JS, CONFIRM_JS_ETAG, "text/javascript; charset=utf-8")
 
 
 def favicon(_: Request) -> Response:
@@ -753,7 +820,7 @@ def font_asset(request: Request) -> Response:
     if rel is None:
         return Response(status_code=404)
     # Font files never change under the same name.
-    return _file_response(request, rel, "font/woff2", "public, max-age=2592000")
+    return _file_response(request, rel, "font/woff2", FONT_CACHE)
 
 
 def robots(_: Request) -> Response:
@@ -861,6 +928,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return None
         return owner
 
+    async def signed_in_user(request: Request) -> str | None:
+        """`session_user` off the event loop: it reads the session record and the user
+        index from the store, and one slow store call must not stall every other
+        request this instance is serving."""
+        return await blocking(session_user, request)
+
     def connect_redirect(request: Request) -> RedirectResponse:
         target = request.url.path
         if request.url.query:
@@ -896,7 +969,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     def owner_only(handler: Handler) -> Handler:
         async def wrapped(request: Request) -> Response:
-            email = session_user(request)
+            email = await signed_in_user(request)
             if not email:
                 if request.method != "GET":
                     return refused(
@@ -923,7 +996,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return refused(request, 400, str(exc))
             except Exception as exc:
                 report_exception(exc, where="dashboard")
-                return refused(request, 502, "A Google Drive request failed. Try again.")
+                if is_drive_failure(exc):
+                    return refused(request, 502, "A Google Drive request failed. Try again.")
+                # Not Google: the store, or a bug here. Saying "Drive" would send the
+                # person (and whoever reads the report) to the wrong place.
+                return refused(request, 500, "Something went wrong on our side. Try again.")
             finally:
                 current_actor.reset(reset)
 
@@ -1010,7 +1087,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return page
 
     async def login(request: Request) -> Response:
-        if session_user(request):
+        if await signed_in_user(request):
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
         next_url = safe_next(request.query_params.get("next"))
         purpose = hint = None
@@ -1188,7 +1265,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         request: Request, data: dict[str, Any], tokens: Any, email: str
     ) -> Response:
         """Step 2 done. Store the refresh token for the signed-in person."""
-        signed_in = session_user(request)
+        signed_in = await signed_in_user(request)
         connection = get_connection(str(data.get("connection") or ""))
         if not signed_in or connection is None:
             await refuse_token(tokens, email)
@@ -1824,7 +1901,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def home(request: Request) -> Response:
         # Logged-out visitors get the public page linked from the Google consent screen.
-        email = session_user(request)
+        email = await signed_in_user(request)
         if not email:
             return render_plain("home.html")
         reset = current_actor.set(email)
@@ -1866,7 +1943,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             mcp_url=f"{settings.app_base_url}/mcp",
             picker_ready=settings.picker_configured,
             env_token_set=bool(
-                settings.env_bot_refresh_token and session_user(request) == settings.owner_email
+                settings.env_bot_refresh_token and current_actor.get() == settings.owner_email
             ),
             **data,
         )
@@ -3256,17 +3333,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 request_names[req.id] = str(label)
         unknown = [i for i in item_ids(records) if i not in names][:ACTIVITY_LOOKUPS]
         if unknown and ctx.drive_connected():
-            # Under drive.file Google also answers 404 for real files this app never
-            # opened, so a 404 proves nothing: don't call them missing.
-            limited = True
             try:
                 drive = ctx.owner_drive()
                 for item in unknown:
                     try:
                         meta = drive.get_file(item, fields="id,name")
                     except DriveNotFoundError:
-                        if not limited:
-                            names[item] = MISSING
+                        # Under drive.file Google also answers 404 for real files this
+                        # app never opened, so a 404 proves nothing: not called missing.
                         continue
                     if meta.get("name"):
                         names[item] = str(meta["name"])
@@ -3318,7 +3392,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return render(request, "error.html", 404, message="Page not found.")
 
     async def admin_page(request: Request) -> Response:
-        email = session_user(request)
+        email = await signed_in_user(request)
         if email != settings.owner_email:
             return render(request, "error.html", 404, message="Page not found.")
         reset = current_actor.set(email)
@@ -3339,7 +3413,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Those tokens are already never used. This removes them from the store and asks
         Google to end them, so a copy of the store cannot be used to reach anyone's Drive.
         Each person reconnects with per-file access when they next visit."""
-        if session_user(request) != settings.owner_email or ctx.directory is None:
+        if await signed_in_user(request) != settings.owner_email or ctx.directory is None:
             return render(request, "error.html", 404, message="Page not found.")
 
         def run() -> tuple[int, int]:
@@ -3387,7 +3461,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def admin_sign_records(request: Request, form: dict[str, str]) -> Response:
         """Sign the allowlist, app and pairing records saved before records were signed."""
-        if session_user(request) != settings.owner_email or ctx.directory is None:
+        if await signed_in_user(request) != settings.owner_email or ctx.directory is None:
             return render(request, "error.html", 404, message="Page not found.")
         if isinstance(ctx.store, SignedStore) and ctx.store.require:
             # Signing is for records from before. Once unsigned ones are ignored, signing
@@ -3501,7 +3575,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             pending = ctx.mcp_oauth.parse_authorize(request.query_params)
         except AuthorizeError as exc:
             return _oauth_error(request, exc)
-        signed_in = session_user(request)
+        signed_in = await signed_in_user(request)
         if request.session.get("owner") and not signed_in:
             return render(
                 request,
@@ -3711,7 +3785,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             root_folder_id=ctx.visible_root_folder_id(),
             picker_ready=settings.picker_configured,
             env_token_set=bool(
-                settings.env_bot_refresh_token and session_user(request) == settings.owner_email
+                settings.env_bot_refresh_token and current_actor.get() == settings.owner_email
             ),
             **data,
         )
@@ -3966,26 +4040,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "/settings#assistants",
         )
 
-    async def confirm_js(_: Request) -> Response:
-        return Response(
-            b"document.addEventListener('submit',function(e){"
-            b"var f=e.target;if(!f||!f.getAttribute)return;"
-            # ui.js asks for confirmation itself on background (data-async) forms.
-            b"if(window.__asyncForms&&f.hasAttribute('data-async'))return;"
-            b"var m=f.getAttribute('data-confirm');if(!m)return;"
-            b"if(f.__confirmed){f.__confirmed=false;return;}"
-            b"e.preventDefault();var s=e.submitter;"
-            # ui.js's in-page dialog when it loaded, else the browser's own confirm().
-            b"var ask=window.__askConfirm||function(x){"
-            b"return Promise.resolve(window.confirm(x.getAttribute('data-confirm')));};"
-            b"ask(f).then(function(ok){if(!ok)return;f.__confirmed=true;"
-            b"if(f.requestSubmit)f.requestSubmit(s||undefined);else f.submit();});});",
-            media_type="text/javascript",
-            headers={"cache-control": "no-store"},
-        )
-
     routes = [
-        Route("/confirm.js", confirm_js, methods=["GET"]),
+        Route("/confirm.js", confirm_script, methods=["GET"]),
         Route("/login", safely(login), methods=["GET"]),
         Route("/auth/login", safely(auth_login), methods=["GET"]),
         Route("/auth/callback", safely(auth_callback), methods=["GET"]),

@@ -6,11 +6,11 @@ import subprocess
 
 import pytest
 
-from scoped_drive_mcp.dashboard import TEMPLATES_DIR
+from scoped_drive_mcp.dashboard import IMMUTABLE, TEMPLATES_DIR, asset_url
 from tests.dash import client
 
 SCRIPTS = (
-    '<script src="/observability.js" defer></script>',
+    f'<script src="{asset_url("observability.js")}" defer></script>',
     '<script src="/_vercel/speed-insights/script.js" defer></script>',
     '<script src="/_vercel/insights/script.js" defer></script>',
 )
@@ -49,6 +49,14 @@ def test_observability_script_is_served_and_strips_ids(c) -> None:
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/javascript")
     assert r.headers["cache-control"] == "no-cache" and r.headers["etag"]
+    # The URL a page links (its content hash in ?v=) can be kept for good, by the
+    # browser and the CDN. Another deployment's hash falls back to revalidating.
+    pinned = c.get(asset_url("observability.js"))
+    assert pinned.text == r.text and pinned.headers["cache-control"] == IMMUTABLE
+    assert "s-maxage" in IMMUTABLE and "immutable" in IMMUTABLE
+    assert c.get("/observability.js?v=0000").headers["cache-control"] == "no-cache"
+    again = c.get(asset_url("observability.js"), headers={"if-none-match": r.headers["etag"]})
+    assert again.status_code == 304
     body = r.text
     assert 'window.va("beforeSend", beforeSend)' in body
     assert 'window.si("beforeSend", beforeSend)' in body
@@ -140,3 +148,18 @@ def test_redaction_strips_ids_search_text_and_fragments() -> None:
 def test_redaction_cuts_another_sites_referrer_to_its_origin() -> None:
     out = _run_redaction("https://botrbac.example/", "https://mail.example.com/inbox/123?q=secret")
     assert out["referrer"] == "https://mail.example.com/"
+
+
+def test_pages_link_every_bundled_asset_by_its_versioned_url(c) -> None:
+    """One function invocation per deployment for each of these, not one per page view."""
+    from tests.dash import login
+
+    page = c.get("/login").text
+    for name in ("app.css", "ui.js"):
+        assert asset_url(name) in page and f'"/{name}"' not in page
+        assert c.get(asset_url(name)).headers["cache-control"] == IMMUTABLE
+    login(c)
+    signed_in = c.get("/").text
+    assert asset_url("confirm.js") in signed_in
+    script = c.get(asset_url("confirm.js"))
+    assert script.headers["cache-control"] == IMMUTABLE and b"data-confirm" in script.content

@@ -132,6 +132,17 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+# Set by `require` on the wrapper it returns: the tool name whose role it checks. The
+# server refuses to register a tool function that does not carry its own name here.
+GUARDED_ATTR = "__botrbac_guarded_tool__"
+
+
+def guarded_tool(fn: object) -> str | None:
+    """The tool name `require` checks for this function, or None if it is not wrapped."""
+    name = getattr(fn, GUARDED_ATTR, None)
+    return name if isinstance(name, str) else None
+
+
 class PermissionDeniedError(Exception):
     """The caller's role does not include this tool."""
 
@@ -282,6 +293,7 @@ def require(
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 
+        setattr(wrapper, GUARDED_ATTR, tool)
         return wrapper
 
     return decorator
