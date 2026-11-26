@@ -211,6 +211,24 @@ def test_a_link_with_unsafe_header_values_is_refused_not_trimmed(sessions, signe
     assert err.value.code == "direct_unavailable"
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"url": "https://vercel.com/api/blob/?pathname=x"},  # no headers at all: fine
+        {"url": "https://vercel.com/api/blob/?pathname=x", "headers": {"x-a; rm -rf /": "1"}},
+        {"headers": {}},
+    ],
+)
+def test_odd_signer_answers_are_handled(sessions, signer, monkeypatch, answer):
+    monkeypatch.setattr(signer, "sign_put", lambda *a: answer)
+    if "url" in answer and not answer.get("headers"):
+        assert _start(sessions, bytes(2000))["upload_headers"] == {}
+        return
+    with pytest.raises(UploadError) as err:
+        _start(sessions, bytes(2000))
+    assert err.value.code == "direct_unavailable"
+
+
 def test_a_failed_signing_costs_no_budget(clock, blob, signer):
     budget = Budget()
     signer.fail = True

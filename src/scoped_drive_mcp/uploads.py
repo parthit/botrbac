@@ -129,6 +129,7 @@ def upload_command(url: str, headers: dict[str, str]) -> str:
     return " ".join(parts)
 
 
+_HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
 _HEADER_VALUE = re.compile(r"[A-Za-z0-9._/+-]{1,128}")
 
 
@@ -300,15 +301,26 @@ class UploadSessions:
         except Exception as exc:
             report_exception(exc, where="upload_link")
             raise _unavailable("An upload link could not be made just now.") from None
-        headers = dict(signed["headers"])
-        unsafe = [name for name, value in headers.items() if not _HEADER_VALUE.fullmatch(value)]
-        if unsafe or "'" in signed["url"]:
+        raw = signed.get("headers") if isinstance(signed, dict) else None
+        headers = dict(raw) if isinstance(raw, dict) else {}
+        url = signed.get("url") if isinstance(signed, dict) else None
+        unsafe = [
+            name
+            for name, value in headers.items()
+            if not (
+                isinstance(name, str)
+                and isinstance(value, str)
+                and _HEADER_NAME.fullmatch(name)
+                and _HEADER_VALUE.fullmatch(value)
+            )
+        ]
+        if unsafe or not isinstance(url, str) or "'" in url:
             # Dropping a header would make the upload fail at Blob for no stated reason.
-            logger.error("refused an upload link with unexpected headers: %s", sorted(unsafe))
+            logger.error("refused an upload link with %d unexpected header(s)", len(unsafe))
             raise _unavailable("An upload link could not be made just now.")
         if budget is not None and not budget.reserve(max(1, math.ceil(size / PIECE_BYTES))):
             raise _unavailable("Upload links are used up for now.")
-        return {"path": path, "url": signed["url"], "headers": headers}
+        return {"path": path, "url": url, "headers": headers}
 
     def _load(self, who: dict[str, str | None], upload_id: Any) -> dict[str, Any]:
         if not isinstance(upload_id, str) or not _ID_RE.fullmatch(upload_id):
