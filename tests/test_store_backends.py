@@ -20,8 +20,8 @@ from urllib.parse import urlparse
 
 import pytest
 
-from scoped_drive_mcp import store as store_module
 from scoped_drive_mcp.store import MemoryStore, PostgresStore, RedisStore
+from scoped_drive_mcp.store import backends as store_module
 from tests.conftest import FakeClock
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
@@ -284,6 +284,31 @@ def test_postgres_reuses_a_fresh_connection(pg_store, monkeypatch) -> None:
     assert len(opened) == 2 and opened[0].closed
 
 
+def test_postgres_resends_a_read_whose_pooled_connection_died(pg_store) -> None:
+    """A pooler can close an idle connection sooner than we stop trusting it."""
+    import psycopg
+
+    key = f"t{uuid.uuid4().hex[:12]}:dead"
+    pg_store.close()
+    pg_store.set(key, "v")
+    # Kill the pooled connection the way a pooler does: from the server's side.
+    ((conn, _),) = pg_store._idle
+    pid = conn.info.backend_pid
+    with psycopg.connect(DATABASE_URL, autocommit=True) as other:
+        other.execute("SELECT pg_terminate_backend(%s)", (pid,))
+    time.sleep(0.2)
+    assert pg_store.get(key) == "v"
+
+    # A write is not resent: its answer being lost does not mean it did not run.
+    ((conn, _),) = pg_store._idle
+    with psycopg.connect(DATABASE_URL, autocommit=True) as other:
+        other.execute("SELECT pg_terminate_backend(%s)", (conn.info.backend_pid,))
+    time.sleep(0.2)
+    with pytest.raises(psycopg.OperationalError):
+        pg_store.set(key, "again")
+    assert pg_store.get(key) == "v"
+
+
 def test_postgres_drops_a_connection_after_a_failed_statement(pg_store, monkeypatch) -> None:
     import psycopg
 
@@ -318,4 +343,5 @@ def test_postgres_sweeps_expired_rows_nobody_reads_again(pg_store) -> None:
     while (batch := pg_store.sweep_expired(batch=2)) > 0:
         removed += batch
     assert removed >= 5 and rows() == 2
+    assert pg_store.sweep_all() == 0
     assert pg_store.get(f"{ns}kept") == "x" and pg_store.get(f"{ns}forever") == "x"

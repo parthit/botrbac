@@ -873,7 +873,7 @@ def build_app(
         # nobody is writing to: expired rows, held-file pieces and dead approvals still go.
         jobs: dict[str, Callable[[], int | None]] = {}
         if isinstance(backend, PostgresStore):
-            jobs["expired_rows"] = backend.sweep_expired
+            jobs["expired_rows"] = backend.sweep_all
         if drop_budget is not None:
             jobs["held_file_pieces"] = drop_budget.sweep_now
         if mcp_oauth is not None:
