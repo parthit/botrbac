@@ -303,6 +303,16 @@
   mismatch the session is discarded. An upload has at most 1,024 pieces, so finishing it is a bounded
   number of store calls. One account can have at most 3 uploads open and start at most 10 in 15 minutes. Start,
   finish, cancel and refused pieces are on the Activity page; accepted pieces go only to the server log.
+- **Upload links** (`direct=true` on `start_upload` / `onedrive_start_upload`) give the assistant a
+  presigned Vercel Blob PUT signed by `api/blob-sign.mjs`, for one pathname, `uploads/<expiry>/<upload id>`,
+  private, at most the declared size, never over an existing blob (so it works once), valid for the
+  session's 15 minutes. The signer signs only `put` for that shape (no read URL is ever given out) and caps
+  it at 50 MiB. Anyone who learns the link can upload to it once, but `finish_upload` still checks the
+  declared size and SHA-256 and the folder, and only the sign-in that started the upload can finish or
+  cancel it, so the worst a stranger can do is make that upload fail. **The file is held unencrypted** in
+  the private store until the upload is finished or cancelled (it is deleted then) or expires (the Blob
+  sweep deletes it): an assistant's `curl` can't take part in the browser's per-file encryption that files
+  people send each other get. Links count against the same Blob budget as held files.
 - `export_file` and `save_export` run Drive's export on a Google file that passes the same check as
   `read_file`; `save_export` also checks its target folder like any other create.
 - `search_files` never passes your text to Drive as a raw query. It lists all folders under the allowlisted

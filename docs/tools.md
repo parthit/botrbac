@@ -121,6 +121,29 @@ sha256sum resume.pdf; stat -c %s resume.pdf
 split -b 6144 -d -a 4 resume.pdf part.   # part.0000, part.0001, … → base64 each into append_chunk
 ```
 
+### Upload links (`direct=true`)
+
+Sending pieces means the model writes out every byte as base64, which is slow and limits how big a
+file can be in practice. An assistant that can run commands with internet access (Claude Code, Claude
+with code execution, and similar) passes `direct=true` to `start_upload` or `onedrive_start_upload`
+instead. The answer then also has:
+
+- `upload_url` and `upload_headers`: a presigned, private Vercel Blob upload for this upload only;
+- `upload_command`: the same as a `curl` command. Replace `FILE` with the file's path and run it.
+
+```sh
+curl -sS --fail-with-body -X PUT -H 'x-api-version: 13' … --data-binary @resume.pdf 'https://vercel.com/api/blob/?pathname=uploads/…'
+```
+
+Then call `finish_upload` as usual: it reads the file back, checks the size and SHA-256 and the folder,
+writes it, and deletes it from Blob. The link is for one pathname, at most the declared size, can't
+overwrite (so it works once), and lasts as long as the upload (15 minutes). The sandbox must be able to
+reach `vercel.com`. If it can't, send the pieces with `append_chunk`: the same upload takes either.
+
+`direct_unavailable` means this deployment has no Blob store and signer (see
+[self-hosting.md](self-hosting.md)), the Blob budget is used up, or signing failed; start again without
+`direct`. `upload_not_received` from `finish_upload` means nothing has arrived yet.
+
 ## Exporting Google files
 
 `export_file(file_id, format)` has Drive export a Google Doc, Sheet or Slides with its real fonts and

@@ -148,7 +148,7 @@ def test_app_sweep_fails_the_run_when_held_files_cannot_be_swept() -> None:
     good = {"Authorization": f"Bearer {SECRET}"}
     assert c.get("/internal/sweep", headers=good).status_code == 200
     assert c.get("/internal/sweep", headers=good).status_code == 200
-    assert blob.lists == 2  # both runs listed the store; neither was gated
+    assert blob.lists == 4  # both runs listed the store (two prefixes each); neither was gated
 
     def away(*args, **kwargs):
         raise RuntimeError("blob store is away")

@@ -315,7 +315,7 @@ def test_the_sweep_deletes_expired_pieces_and_runs_rarely(blob) -> None:
     budget.maybe_sweep()
     assert list(blob.blobs) == [BlobParts.path("new", future, 0)]
     budget.maybe_sweep()
-    assert blob.lists == 1
+    assert blob.lists == 2  # one sweep: drops/ and uploads/
 
 
 def test_a_piece_cannot_be_moved_to_another_drop(blob) -> None:
@@ -411,11 +411,11 @@ def test_the_scheduled_sweep_runs_whatever_swept_last_and_reports_failure(blob) 
     budget.maybe_sweep()
     parts.put_piece("old", past, 0, b"a")
     budget.maybe_sweep()  # inside the 6 hours: skipped
-    assert blob.lists == 1 and len(blob.blobs) == 1
-    assert budget.sweep_now() == 1 and blob.blobs == {} and blob.lists == 2
+    assert blob.lists == 2 and len(blob.blobs) == 1  # one sweep lists two prefixes
+    assert budget.sweep_now() == 1 and blob.blobs == {} and blob.lists == 4
     # Having just swept, the next upload does not sweep again.
     budget.maybe_sweep()
-    assert blob.lists == 2
+    assert blob.lists == 4
 
     def broken(now: int) -> int:
         raise RuntimeError("blob store is away")

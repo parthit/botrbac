@@ -41,6 +41,18 @@ def register(
         except UploadError as exc:
             raise PayloadToolError(exc.payload()) from None
 
+    def next_step(started: dict[str, Any]) -> str:
+        if "upload_command" in started:
+            return (
+                "Run upload_command with FILE replaced by the file's path (it PUTs the "
+                "whole file to upload_url), then call finish_upload. If your sandbox can't "
+                "reach that host, send the pieces with append_chunk instead."
+            )
+        return (
+            "Send each chunk with append_chunk (index 0 to chunk_count - 1), then call "
+            "finish_upload."
+        )
+
     def begin_upload(
         name: str,
         mime_type: str,
@@ -49,6 +61,7 @@ def register(
         parent_id: str | None,
         chunk_size: int,
         owner: str | None,
+        direct: bool,
     ) -> dict[str, Any]:
         name, mime_type = service.check_upload_meta(name, mime_type)
         who = upload_who()
@@ -68,14 +81,14 @@ def register(
                 sha256=sha256,
                 chunk_size=chunk_size,
                 owner=owner or None,
+                direct=direct,
             )
         )
         return {
             **started,
             "parent_id": parent,
             **({"owner": owner} if owner else {}),
-            "next": "Send each chunk with append_chunk (index 0 to chunk_count - 1), then "
-            "call finish_upload.",
+            "next": next_step(started),
         }
 
     def begin_onedrive_upload(
@@ -85,6 +98,7 @@ def register(
         sha256: str,
         parent_id: str | None,
         chunk_size: int,
+        direct: bool,
     ) -> dict[str, Any]:
         # The same checks as onedrive_upload_file, before any piece is sent.
         clean, parent = onedrive_service.check_upload(name, parent_id)
@@ -99,13 +113,13 @@ def register(
                 sha256=sha256,
                 chunk_size=chunk_size,
                 target="onedrive",
+                direct=direct,
             )
         )
         return {
             **started,
             "parent_id": parent,
-            "next": "Send each chunk with append_chunk (index 0 to chunk_count - 1), then "
-            "call finish_upload.",
+            "next": next_step(started),
         }
 
     def write_onedrive(meta: dict[str, Any], data: bytes) -> dict[str, Any]:
@@ -167,6 +181,7 @@ def register(
         parent_id: str | None = None,
         chunk_size: int = DEFAULT_CHUNK,
         owner: str | None = None,
+        direct: bool = False,
     ) -> dict[str, Any]:
         """Start uploading a file too big to pass inline to upload_file (a PDF, DOCX or
         image you made). Give its exact size in bytes and its SHA-256 (64 hex chars), e.g.
@@ -177,8 +192,15 @@ def register(
         which writes the file only if the size and hash match. Same folder checks as
         upload_file. To write into a folder another person shares with you and lets you
         edit, pass their email as owner. The upload expires after 15 minutes. For
-        OneDrive, use onedrive_start_upload instead."""
-        return await _run(begin_upload, name, mime_type, size, sha256, parent_id, chunk_size, owner)
+        OneDrive, use onedrive_start_upload instead.
+
+        If you can run commands that reach the internet (curl), pass direct=true: the
+        answer then has upload_command, which uploads the whole file in one request, so
+        you don't copy its bytes into append_chunk calls. Then call finish_upload. On
+        direct_unavailable, start again without direct."""
+        return await _run(
+            begin_upload, name, mime_type, size, sha256, parent_id, chunk_size, owner, direct
+        )
 
     @mcp.tool(annotations=WRITE)
     @guarded("append_chunk")
@@ -194,8 +216,9 @@ def register(
     @mcp.tool(annotations=WRITE)
     @guarded("finish_upload")
     async def finish_upload(upload_id: str) -> dict[str, Any]:
-        """Check an upload's pieces against the declared size and SHA-256 and create the
-        file in Drive (or in OneDrive, for an upload started with onedrive_start_upload).
+        """Check the uploaded file (sent through upload_command, or as pieces) against the
+        declared size and SHA-256 and create the file in Drive (or in OneDrive, for an
+        upload started with onedrive_start_upload).
         Missing pieces are listed in the error (send them and call again). On a mismatch
         nothing is written and the upload is discarded."""
         return await _run(complete_upload, upload_id)
@@ -217,6 +240,7 @@ def register(
             sha256: str,
             parent_id: str | None = None,
             chunk_size: int = DEFAULT_CHUNK,
+            direct: bool = False,
         ) -> dict[str, Any]:
             """Start uploading a new OneDrive file too big to pass inline to
             onedrive_upload_file (a PDF, DOCX or image you made). Works like start_upload:
@@ -225,7 +249,9 @@ def register(
             allowed OneDrive folder only if the size and hash match. The type comes from
             the name's extension. A taken name fails with name_taken; nothing is
             overwritten. Omit parent_id only when exactly one OneDrive folder is allowed.
-            The upload expires after 15 minutes."""
+            The upload expires after 15 minutes. With direct=true (you can run curl), the
+            answer has upload_command, which uploads the whole file in one request
+            instead of append_chunk calls."""
             return await _run(
                 begin_onedrive_upload,
                 onedrive_service,
@@ -234,4 +260,5 @@ def register(
                 sha256,
                 parent_id,
                 chunk_size,
+                direct,
             )

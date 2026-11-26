@@ -59,6 +59,9 @@ KV_PART_BYTES = 512 * 1024
 DROP_PART_PREFIX = "drops:part:"
 BLOB_PREFIX = "drops/"
 _BLOB_PATH = re.compile(r"drops/(\d{1,12})/([A-Za-z0-9_-]{1,64})/(\d{1,4})")
+# Files assistants upload through a link (uploads.py): uploads/<expiry>/<upload id>.
+UPLOAD_BLOB_PREFIX = "uploads/"
+_UPLOAD_PATH = re.compile(r"uploads/(\d{1,12})/([A-Za-z0-9_-]{16,64})")
 
 
 def _kv_per_piece() -> int:
@@ -334,13 +337,15 @@ class BlobParts:
         self.api.delete([self.path(drop_id, exp, n) for n in range(int(row.get("parts") or 0))])
 
     def sweep(self, now: int) -> int:
-        """Delete every piece whose drop has expired. One list call (an advanced
-        operation per 1,000 blobs); deletes are free."""
+        """Delete every piece whose drop has expired, and every assistant upload left
+        behind after its session ended. One list call per prefix (an advanced operation
+        per 1,000 blobs); deletes are free."""
         expired: list[str] = []
-        for pathname in self.api.list(BLOB_PREFIX):
-            match = _BLOB_PATH.fullmatch(pathname)
-            if match is None or int(match.group(1)) < now:
-                expired.append(pathname)
+        for prefix, shape in ((BLOB_PREFIX, _BLOB_PATH), (UPLOAD_BLOB_PREFIX, _UPLOAD_PATH)):
+            for pathname in self.api.list(prefix):
+                match = shape.fullmatch(pathname)
+                if match is None or int(match.group(1)) < now:
+                    expired.append(pathname)
         for i in range(0, len(expired), 1000):
             self.api.delete(expired[i : i + 1000])
         return len(expired)
@@ -351,6 +356,8 @@ class BlobParts:
 BUDGET_PREFIX = "drops:blob:"
 # The longest a dashboard upload may take (drops.UPLOAD_SECONDS), in hours.
 UPLOAD_HOURS = 1
+# List calls one sweep makes (BlobParts.sweep: drops/ and uploads/).
+SWEEP_LISTS = 2
 # How often an upload may trigger a sweep of expired pieces.
 SWEEP_EVERY_SECONDS = 6 * 3600
 
@@ -444,8 +451,10 @@ class BlobBudget:
 
     def _sweep(self) -> int:
         now = self.clock()
-        # Listing the store is one advanced operation: it counts against the month.
-        self.store.incr(self._month_key(now), 40 * 86400)
+        # Listing the store is an advanced operation, once per prefix (held files and
+        # assistant uploads): each counts against the month.
+        for _ in range(SWEEP_LISTS):
+            self.store.incr(self._month_key(now), 40 * 86400)
         removed = self.parts.sweep(int(now.timestamp()))
         if removed:
             logger.info("deleted %d expired held-file pieces from Blob", removed)

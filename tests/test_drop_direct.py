@@ -663,8 +663,8 @@ def test_presigned_puts_count_against_the_budget_when_issued(setup, signer) -> N
     before = budget.usage()["month_uploads"]
     begun = _start(eve, 20)[1].json()  # 3 pieces
     assert len(begun["direct"]) == 3
-    # The three URLs (and the first sweep) are counted now, once.
-    assert budget.usage()["month_uploads"] - before == 4
+    # The three URLs (and the first sweep's two list calls) are counted now, once.
+    assert budget.usage()["month_uploads"] - before == 5
     budget.monthly_uploads = budget.usage()["month_uploads"] + 2
     signer.puts.clear()
     r = _start(eve, 20)[1]
