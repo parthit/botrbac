@@ -26,17 +26,37 @@ class Decision:
     role: str
 
 
+_SITE_CACHE: dict[tuple[str, int], str] = {}
+
+
+def _site() -> str:
+    """The site from login, scheme and host only, or "" when unknown. Cached per version of
+    credentials.json, so a busy gateway does not read it on every denied call."""
+    path = state.home() / "credentials.json"
+    try:
+        key = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return ""
+    if key not in _SITE_CACHE:
+        creds = state.read_json("credentials.json") or {}
+        server = str(creds.get("server") or "") if isinstance(creds, dict) else ""
+        parts = urlsplit(server)
+        ok = parts.scheme in ("https", "http") and parts.netloc
+        _SITE_CACHE.clear()
+        _SITE_CACHE[key] = f"{parts.scheme}://{parts.netloc}" if ok else ""
+    return _SITE_CACHE[key]
+
+
 def fix_hint(pattern: str) -> str:
     """What a blocked agent should tell its person: the pattern to add, and where. Names
     the site from login (scheme and host only), or the Terminal page when it is unknown."""
-    creds = state.read_json("credentials.json") or {}
-    parts = urlsplit(str(creds.get("server") or "") if isinstance(creds, dict) else "")
-    site = f"{parts.scheme}://{parts.netloc}" if parts.scheme in ("https", "http") else ""
+    site = _site()
     roles = f"{site}/terminal/roles" if site else "the Terminal page"
     return (
         "This is the person's rule, not a fault to work around. If the tool is needed, ask "
-        f"them to add {pattern} to this computer's role at {roles}, or to give the computer "
-        "a wider role on the Terminal page."
+        f"them to add {pattern} to this computer's role at {roles} (a built-in role such as "
+        "Read-only cannot be edited: make a new role there and give it to the computer), "
+        "or to give the computer a wider role on the Terminal page."
     )
 
 

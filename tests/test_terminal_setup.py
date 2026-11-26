@@ -1,6 +1,7 @@
 """Terminal setup: the install script, agent instructions, add-gateway, login and the page."""
 
 import json
+import os
 import stat
 import subprocess
 import tomllib
@@ -409,3 +410,28 @@ def test_blocked_message_names_the_pattern_and_the_page(tmp_path, monkeypatch) -
         "add github/create_issue to this computer's role at https://rbac.example.org/terminal/roles"
         in hint
     )
+    assert "make a new role" in hint  # built-in roles cannot be edited
+    # A new login (a changed file) is picked up, not served from the cache.
+    state.write_json("credentials.json", {"server": "javascript:alert(1)"}, private=True)
+    os.utime(tmp_path / "credentials.json", ns=(1, 1))
+    later = policy.fix_hint("x/y")
+    assert "javascript" not in later and "the Terminal page" in later
+
+
+def test_deleted_role_reads_as_every_tool_blocked(world, memstore, oauth) -> None:
+    from tests.terminal_helpers import connect_terminal
+
+    c = dash.client(terminal_app(world, memstore, oauth))
+    dash.login(c)
+    token = dash.csrf(c, "/terminal/roles/new")
+    c.post(
+        "/terminal/roles/save",
+        data={"csrf": token, "name": "Temp", "patterns": "fs/*", "offline_days": "2"},
+    )
+    roles = c.get("/terminal/roles").text
+    role_id = "r_" + roles.split('id="role-r_', 1)[1].split('"', 1)[0]
+    connect_terminal(c, role_id=role_id)
+    assert "Every tool is blocked." not in c.get("/terminal").text
+    c.post(f"/terminal/roles/{role_id}/delete", data={"csrf": dash.csrf(c, "/terminal/roles")})
+    page = c.get("/terminal").text
+    assert "No tools (its role was deleted)" in page and "Every tool is blocked." in page
