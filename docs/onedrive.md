@@ -53,6 +53,7 @@ is read-only the same way.
 | `onedrive_search(query, max_results?)` | all | Microsoft's search (names and content) inside each allowed folder; an allowed single file is matched by name |
 | `onedrive_create_folder(name, parent_id?)` | editor, admin | A new folder in an allowed folder (or one inside it) |
 | `onedrive_upload_file(name, content_text \| content_base64, parent_id?)` | editor, admin | A new file there. The type comes from the extension. A taken name fails with `name_taken`; nothing is overwritten |
+| `onedrive_start_upload(name, size, sha256, parent_id?, chunk_size?)` | editor, admin | A new file too big to pass inline, sent in pieces with `append_chunk` and written by `finish_upload` ([tools.md](tools.md#saving-files-an-assistant-made)). Same folder and name rules as `onedrive_upload_file`, checked at the start and again at the finish |
 | `onedrive_update_file(file_id, content_text \| content_base64)` | editor, admin | Replace an allowed file's whole content. OneDrive keeps the earlier version in its version history |
 | `onedrive_rename_file(file_id, new_name)` | editor, admin | Rename a file or folder inside an allowed folder. An item allowed directly keeps its name |
 

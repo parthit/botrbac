@@ -794,6 +794,30 @@ class OneDriveService:
         """A new file inside an allowed folder. Never overwrites: a taken name fails."""
         clean = self._name(name)
         data = self._content(content_text, content_base64)
+        return self.upload_bytes(clean, data, parent_id)
+
+    def check_upload(self, name: str, parent_id: str | None = None) -> tuple[str, str]:
+        """Before a chunked upload (uploads.py) starts: the checked name and the folder it
+        will go into, which must be writable and allowed now. finish_upload checks the
+        folder again through upload_bytes, since the list can change in between."""
+        clean = self._name(name)
+        parent = self._parent_id(parent_id)
+        self._require_writable(parent)
+
+        self._run(lambda api: self._writable_folder(api, parent))
+        return clean, parent
+
+    def upload_bytes(self, name: str, data: bytes, parent_id: str | None = None) -> dict[str, Any]:
+        """Create a new file from bytes already in hand (upload_file, or a finished
+        chunked upload). Never overwrites: a taken name fails."""
+        clean = self._name(name)
+        if len(data) > self.max_bytes:
+            raise PayloadToolError(
+                {
+                    "error": "invalid_input",
+                    "message": f"content is larger than the {self.max_bytes}-byte limit",
+                }
+            )
         parent = self._parent_id(parent_id)
         self._require_writable(parent)
 

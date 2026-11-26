@@ -294,7 +294,7 @@
   default is `ROOT_FOLDER_ID`, else the only granted folder). Updates, renames and trashes require the **file**
   to pass it; allowlisted items themselves can't be renamed or trashed, and neither can a folder with an
   allowlisted item below it.
-- Chunked uploads (`start_upload`, `append_chunk`, `finish_upload`) check the parent folder when the upload
+- Chunked uploads (`start_upload` or `onedrive_start_upload`, `append_chunk`, `finish_upload`) check the parent folder when the upload
   starts and again when it is finished, so a folder removed from the share in between gets nothing. An
   upload session lives in the store for 15 minutes, is capped at `MAX_BYTES`, and belongs to the account,
   token and connected app that started it (anyone else gets `upload_not_found` for its id). Every piece but

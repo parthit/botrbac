@@ -99,6 +99,8 @@ ONEDRIVE_WRITE_TOOLS: frozenset[str] = frozenset(
         "onedrive_upload_file",
         "onedrive_update_file",
         "onedrive_rename_file",
+        # A new file sent in pieces; append_chunk and finish_upload are in UPLOAD_TOOLS.
+        "onedrive_start_upload",
     }
 )
 # Sending one file to a paired person (drops.py), and saving one sent to this human into
@@ -359,7 +361,7 @@ def require(
                 # Lets Activity name the row from the request ("asked for … budget sheet").
                 rid = result.get("request_id")
                 ids["request_id"] = rid if isinstance(rid, str) else None
-            if tool == "start_upload" and isinstance(result, dict):
+            if tool in ("start_upload", "onedrive_start_upload") and isinstance(result, dict):
                 # Ties the start, the pieces and the finish of one upload together in the log.
                 uid = result.get("upload_id")
                 ids["upload_id"] = uid if isinstance(uid, str) else None

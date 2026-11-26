@@ -69,7 +69,9 @@ ONEDRIVE_INSTRUCTIONS = (
     "need; they allow it on the dashboard. A connection allowed to edit can also, only "
     "inside allowed folders: onedrive_create_folder, onedrive_upload_file (a new file; an "
     "existing name is never overwritten), onedrive_update_file (replace an allowed file's "
-    "content) and onedrive_rename_file. 'onedrive_read_only' means the human must "
+    "content) and onedrive_rename_file. For a new file too big to pass inline, use "
+    "onedrive_start_upload, append_chunk for each piece, then finish_upload. "
+    "'onedrive_read_only' means the human must "
     "reconnect OneDrive and approve editing."
 )
 

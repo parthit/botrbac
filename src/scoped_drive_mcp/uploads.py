@@ -1,5 +1,5 @@
 """Chunked uploads: an assistant sends a file it made in pieces, then the whole is checked
-and created in Drive in one step.
+and created in Drive (or the person's OneDrive) in one step.
 
 A model can't reliably copy tens of thousands of base64 characters into one tool call, so
 `upload_file` alone can't carry a PDF or an image an assistant generated. Here the
@@ -43,6 +43,10 @@ MAX_STARTS = 10
 MAX_OPEN = 3
 # How many missing piece numbers an error lists.
 MISSING_SHOWN = 50
+
+# Where a finished upload is written. A session started before targets existed has none
+# and is a Drive upload.
+TARGETS = frozenset({"drive", "onedrive"})
 
 KEY = "upload:"
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
@@ -140,8 +144,13 @@ class UploadSessions:
         sha256: Any,
         chunk_size: Any = DEFAULT_CHUNK,
         owner: str | None = None,
+        target: str = "drive",
     ) -> dict[str, Any]:
-        """Open a session. The caller has already checked the name, type and parent."""
+        """Open a session. The caller has already checked the name, type and parent.
+        `target` is where finish_upload writes the file: "drive" (Google Drive, the
+        person's own or `owner`'s shared folder) or "onedrive" (the person's OneDrive)."""
+        if target not in TARGETS:
+            raise UploadError("invalid_input", "unknown upload target")
         if not who.get("email"):
             raise UploadError("unauthenticated", "Sign in before uploading.")
         size = _int(size, "size")
@@ -194,6 +203,7 @@ class UploadSessions:
             "token_name": who.get("token_name"),
             "grant_id": who.get("grant_id"),
             "owner": owner,
+            "target": target,
             "name": name,
             "mime_type": mime_type,
             "parent_id": parent_id,
@@ -346,7 +356,7 @@ class UploadSessions:
             raise UploadError(
                 "integrity_mismatch",
                 "The assembled file does not match the declared size and sha256, so nothing "
-                "was written to Drive. The upload was discarded; start again.",
+                "was written. The upload was discarded; start again.",
                 expected_size=meta["size"],
                 received_size=len(data),
                 expected_sha256=meta["sha256"],

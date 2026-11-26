@@ -333,6 +333,7 @@ ONEDRIVE_WRITE_TOOLS = {
     "onedrive_upload_file",
     "onedrive_update_file",
     "onedrive_rename_file",
+    "onedrive_start_upload",
 }
 WRITE_CALLS = {"create_folder", "upload_new", "replace_content", "rename"}
 
@@ -1499,3 +1500,137 @@ def test_admin_consent_error_offers_reading_only(c) -> None:
     )
     assert "Connect for reading only" in r.text
     assert "/files?tab=onedrive#onedrive-connect" in r.text
+
+
+# ---- chunked uploads into OneDrive ----------------------------------------------------
+
+
+def send_in_pieces(c, name: str, data: bytes, role: str = "editor", **start_args) -> dict:
+    """Start a OneDrive upload, send every piece, and return the start result."""
+    import base64
+    import hashlib
+
+    started = write(
+        c,
+        "onedrive_start_upload",
+        role=role,
+        name=name,
+        size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        chunk_size=1024,
+        **start_args,
+    )
+    if started["isError"]:
+        return started
+    upload_id = started["structuredContent"]["upload_id"]
+    for i in range(started["structuredContent"]["chunk_count"]):
+        piece = base64.b64encode(data[i * 1024 : (i + 1) * 1024]).decode()
+        out = write(
+            c, "append_chunk", role=role, upload_id=upload_id, index=i, content_base64=piece
+        )
+        assert not out["isError"], out
+    return started
+
+
+def test_a_big_file_is_sent_in_pieces_and_lands_in_the_allowed_folder(allowed, drive, capsys):
+    import json as _json
+
+    data = bytes(range(256)) * 15  # 3,840 bytes: four pieces, the last 768
+    started = send_in_pieces(allowed, "chart.png", data)["structuredContent"]
+    assert started["chunk_count"] == 4 and started["parent_id"] == SCHOOL
+    assert drive.writes() == []  # nothing reaches OneDrive before finish
+
+    capsys.readouterr()
+    done = write(allowed, "finish_upload", upload_id=started["upload_id"])
+    made = done["structuredContent"]
+    assert not done["isError"] and made["name"] == "chart.png"
+    assert made["byte_count"] == len(data)
+    assert drive.content[made["id"]] == data
+    assert drive.items[made["id"]]["parentReference"]["id"] == SCHOOL
+    records = [
+        _json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{") and '"tool_call"' in line
+    ]
+    assert {"tool": "finish_upload", "file_id": made["id"], "decision": "allow"}.items() <= (
+        records[-1].items()
+    )
+    # The upload is used up.
+    again = write(allowed, "finish_upload", upload_id=started["upload_id"])
+    assert error_of(again) == "upload_not_found"
+
+
+def test_onedrive_upload_start_checks_the_folder_first(allowed, drive) -> None:
+    for parent in (DIARY, ROOT, SHORTCUT, "D00D!9"):
+        out = send_in_pieces(allowed, "a.bin", b"x" * 2000, parent_id=parent)
+        assert error_of(out) in ("onedrive_not_allowed", "invalid_input"), (parent, out)
+    out = send_in_pieces(allowed, "a.bin", b"x" * 2000, parent_id=ESSAY)
+    assert error_of(out) == "invalid_input"  # a file, not a folder
+    out = send_in_pieces(allowed, "bad/name.bin", b"x" * 2000)
+    assert error_of(out) == "invalid_input"
+    assert drive.writes() == []
+
+
+def test_a_viewer_cannot_start_a_onedrive_upload(allowed, drive) -> None:
+    out = send_in_pieces(allowed, "a.bin", b"x" * 2000, role="viewer")
+    assert out["isError"] and "Permission denied" in out["content"][0]["text"]
+    assert drive.writes() == []
+
+
+def test_a_read_only_connection_cannot_start_a_onedrive_upload(c, drive, ms_oauth) -> None:
+    ms_oauth.scopes = READ_SCOPES
+    connect(c, access="read")
+    allow(c, SCHOOL)
+    out = send_in_pieces(c, "a.bin", b"x" * 2000)
+    assert error_of(out) == "onedrive_read_only"
+    assert drive.writes() == []
+
+
+def test_a_folder_removed_before_finish_gets_nothing(allowed, drive) -> None:
+    started = send_in_pieces(allowed, "a.bin", b"x" * 2000)["structuredContent"]
+    token = csrf(allowed, "/files?tab=onedrive")
+    allowed.post("/onedrive/remove", data={"csrf": token, "file_id": SCHOOL})
+    out = write(allowed, "finish_upload", upload_id=started["upload_id"])
+    assert error_of(out) == "onedrive_not_allowed"
+    assert drive.writes() == []
+    # Not written, so the upload is still there to cancel.
+    out = write(allowed, "cancel_upload", upload_id=started["upload_id"])
+    assert out["structuredContent"]["cancelled"] is True
+
+
+def test_a_onedrive_upload_never_overwrites_and_checks_the_hash(allowed, drive) -> None:
+    started = send_in_pieces(allowed, "essay.txt", b"y" * 2000)["structuredContent"]
+    out = write(allowed, "finish_upload", upload_id=started["upload_id"])
+    assert error_of(out) == "name_taken"
+    assert drive.content[ESSAY] == b"my essay about rivers"
+    attempts = drive.writes()  # the refused attempt, which Graph turned down
+
+    import hashlib
+
+    started = write(
+        allowed,
+        "onedrive_start_upload",
+        name="b.bin",
+        size=2000,
+        sha256=hashlib.sha256(b"z" * 2000).hexdigest(),
+        chunk_size=1024,
+    )["structuredContent"]
+    import base64
+
+    for i, piece in enumerate((b"z" * 1024, b"q" * 976)):
+        write(
+            allowed,
+            "append_chunk",
+            upload_id=started["upload_id"],
+            index=i,
+            content_base64=base64.b64encode(piece).decode(),
+        )
+    out = write(allowed, "finish_upload", upload_id=started["upload_id"])
+    assert error_of(out) == "integrity_mismatch"
+    assert drive.writes() == attempts
+
+
+def test_a_onedrive_upload_is_held_to_the_byte_limit(allowed, drive) -> None:
+    out = send_in_pieces(allowed, "big.bin", b"x" * 4097)  # MAX_BYTES is 4096 in tests
+    assert error_of(out) == "too_large"
+    assert drive.writes() == []
