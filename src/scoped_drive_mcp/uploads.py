@@ -28,6 +28,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import math
 import re
 import secrets
@@ -38,6 +39,8 @@ from typing import Any
 from .drop_storage import PIECE_BYTES, UPLOAD_BLOB_PREFIX, BlobApi, BlobBudget, BlobSigner
 from .errors import report_exception
 from .store import KeyValueStore
+
+logger = logging.getLogger(__name__)
 
 UPLOAD_TTL = 15 * 60
 # Bytes per piece. Every piece but the last is exactly chunk_size bytes, so the number of
@@ -284,11 +287,12 @@ class UploadSessions:
         return started
 
     def _link(self, upload_id: str, expires_at: float, size: int) -> dict[str, Any]:
-        """A presigned PUT for this upload's pathname, at most `size` bytes."""
+        """A presigned PUT for this upload's pathname, at most `size` bytes. Signed first
+        and charged to the Blob budget after, so a failed signing costs nothing. A link
+        that is never used still counts: there is no telling whether it was."""
         assert self.direct is not None
-        if self.direct.budget is not None and not self.direct.budget.reserve(
-            max(1, math.ceil(size / PIECE_BYTES))
-        ):
+        budget = self.direct.budget
+        if budget is not None and not budget.allows(max(1, math.ceil(size / PIECE_BYTES))):
             raise _unavailable("Upload links are used up for now.")
         path = blob_path(upload_id, expires_at)
         try:
@@ -296,13 +300,14 @@ class UploadSessions:
         except Exception as exc:
             report_exception(exc, where="upload_link")
             raise _unavailable("An upload link could not be made just now.") from None
-        headers = {
-            name: value
-            for name, value in signed["headers"].items()
-            if _HEADER_VALUE.fullmatch(value)
-        }
-        if "'" in signed["url"]:
+        headers = dict(signed["headers"])
+        unsafe = [name for name, value in headers.items() if not _HEADER_VALUE.fullmatch(value)]
+        if unsafe or "'" in signed["url"]:
+            # Dropping a header would make the upload fail at Blob for no stated reason.
+            logger.error("refused an upload link with unexpected headers: %s", sorted(unsafe))
             raise _unavailable("An upload link could not be made just now.")
+        if budget is not None and not budget.reserve(max(1, math.ceil(size / PIECE_BYTES))):
+            raise _unavailable("Upload links are used up for now.")
         return {"path": path, "url": signed["url"], "headers": headers}
 
     def _load(self, who: dict[str, str | None], upload_id: Any) -> dict[str, Any]:

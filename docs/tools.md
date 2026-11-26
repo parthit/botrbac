@@ -140,6 +140,9 @@ writes it, and deletes it from Blob. The link is for one pathname, at most the d
 overwrite (so it works once), and lasts as long as the upload (15 minutes). The sandbox must be able to
 reach `vercel.com`. If it can't, send the pieces with `append_chunk`: the same upload takes either.
 
+If both a file at the link and pieces arrive, the file at the link is used. A link counts against the
+Blob budget when it is handed out, used or not.
+
 `direct_unavailable` means this deployment has no Blob store and signer (see
 [self-hosting.md](self-hosting.md)), the Blob budget is used up, or signing failed; start again without
 `direct`. `upload_not_received` from `finish_upload` means nothing has arrived yet.

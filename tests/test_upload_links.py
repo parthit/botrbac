@@ -29,6 +29,9 @@ class Budget:
         self.room = room
         self.reserved: list[int] = []
 
+    def allows(self, pieces: int) -> bool:
+        return pieces <= self.room
+
     def reserve(self, pieces: int) -> bool:
         if pieces > self.room:
             return False
@@ -195,7 +198,7 @@ def _args(data: bytes) -> dict:
     }
 
 
-def test_a_link_never_has_unsafe_header_values_or_quotes(sessions, signer, monkeypatch):
+def test_a_link_with_unsafe_header_values_is_refused_not_trimmed(sessions, signer, monkeypatch):
     def odd(pathname, max_bytes, valid_for, ttl_days):
         return {
             "url": f"https://vercel.com/api/blob/?pathname={pathname}",
@@ -203,9 +206,24 @@ def test_a_link_never_has_unsafe_header_values_or_quotes(sessions, signer, monke
         }
 
     monkeypatch.setattr(signer, "sign_put", odd)
-    started = _start(sessions, bytes(2000))
-    assert started["upload_headers"] == {"x-api-version": "13"}
-    assert "rm -rf" not in started["upload_command"]
+    with pytest.raises(UploadError) as err:
+        _start(sessions, bytes(2000))
+    assert err.value.code == "direct_unavailable"
+
+
+def test_a_failed_signing_costs_no_budget(clock, blob, signer):
+    budget = Budget()
+    signer.fail = True
+    failing = UploadSessions(
+        MemoryStore(clock),
+        max_bytes=64 * 1024,
+        clock=clock,
+        direct=DirectUploads(blob, signer, budget),  # type: ignore[arg-type]
+    )
+    for _ in range(3):
+        with pytest.raises(UploadError):
+            _start(failing, bytes(2000))
+    assert budget.reserved == [] and budget.room == 100
 
 
 def test_the_sweep_deletes_expired_uploads_only(clock):
