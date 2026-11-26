@@ -8,7 +8,7 @@
 <link rel="preload" href="/fonts/geist-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/geist-500.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/geist-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="{{ asset_url('app.css') }}">
 {% if csrf %}<meta name="csrf" content="{{ csrf }}">{% endif %}
 </head>
 <body>
@@ -71,11 +71,11 @@
     </nav>
   </div>
 </footer>
-<script src="/ui.js" defer></script>
-{% if owner %}<script src="/confirm.js" defer></script>{% endif %}
+<script src="{{ asset_url('ui.js') }}" defer></script>
+{% if owner %}<script src="{{ asset_url('confirm.js') }}" defer></script>{% endif %}
 {% if observability_on() %}
 {#- observability.js first: it strips ids and query strings before either script sends. -#}
-<script src="/observability.js" defer></script>
+<script src="{{ asset_url('observability.js') }}" defer></script>
 <script src="/_vercel/speed-insights/script.js" defer></script>
 <script src="/_vercel/insights/script.js" defer></script>
 {% endif %}

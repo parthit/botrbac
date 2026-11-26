@@ -64,7 +64,13 @@ jobs:
           uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
           git diff --exit-code requirements.txt
 
-      # The Node function that signs Blob URLs (api/blob-sign.mjs), with the runner's Node.
+      # The Node function that signs Blob URLs (api/blob-sign.mjs), on the Node that
+      # package.json's `engines` asks Vercel for.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Node signer
         run: |
           npm ci --ignore-scripts

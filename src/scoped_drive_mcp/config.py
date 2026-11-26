@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     # OAuth redirects. No supported assistant uses them, and any program on the approver's
     # computer could be listening there, so they are off unless you run such a client.
     oauth_loopback_callback: bool = False
+    # You set it in Vercel (Project → Settings → Environment Variables); its cron sends it as
+    # `Authorization: Bearer …`. The daily clean-up route exists only when this is set.
+    cron_secret: SecretStr | None = None
     # Wake-up pings to paired assistants are on whenever WEBHOOK_KEK is set.
     webhook_kek: SecretStr | None = None
     webhook_host_allowlist: str = "api2.cursor.sh,api.anthropic.com"

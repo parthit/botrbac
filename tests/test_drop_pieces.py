@@ -396,3 +396,30 @@ def test_finish_lists_and_logs_a_file_once(setup, blob) -> None:
     again = eve.post(f"/shared/send/{upload}/finish", data={"csrf": token})
     assert again.status_code == 400 and again.json()["error"] == "not_found"
     assert len(_held(app)) == 1
+
+
+def test_the_scheduled_sweep_runs_whatever_swept_last_and_reports_failure(blob) -> None:
+    """The cron's sweep is the guarantee: it is not skipped because an upload swept an
+    hour ago, and a store that cannot be swept is an error, not a quiet success."""
+    store = MemoryStore()
+    parts = BlobParts(blob, "k" * 44)
+    now = datetime(2026, 11, 24, tzinfo=UTC)
+    past = int(now.timestamp()) - 10
+    budget = BlobBudget(
+        store, parts, monthly_uploads=100, held_bytes=10**9, hold_hours=24, clock=lambda: now
+    )
+    budget.maybe_sweep()
+    parts.put_piece("old", past, 0, b"a")
+    budget.maybe_sweep()  # inside the 6 hours: skipped
+    assert blob.lists == 1 and len(blob.blobs) == 1
+    assert budget.sweep_now() == 1 and blob.blobs == {} and blob.lists == 2
+    # Having just swept, the next upload does not sweep again.
+    budget.maybe_sweep()
+    assert blob.lists == 2
+
+    def broken(now: int) -> int:
+        raise RuntimeError("blob store is away")
+
+    parts.sweep = broken  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        budget.sweep_now()

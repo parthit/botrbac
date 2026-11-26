@@ -1,12 +1,15 @@
 """Requests between paired people: asked and answered by people on the dashboard, and
 never visible to an assistant on either side."""
 
+import importlib
 import inspect
 import json
+import pkgutil
 
 import pytest
 
 from scoped_drive_mcp import access, bridge, external, policy, server, service
+from scoped_drive_mcp import tools as tools_package
 from scoped_drive_mcp.access import AccessRequests
 from scoped_drive_mcp.grants import GrantError, GrantService
 from scoped_drive_mcp.peer_request_pages import SENT_MESSAGE
@@ -255,7 +258,18 @@ def test_no_assistant_on_either_side_can_see_a_request(three, memstore) -> None:
     assert "zebra-quartz" not in eve.get("/activity").text
 
     # Nothing an assistant runs through knows these records exist.
-    for module in (server, service, access, bridge, external, policy):
+    # `bridge` and `tools` are packages: every module in them is read, not just __init__.
+    modules = [server, service, access, external, policy]
+    for package in (bridge, tools_package):
+        modules.append(package)
+        modules += [
+            importlib.import_module(f"{package.__name__}.{found.name}")
+            for found in pkgutil.iter_modules(package.__path__)
+        ]
+    assert {"scoped_drive_mcp.tools.drive", "scoped_drive_mcp.bridge.mail"} <= {
+        module.__name__ for module in modules
+    }
+    for module in modules:
         source = inspect.getsource(module)
         assert "peer_request" not in source and "peerreq" not in source, module.__name__
 

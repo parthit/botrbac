@@ -425,18 +425,31 @@ class BlobBudget:
         return True
 
     def maybe_sweep(self) -> None:
-        """Delete expired pieces, at most once every SWEEP_EVERY_SECONDS."""
-        now = self.clock()
+        """Delete expired pieces, at most once every SWEEP_EVERY_SECONDS. Called while a
+        file is being sent, so a failure is reported and never stops the upload."""
         if not self.store.set_if_absent(f"{BUDGET_PREFIX}swept", "1", ex=SWEEP_EVERY_SECONDS):
             return
         try:
-            self.store.incr(self._month_key(now), 40 * 86400)
-            removed = self.parts.sweep(int(now.timestamp()))
+            self._sweep()
         except Exception as exc:
             report_exception(exc, where="drop_sweep")
-            return
+
+    def sweep_now(self) -> int:
+        """Delete expired pieces now and return how many went. For the scheduled
+        clean-up: it runs whatever swept last, and a failure is the caller's to report,
+        so a Blob store that cannot be swept shows up as a failed run."""
+        # An upload right after this has nothing left to sweep.
+        self.store.set(f"{BUDGET_PREFIX}swept", "1", ex=SWEEP_EVERY_SECONDS)
+        return self._sweep()
+
+    def _sweep(self) -> int:
+        now = self.clock()
+        # Listing the store is one advanced operation: it counts against the month.
+        self.store.incr(self._month_key(now), 40 * 86400)
+        removed = self.parts.sweep(int(now.timestamp()))
         if removed:
             logger.info("deleted %d expired held-file pieces from Blob", removed)
+        return removed
 
 
 def blob_configured() -> bool:

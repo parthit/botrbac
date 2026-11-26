@@ -150,7 +150,7 @@ AGENT_ROLE_TOOLS: frozenset[str] = frozenset(
 )
 
 # Tools that are not in the role sets above and exist only when a deployment turns them on
-# with a setting; server.py registers them only then. Until it does, there is no such tool
+# with a setting; tools/ registers them only then. Until it does, there is no such tool
 # to list or call, whatever this says. Like create_doc, they are for connections that may
 # edit.
 OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
@@ -180,6 +180,17 @@ ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+# Set by `require` on the wrapper it returns: the tool name whose role it checks. The
+# server refuses to register a tool function that does not carry its own name here.
+GUARDED_ATTR = "__botrbac_guarded_tool__"
+
+
+def guarded_tool(fn: object) -> str | None:
+    """The tool name `require` checks for this function, or None if it is not wrapped."""
+    name = getattr(fn, GUARDED_ATTR, None)
+    return name if isinstance(name, str) else None
 
 
 class PermissionDeniedError(Exception):
@@ -366,6 +377,7 @@ def require(
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 
+        setattr(wrapper, GUARDED_ATTR, tool)
         return wrapper
 
     return decorator

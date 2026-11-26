@@ -119,3 +119,16 @@ def test_export_over_drives_limit_is_its_own_error() -> None:
     with pytest.raises(HttpError):  # a plain 403 is not "too large"
         client.export("hidden", "text/plain")
     assert client.export("doc", "text/plain") == b"text"
+
+
+def test_a_drive_error_does_not_carry_the_search_text_into_logs() -> None:
+    """HttpError prints its request URL, and a list request's URL holds `q=` with what the
+    assistant searched for. docs/security.md says search text is never logged."""
+    uri = "https://www.googleapis.com/drive/v3/files?q=fullText+contains+%27payroll+2026%27"
+    error = HttpError(_Resp(500), b'{"error":{"message":"Backend Error"}}', uri=uri)
+    assert "payroll" in str(error)
+    with pytest.raises(HttpError) as raised:
+        _client([], [error]).list_files("fullText contains 'payroll 2026'", "id", 10)
+    text = str(raised.value) + repr(raised.value)
+    assert "payroll" not in text and "googleapis.com" not in text
+    assert "500" in text and "Backend Error" in text

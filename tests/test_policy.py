@@ -13,10 +13,11 @@ from scoped_drive_mcp.policy import (
     GUEST_WRITE_TOOLS,
     ROLE_TOOLS,
     VIEWER_TOOLS,
+    guarded_tool,
     is_allowed,
     require,
 )
-from scoped_drive_mcp.server import create_mcp
+from scoped_drive_mcp.server import UnguardedToolError, create_mcp
 
 VALID_ARGS = {
     "search_files": {"query": "plan"},
@@ -259,3 +260,62 @@ def test_audit_caps_caller_supplied_ids(capsys) -> None:
     )
     line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert len(line["file_id"]) == 200
+
+
+# ---- registration is the choke point: no tool without its own role check ----
+
+
+def test_a_tool_without_the_role_check_cannot_be_registered(service) -> None:
+    mcp = create_mcp(service)
+
+    async def unchecked() -> dict:
+        return {}
+
+    with pytest.raises(UnguardedToolError):
+        mcp.tool()(unchecked)
+    with pytest.raises(UnguardedToolError):
+        mcp.add_tool(unchecked, name="read_file")
+
+
+def test_a_tool_wrapped_for_another_name_cannot_be_registered(service) -> None:
+    """`@require("read_file")` on a function registered as trash_file would check the
+    viewer role for an admin tool."""
+    mcp = create_mcp(service)
+
+    @require("read_file")
+    async def trash_file(file_id: str) -> dict:
+        return {}
+
+    with pytest.raises(UnguardedToolError):
+        mcp.tool()(trash_file)
+    with pytest.raises(UnguardedToolError):
+        mcp.add_tool(trash_file, name="trash_file")
+
+
+def test_every_registered_tool_checks_its_own_name(service) -> None:
+    mcp = create_mcp(service)
+    for tool in mcp._tool_manager.list_tools():
+        assert guarded_tool(tool.fn) == tool.name
+
+
+@pytest.mark.anyio
+async def test_a_tool_put_into_the_manager_directly_is_neither_listed_nor_callable(service) -> None:
+    """`add_tool` is the public path. One that goes around it is refused where it is used."""
+    mcp = create_mcp(service)
+    ran: list[str] = []
+
+    async def read_everything() -> dict:
+        ran.append("ran")
+        return {}
+
+    mcp._tool_manager.add_tool(read_everything)
+    token = current_principal.set(Principal("t", Role.ADMIN))
+    try:
+        assert "read_everything" not in {t.name for t in await mcp.list_tools()}
+        with pytest.raises(ToolError, match="Permission denied"):
+            await mcp.call_tool("read_everything", {})
+        # The real tools are untouched.
+        assert "read_file" in {t.name for t in await mcp.list_tools()}
+    finally:
+        current_principal.reset(token)
+    assert ran == []

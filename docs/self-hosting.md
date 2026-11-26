@@ -264,6 +264,7 @@ uv run ruff check . && uv run ruff format --check .
 | "Access blocked: app has not completed verification" | Add the address as a **Test user** on the consent screen |
 | Site says storage is missing | Connect Upstash Redis or Neon Postgres to the Vercel project, then redeploy |
 | `/health` returns 503 | A variable is malformed (e.g. `ENCRYPTION_KEY` is not a Fernet key, `APP_BASE_URL` is `http://` on a non-local host). Check the function logs |
+| `/health` is fine but `/health/ready` returns 503 | The app is up and cannot reach its store. Check the Upstash or Postgres integration and its variables |
 | Drive stops working after a week | The Google app is in Testing. Reconnect Drive, or publish the app (step 1) |
 | Assistant sees your whole Drive | Its built-in Google Drive connector is still connected. Disconnect it |
 | No **Add from Google Drive** button | `GOOGLE_PICKER_API_KEY` or `GOOGLE_CLOUD_PROJECT_NUMBER` is missing |
@@ -291,6 +292,7 @@ uv run ruff check . && uv run ruff format --check .
 | `ROOT_FOLDER_ID` | none | a Drive folder that is always allowed for the admin, on top of the ticks. It must also be picked, or Google won't open it |
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | none | overrides the admin's dashboard Drive connection (from `scripts/bootstrap_oauth.py`, which needs a Desktop client). Every access token it yields is limited to `drive.file` |
 | `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER` | required | Google's file picker, which is how files are added. Restrict the key by HTTP referrer and to the Picker API; it is visible in the page |
+| `CRON_SECRET` | unset | a random string of 16+ characters (`openssl rand -hex 32`). Vercel sends it with the daily clean-up cron in `vercel.json` (`/internal/sweep`: expired Postgres rows, expired held-file pieces, unfinished app approvals). Unset: the route does not exist and clean-up only happens during ordinary requests |
 | `MAX_BYTES` | 5242880 | bytes fetched per read |
 | `MAX_CHARS` | 100000 | characters returned per read |
 | `DROP_HOLD_HOURS` | 24 | hours a file a paired person sent is held for its recipient to save (24 to 168); then it is deleted |
