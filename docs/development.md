@@ -40,11 +40,14 @@ src/scoped_drive_mcp/
 
   Other connections (optional, each behind its own allowlist)
   connections.py              the services a person can connect, one consent step each
-  notion.py / notion_client.py        Notion: read-only tools / OAuth and API calls
+  notion.py / notion_client.py        Notion: tools / OAuth and API calls
   onedrive.py / onedrive_client.py    OneDrive: tools / OAuth and Microsoft Graph calls
 
   People and their assistants
   access.py                   access requests (storage, dedupe, request tools)
+  agent_roles.py              named roles: /mcp/role/<slug> narrows a call to part of the allowlist
+  peer_requests.py            requests between paired people, for people only (no MCP tool reads them)
+  peer_request_pages.py       their dashboard routes
   grants.py                   owner-side grant/revoke and approve/deny
   bridge.py                   pairings; mailbox between one person's own assistants; wake-up webhooks
   wake.py                     the HTTPS ping that wakes a paired assistant (host allowlist, pinned address)
@@ -70,6 +73,7 @@ src/botrbac_cli/              the `botrbac` CLI. The server imports patterns.py,
                               api.DEFAULT_SERVER from it, so both sides share one definition
   patterns.py                 tool patterns and the session chain check (pure Python)
   signing.py                  the signed policy: the server signs, the CLI verifies
+  sealing.py                  seals recorded commands to the site's key, so only the website reads them
   main.py                     commands
   api.py                      the website's /api/terminal endpoints, with token refresh
   state.py                    the files the CLI keeps on the computer ($BOTRBAC_HOME)

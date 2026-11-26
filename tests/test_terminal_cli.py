@@ -478,3 +478,14 @@ def test_servers_command(capsys) -> None:
     main(["servers", "list"])
     assert "my-github" in capsys.readouterr().out
     assert main(["status"]) == 1  # not logged in
+
+
+def test_login_refuses_a_server_that_is_not_https() -> None:
+    """A sign-in sent over plain http could be read on the way."""
+    from botrbac_cli.main import _safe_server
+
+    assert _safe_server("https://botrbac.com")
+    assert _safe_server("http://localhost:8000") and _safe_server("http://127.0.0.1:8000")
+    assert not _safe_server("http://botrbac.com")
+    assert not _safe_server("http://localhost.evil.example")
+    assert not _safe_server("ftp://botrbac.com") and not _safe_server("botrbac.com")

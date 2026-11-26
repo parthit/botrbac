@@ -7,8 +7,11 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
+from scoped_drive_mcp.humanize import describe
 from scoped_drive_mcp.notion_client import (
     API_BASE,
+    MAX_BLOCKS,
+    TEXT_CHUNK,
     HttpNotionApi,
     NotionApiError,
     NotionForbiddenError,
@@ -18,6 +21,7 @@ from scoped_drive_mcp.notion_client import (
     NotionTokens,
     NotionUnauthorizedError,
     block_line,
+    blocks_from_text,
     normalize_notion_id,
     property_text,
     title_of,
@@ -114,6 +118,10 @@ class FakeNotion:
         self.shared = {TOP, CHILD, DB, ROW, OTHER, COLUMN, NESTED}
         self.tokens = {"notion-access-1"}
         self.calls: list[tuple[str, str]] = []
+        # Whether the connection has Notion's "Insert content" capability, and what
+        # create_page was asked to make.
+        self.can_insert = True
+        self.created: list[dict] = []
 
     def factory(self, token: str) -> "FakeNotionApi":
         return FakeNotionApi(self, token)
@@ -171,6 +179,29 @@ class FakeNotionApi:
             if o.get("parent", {}).get("database_id") == database_id
         ]
         return {"results": rows, "has_more": False}
+
+    def create_page(self, parent_page_id: str, title: str, children: list[dict]) -> dict:
+        self._check()
+        self.world.calls.append(("create", parent_page_id))
+        if not self.world.can_insert:
+            raise NotionForbiddenError(403, "restricted_resource")
+        if parent_page_id not in self.world.shared:
+            raise NotionNotFoundError(404, "object_not_found")
+        new_id = nid(1000 + len(self.world.created))
+        made = page(new_id, title, {"type": "page_id", "page_id": parent_page_id})
+        self.world.objects[new_id] = made
+        self.world.shared.add(new_id)
+        # Notion answers reads with `plain_text` on each piece of rich text.
+        stored = json.loads(json.dumps(children))
+        for i, block in enumerate(stored):
+            block.update(id=f"{new_id}-{i}", has_children=False)
+            for piece in block[block["type"]].get("rich_text", []):
+                piece["plain_text"] = piece["text"]["content"]
+        self.world.children[new_id] = stored
+        self.world.created.append(
+            {"parent": parent_page_id, "title": title, "children": children, "id": new_id}
+        )
+        return made
 
 
 class FakeNotionOAuth:
@@ -894,3 +925,561 @@ def test_a_page_reads_its_properties_and_nested_blocks(allowed, notion) -> None:
     assert "- outer\n  inner" in out
     assert f"[page] Sub (id {nid(31)})" in out
     assert "child page body" not in out
+
+
+# ---- creating a page ---------------------------------------------------------------
+
+# Page creation is off unless the server sets NOTION_ALLOW_CREATE. These tests turn it on.
+with_create = pytest.mark.parametrize(
+    "p2_settings",
+    [make_settings(root_folder_id=None, allowlist_cache_ttl=0, notion_allow_create=True)],
+    ids=["create-on"],
+)
+
+
+def create(c, role: str = "editor", **args) -> dict:
+    return mcp_call(c, "notion_create_page", role=role, **args)
+
+
+def audit_rows(capsys) -> list[dict]:
+    rows = []
+    for line in capsys.readouterr().out.splitlines():
+        if line.startswith("{"):
+            row = json.loads(line)
+            if row.get("event") == "tool_call":
+                rows.append(row)
+    return rows
+
+
+@with_create
+def test_create_page_under_an_allowed_page(allowed, notion, capsys) -> None:
+    capsys.readouterr()
+    out = create(
+        allowed,
+        parent_page_id=TOP,
+        title="  Meeting\nnotes ",
+        content="# Agenda\n\nfirst line\nsecond line\n\n- bring laptop\n- [x] book room",
+    )
+    assert out.get("isError") is not True, out
+    made = out["structuredContent"]
+    assert notion.created == [
+        {
+            "parent": TOP,
+            "title": "Meeting notes",
+            "id": made["id"],
+            "children": [
+                {
+                    "object": "block",
+                    "type": "heading_1",
+                    "heading_1": {"rich_text": [{"type": "text", "text": {"content": "Agenda"}}]},
+                },
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {"type": "text", "text": {"content": "first line\nsecond line"}}
+                        ]
+                    },
+                },
+                {
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": [{"type": "text", "text": {"content": "bring laptop"}}]
+                    },
+                },
+                {
+                    "object": "block",
+                    "type": "to_do",
+                    "to_do": {
+                        "rich_text": [{"type": "text", "text": {"content": "book room"}}],
+                        "checked": True,
+                    },
+                },
+            ],
+        }
+    ]
+    assert made["title"] == "Meeting notes"
+    assert made["parent_id"] == TOP
+    assert made["type"] == "page"
+    assert made["blocks"] == 4
+    assert made["url"].startswith("https://www.notion.so/")
+    # The audit row names the parent that was asked for and the page that was made, and
+    # nothing of the title or text.
+    row = audit_rows(capsys)[-1]
+    assert (row["tool"], row["decision"], row["role"]) == ("notion_create_page", "allow", "editor")
+    assert (row["parent_page_id"], row["page_id"]) == (TOP, made["id"])
+    assert "Meeting" not in json.dumps(row) and "laptop" not in json.dumps(row)
+    # It sits under an allowed page, so it is readable at once with no extra Allow.
+    back = result(allowed, "notion_read_page", page_id=made["id"])["structuredContent"]
+    assert "# Agenda" in back["content"] and "[x] book room" in back["content"]
+    # The allowlist itself did not grow.
+    assert [
+        i["id"] for i in result(allowed, "notion_list_pages")["structuredContent"]["items"]
+    ] == [TOP]
+
+
+@with_create
+@pytest.mark.parametrize("parent", [CHILD, NESTED, ROW])
+def test_create_page_under_a_page_inside_an_allowed_page(allowed, notion, parent) -> None:
+    # Reads work for these (a sub-page, a page in a column block, a database row), so a
+    # new page under them does too: the check is the one the read tools use.
+    assert result(allowed, "notion_read_page", page_id=parent).get("isError") is not True
+    url = f"https://www.notion.so/Some-title-{parent.replace('-', '')}"
+    out = create(allowed, parent_page_id=url, title="Under it")
+    assert out.get("isError") is not True, out
+    assert [(p["parent"], p["title"], p["children"]) for p in notion.created] == [
+        (parent, "Under it", [])
+    ]
+
+
+@with_create
+@pytest.mark.parametrize("parent", [OTHER, HIDDEN, nid(99)])
+def test_create_page_outside_the_list_is_refused_like_a_read(allowed, notion, parent) -> None:
+    # Shared with Bot RBAC but never allowed, not shared at all, and not existing: the
+    # same answer as notion_read_page gives, and Notion is never asked to create anything.
+    read = result(allowed, "notion_read_page", page_id=parent)["structuredContent"]
+    out = create(allowed, role="admin", parent_page_id=parent, title="Sneaky")
+    assert out["isError"] is True
+    assert out["structuredContent"] == read
+    assert out["structuredContent"]["error"] == "not_allowed"
+    assert notion.created == []
+    assert ("create", parent) not in notion.calls
+
+
+@with_create
+def test_create_page_with_nothing_allowed_never_calls_notion(c, notion) -> None:
+    connect_notion(c)
+    out = create(c, parent_page_id=TOP, title="x")
+    assert out["structuredContent"]["error"] == "not_allowed"
+    assert notion.calls == []
+
+
+@with_create
+def test_create_page_stops_when_the_page_is_removed_or_trashed(allowed, notion) -> None:
+    notion.objects[TOP]["in_trash"] = True
+    assert create(allowed, parent_page_id=CHILD, title="x")["structuredContent"]["error"] == (
+        "not_allowed"
+    )
+    assert create(allowed, parent_page_id=TOP, title="x")["structuredContent"]["error"] == (
+        "not_allowed"
+    )
+    notion.objects[TOP]["in_trash"] = False
+    token = csrf(allowed, "/files?tab=notion")
+    allowed.post("/notion/remove", data={"csrf": token, "page_id": TOP})
+    assert create(allowed, parent_page_id=TOP, title="x")["structuredContent"]["error"] == (
+        "not_allowed"
+    )
+    assert notion.created == []
+
+
+@with_create
+def test_create_page_under_a_database_is_not_supported(allowed, notion) -> None:
+    out = create(allowed, parent_page_id=DB, title="A row")
+    assert out["structuredContent"]["error"] == "notion_parent_unsupported"
+    # A database that is not allowed is not told apart from one that does not exist.
+    notion.objects[nid(50)] = {**notion.objects[DB], "id": nid(50), "parent": {"type": "workspace"}}
+    notion.shared.add(nid(50))
+    out = create(allowed, parent_page_id=nid(50), title="A row")
+    assert out["structuredContent"]["error"] == "not_allowed"
+    assert notion.created == []
+
+
+@with_create
+def test_read_only_connections_cannot_create_pages(allowed, notion, capsys) -> None:
+    capsys.readouterr()
+    notion.calls.clear()
+    out = create(allowed, role="viewer", parent_page_id=TOP, title="x")
+    assert out["isError"] is True
+    assert "Permission denied" in out["content"][0]["text"]
+    assert notion.created == [] and notion.calls == []
+    row = audit_rows(capsys)[-1]
+    assert (row["tool"], row["decision"], row["role"]) == ("notion_create_page", "deny", "viewer")
+    assert row["parent_page_id"] == TOP
+    # The roles that may write to Drive may; no one else.
+    for role in ("editor", "admin"):
+        assert create(allowed, role=role, parent_page_id=TOP, title=role).get("isError") is not True
+    assert [p["title"] for p in notion.created] == ["editor", "admin"]
+
+
+@with_create
+def test_only_editing_roles_are_offered_the_create_tool(allowed) -> None:
+    listed = {}
+    for role in ("viewer", "editor", "admin"):
+        r = allowed.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS[role]}"},
+        )
+        tools = {t["name"]: t for t in r.json()["result"]["tools"]}
+        listed[role] = "notion_create_page" in tools
+        # The read tools are there for everyone, as before.
+        assert {"notion_list_pages", "notion_read_page", "notion_search"} <= set(tools)
+        if listed[role]:
+            hints = tools["notion_create_page"]["annotations"]
+            assert hints["readOnlyHint"] is False and hints["destructiveHint"] is False
+    assert listed == {"viewer": False, "editor": True, "admin": True}
+
+
+@with_create
+def test_a_connection_without_insert_content_says_what_to_change(allowed, notion, capsys) -> None:
+    notion.can_insert = False  # the capability is not ticked on the connection in Notion
+    capsys.readouterr()
+    out = create(allowed, parent_page_id=TOP, title="x", content="hello")
+    assert out["isError"] is True
+    payload = out["structuredContent"]
+    assert payload["error"] == "notion_cannot_create"
+    assert "Insert content" in payload["message"]
+    assert "Connect Notion" in payload["message"] and "/settings#services" in payload["message"]
+    assert notion.created == []
+    # Asked once, not retried, and no reconnect or refresh was started on its own.
+    assert [call for call in notion.calls if call[0] == "create"] == [("create", TOP)]
+    row = audit_rows(capsys)[-1]
+    assert (row["decision"], row["reason"]) == ("error", "notion_cannot_create")
+    # Reading with that connection works exactly as before.
+    top = result(allowed, "notion_read_page", page_id=TOP)["structuredContent"]
+    assert "welcome to the wiki" in top["content"]
+    hits = result(allowed, "notion_search", query="wiki")["structuredContent"]["results"]
+    assert [h["title"] for h in hits] == ["Team wiki"]
+
+
+@with_create
+def test_a_stored_connection_is_not_changed_by_creating(allowed, notion, memstore) -> None:
+    before = memstore.get(f"{KEY_PREFIX}{NOTION_TOKEN_KEY}")
+    listed = dict(memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}"))
+    assert before
+    create(allowed, parent_page_id=TOP, title="x")
+    notion.can_insert = False
+    create(allowed, parent_page_id=TOP, title="y")
+    assert memstore.get(f"{KEY_PREFIX}{NOTION_TOKEN_KEY}") == before
+    assert dict(memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}")) == listed
+
+
+@with_create
+def test_create_page_refreshes_an_expired_token_and_creates_once(
+    allowed, notion, notion_oauth
+) -> None:
+    notion.tokens.clear()
+    out = create(allowed, parent_page_id=TOP, title="After refresh")
+    assert out.get("isError") is not True, out
+    assert notion_oauth.refreshed == ["notion-refresh-1"]
+    assert [p["title"] for p in notion.created] == ["After refresh"]
+
+
+@with_create
+def test_create_page_when_notion_is_not_connected(c, notion) -> None:
+    out = create(c, parent_page_id=TOP, title="x")
+    assert out["structuredContent"]["error"] in ("not_allowed", "notion_not_connected")
+    assert notion.calls == []
+
+
+@with_create
+@pytest.mark.parametrize(
+    ("args", "word"),
+    [
+        ({"parent_page_id": "not an id", "title": "x"}, "parent_page_id"),
+        ({"parent_page_id": TOP, "title": "   "}, "title"),
+        ({"parent_page_id": TOP, "title": "t" * 201}, "title"),
+        ({"parent_page_id": TOP, "title": "x", "content": "c" * 20_001}, "content"),
+        ({"parent_page_id": TOP, "title": "x", "content": "- item\n" * 101}, "content"),
+    ],
+)
+def test_create_page_bounds_its_input(allowed, notion, args, word) -> None:
+    notion.calls.clear()
+    out = create(allowed, **args)
+    assert out["isError"] is True
+    assert out["structuredContent"]["error"] == "invalid_input"
+    assert word in out["structuredContent"]["message"]
+    assert notion.calls == []  # refused before Notion is asked anything
+
+
+@with_create
+def test_create_page_accepts_input_at_the_limits(allowed, notion) -> None:
+    out = create(
+        allowed, parent_page_id=TOP, title="t" * 200, content=("- item\n" * 100) + ("c" * 19_000)
+    )
+    assert out["isError"] is True  # 100 items and one more paragraph: 101 blocks
+    out = create(allowed, parent_page_id=TOP, title="t" * 200, content="c" * 20_000)
+    assert out.get("isError") is not True, out
+    (made,) = notion.created
+    pieces = made["children"][0]["paragraph"]["rich_text"]
+    assert len(made["children"]) == 1
+    assert all(len(p["text"]["content"]) <= TEXT_CHUNK for p in pieces)
+    assert "".join(p["text"]["content"] for p in pieces) == "c" * 20_000
+
+
+@with_create
+def test_block_json_in_the_text_stays_text(allowed, notion) -> None:
+    # A caller cannot hand Notion blocks of its own: whatever it sends is text in a block
+    # this server built, with no link, mention or child page.
+    sneaky = json.dumps(
+        {
+            "object": "block",
+            "type": "link_to_page",
+            "link_to_page": {"type": "page_id", "page_id": OTHER},
+        }
+    )
+    out = create(allowed, parent_page_id=TOP, title="x", content=sneaky)
+    assert out.get("isError") is not True, out
+    assert notion.created[0]["children"] == [
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": sneaky}}]},
+        }
+    ]
+
+
+SIMPLE_KINDS = {
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "quote",
+    "code",
+    "divider",
+}
+
+
+def test_text_becomes_simple_blocks() -> None:
+    text = (
+        "intro one\r\nintro two\n\n"
+        "# One\n## Two\n### Three\n#### four stays text\n"
+        "- a\n* b\n1. c\n2) d\n- [ ] todo\n- [X] done\n> said\n---\n"
+        "```python\nx = 1\n\n# not a heading\n```\n"
+        "[link](https://example.com) **bold** @someone\n"
+        "```\nnever closed"
+    )
+    blocks = blocks_from_text(text)
+    assert {b["type"] for b in blocks} == SIMPLE_KINDS
+    for block in blocks:
+        assert set(block) == {"object", "type", block["type"]}
+        body = block[block["type"]]
+        assert set(body) <= {"rich_text", "checked", "language"}
+        for piece in body.get("rich_text", []):
+            # Plain text only: no link, no mention, no annotations.
+            assert set(piece) == {"type", "text"} and piece["type"] == "text"
+            assert set(piece["text"]) == {"content"}
+    # What the read tools print for those blocks is the text that was sent.
+    lines = [block_line(_as_read(b)) for b in blocks]
+    assert lines == [
+        "intro one\nintro two",
+        "# One",
+        "## Two",
+        "### Three",
+        "#### four stays text",
+        "- a",
+        "- b",
+        "1. c",
+        "1. d",
+        "[ ] todo",
+        "[x] done",
+        "> said",
+        "---",
+        "```plain text\nx = 1\n\n# not a heading\n```",
+        "[link](https://example.com) **bold** @someone",
+        "```plain text\nnever closed\n```",
+    ]
+    assert blocks_from_text("") == [] and blocks_from_text(" \n\n ") == []
+    assert len(blocks_from_text("- x\n" * MAX_BLOCKS)) == MAX_BLOCKS
+    with pytest.raises(ValueError):
+        blocks_from_text("- x\n" * (MAX_BLOCKS + 1))
+
+
+def _as_read(block: dict) -> dict:
+    out = json.loads(json.dumps(block))
+    for piece in out[out["type"]].get("rich_text", []):
+        piece["plain_text"] = piece["text"]["content"]
+    return out
+
+
+def test_the_http_client_creates_a_page_as_notion_documents_it() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"object": "page", "id": nid(77)})
+
+    api = _http_api(handler)
+    children = blocks_from_text("hello")
+    assert api.create_page(TOP, "New page", children)["id"] == nid(77)
+    api.create_page(TOP, "Empty", [])
+    api.close()
+    assert [(r.method, r.url.path) for r in seen] == [("POST", "/v1/pages")] * 2
+    assert seen[0].headers["notion-version"] == "2022-06-28"
+    assert json.loads(seen[0].content) == {
+        "parent": {"type": "page_id", "page_id": TOP},
+        "properties": {"title": {"title": [{"type": "text", "text": {"content": "New page"}}]}},
+        "children": children,
+    }
+    assert "children" not in json.loads(seen[1].content)
+
+    def refused(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"code": "restricted_resource"})
+
+    with pytest.raises(NotionForbiddenError):
+        _http_api(refused).create_page(TOP, "x", [])
+
+
+@with_create
+def test_notion_refusing_the_new_page_is_not_reported_as_a_read_problem(
+    allowed, monkeypatch
+) -> None:
+    def invalid(self, parent_page_id, title, children):
+        raise NotionApiError(400, "validation_error")
+
+    monkeypatch.setattr(FakeNotionApi, "create_page", invalid)
+    out = create(allowed, parent_page_id=TOP, title="x")
+    assert out["structuredContent"]["error"] == "notion_create_refused"
+
+    def busy(self, parent_page_id, title, children):
+        raise NotionApiError(429, "rate_limited")
+
+    monkeypatch.setattr(FakeNotionApi, "create_page", busy)
+    out = create(allowed, parent_page_id=TOP, title="x")
+    assert out["isError"] is True
+    assert "Notion request failed" in out["content"][0]["text"]
+
+
+def test_activity_names_a_created_notion_page() -> None:
+    base = {"event": "tool_call", "tool": "notion_create_page", "token_name": "editor-tok"}
+    done = describe({**base, "decision": "allow", "reason": "ok", "parent_page_id": TOP})
+    assert done.text.endswith("created a Notion page.") and done.badge.label == "Allowed"
+    refused = describe({**base, "decision": "error", "reason": "notion_cannot_create"})
+    assert refused.text.endswith(
+        "couldn’t create a Notion page: the Notion connection isn’t allowed to add pages."
+    )
+    outside = describe({**base, "decision": "error", "reason": "not_allowed"})
+    assert outside.text.endswith("couldn’t create a Notion page: that Notion page isn’t allowed.")
+    blocked = describe(
+        {**base, "decision": "deny", "reason": "role 'viewer' may not call 'notion_create_page'"}
+    )
+    assert "tried to create a Notion page" in blocked.text and blocked.badge.label == "Blocked"
+
+
+# ---- page creation is off by default ---------------------------------------------------
+
+
+def _listed(c, role: str) -> dict:
+    r = c.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS[role]}"},
+    )
+    return {t["name"]: t for t in r.json()["result"]["tools"]}
+
+
+def _instructions(c) -> str:
+    r = c.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"},
+            },
+        },
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {TOKENS['admin']}"},
+    )
+    return r.json()["result"]["instructions"]
+
+
+def test_page_creation_is_off_unless_the_server_turns_it_on() -> None:
+    assert make_settings().notion_allow_create is False
+    assert make_settings(notion_allow_create="1").notion_allow_create is True
+
+
+def test_by_default_no_role_is_offered_or_can_call_create_page(allowed, notion, capsys) -> None:
+    for role in ("viewer", "editor", "admin"):
+        tools = _listed(allowed, role)
+        assert "notion_create_page" not in tools
+        assert {"notion_list_pages", "notion_read_page", "notion_search"} <= set(tools)
+    assert "notion_create_page" not in _instructions(allowed)
+    notion.calls.clear()
+    capsys.readouterr()
+    for role in ("viewer", "editor", "admin"):
+        out = create(allowed, role=role, parent_page_id=TOP, title="x", content="hello")
+        assert out["isError"] is True
+        # The same answer as any tool this server does not have.
+        unknown = mcp_call(allowed, "no_such_tool", role=role)
+        assert (
+            out["content"][0]["text"].replace("notion_create_page", "no_such_tool")
+            == (unknown["content"][0]["text"])
+        )
+        assert "Unknown tool" in out["content"][0]["text"]
+    assert notion.created == [] and notion.calls == []
+    assert audit_rows(capsys) == []
+    # Reading is untouched.
+    top = result(allowed, "notion_read_page", page_id=TOP)["structuredContent"]
+    assert "welcome to the wiki" in top["content"]
+
+
+def test_by_default_the_pages_still_say_notion_is_never_edited(app, allowed) -> None:
+    privacy = allowed.get("/privacy").text
+    assert "and never edits Notion. An assistant can read only" in privacy
+    assert "add a new page" not in privacy
+    tab = allowed.get("/files?tab=notion").text
+    assert "They can’t edit Notion." in tab and "add new pages" not in tab
+    settings = allowed.get("/settings").text
+    assert "Only the Notion pages you pick, and only to read." in settings
+    assert "add a new page" not in settings
+
+
+def test_by_default_a_person_not_yet_connected_is_told_notion_is_never_edited(c) -> None:
+    tab = c.get("/files?tab=notion").text
+    assert "Bot RBAC never edits Notion." in tab
+
+
+@with_create
+def test_with_creation_on_the_pages_say_what_assistants_can_add(allowed) -> None:
+    assert "notion_create_page" in _instructions(allowed)
+    privacy = allowed.get("/privacy").text
+    assert "add a new page under one of those" in privacy
+    assert "never changes or deletes a page that already exists" in privacy
+    assert "never edits Notion" not in privacy
+    tab = allowed.get("/files?tab=notion").text
+    assert "Assistants you let edit can also add new pages under them." in tab
+    assert "They can’t edit Notion." not in tab
+    settings = allowed.get("/settings").text
+    assert "to read, and to add new pages under them." in settings
+    assert "only to read." not in settings
+
+
+@with_create
+def test_with_creation_on_the_connect_card_does_not_say_never_edits(c) -> None:
+    tab = c.get("/files?tab=notion").text
+    assert "Bot RBAC never changes or deletes your existing Notion pages." in tab
+    assert "Bot RBAC never edits Notion." not in tab
+
+
+def test_creation_needs_notion_itself_to_be_configured(world, p2_settings, memstore, oauth) -> None:
+    # The setting alone, with no Notion OAuth client, registers nothing.
+    settings = make_settings(root_folder_id=None, allowlist_cache_ttl=0, notion_allow_create=True)
+    app = build_app(
+        settings,
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        owner_drive_factory=lambda token: world.as_user(OWNER_EMAIL),
+        oauth=oauth,
+    )
+    c = client(app)
+    login(c)
+    assert not any(name.startswith("notion_") for name in _listed(c, "admin"))
+
+
+@with_create
+def test_no_answer_from_notion_says_the_page_may_exist(allowed, monkeypatch) -> None:
+    def silent(self, parent_page_id, title, children):
+        raise NotionApiError(0, "unreachable")
+
+    monkeypatch.setattr(FakeNotionApi, "create_page", silent)
+    out = create(allowed, parent_page_id=TOP, title="x")
+    assert out["structuredContent"]["error"] == "notion_unavailable"
+    assert "may or may not" in out["structuredContent"]["message"]

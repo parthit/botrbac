@@ -51,11 +51,12 @@ from .access import (
     AccessRequests,
     validate_request_id,
 )
+from .agent_roles import AgentRole, AgentRoleError
 from .audit import audit_owner
 from .auth import current_actor
 from .bridge import MailboxError
 from .config import Settings
-from .connections import CONNECTIONS, Connection, get_connection
+from .connections import CONNECTIONS, NOTION_WITH_CREATE, Connection, get_connection
 from .drive_client import (
     FOLDER_MIME,
     SHORTCUT_MIME,
@@ -90,9 +91,18 @@ from .mcp_oauth import (
 )
 from .notion_client import NotionApiError, NotionOAuthError
 from .oauth import SIGN_IN_SCOPES, OAuthClient, OAuthError, refresh_access_token
+from .onedrive import can_write as onedrive_can_write
+from .onedrive_client import READ_SCOPES as ONEDRIVE_READ_SCOPES
+from .onedrive_client import SCOPES as ONEDRIVE_SCOPES
+from .onedrive_client import WRITE_SCOPE as ONEDRIVE_WRITE_SCOPE
 from .onedrive_client import OneDriveApiError, OneDriveOAuthError
 from .onedrive_client import normalize_item_id as normalize_onedrive_id
+from .onedrive_client import normalize_scopes as normalize_onedrive_scopes
 from .onedrive_client import scopes_acceptable as onedrive_scopes_acceptable
+from .onedrive_client import scopes_can_write as onedrive_scopes_can_write
+from .peer_request_pages import Kit as PeerRequestKit
+from .peer_request_pages import page_routes as peer_request_routes
+from .peer_requests import PeerRequestService
 from .policy import PayloadToolError
 from .ratelimit import allow, ip_identity
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
@@ -261,6 +271,8 @@ class DashboardContext:
     directory: Any = None
     drive_router: Any = None
     mailbox: Any = None
+    # This person's named roles (agent_roles.py). None hides the Roles section.
+    agent_roles: Any = None
     # The list other people's assistants may read (external.py). None disables Sharing.
     ext_allowlist: Allowlist | None = None
     on_ext_change: Callable[[], None] = lambda: None
@@ -276,6 +288,9 @@ class DashboardContext:
     hidden: Any = None
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
+    # NOTION_ALLOW_CREATE: assistants that may edit can add Notion pages. Changes only
+    # what the pages say about Notion; the tool itself is registered in server.py.
+    notion_create: bool = False
     # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
     onedrive: Any = None
     # Files paired people send this person (drops.DropBox). None hides sending.
@@ -409,6 +424,8 @@ class DashboardContext:
                 if record and record.get("workspace_name"):
                     detail = f"Workspace: {record['workspace_name']}"
                 needs_upgrade = False
+                if self.notion_create:
+                    conn = NOTION_WITH_CREATE
             elif conn.provider == "microsoft":
                 if self.onedrive is None:
                     continue
@@ -692,6 +709,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
     ctx.setdefault("onedrive_tab", getattr(request.state, "onedrive_tab", False))
     ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
+    ctx.setdefault("notion_create", getattr(request.app.state, "notion_create", False))
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -723,8 +741,10 @@ async def terms_page(_: Request) -> Response:
     return render_plain("terms.html")
 
 
-async def privacy_page(_: Request) -> Response:
-    return render_plain("privacy.html")
+async def privacy_page(request: Request) -> Response:
+    return render_plain(
+        "privacy.html", notion_create=getattr(request.app.state, "notion_create", False)
+    )
 
 
 @functools.lru_cache(maxsize=16)
@@ -878,6 +898,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     oauth = ctx.oauth
     serializer = URLSafeTimedSerializer(settings.session_secret.get_secret_value(), STATE_SALT)
     app_origin = origin_of(settings.app_base_url)
+    # Requests between paired people, for people only (peer_requests.py). Off wherever
+    # Sharing is off.
+    peer_requests = (
+        PeerRequestService(ctx.directory, ctx.mailbox)
+        if ctx.directory is not None and ctx.mailbox is not None and ctx.ext_allowlist is not None
+        else None
+    )
 
     async def remember_pending(request: Request) -> None:
         """The nav badges for this page, off the event loop. The three lookups are
@@ -890,6 +917,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         async def pending() -> None:
             try:
                 request.state.pending_count = await blocking(ctx.requests.pending_count)
+                if peer_requests is not None and actor:
+                    request.state.pending_count += await blocking(
+                        peer_requests.pending_count, actor
+                    )
             except Exception:
                 logger.exception("pending request count failed")
 
@@ -1089,6 +1120,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def login(request: Request) -> Response:
         if await signed_in_user(request):
             return RedirectResponse(safe_next(request.query_params.get("next")), status_code=303)
+        # A cookie whose session has ended on the server still names its account. Forget
+        # it, so this page (and its header) does not show that address to whoever is at
+        # the browser now.
+        for stale in ("owner", "sid", "csrf"):
+            request.session.pop(stale, None)
         next_url = safe_next(request.query_params.get("next"))
         purpose = hint = None
         if next_url.startswith("/requests/"):
@@ -1239,9 +1275,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 ctx.directory.open_session, email, SESSION_MAX_AGE
             )
         request.session["csrf"] = secrets.token_urlsafe(32)
-        audit_owner("login")
+        # As the person signing in, so the row lands in their own Activity. With no
+        # actor it would be written to the admin's list, by anyone with a Google account.
         reset = current_actor.set(email)
         try:
+            audit_owner("login")
             connected = await blocking(ctx.drive_connected)
         finally:
             current_actor.reset(reset)
@@ -1273,7 +1311,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if email != signed_in:
             # The Drive an assistant uses must belong to the person who signed in.
             await refuse_token(tokens, email)
-            audit_owner("connect", "deny", reason="different_account")
+            reset = current_actor.set(signed_in)
+            try:
+                audit_owner("connect", "deny", reason="different_account")
+            finally:
+                current_actor.reset(reset)
             next_url = safe_next(request.session.get("oauth_next"))
             retry = "/connect" + (f"?{urlencode({'next': next_url})}" if next_url != "/" else "")
             return render(
@@ -1399,7 +1441,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if connection.provider == "notion":
             return start_notion(request)
         if connection.provider == "microsoft":
-            return start_onedrive(request)
+            return start_onedrive(request, read_only=form.get("access") == "read")
         if connection.key == "google_drive":
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
@@ -1655,15 +1697,20 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- OneDrive (an optional connection, Microsoft's own OAuth) ----------------
 
-    def start_onedrive(request: Request) -> Response:
+    def start_onedrive(request: Request, *, read_only: bool = False) -> Response:
         """Send the signed-in person to Microsoft's sign-in and consent screen. The state
-        is signed, expires, is tied to this browser (nonce) and names the account."""
+        is signed, expires, is tied to this browser (nonce), names the account, and carries
+        whether they chose reading only (then only the read scopes are asked for)."""
         nonce = secrets.token_urlsafe(24)
         request.session["onedrive_nonce"] = nonce
+        access = "read" if read_only else "edit"
         state = serializer.dumps(
-            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or ""}
+            {"flow": "onedrive", "nonce": nonce, "who": current_actor.get() or "", "access": access}
         )
-        return RedirectResponse(ctx.onedrive.oauth.authorization_url(state), status_code=303)
+        scopes = ONEDRIVE_READ_SCOPES if read_only else ONEDRIVE_SCOPES
+        return RedirectResponse(
+            ctx.onedrive.oauth.authorization_url(state, scopes), status_code=303
+        )
 
     async def onedrive_callback(request: Request) -> Response:
         if ctx.onedrive is None:
@@ -1686,8 +1733,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 message = (
                     "Your school or work account doesn’t let you connect apps like Bot RBAC "
                     "yourself. Ask your IT administrator to approve Bot RBAC for your "
-                    "organization, then try again. Nothing changed."
+                    "organization, then try again. Nothing changed. Some organizations let "
+                    "you approve reading but not editing: you can try Connect for reading "
+                    "only on Files → From OneDrive."
                 )
+                retry_actions = [
+                    {
+                        "label": "Connect for reading only",
+                        "href": "/files?tab=onedrive#onedrive-connect",
+                        "primary": True,
+                    },
+                    {"label": "Back to Settings", "href": "/settings#services"},
+                ]
             elif error == "access_denied":
                 title = "You didn’t connect OneDrive"
                 message = "You cancelled on Microsoft’s screen, so nothing changed."
@@ -1721,8 +1778,13 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         code = params.get("code")
         if not code:
             return render(request, "error.html", 400, message="Microsoft did not return a code.")
+        read_only = data.get("access") == "read"
         try:
-            tokens = await blocking(ctx.onedrive.oauth.exchange_code, code)
+            tokens = await blocking(
+                ctx.onedrive.oauth.exchange_code,
+                code,
+                ONEDRIVE_READ_SCOPES if read_only else ONEDRIVE_SCOPES,
+            )
         except OneDriveOAuthError as exc:
             return render(
                 request,
@@ -1742,9 +1804,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 400,
                 title="OneDrive isn’t connected",
                 message=(
-                    "Microsoft gave Bot RBAC different access than it asks for (read your "
-                    "files), so the connection was not kept. Try again, and keep the "
-                    "permission to read your files ticked."
+                    "Microsoft gave Bot RBAC different access than it asks for (read and "
+                    "edit your files), so the connection was not kept. Try again, and keep "
+                    "the permission to your files ticked."
                 ),
                 actions=retry_actions,
             )
@@ -1776,6 +1838,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             # A list is kept only when the same drive reconnects. With no usable earlier
             # connection we can't tell which account the list was chosen for, so it goes.
             await blocking(ctx.onedrive.clear)
+        granted = normalize_onedrive_scopes(tokens.scopes)
+        if read_only:
+            # Reading only was chosen: the connection never writes, even when Microsoft's
+            # token lists Files.ReadWrite (approved once before). Refreshes keep it so.
+            granted.discard(ONEDRIVE_WRITE_SCOPE)
         await blocking(
             ctx.vault.set_onedrive,
             tokens.access_token,
@@ -1785,13 +1852,22 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             account.drive_id,
             account.name,
             account.drive_type,
+            " ".join(sorted(granted)),
         )
         audit_owner("onedrive_connect", connection="onedrive")
-        flash(
-            request,
-            "ok",
-            "OneDrive is connected. Now allow the files and folders your assistants may read.",
-        )
+        if onedrive_scopes_can_write(granted):
+            done = "OneDrive is connected. Now allow the files and folders your assistants may use."
+        elif read_only:
+            done = (
+                "OneDrive is connected for reading only. Now allow the files and folders "
+                "your assistants may read."
+            )
+        else:
+            done = (
+                "OneDrive is connected for reading only: Microsoft didn’t grant editing. "
+                "Now allow the files and folders your assistants may read."
+            )
+        flash(request, "ok", done)
         return RedirectResponse("/files?tab=onedrive", status_code=303)
 
     async def onedrive_disconnect(request: Request) -> Response:
@@ -1820,6 +1896,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
             out: dict[str, Any] = {
                 "onedrive_connected": record is not None,
+                "onedrive_can_write": onedrive_can_write(record),
                 "account": (record or {}).get("account") or "",
                 "allowed": allowed,
                 "listing": {"folder": None, "up": None, "items": []},
@@ -2227,6 +2304,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             picking = await blocking(ctx.requests.get, request_id)
             if picking is None or picking.status != PENDING:
                 picking = None
+        # Choosing the one item to share for a paired person's described request.
+        peer_picking = None
+        peer_id = request.query_params.get("peer_request") or None
+        if peer_id and peer_requests is not None:
+            peer_picking = await blocking(
+                peer_requests.get, str(current_actor.get() or ""), peer_id
+            )
+            if peer_picking is None or peer_picking.status != PENDING or peer_picking.text is None:
+                peer_picking = None
+        if peer_picking is not None:
+            picking = None
         try:
             data = await blocking(browse_data, folder, q, page_token)
         except (InvalidInputError, OwnerNotConnectedError):
@@ -2243,6 +2331,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     first["q"] = q
                 if picking:
                     first["request"] = picking.id
+                if peer_picking:
+                    first["peer_request"] = peer_picking.id
                 return RedirectResponse(f"/files?{urlencode(first)}", status_code=303)
             data = {
                 "rows": [],
@@ -2265,6 +2355,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             prev=prev,
             next_token=data.get("next_token"),
         )
+        if peer_picking:
+            keep_peer = "&" + urlencode({"peer_request": peer_picking.id})
+            pager = {k: (v + keep_peer if v else v) for k, v in pager.items()}
         email = str(current_actor.get() or "")
         has_pairing = bool(
             ctx.mailbox is not None
@@ -2278,6 +2371,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             q=q,
             folder=folder,
             picking=picking,
+            peer_picking=peer_picking,
             here=here,
             picker_ready=settings.picker_configured,
             **pager,
@@ -2770,6 +2864,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     }
                     for row in ctx.drops.received(DROPS_SHOWN)
                 ]
+            # Asking a paired person for something (peer_requests.py).
+            data["ask_on"] = peer_requests is not None
+            if peer_requests is not None:
+                data["ask_sent"] = peer_requests.sent(email)
+                data["askable"] = {p: peer_requests.askable(email, p) for p in peers}
             return data
 
         data = await blocking(gather)
@@ -3155,7 +3254,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         pending = [r for r in reqs if r.status == PENDING]
         decided = [r for r in reqs if r.status != PENDING]
         apps = await blocking(my_app_names)
-        return render(request, "requests.html", pending=pending, decided=decided, apps=apps)
+        peer_pending, peer_decided = [], []
+        if peer_requests is not None:
+            peer_pending, peer_decided = await blocking(
+                peer_requests.inbox, str(current_actor.get() or "")
+            )
+        return render(
+            request,
+            "requests.html",
+            pending=pending,
+            decided=decided,
+            apps=apps,
+            peer_on=peer_requests is not None,
+            peer_pending=peer_pending,
+            peer_decided=peer_decided,
+        )
 
     def request_elsewhere(rid: str, email: str | None) -> bool:
         """Whether this request id belongs to another signed-in person. Ids are 192 random
@@ -3595,6 +3708,21 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return connect_redirect(request)
             # The form carries this id back, so Allow only ever approves the request this
             # page describes. A second authorize request in another tab replaces it.
+            # Signing in through a named role's address: say so, and refuse a role this
+            # person does not have instead of approving a connection that reaches nothing.
+            role_slug = ctx.mcp_oauth.bound_role(pending.resource)
+            agent_role = None
+            if role_slug:
+                if ctx.agent_roles is not None:
+                    agent_role = await blocking(ctx.agent_roles.get, role_slug)
+                if agent_role is None:
+                    return render(
+                        request,
+                        "error.html",
+                        404,
+                        message=f"You have no role named “{role_slug}”. Make it in Settings, "
+                        "under Roles, then connect again.",
+                    )
             consent_id = secrets.token_urlsafe(16)
             request.session["mcp_auth"] = {**pending.to_dict(), "consent_id": consent_id}
             await remember_pending(request)
@@ -3612,8 +3740,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return_host=return_host,
                 consent_id=consent_id,
                 switch_next=here,
-                mailbox_on=ctx.mailbox is not None,
-                shared_on=ctx.shared_with_me is not None,
+                agent_role=agent_role,
+                mailbox_on=ctx.mailbox is not None and agent_role is None,
+                shared_on=ctx.shared_with_me is not None and agent_role is None,
             )
         finally:
             current_actor.reset(reset)
@@ -3719,6 +3848,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     "name": g.client_name,
                     "app_name": g.app_name or g.client_name,
                     "renamed": g.renamed,
+                    "agent_role": g.agent_role,
                     "created_at": g.created_at,
                     "last_used": g.last_used,
                     "paired_with": ", ".join(m["name"] for m in mates.get(g.id, [])) or None,
@@ -3768,9 +3898,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(request.session.get("owner") or "")
 
         def gather() -> dict[str, Any]:
+            entries = ctx.allowlist.entries()
+            roles = ctx.agent_roles.all() if ctx.agent_roles is not None else []
             return {
                 "rows": ctx.connection_rows(),
                 **assistant_rows(email),
+                "roles_on": ctx.agent_roles is not None,
+                # Each role with the items it still reaches: one taken off the allowlist
+                # stays on the record but no longer counts.
+                "roles": [{"role": r, "live": [i for i in r.items if i in entries]} for r in roles],
+                "allowed_items": sorted(entries.values(), key=lambda e: e.name.lower()),
             }
 
         data = await blocking(gather)
@@ -3778,6 +3915,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "settings.html",
             mcp_url=f"{settings.app_base_url}/mcp",
+            role_url_base=f"{settings.app_base_url}/mcp/role/",
+            describe_mime=describe_mime,
             drive_connected=drive_row_connected(data["rows"]),
             next="/settings",
             missing=settings.missing_settings(),
@@ -4002,6 +4141,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )
 
+    async def role_save(request: Request, form: dict[str, str]) -> Response:
+        """The owner creates a named role, or replaces the one with the same name."""
+        back = "/settings#roles"
+        if ctx.agent_roles is None:
+            return action_done(request, "error", "Roles are not set up on this server.", back)
+        items = [str(v) for v in (await request.form()).getlist("item")]
+
+        def save() -> AgentRole:
+            return ctx.agent_roles.save(
+                form.get("name") or "", form.get("level") or "", items, ctx.allowlist.entries()
+            )
+
+        try:
+            role = await blocking(save)
+        except AgentRoleError as exc:
+            return action_done(request, "error", str(exc), back)
+        # The scope guard caches each role's part of the list.
+        ctx.on_allowlist_change()
+        audit_owner("role_save", name=role.name, level=role.level, count=str(len(role.items)))
+        return action_done(
+            request, "ok", f"Saved the role {role.name}. Its next call uses these files.", back
+        )
+
+    async def role_delete(request: Request, form: dict[str, str]) -> Response:
+        back = "/settings#roles"
+        slug = form.get("slug") or ""
+        role = None if ctx.agent_roles is None else await blocking(ctx.agent_roles.get, slug)
+        if role is None or not await blocking(ctx.agent_roles.delete, slug):
+            return action_done(request, "error", "That role was not found.", back)
+        ctx.on_allowlist_change()
+        audit_owner("role_delete", name=role.name)
+        return action_done(
+            request, "ok", "Deleted the role. Agents using its address are refused.", back
+        )
+
     async def oauth_grant_rename(request: Request, form: dict[str, str]) -> Response:
         """The owner gives one of their connected apps a name of their own ("Grok Bot"
         instead of the "Cursor" it registered as). Empty goes back to the app's name."""
@@ -4070,6 +4244,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
         Route("/first-reads/clear", csrf_protected(first_reads_clear), methods=["POST"]),
         Route("/oauth/grants/role", csrf_protected(oauth_grant_role), methods=["POST"]),
+        Route("/roles/save", csrf_protected(role_save), methods=["POST"]),
+        Route("/roles/delete", csrf_protected(role_delete), methods=["POST"]),
         Route("/oauth/grants/rename", csrf_protected(oauth_grant_rename), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
@@ -4110,6 +4286,16 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         *legal_routes(),
         *(
+            peer_request_routes(
+                peer_requests,
+                PeerRequestKit(
+                    owner_only, csrf_protected, render, flash, ctx.ext_grants, _end_of_day
+                ),
+            )
+            if peer_requests is not None
+            else []
+        ),
+        *(
             ctx.terminal.page_routes(TerminalKit(owner_only, csrf_protected, render, flash))
             if ctx.terminal
             else []
@@ -4132,6 +4318,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     )
     app.state.owner_email = settings.owner_email
     app.state.terminal_tab = ctx.terminal is not None
+    app.state.notion_create = ctx.notion_create
     # Mount("/") serves this app, so request.app is this app, not the outer one.
     app.state.dashboard = ctx
     return app

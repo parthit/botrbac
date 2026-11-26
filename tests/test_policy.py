@@ -68,7 +68,14 @@ ONEDRIVE_READ_TOOLS = {
     "onedrive_download_file",
     "onedrive_search",
 }
-OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS
+# Writing the person's own OneDrive inside what they allowed: editors and admins only.
+ONEDRIVE_WRITE_TOOLS = {
+    "onedrive_create_folder",
+    "onedrive_upload_file",
+    "onedrive_update_file",
+    "onedrive_rename_file",
+}
+OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS | ONEDRIVE_WRITE_TOOLS
 UPLOAD_TOOLS = {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 SHARED_WRITE_TOOLS = {
     "create_shared_doc",
@@ -106,7 +113,8 @@ EXPECTED = {
     }
     | SHARED_WRITE_TOOLS
     | DROP_SEND_TOOLS
-    | UPLOAD_TOOLS,
+    | UPLOAD_TOOLS
+    | ONEDRIVE_WRITE_TOOLS,
     Role.ADMIN: set(VALID_ARGS)
     | MAILBOX_TOOLS
     | SHARED_TOOLS
@@ -115,7 +123,8 @@ EXPECTED = {
     | ONEDRIVE_READ_TOOLS
     | DROP_READ_TOOLS
     | DROP_SEND_TOOLS
-    | UPLOAD_TOOLS,
+    | UPLOAD_TOOLS
+    | ONEDRIVE_WRITE_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")

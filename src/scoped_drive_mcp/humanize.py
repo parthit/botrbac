@@ -132,10 +132,15 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "notion_list_pages": ("listed your allowed Notion pages", "list your Notion pages"),
     "notion_read_page": ("read a Notion page", "read a Notion page"),
     "notion_search": ("searched your allowed Notion pages", "search your Notion pages"),
+    "notion_create_page": ("created a Notion page", "create a Notion page"),
     "onedrive_list_folder": ("listed your allowed OneDrive files", "list your OneDrive files"),
     "onedrive_read_file": ("read a OneDrive file", "read a OneDrive file"),
     "onedrive_download_file": ("downloaded a OneDrive file", "download a OneDrive file"),
     "onedrive_search": ("searched your allowed OneDrive files", "search your OneDrive files"),
+    "onedrive_create_folder": ("created a OneDrive folder", "create a OneDrive folder"),
+    "onedrive_upload_file": ("added a file to OneDrive", "add a file to OneDrive"),
+    "onedrive_update_file": ("changed a OneDrive file", "change a OneDrive file"),
+    "onedrive_rename_file": ("renamed a OneDrive item", "rename a OneDrive item"),
     "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
     "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
@@ -273,11 +278,22 @@ _REFUSALS = {
     "notion_not_connected": "Notion isn’t connected",
     "notion_reconnect": "Notion needs to be connected again",
     "notion_error": "Notion returned an error",
+    "notion_cannot_create": "the Notion connection isn’t allowed to add pages",
+    "notion_parent_unsupported": "pages can’t be added to a Notion database",
+    "notion_create_refused": "Notion refused the new page",
+    "notion_unavailable": "Notion didn’t answer; the page may or may not exist",
     "onedrive_not_allowed": "that OneDrive file isn’t allowed",
     "onedrive_not_connected": "OneDrive isn’t connected",
     "onedrive_reconnect": "OneDrive needs to be connected again",
     "onedrive_error": "OneDrive returned an error",
     "onedrive_unavailable": "Microsoft wasn’t answering",
+    "onedrive_read_only": "OneDrive is connected for reading only",
+    "onedrive_refused": "Microsoft refused the change",
+    "onedrive_changed": "the OneDrive item changed meanwhile",
+    "onedrive_full": "OneDrive is full",
+    "onedrive_locked": "the OneDrive file was locked",
+    "onedrive_unexpected": "Microsoft put the change somewhere unexpected",
+    "name_taken": "that name is already taken",
 }
 
 
@@ -308,6 +324,10 @@ def _tool_row(
     )
     via_dashboard = record.get("via") == "dashboard"
     who = assistant_label(record.get("token_name"), apps)
+    named_role = record.get("agent_role")
+    if isinstance(named_role, str) and named_role:
+        # The call came in through a named role's address (agent_roles.py).
+        who = f"{who} (role {named_role})"
     done, attempt = _TOOL_TEXT.get(tool, ("used {item}", "use {item}"))
     item = _item_text(record, names, request_names, tool)
     owner = record.get("owner")
@@ -372,6 +392,7 @@ def _owner_row(
     client = str(record.get("client") or "an app")
     role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
     notion_name = _quoted(str(record.get("name") or "Untitled"))
+    person = str(record.get("person") or "Someone you are paired with")
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -395,6 +416,19 @@ def _owner_row(
             Badge("ok", "Approved", "✓"),
         ),
         "deny_request": (f"You denied a request for {item}.", Badge("bad", "Denied", "✕")),
+        "peer_request": (
+            f"{person} sent you a request. It is on your Requests page.",
+            Badge("pending", "Asked", "●"),
+        ),
+        "peer_request_sent": (f"You sent {person} a request.", _DONE),
+        "approve_peer_request": (
+            f"You approved a request from {person} for {item}.",
+            Badge("ok", "Approved", "✓"),
+        ),
+        "deny_peer_request": (
+            f"You declined a request from {person}.",
+            Badge("bad", "Declined", "✕"),
+        ),
         "oauth_approve": (f"You connected {client}.", Badge("ok", "Connected", "✓")),
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
@@ -404,6 +438,11 @@ def _owner_row(
             _DONE,
         ),
         "share_all": ("You shared your allowed items with the bot account.", _DONE),
+        "role_save": (f"You saved the role {record.get('name') or 'a role'}.", _DONE),
+        "role_delete": (
+            f"You deleted the role {record.get('name') or 'a role'}.",
+            Badge("", "Deleted", "–"),
+        ),
         "notion_connect": ("You connected Notion.", Badge("ok", "Connected", "✓")),
         "notion_disconnect": ("You disconnected Notion.", Badge("", "Disconnected", "–")),
         "notion_allow": (
@@ -477,10 +516,16 @@ def describe(
     if event == "owner":
         return _owner_row(record, names, request_names)
     if event == "auth":
+        role_text = {
+            "unknown_role": "An assistant asked for a role that does not exist. "
+            "The call was refused.",
+            "role_mismatch": "An assistant used its connection at an address it was not "
+            "approved for. The call was refused.",
+        }.get(str(record.get("reason") or ""))
         return ActivityRow(
             ts=str(record.get("ts") or ""),
-            who="Unknown app",
-            text="An app tried to connect with a missing, wrong or expired key.",
+            who="An assistant" if role_text else "Unknown app",
+            text=role_text or "An app tried to connect with a missing, wrong or expired key.",
             badge=_BLOCKED,
             group="security",
             # Refused already and nothing for the person to do, so it does not count

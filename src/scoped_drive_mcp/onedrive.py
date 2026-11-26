@@ -1,20 +1,30 @@
-"""OneDrive for assistants: what they may read, and the read-only tools.
+"""OneDrive for assistants: what they may reach, and the tools.
 
-Microsoft's `Files.Read` lets Bot RBAC's connection read the person's whole OneDrive, so
-the limit assistants are held to is Bot RBAC's own allowlist (`ONEDRIVE_ALLOWLIST_KEY`),
-chosen on Files → From OneDrive. An assistant may read a file or folder only when it is
-on that list, or sits under an allowed folder (its parent chain reaches an allowed
-item). That is the same rule as a Drive file inside an allowed folder.
+Microsoft's `Files.ReadWrite` (or `Files.Read`, for a connection made before writing
+existed) lets Bot RBAC's connection reach the person's whole OneDrive, so the limit
+assistants are held to is Bot RBAC's own allowlist (`ONEDRIVE_ALLOWLIST_KEY`), chosen on
+Files → From OneDrive. An assistant may read a file or folder only when it is on that
+list, or sits under an allowed folder (its parent chain reaches an allowed item). That
+is the same rule as a Drive file inside an allowed folder.
+
+Writes (editor and admin roles only, see policy.py) pass the same check on their
+target: a new file or folder goes only into an allowed folder or one inside it, and only
+an allowed file (or one inside an allowed folder) can be replaced or renamed. An item
+the person allowed directly can't be renamed. New items never overwrite an existing
+name, a replace or rename is conditional on the version that was checked (If-Match), and
+a connection that was granted only `Files.Read` writes nothing. Nothing here deletes,
+moves, shares or copies.
 
 The parent walk always starts from a fresh lookup of the item asked for, is capped in
 depth, and stops at the top of the drive. The drive's top folder itself can never be
 allowed. Shortcuts to other people's items ("Add to my files") are not followed. An item
 that is not allowed and one that does not exist get the same answer, so an assistant
-cannot use the tools to find out what else is in the drive. Nothing here writes to
-OneDrive. File text is wrapped in untrusted-data markers, like Notion pages.
+cannot use the tools to find out what else is in the drive. File text is wrapped in
+untrusted-data markers, like Notion pages.
 """
 
 import base64
+import binascii
 import logging
 import time
 from collections.abc import Callable
@@ -23,8 +33,12 @@ from typing import Any
 from .extract import Extracted, ExtractError, document_kind, extract
 from .extract_worker import ExtractBusy, extract_isolated
 from .onedrive_client import (
+    FILE,
     FOLDER,
     PACKAGE,
+    READ_SCOPES,
+    SCOPES,
+    WRITE_SCOPE,
     OneDriveAccount,
     OneDriveApi,
     OneDriveApiError,
@@ -37,8 +51,11 @@ from .onedrive_client import (
     kind_of,
     mime_of,
     normalize_item_id,
+    normalize_scopes,
     parent_id_of,
     scopes_acceptable,
+    scopes_can_write,
+    validate_item_name,
 )
 from .policy import PayloadToolError
 from .service import DOWNLOAD_BYTE_CAP, is_text_like
@@ -55,6 +72,8 @@ LIST_PAGES = 5
 # Search: result pages, parent lookups across all results, and a wall-clock limit.
 SEARCH_PAGES = 3
 SEARCH_LOOKUPS = 80
+# Allowed items one assistant search looks inside (each allowed folder is one Graph search).
+SEARCH_ROOTS = 25
 SEARCH_SECONDS = 15.0
 
 # The search time limit's clock (a name tests can replace).
@@ -78,6 +97,14 @@ def public_item(item: dict[str, Any]) -> dict[str, Any]:
         out["mime_type"] = mime_of(item)
         out["size"] = item.get("size")
     return out
+
+
+def can_write(record: dict[str, str] | None) -> bool:
+    """Whether a stored connection was granted `Files.ReadWrite`. A record from before
+    writing existed has no scope list and is read-only."""
+    if not record:
+        return False
+    return scopes_can_write(str(record.get("scp") or "").split())
 
 
 class OneDriveAccess:
@@ -215,6 +242,17 @@ class OneDriveService:
         )
 
     def _store(self, vault: TokenVault, record: dict[str, str], tokens: Any) -> str:
+        # A refresh answer with no scope list is taken as unchanged. A refresh never turns
+        # writing on: only connecting with editing chosen and granted does. (Microsoft may
+        # list Files.ReadWrite on a token for someone who approved it once and later chose
+        # to connect for reading only.)
+        if tokens.scopes:
+            granted = normalize_scopes(tokens.scopes)
+            if not can_write(record):
+                granted.discard(WRITE_SCOPE)
+            scopes = " ".join(sorted(granted))
+        else:
+            scopes = record.get("scp", "")
         vault.set_onedrive(
             tokens.access_token,
             tokens.refresh_token or record.get("r"),
@@ -223,6 +261,7 @@ class OneDriveService:
             record.get("drive_id", ""),
             record.get("account", ""),
             record.get("drive_type", ""),
+            scopes,
         )
         return tokens.access_token
 
@@ -231,8 +270,10 @@ class OneDriveService:
         refresh = record.get("r")
         if not refresh or self.oauth is None:
             raise self._reconnect()
+        # Only the scopes this connection was granted: asking a refresh for more fails.
+        scopes = SCOPES if can_write(record) else READ_SCOPES
         try:
-            tokens = self.oauth.refresh(refresh)
+            tokens = self.oauth.refresh(refresh, scopes)
         except OneDriveOAuthUnavailableError:
             # Microsoft is down or unreachable: the connection may be fine. Say so instead
             # of asking the person to reconnect.
@@ -476,47 +517,343 @@ class OneDriveService:
                 raise self._not_connected()
             return {"results": [], "note": "Nothing in OneDrive is allowed yet."}
 
+        needle = query.casefold()
+
         def run(api: OneDriveApi) -> dict[str, Any]:
+            # Microsoft is asked to search inside each allowed folder, never the whole
+            # drive, so a match outside the allowlist does not reach this server at all:
+            # neither the note below nor the time a search takes can say whether some
+            # other file matches. An allowed single file is matched by its name.
             access = OneDriveAccess(api, allowed, budget=SEARCH_LOOKUPS)
             results: list[dict[str, Any]] = []
-            cursor: str | None = None
-            incomplete = False
+            seen: set[str] = set()
+            # Ids go into a Graph path: only ones of the shape an id has.
+            roots = sorted(i for i in allowed if normalize_item_id(i) == i)
+            incomplete = len(roots) > SEARCH_ROOTS
             deadline = _clock() + SEARCH_SECONDS
-            for _ in range(SEARCH_PAGES):
+
+            def add(item: dict[str, Any]) -> bool:
+                """Keep a covered hit. True when the search has all it was asked for."""
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    results.append(public_item(item))
+                return len(results) >= limit
+
+            for root_id in roots[:SEARCH_ROOTS]:
                 if _clock() > deadline:
                     incomplete = True
                     break
-                page = api.search(query, cursor)
-                for item in page.get("value") or []:
-                    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                        continue
+                try:
+                    root = access.fetch(root_id)
+                    if root is None or access.covering(root_id, root) is None:
+                        continue  # deleted, or no longer the person's own item
+                except OneDriveUnauthorizedError:
+                    raise
+                except OneDriveApiError:
+                    incomplete = True
+                    continue
+                if kind_of(root) != FOLDER:
+                    if needle in str(root.get("name") or "").casefold() and add(root):
+                        return {"results": results}
+                    continue
+                cursor: str | None = None
+                for _ in range(SEARCH_PAGES):
                     if _clock() > deadline:
-                        # Each hit may cost several lookups; stop within the time limit.
                         incomplete = True
                         break
-                    before = access.budget
-                    # A search hit is only a hint: the check walks fresh lookups. One
-                    # throttled or failed lookup skips that hit, not the whole search.
-                    try:
-                        covered = access.covering(item["id"])
-                    except OneDriveUnauthorizedError:
-                        raise
-                    except OneDriveApiError:
-                        incomplete = True
-                        continue
-                    if covered is not None:
-                        results.append(public_item(access.fetch(item["id"]) or item))
-                        if len(results) >= limit:
+                    page = api.search(query, cursor, folder_id=root_id)
+                    for item in page.get("value") or []:
+                        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                            continue
+                        if _clock() > deadline:
+                            # Each hit may cost several lookups; stop within the time limit.
+                            incomplete = True
+                            break
+                        # A search hit is only a hint: the check walks fresh lookups. One
+                        # throttled or failed lookup skips that hit, not the whole search.
+                        # A hit that is not covered (Microsoft answered for more than the
+                        # folder) is dropped without a word, also when the lookups run out.
+                        try:
+                            covered = access.covering(item["id"])
+                        except OneDriveUnauthorizedError:
+                            raise
+                        except OneDriveApiError:
+                            incomplete = True
+                            continue
+                        if covered is not None and add(access.fetch(item["id"]) or item):
                             return {"results": results}
-                    elif access.budget <= 0 and before > 0:
-                        incomplete = True
-                cursor = page.get("@odata.nextLink")
-                if not cursor:
-                    break
+                    cursor = page.get("@odata.nextLink")
+                    if not cursor:
+                        break
             out: dict[str, Any] = {"results": results}
             if incomplete:
                 out["note"] = "Some matches could not be checked. Try a more specific query."
             return out
+
+        return self._run(run)
+
+    # ---- write tools (editor and admin roles) ---------------------------------------
+
+    def _read_only(self) -> PayloadToolError:
+        return PayloadToolError(
+            {
+                "error": "onedrive_read_only",
+                "message": (
+                    "OneDrive is connected for reading only. Ask the person to choose "
+                    f"Connect OneDrive again at {self._settings_url()} and approve editing. "
+                    "Their allowed list is kept."
+                ),
+            }
+        )
+
+    def _require_writable(self, item_id: str) -> None:
+        """Before any Graph call: connected, granted Files.ReadWrite, something allowed."""
+        record = self._vault().onedrive()
+        if not record:
+            raise self._not_connected()
+        if not can_write(record):
+            raise self._read_only()
+        if not self.allowlist.entries():
+            raise self._not_allowed(item_id)
+
+    @staticmethod
+    def _name(raw: object, what: str = "name") -> str:
+        try:
+            return validate_item_name(raw, what)
+        except ValueError as exc:
+            raise PayloadToolError({"error": "invalid_input", "message": str(exc)}) from None
+
+    def _content(self, content_text: str | None, content_base64: str | None) -> bytes:
+        """Exactly one of text (UTF-8) or base64, within the byte limit."""
+        too_big = PayloadToolError(
+            {
+                "error": "invalid_input",
+                "message": f"content is larger than the {self.max_bytes}-byte limit",
+            }
+        )
+        if (content_text is None) == (content_base64 is None):
+            raise PayloadToolError(
+                {
+                    "error": "invalid_input",
+                    "message": "provide exactly one of content_text or content_base64",
+                }
+            )
+        if content_text is not None:
+            if not isinstance(content_text, str):
+                raise PayloadToolError(
+                    {"error": "invalid_input", "message": "content_text must be a string"}
+                )
+            data = content_text.encode("utf-8")
+        else:
+            if not isinstance(content_base64, str):
+                raise PayloadToolError(
+                    {"error": "invalid_input", "message": "content_base64 must be a string"}
+                )
+            if len(content_base64) > (self.max_bytes * 4) // 3 + 8:
+                raise too_big
+            try:
+                data = base64.b64decode(content_base64, validate=True)
+            except (binascii.Error, ValueError):
+                raise PayloadToolError(
+                    {"error": "invalid_input", "message": "content_base64 is not valid base64"}
+                ) from None
+        if len(data) > self.max_bytes:
+            raise too_big
+        return data
+
+    def _parent_id(self, raw: str | None) -> str:
+        """parent_id, or the one allowed folder when there is exactly one."""
+        if raw:
+            return self._id(raw, "parent_id")
+        folders = [e.id for e in self.allowlist.entries().values() if e.mime_type == FOLDER_MIME]
+        if len(folders) == 1:
+            return folders[0]
+        raise PayloadToolError(
+            {
+                "error": "invalid_input",
+                "message": (
+                    "parent_id is required unless exactly one OneDrive folder is allowed. "
+                    "Call onedrive_list_folder to find the folder's id."
+                ),
+            }
+        )
+
+    def _write_call[T](self, item_id: str, fn: Callable[[], T]) -> T:
+        """A Graph write, with its refusals turned into answers an assistant can act on.
+        An expired token is passed on, so _run can refresh it and try once more."""
+        try:
+            return fn()
+        except OneDriveUnauthorizedError:
+            raise
+        except OneDriveNotFoundError:
+            raise self._not_allowed(item_id) from None
+        except OneDriveForbiddenError:
+            raise PayloadToolError(
+                {
+                    "error": "onedrive_refused",
+                    "message": "Microsoft refused this change. The item may be read-only.",
+                }
+            ) from None
+        except OneDriveApiError as exc:
+            if exc.status == 409:
+                raise PayloadToolError(
+                    {
+                        "error": "name_taken",
+                        "message": "Something with that name is already there. Pick another name.",
+                    }
+                ) from None
+            if exc.status == 412:
+                raise PayloadToolError(
+                    {
+                        "error": "onedrive_changed",
+                        "message": "The item changed while this was checked. Try again.",
+                    }
+                ) from None
+            if exc.status == 423:
+                raise PayloadToolError(
+                    {
+                        "error": "onedrive_locked",
+                        "message": "The file is open or locked in OneDrive. Try again later.",
+                    }
+                ) from None
+            if exc.status == 0 and exc.code == "unreachable":
+                raise PayloadToolError(
+                    {
+                        "error": "onedrive_unavailable",
+                        "message": (
+                            "Microsoft didn’t answer, so the change may or may not have been "
+                            "made. Check with onedrive_list_folder before trying again."
+                        ),
+                    }
+                ) from None
+            if exc.status == 507:
+                raise PayloadToolError(
+                    {"error": "onedrive_full", "message": "The person's OneDrive is full."}
+                ) from None
+            raise
+
+    @staticmethod
+    def _check_placed(written: dict[str, Any], parent_id: str | None) -> None:
+        """What Graph wrote must sit where it was checked. It always should (names can't
+        hold a path); this is the belt to validate_item_name's braces. It runs after the
+        write, so it reports a misplaced write rather than preventing one."""
+        placed = parent_id_of(written)
+        if not parent_id or not placed or placed.lower() != parent_id.lower():
+            logger.error(
+                "OneDrive write was applied but landed outside the checked folder: item %s",
+                written.get("id"),
+            )
+            raise PayloadToolError(
+                {
+                    "error": "onedrive_unexpected",
+                    "message": (
+                        "Microsoft made the change but not where it was checked. Tell the "
+                        "person; it has been logged. Do not try again."
+                    ),
+                    "file_id": written.get("id"),
+                }
+            )
+
+    @staticmethod
+    def _etag(item: dict[str, Any]) -> str:
+        """The version to make a write conditional on. Without one there is no write."""
+        etag = item.get("eTag")
+        if not isinstance(etag, str) or not etag:
+            raise OneDriveApiError(0, "missing_etag")
+        return etag
+
+    def _writable_folder(self, api: OneDriveApi, parent_id: str) -> dict[str, Any]:
+        folder = self._allowed_item(api, parent_id)
+        if kind_of(folder) != FOLDER:
+            raise PayloadToolError(
+                {"error": "invalid_input", "message": "parent_id is not a folder."}
+            )
+        return folder
+
+    def create_folder(self, name: str, parent_id: str | None = None) -> dict[str, Any]:
+        """A new folder inside an allowed folder (or one inside it)."""
+        clean = self._name(name)
+        parent = self._parent_id(parent_id)
+        self._require_writable(parent)
+
+        def run(api: OneDriveApi) -> dict[str, Any]:
+            self._writable_folder(api, parent)
+            created = self._write_call(parent, lambda: api.create_folder(parent, clean))
+            self._check_placed(created, parent)
+            return public_item(created)
+
+        return self._run(run)
+
+    def upload_file(
+        self,
+        name: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """A new file inside an allowed folder. Never overwrites: a taken name fails."""
+        clean = self._name(name)
+        data = self._content(content_text, content_base64)
+        parent = self._parent_id(parent_id)
+        self._require_writable(parent)
+
+        def run(api: OneDriveApi) -> dict[str, Any]:
+            self._writable_folder(api, parent)
+            created = self._write_call(parent, lambda: api.upload_new(parent, clean, data))
+            self._check_placed(created, parent)
+            return public_item(created)
+
+        return self._run(run)
+
+    def update_file(
+        self,
+        file_id: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace an allowed file's content. OneDrive keeps the old one in its history."""
+        item_id = self._id(file_id)
+        data = self._content(content_text, content_base64)
+        self._require_writable(item_id)
+
+        def run(api: OneDriveApi) -> dict[str, Any]:
+            item = self._allowed_item(api, item_id)
+            if kind_of(item) != FILE:
+                raise PayloadToolError(
+                    {"error": "invalid_input", "message": "Only files can be updated."}
+                )
+            etag = self._etag(item)
+            updated = self._write_call(item_id, lambda: api.replace_content(item_id, data, etag))
+            self._check_placed(updated, parent_id_of(item))
+            return public_item(updated)
+
+        return self._run(run)
+
+    def rename_file(self, file_id: str, new_name: str) -> dict[str, Any]:
+        """Rename a file or folder inside an allowed folder. An item the person allowed
+        directly keeps its name, like rename_file on Drive."""
+        item_id = self._id(file_id)
+        clean = self._name(new_name, "new_name")
+        self._require_writable(item_id)
+
+        def run(api: OneDriveApi) -> dict[str, Any]:
+            item = self._allowed_item(api, item_id)
+            # Graph's own id for the item, not the string the assistant sent.
+            real_id = str(item.get("id") or item_id).lower()
+            if any(real_id == allowed.lower() for allowed in self.allowlist.entries()):
+                raise PayloadToolError(
+                    {
+                        "error": "invalid_input",
+                        "message": (
+                            "An item the person allowed directly can't be renamed. Items "
+                            "inside an allowed folder can."
+                        ),
+                    }
+                )
+            etag = self._etag(item)
+            updated = self._write_call(item_id, lambda: api.rename(item_id, clean, etag))
+            self._check_placed(updated, parent_id_of(item))
+            return public_item(updated)
 
         return self._run(run)
 
@@ -626,4 +963,4 @@ class OneDriveService:
         return len(ids)
 
 
-__all__ = ["FOLDER_MIME", "OneDriveAccess", "OneDriveService"]
+__all__ = ["FOLDER_MIME", "OneDriveAccess", "OneDriveService", "can_write"]

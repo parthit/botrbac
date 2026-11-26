@@ -25,9 +25,13 @@ Assistant ──▶ Bot RBAC /mcp ──▶ role check ──▶ allowlist check
   You approve or deny it in the dashboard.
 - **A role for each app.** Read only, read and edit, or full. An app only sees the tools its role allows.
   There are no tools to move, share or permanently delete files.
+- **Named roles for agents and subagents.** A role is a named part of your list with its own level. An agent
+  that connects to `/mcp/role/<role>` reaches only that role's files. See [docs/roles.md](docs/roles.md).
 - **An activity log.** Every call, grant, revoke and refusal, without file contents.
 - **Sharing with people you pair with.** Their assistants can read the items you put on a separate Sharing
   list, and edit only where you say so.
+- **Requests between people.** A paired person can ask you, in their own words, for something you haven't
+  shared. Only you see it, on your dashboard: no assistant on either side can read it.
 - **Works with any MCP client** that does OAuth: Claude, ChatGPT, Grok, Cursor and Muse connect to one URL.
 - **Terminal: roles for agents on your own computers.** The `botrbac` CLI puts Claude Code, Codex, Cursor or
   Gemini CLI behind roles you define on the website, works offline and syncs its audit log when it can.
@@ -107,8 +111,9 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/self-hosting.md](docs/self-hosting.md) | Deploy your own copy, run it locally, every environment variable, troubleshooting |
 | [docs/agent-setup.md](docs/agent-setup.md) | Copy-paste prompts so a coding agent sets it up for you |
 | [docs/tools.md](docs/tools.md) | Every tool, which role may call it, and how files are read |
+| [docs/roles.md](docs/roles.md) | Named roles: give an agent or subagent only part of your allowed list |
 | [docs/notion.md](docs/notion.md) | Optional: let assistants read the Notion pages you allow |
-| [docs/onedrive.md](docs/onedrive.md) | Optional: let assistants read the OneDrive files and folders you allow |
+| [docs/onedrive.md](docs/onedrive.md) | Optional: let assistants read (and, if they may edit, add and change) the OneDrive files and folders you allow |
 | [docs/terminal.md](docs/terminal.md) | Bot RBAC Terminal: the `botrbac` CLI, roles for local agents, `--role` sessions, hooks |
 | [docs/sharing.md](docs/sharing.md) | Pairing assistants, the mailbox between your own assistants, sharing with other people |
 | [docs/security.md](docs/security.md) | Security notes and how the allowlist check works |

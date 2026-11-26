@@ -1,12 +1,14 @@
-"""Notion's public API: the OAuth exchange and the few read calls Bot RBAC makes.
+"""Notion's public API: the OAuth exchange and the few calls Bot RBAC makes.
 
 Connecting Notion is a separate OAuth flow from Google sign-in. Notion shows its own
 consent screen, where the person picks which pages Bot RBAC's connection may see. Those
 pages are the outer limit. Bot RBAC's own Notion allowlist (chosen on Files) is the inner
 limit that assistants are held to.
 
-Only reads are implemented: search, retrieve a page, database or block, list a block's
-children and query a database. Nothing here writes to Notion.
+The reads are: search, retrieve a page, database or block, list a block's children and
+query a database. The one write is creating a new page under a page (`create_page`),
+with a body this module builds from plain text (`blocks_from_text`). Nothing here edits,
+moves or deletes what is already in Notion.
 """
 
 import base64
@@ -197,6 +199,9 @@ class NotionApi(Protocol):
     def get_block(self, block_id: str) -> dict[str, Any]: ...
     def block_children(self, block_id: str, cursor: str | None = None) -> dict[str, Any]: ...
     def query_database(self, database_id: str, cursor: str | None = None) -> dict[str, Any]: ...
+    def create_page(
+        self, parent_page_id: str, title: str, children: list[dict[str, Any]]
+    ) -> dict[str, Any]: ...
 
 
 class HttpNotionApi:
@@ -270,6 +275,19 @@ class HttpNotionApi:
         if cursor:
             body["start_cursor"] = cursor
         return self._call("POST", f"/databases/{database_id}/query", json=body)
+
+    def create_page(
+        self, parent_page_id: str, title: str, children: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """A new page under a page. Needs the connection's "Insert content" capability;
+        without it Notion answers 403. `children` comes from `blocks_from_text`."""
+        body: dict[str, Any] = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "properties": {"title": {"title": rich_text(title)}},
+        }
+        if children:
+            body["children"] = children
+        return self._call("POST", "/pages", json=body)
 
 
 # ---- reading Notion objects ------------------------------------------------------
@@ -381,3 +399,98 @@ def property_text(prop: dict[str, Any]) -> str:
         inner = value.get(value.get("type")) if isinstance(value.get("type"), str) else None
         return "" if inner is None else str(inner)
     return ""
+
+
+# ---- writing: plain text to blocks -----------------------------------------------
+
+# Notion allows 2000 UTF-16 units in one text object, and a character can be two.
+TEXT_CHUNK = 1000
+# Notion accepts at most 100 blocks in one create call.
+MAX_BLOCKS = 100
+
+_HEADING = re.compile(r"(#{1,3})\s+(.*)")
+_TODO = re.compile(r"[-*]\s+\[([ xX])\]\s+(.*)")
+_BULLET = re.compile(r"[-*]\s+(.*)")
+_NUMBERED = re.compile(r"\d{1,9}[.)]\s+(.*)")
+_QUOTE = re.compile(r">\s?(.*)")
+_DIVIDER = re.compile(r"(-{3,}|\*{3,}|_{3,})")
+
+
+class TooManyBlocksError(ValueError):
+    """The text would need more blocks than one page creation may carry."""
+
+
+def rich_text(text: str) -> list[dict[str, Any]]:
+    """Plain text as Notion rich text: no links, mentions or formatting."""
+    return [
+        {"type": "text", "text": {"content": text[i : i + TEXT_CHUNK]}}
+        for i in range(0, len(text), TEXT_CHUNK)
+    ]
+
+
+def _block(kind: str, text: str = "", **extra: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {} if kind == "divider" else {"rich_text": rich_text(text), **extra}
+    return {"object": "block", "type": kind, kind: body}
+
+
+def blocks_from_text(text: str, max_blocks: int = MAX_BLOCKS) -> list[dict[str, Any]]:
+    """Markdown-like plain text as a flat list of simple Notion blocks.
+
+    Every block is built here, from a fixed set of kinds (paragraph, heading 1 to 3,
+    bulleted, numbered and to-do items, quote, code, divider), and holds plain text only.
+    Nothing a caller writes is passed to Notion as block JSON. Lines that follow each other
+    make one paragraph; a blank line ends it. Inline Markdown (bold, links) stays as typed.
+    Raises TooManyBlocksError past `max_blocks`."""
+    blocks: list[dict[str, Any]] = []
+    paragraph: list[str] = []
+    code: list[str] | None = None
+
+    def add(block: dict[str, Any]) -> None:
+        if len(blocks) >= max_blocks:
+            raise TooManyBlocksError
+        blocks.append(block)
+
+    def flush() -> None:
+        if paragraph:
+            add(_block("paragraph", "\n".join(paragraph)))
+            paragraph.clear()
+
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if code is not None:
+            if line.startswith("```"):
+                add(_block("code", "\n".join(code), language="plain text"))
+                code = None
+            else:
+                code.append(raw)
+            continue
+        if line.startswith("```"):
+            flush()
+            code = []
+        elif not line:
+            flush()
+        elif _DIVIDER.fullmatch(line):
+            flush()
+            add(_block("divider"))
+        elif m := _HEADING.fullmatch(line):
+            flush()
+            add(_block(f"heading_{len(m.group(1))}", m.group(2)))
+        elif m := _TODO.fullmatch(line):
+            flush()
+            add(_block("to_do", m.group(2), checked=m.group(1) != " "))
+        elif m := _BULLET.fullmatch(line):
+            flush()
+            add(_block("bulleted_list_item", m.group(1)))
+        elif m := _NUMBERED.fullmatch(line):
+            flush()
+            add(_block("numbered_list_item", m.group(1)))
+        elif m := _QUOTE.fullmatch(line):
+            flush()
+            add(_block("quote", m.group(1)))
+        else:
+            paragraph.append(line)
+    if code is not None:
+        # A fence that was never closed: keep what followed it as code.
+        add(_block("code", "\n".join(code), language="plain text"))
+    flush()
+    return blocks

@@ -79,7 +79,8 @@ screen and Web OAuth client must be done in the console.
 5. Put the Client ID and Client secret into `.env` as `GOOGLE_OAUTH_CLIENT_ID` and
    `GOOGLE_OAUTH_CLIENT_SECRET`.
 6. Credentials → Create credentials → **API key**. Restrict it: Websites →
-   `https://<vercel-domain>/*` and `http://localhost:8000/*`; API restrictions → **Google Picker API**.
+   `https://<vercel-domain>/*`, `https://docs.google.com/*` (Safari fails without it) and
+   `http://localhost:8000/*`; API restrictions → **Google Picker API**.
    Put it in `.env` as `GOOGLE_PICKER_API_KEY`.
 7. Console home → Project info → **Project number** (digits). Put it in `.env` as
    `GOOGLE_CLOUD_PROJECT_NUMBER`.

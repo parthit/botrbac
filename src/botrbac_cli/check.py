@@ -12,8 +12,9 @@ blocked outright with `--block-unguarded`, so an agent cannot go around the gate
 
 A shell tool (Claude Code's Bash, Codex's shell, Gemini's run_shell_command; see
 shellcmd.SHELL_TOOLS) is checked twice when the role has `cmd/` patterns: the tool
-itself, then every program in its command as `cmd/<program>`. Only program names are
-logged, never the command.
+itself, then every program in its command as `cmd/<program>`. The row's reason names
+programs only. The command itself (or another tool's input) is recorded only when the
+person turned on "Record commands", and then only sealed to the website's key.
 """
 
 import json
@@ -25,6 +26,7 @@ from .gateway import safe_tool
 from .patterns import normalize_server
 from .protect import refusal
 from .queue import AuditQueue
+from .sealing import describe
 from .shellcmd import CommandError, command_text, is_shell_tool, programs
 
 GATEWAY_PREFIX = "mcp__botrbac__"
@@ -72,6 +74,7 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
         **policy.session_fields(),
     }
     tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
+    row["command"] = _what_ran(agent, tool, payload, tool_input)
     guarded = refusal(tool, tool_input if tool_input is not None else payload)
     if guarded:
         _record(decision="deny", reason="protected file", role="", **row)
@@ -106,6 +109,18 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
         f"Blocked by Bot RBAC: {tool_id} is {decision.reason}. "
         "Ask the person to change the role on the Terminal page if this tool is needed."
     )
+
+
+def _what_ran(agent: str, tool: str, payload: Any, tool_input: Any) -> str | None:
+    """What the call asked for: a shell tool's command line, or another tool's input.
+    None when the hook was given no call (`--tool`)."""
+    if payload is None:
+        return None
+    if is_shell_tool(normalize_server(agent), tool):
+        command = command_text(payload)
+        if command is not None:
+            return command
+    return describe(tool_input if tool_input is not None else payload)
 
 
 def _decide_command(enforcer: policy.Enforcer, payload: Any, role: str) -> policy.Decision:

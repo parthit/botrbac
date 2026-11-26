@@ -1,18 +1,21 @@
-"""Microsoft OneDrive: the OAuth exchange and the few read calls Bot RBAC makes.
+"""Microsoft OneDrive: the OAuth exchange and the few Graph calls Bot RBAC makes.
 
 Connecting OneDrive is a separate OAuth flow from Google sign-in, run by the Microsoft
 identity platform (the `common` endpoint, so personal Microsoft accounts and work or
-school accounts both work). Bot RBAC asks for `Files.Read` (read the person's own
-files), `User.Read` (their name, to show which account is connected) and
-`offline_access` (a refresh token). A token that carries anything wider is refused and
-not stored.
+school accounts both work). Bot RBAC asks for `Files.ReadWrite` (read and change the
+person's own files), `User.Read` (their name, to show which account is connected) and
+`offline_access` (a refresh token). Connections made before writing existed carry
+`Files.Read` instead; they keep working for reading, and are refreshed with the read
+scopes they were granted. A token that carries anything wider (`Files.ReadWrite.All`,
+`Sites.*`, mail, ...) is refused and not stored.
 
-`Files.Read` lets this server read the whole of the person's own OneDrive. Microsoft has
-no per-file consent for personal accounts, so Bot RBAC's OneDrive allowlist (chosen on
+`Files.ReadWrite` reaches the whole of the person's own OneDrive. Microsoft has no
+per-file consent for personal accounts, so Bot RBAC's OneDrive allowlist (chosen on
 Files) is what holds assistants to the items the person picked.
 
-Only reads are implemented: get an item, list a folder, search, and download a file's
-bytes. Nothing here writes to OneDrive.
+Reads: get an item, list a folder, search, and download a file's bytes. Writes: create a
+folder, upload a new file, replace a file's content and rename an item. Nothing here
+deletes, moves, shares or copies.
 """
 
 import contextlib
@@ -31,19 +34,26 @@ TOKEN_URL = f"{AUTHORITY}/token"
 GRAPH = "https://graph.microsoft.com/v1.0"
 
 # Requested on the consent screen. Short names; Microsoft may answer with full URIs.
-SCOPES = ("Files.Read", "User.Read", "offline_access")
-REQUIRED_SCOPE = "files.read"
+SCOPES = ("Files.ReadWrite", "User.Read", "offline_access")
+# What a connection made before writing existed was granted, and is refreshed with: a
+# refresh may not ask for a scope the person never approved.
+READ_SCOPES = ("Files.Read", "User.Read", "offline_access")
+READ_SCOPE = "files.read"
+WRITE_SCOPE = "files.readwrite"
+# A token needs one of these to be any use.
+FILE_SCOPES = frozenset({READ_SCOPE, WRITE_SCOPE})
+REQUIRED_SCOPE = WRITE_SCOPE
 # Anything outside this set on a token means it can do more than Bot RBAC asked for (an
 # organization admin may have granted the app wider access): it is refused.
 ALLOWED_SCOPES = frozenset(
-    {"files.read", "user.read", "offline_access", "openid", "profile", "email"}
+    {READ_SCOPE, WRITE_SCOPE, "user.read", "offline_access", "openid", "profile", "email"}
 )
 _SCOPE_PREFIXES = ("https://graph.microsoft.com/", "00000003-0000-0000-c000-000000000000/")
 
 # What an item lookup asks Graph for.
 ITEM_FIELDS = (
     "id,name,size,file,folder,package,remoteItem,root,deleted,parentReference,webUrl,"
-    "lastModifiedDateTime"
+    "lastModifiedDateTime,eTag"
 )
 # OneDrive item ids: personal accounts use "HEX!123" (and some newer forms with other
 # letters), work and school accounts a 34-character base32-like string. Never "/", "?",
@@ -52,6 +62,16 @@ ITEM_FIELDS = (
 _ITEM_ID = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9!._\-]{1,256}$")
 # Redirects a download may follow after Graph's own redirect.
 MAX_DOWNLOAD_REDIRECTS = 3
+
+# Names a write may give an item. OneDrive refuses these characters; "%" and "#" are
+# refused too so a name put into a Graph path can never be read as anything but a name.
+MAX_NAME_LEN = 255
+_BAD_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f"*:<>?/\\|%#]')
+_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", ".lock", "desktop.ini"}
+    | {f"com{i}" for i in range(10)}
+    | {f"lpt{i}" for i in range(10)}
+)
 
 
 class OneDriveOAuthError(Exception):
@@ -92,6 +112,32 @@ def normalize_item_id(raw: object) -> str | None:
     return value if _ITEM_ID.match(value) else None
 
 
+def validate_item_name(raw: object, what: str = "name") -> str:
+    """A name OneDrive accepts for a new or renamed item. Raises ValueError (with a
+    message safe to show) when it is not one."""
+    if not isinstance(raw, str):
+        raise ValueError(f"{what} must be a string")
+    value = raw.strip()
+    if not value:
+        raise ValueError(f"{what} must not be empty")
+    if len(value) > MAX_NAME_LEN:
+        raise ValueError(f"{what} must be at most {MAX_NAME_LEN} characters")
+    if _BAD_NAME_CHARS.search(value):
+        raise ValueError(
+            f'{what} must not contain control characters or any of " * : < > ? / \\ | % #'
+        )
+    stem = value.split(".", 1)[0].lower()
+    if (
+        value.endswith(".")
+        or value.startswith("~$")
+        or "_vti_" in value.lower()
+        or value.lower() in _RESERVED_NAMES
+        or stem in _RESERVED_NAMES
+    ):
+        raise ValueError(f"{what} is a name OneDrive does not allow")
+    return value
+
+
 def normalize_scopes(granted: Iterable[str]) -> set[str]:
     """Scope names in lower case, without Graph's resource prefix."""
     out: set[str] = set()
@@ -106,9 +152,15 @@ def normalize_scopes(granted: Iterable[str]) -> set[str]:
 
 
 def scopes_acceptable(granted: Iterable[str]) -> bool:
-    """True when the token can read files and nothing beyond what Bot RBAC asked for."""
+    """True when the token can read (or read and write) the person's own files, and
+    nothing beyond what Bot RBAC asks for."""
     names = normalize_scopes(granted)
-    return REQUIRED_SCOPE in names and names <= ALLOWED_SCOPES
+    return bool(names & FILE_SCOPES) and names <= ALLOWED_SCOPES
+
+
+def scopes_can_write(granted: Iterable[str]) -> bool:
+    """True when the token may change the person's own files."""
+    return WRITE_SCOPE in normalize_scopes(granted)
 
 
 @dataclass(frozen=True)
@@ -137,13 +189,14 @@ class OneDriveOAuth:
         self.redirect_uri = redirect_uri
         self.timeout = timeout
 
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scopes: tuple[str, ...] = SCOPES) -> str:
+        """Microsoft's consent screen. READ_SCOPES for a connection made for reading only."""
         params = {
             "client_id": self.client_id,
             "response_type": "code",
             "redirect_uri": self.redirect_uri,
             "response_mode": "query",
-            "scope": " ".join(SCOPES),
+            "scope": " ".join(scopes),
             "state": state,
             # Let the person choose the account instead of silently using the one the
             # browser is signed in with.
@@ -151,11 +204,11 @@ class OneDriveOAuth:
         }
         return f"{AUTHORIZE_URL}?{urlencode(params)}"
 
-    def _token_call(self, body: dict[str, str]) -> OneDriveTokens:
+    def _token_call(self, body: dict[str, str], scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
         form = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
-            "scope": " ".join(SCOPES),
+            "scope": " ".join(scopes),
             **body,
         }
         try:
@@ -184,25 +237,38 @@ class OneDriveOAuth:
         except (ValueError, KeyError, TypeError, AttributeError):
             raise OneDriveOAuthError("Microsoft returned an unexpected response") from None
 
-    def exchange_code(self, code: str) -> OneDriveTokens:
+    def exchange_code(self, code: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
         return self._token_call(
             {
                 "grant_type": "authorization_code",
                 "code": code,
                 "redirect_uri": self.redirect_uri,
-            }
+            },
+            scopes,
         )
 
-    def refresh(self, refresh_token: str) -> OneDriveTokens:
-        return self._token_call({"grant_type": "refresh_token", "refresh_token": refresh_token})
+    def refresh(self, refresh_token: str, scopes: tuple[str, ...] = SCOPES) -> OneDriveTokens:
+        """A new access token. `scopes` must be ones the person approved: a connection
+        made with `Files.Read` is refreshed with READ_SCOPES."""
+        return self._token_call(
+            {"grant_type": "refresh_token", "refresh_token": refresh_token}, scopes
+        )
 
 
 class OneDriveApi(Protocol):
     def account(self) -> OneDriveAccount: ...
     def get_item(self, item_id: str) -> dict[str, Any]: ...
     def children(self, item_id: str | None, cursor: str | None = None) -> dict[str, Any]: ...
-    def search(self, query: str, cursor: str | None = None) -> dict[str, Any]: ...
+    def search(
+        self, query: str, cursor: str | None = None, folder_id: str | None = None
+    ) -> dict[str, Any]: ...
     def download(self, item_id: str, limit: int) -> bytes: ...
+    def create_folder(self, parent_id: str, name: str) -> dict[str, Any]: ...
+    def upload_new(self, parent_id: str, name: str, data: bytes) -> dict[str, Any]: ...
+    def replace_content(
+        self, item_id: str, data: bytes, if_match: str | None
+    ) -> dict[str, Any]: ...
+    def rename(self, item_id: str, name: str, if_match: str | None) -> dict[str, Any]: ...
 
 
 class HttpOneDriveApi:
@@ -255,6 +321,45 @@ class HttpOneDriveApi:
             raise OneDriveApiError(resp.status_code, "bad_response")
         return data
 
+    def _write(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        params: dict[str, Any] | None = None,
+        if_match: str | None = None,
+    ) -> dict[str, Any]:
+        """One write to Graph. Redirects are not followed, so the token only ever goes to
+        Graph. `if_match` makes it conditional on the version that was checked."""
+        headers: dict[str, str] = {}
+        if if_match:
+            headers["If-Match"] = if_match
+        if content is not None:
+            headers["Content-Type"] = "application/octet-stream"
+        try:
+            resp = self._client.request(
+                method,
+                path,
+                json=json,
+                content=content,
+                params=params,
+                headers=headers,
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            raise OneDriveApiError(0, "unreachable") from None
+        if resp.status_code not in (200, 201):
+            self._raise(resp)
+        try:
+            data = resp.json()
+        except ValueError:
+            raise OneDriveApiError(resp.status_code, "bad_response") from None
+        if not isinstance(data, dict):
+            raise OneDriveApiError(resp.status_code, "bad_response")
+        return data
+
     def _page(self, path: str, params: dict[str, Any], cursor: str | None) -> dict[str, Any]:
         """One page of a list. `cursor` is Graph's @odata.nextLink, which is only followed
         when it points back at Graph (the access token is sent with it)."""
@@ -285,11 +390,50 @@ class HttpOneDriveApi:
         path = f"/me/drive/items/{item_id}/children" if item_id else "/me/drive/root/children"
         return self._page(path, {"$top": 200, "$select": ITEM_FIELDS}, cursor)
 
-    def search(self, query: str, cursor: str | None = None) -> dict[str, Any]:
+    def search(
+        self, query: str, cursor: str | None = None, folder_id: str | None = None
+    ) -> dict[str, Any]:
+        """Microsoft's search: inside one folder, or the whole drive with no `folder_id`
+        (the dashboard, for the person themselves; never for an assistant)."""
         # The query sits inside a quoted OData string: a quote is doubled, then the whole
         # thing is percent-encoded so it cannot change the path.
         q = quote(query.replace("'", "''"), safe="")
-        return self._page(f"/me/drive/root/search(q='{q}')", {"$top": 100}, cursor)
+        where = f"items/{folder_id}" if folder_id else "root"
+        return self._page(f"/me/drive/{where}/search(q='{q}')", {"$top": 100}, cursor)
+
+    def create_folder(self, parent_id: str, name: str) -> dict[str, Any]:
+        """A new folder in `parent_id`. Fails (409) when the name is taken."""
+        return self._write(
+            "POST",
+            f"/me/drive/items/{parent_id}/children",
+            json={"name": name, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
+        )
+
+    def upload_new(self, parent_id: str, name: str, data: bytes) -> dict[str, Any]:
+        """A new file in `parent_id`. Fails (409) when the name is taken, so nothing is
+        overwritten. `name` must have passed validate_item_name (no "/" or "%"); it is
+        percent-encoded as well."""
+        validate_item_name(name)
+        # The query is written out with a literal "@": Graph documents the key that way,
+        # and a percent-encoded key is not guaranteed to be read as the same one.
+        return self._write(
+            "PUT",
+            f"/me/drive/items/{parent_id}:/{quote(name, safe='')}:/content"
+            "?@microsoft.graph.conflictBehavior=fail",
+            content=data,
+        )
+
+    def replace_content(self, item_id: str, data: bytes, if_match: str | None) -> dict[str, Any]:
+        """Replace a file's bytes (OneDrive keeps the earlier version in its history)."""
+        return self._write(
+            "PUT", f"/me/drive/items/{item_id}/content", content=data, if_match=if_match
+        )
+
+    def rename(self, item_id: str, name: str, if_match: str | None) -> dict[str, Any]:
+        """Change an item's name only; it stays in the same folder."""
+        return self._write(
+            "PATCH", f"/me/drive/items/{item_id}", json={"name": name}, if_match=if_match
+        )
 
     def download(self, item_id: str, limit: int) -> bytes:
         """Up to `limit` bytes of a file. Graph answers with a redirect to a short-lived,

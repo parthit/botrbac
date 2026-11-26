@@ -135,6 +135,15 @@ class Enforcer:
         return Decision(True, "ok", name)
 
 
+def command_key() -> str | None:
+    """The website's public key for sealing commands, when the person turned on
+    "Record commands". Only from a policy whose signature checks out, so an edited
+    cache cannot point the commands at another key (and blocks every tool anyway)."""
+    pol, _why = Enforcer()._state()
+    key = (pol or {}).get("command_key")
+    return key if isinstance(key, str) and key else None
+
+
 def session_fields() -> dict[str, Any]:
     """Session ids for an audit row, when running inside `botrbac run`."""
     session = load_session(os.environ.get(SESSION_ENV))

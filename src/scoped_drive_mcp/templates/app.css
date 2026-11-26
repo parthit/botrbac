@@ -1389,6 +1389,21 @@ textarea:focus-visible, input[type="number"]:focus-visible { outline: 2px solid 
 .term-form select { width: auto; min-width: 9rem; max-width: 100%; }
 .term-form input[type="text"] { width: 9rem; }
 .term-table td:last-child { white-space: normal; }
+.term-record { margin: 0 0 16px; }
+.term-record > h2:first-child { display: flex; align-items: center; gap: 8px; margin-top: 0; }
+.term-ran {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: var(--wash);
+  color: var(--ink);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 6px 0 0;
+  max-height: 12em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .term-tools { margin: 0 0 14px; }
 .term-server { font-weight: 600; margin: 0 0 6px; }
 .term-ticks { display: flex; flex-wrap: wrap; gap: 6px 8px; }
