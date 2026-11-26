@@ -43,6 +43,7 @@ write tools for your own files (`create_folder`, `create_doc`, `upload_file`, `u
 | `onedrive_search(query, max_results?)` | ✓ | ✓ | ✓ |
 | `onedrive_create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `onedrive_upload_file(name, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
+| `onedrive_start_upload(name, size, sha256, parent_id?, chunk_size?)` (then `append_chunk` and `finish_upload`) |  | ✓ | ✓ |
 | `onedrive_update_file(file_id, content_text \| content_base64)` |  | ✓ | ✓ |
 | `onedrive_rename_file(file_id, new_name)` |  | ✓ | ✓ |
 | `notion_create_page(parent_page_id, title, content?)` (only with `NOTION_ALLOW_CREATE=1`; new page under an allowed Notion page, [notion.md](notion.md#creating-a-page)) |  | ✓ | ✓ |
@@ -103,6 +104,12 @@ assistant generated: it would have to copy every base64 character into the call.
    again, and only then creates the file. Missing pieces are listed in the error (`missing_chunks`), and
    the upload stays open so they can be sent. On a mismatch (`integrity_mismatch`) nothing is written and
    the upload is discarded. If Drive fails, `finish_upload` can be called again.
+
+For a new OneDrive file, start with `onedrive_start_upload(name, size, sha256, parent_id?, chunk_size?)`
+instead (no `mime_type`: OneDrive takes the type from the name's extension). The pieces, `finish_upload` and
+`cancel_upload` are the same. The folder must be an allowed OneDrive folder (or one inside it), checked at
+the start and again at the finish, and a taken name fails with `name_taken` rather than overwrite. See
+[onedrive.md](onedrive.md).
 
 `cancel_upload(upload_id)` discards an upload. An upload expires 15 minutes after it starts. It is capped
 at `MAX_BYTES` (5 MiB by default) and 1,024 pieces (a bigger file needs a bigger `chunk_size`), and can only

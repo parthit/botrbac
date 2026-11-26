@@ -211,7 +211,7 @@ def create_mcp(
     access_tools.register(mcp, access)
     mailbox_tools.register(mcp, guarded, box)
     shared_tools.register(mcp, run_shared)
-    upload_tools.register(mcp, guarded, service, sessions, run_shared)
+    upload_tools.register(mcp, guarded, service, sessions, run_shared, onedrive)
     drop_tools.register(mcp, drops)
     notion_tools.register(mcp, notion, notion_create)
     onedrive_tools.register(mcp, onedrive)

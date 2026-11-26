@@ -74,6 +74,7 @@ ONEDRIVE_WRITE_TOOLS = {
     "onedrive_upload_file",
     "onedrive_update_file",
     "onedrive_rename_file",
+    "onedrive_start_upload",
 }
 OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS | ONEDRIVE_WRITE_TOOLS
 UPLOAD_TOOLS = {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
