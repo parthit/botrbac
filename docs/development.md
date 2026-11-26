@@ -17,7 +17,9 @@ scripts/make_token.py         generate API tokens + hashes
 scripts/make_secrets.py       generate SESSION_SECRET and ENCRYPTION_KEY
 scripts/terminal_agent_setup.py  writes docs/terminal-agent-setup.md from templates/terminal_setup.md
 src/scoped_drive_mcp/
-  server.py                   FastMCP tools + build_app(), the one place everything is wired together
+  server.py                   build_app(), the one place everything is wired together; ScopedFastMCP
+  tools/                      MCP tool registration, one module per group (drive, uploads, access,
+                              mailbox, shared, drops, notion, onedrive) + instructions
   config.py                   env-var settings (pydantic-settings), missing-settings report
   ops.py                      /health/ready and the scheduled clean-up route (/internal/sweep)
   errors.py                   report_exception: one place unexpected errors go
@@ -49,18 +51,28 @@ src/scoped_drive_mcp/
   peer_requests.py            requests between paired people, for people only (no MCP tool reads them)
   peer_request_pages.py       their dashboard routes
   grants.py                   owner-side grant/revoke and approve/deny
-  bridge.py                   pairings; mailbox between one person's own assistants; wake-up webhooks
+  bridge/                     pairings and the mailbox between one person's own assistants
+    pairing.py / mail.py / webhooks.py   the three parts of Mailbox (mailbox.py puts them together)
+    common.py                   errors, limits, key names and helpers they share
   wake.py                     the HTTPS ping that wakes a paired assistant (host allowlist, pinned address)
   external.py                 what a paired person's assistants may read or edit (the Sharing list)
   shared_sources.py           "Shared with me" as a browsable tree for the dashboard
   drops.py / drop_storage.py  sending a file to a paired person / where its bytes wait (store or Vercel Blob)
 
   Storage
-  store.py                    Memory / Redis / Postgres backends, key prefixes, signed records,
-                              allowlist, encrypted tokens, activity log, tenant directory
+  store/                      everything kept in Redis or Postgres
+    backends.py                 the KeyValueStore interface; Memory, Redis and Postgres
+    wrappers.py                 key prefix, signed records, per-person keys
+    records.py                  allowlist, encrypted tokens, activity log
+    tenancy.py                  who has an account; sessions
+    __init__.py                 build_store, the one-time Redis → Postgres copy, re-exports
 
   Dashboard
-  dashboard.py                dashboard routes (Starlette), security headers, CSRF, static assets
+  dashboard.py                session, CSRF and error wrappers, security headers, static assets,
+                              and the route table
+  pages/                      the pages themselves, one module per group (signin, connections, files,
+                              sharing, drops, requests, admin, consent, settings); kit.py is what
+                              dashboard.py hands them, common.py what they share
   humanize.py                 plain-language timestamps, names and activity rows; reads nothing
   templates/                  dashboard HTML (Jinja2), app.css, ui.js, fonts
 

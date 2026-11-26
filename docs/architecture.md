@@ -72,6 +72,23 @@ signer to it. The app is stateless: any instance can serve any request, and all 
 
 Blocking work (the Google client, the store) runs in worker threads; context variables are copied in.
 
+## Where the code is
+
+```
+api/index.py ──▶ server.py            build_app(): the one place everything is wired together
+                   ├─ auth.py, ratelimit.py, mcp_oauth.py      who is calling
+                   ├─ tools/        one module per group of MCP tools; each tool wrapped by policy.require
+                   │    └─ service.py ─▶ scope.py ─▶ drive_client.py     allowlist check, then Google
+                   ├─ dashboard.py   session, CSRF and error wrappers, headers, assets, route table
+                   │    └─ pages/    one module per group of pages
+                   ├─ bridge/, external.py, drops.py            pairing, mail, sharing with people
+                   ├─ ops.py         readiness and scheduled clean-up
+                   └─ store/         backends ─ wrappers (prefix, signing, per-person) ─ records
+```
+
+Dependencies point down and to the right: tools and pages call services, services call the store
+and the Drive client, and nothing below `server.py` imports it.
+
 ## Data model
 
 All keys sit under `sdm:`. One person's records sit under `sdm:u:<email>:`; the admin's sit at the
@@ -94,8 +111,8 @@ that handles one person's data cannot name another's.
 allowlist entry, mint a token record, or move a record to another person. A record that fails the
 check reads as missing, and missing never means allowed.
 
-The store interface (`store.KeyValueStore`) has three backends: `MemoryStore` (tests, local),
-`RedisStore` (Upstash REST) and `PostgresStore`. `tests/test_store_backends.py` runs one contract
+The store interface (`store.KeyValueStore`, in `store/backends.py`) has three backends:
+`MemoryStore` (tests, local), `RedisStore` (Upstash REST) and `PostgresStore`. `tests/test_store_backends.py` runs one contract
 against all three, with real servers in CI.
 
 ## Consistency and caching
@@ -146,18 +163,15 @@ Sized for a personal or small-team deployment on free tiers. Where it stops scal
 
 Written down so it is a decision, not a surprise.
 
-- **Four modules are too large**: `dashboard.py` (one 3,300-line route closure), `bridge.py`,
-  `store.py`, `server.py`. They work and are covered by tests, but are hard to review. The seams are:
-  - `dashboard.py` → a package with `context`, `security` (headers, CSRF), `rendering`, `assets`,
-    then one module per route group (sign-in, connections, files, sharing, drops, requests and
-    activity, admin, OAuth consent, settings), each a `routes(kit)` function. Terminal already
-    works this way (`terminal/feature.py`, `TerminalKit`).
-  - `store.py` → `backends` (Memory, Redis, Postgres), `wrappers` (Prefixed, Signed, Actor),
-    `records` (Allowlist, TokenVault, ActivityLog), `tenancy` (TenantDirectory, import).
-  - `bridge.py` → pairing lifecycle, mail, webhooks. Webhooks first: it needs only the store.
-  - `server.py` → tool registration per connector, leaving `build_app` as the composition root.
-  Each step is a pure move re-exported from the old module name, so the test suite verifies it
-  unchanged. It is sequenced after in-flight feature branches that edit the same files.
+- **`Mailbox` is one class in three files.** `bridge/` splits it into pairing, mail and webhooks
+  as mixins, with what each needs from the others declared. That made it reviewable without
+  changing how anything calls it, but mixins are a step, not the end: the webhook part needs only
+  the store and the wake settings (bar one report), and should become its own object that
+  `Mailbox` holds.
+- **The largest modules left** are `mcp_oauth.py` (1,550 lines, the OAuth server), `extract.py`
+  (1,400, one parser per file format) and `dashboard.py` (1,200: the session, CSRF and error
+  wrappers, security headers, static assets and the route table). Each does one job; `extract.py`
+  would split by format if it grows.
 - **Atomic operations are not all in the store interface.** `swap`, `getdel` and `replace_list` exist
   on every backend but are reached with `getattr`, and `replace` exists only on `SignedStore`.
   Without `ENCRYPTION_KEY` (static-token deployments only) two pairing updates fall back to
@@ -184,7 +198,7 @@ would change".
 | Data layer | 8.5 | One contract over three backends, tested against real servers; atomic primitives; expiry and sweep on all of them. The interface gap above keeps it from higher |
 | Reliability and operations | 8.5 | Liveness and readiness, scheduled clean-up, fail-closed startup, errors labelled by cause. No tracing or metrics beyond logs and Vercel's own |
 | Performance and cost | 8.5 | Static assets served from the CDN, pooled store connections, bounded Drive fan-out, blocking work off the event loop. Top-level listing is still one read per allowed item |
-| Testing | 9 | 1,500+ tests with no network, a fake Drive that enforces the same query grammar, backend contract tests, a Node suite for the signer |
+| Testing | 9 | 1,700 tests with no network, a fake Drive that enforces the same query grammar, backend contract tests, a Node suite for the signer |
 | Delivery | 8.5 | Locked dependencies, pinned actions, drift check for the deploy manifest, dependabot. No type checker in CI |
 | Documentation | 9 | Threat model, self-hosting, every tool and every setting, and this document |
-| Code organisation | 6.5 | Clear layering and small modules almost everywhere, but the four large modules above. The fix is planned, not done |
+| Code organisation | 8.5 | One composition root (`server.build_app`); tools, pages, store and pairing each split by concern, with no module over 1,550 lines and most under 900. `Mailbox` as mixins and the three large single-purpose modules (above) keep it from higher |
