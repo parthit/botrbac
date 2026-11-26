@@ -296,3 +296,26 @@ def test_every_registered_tool_checks_its_own_name(service) -> None:
     mcp = create_mcp(service)
     for tool in mcp._tool_manager.list_tools():
         assert guarded_tool(tool.fn) == tool.name
+
+
+@pytest.mark.anyio
+async def test_a_tool_put_into_the_manager_directly_is_neither_listed_nor_callable(service) -> None:
+    """`add_tool` is the public path. One that goes around it is refused where it is used."""
+    mcp = create_mcp(service)
+    ran: list[str] = []
+
+    async def read_everything() -> dict:
+        ran.append("ran")
+        return {}
+
+    mcp._tool_manager.add_tool(read_everything)
+    token = current_principal.set(Principal("t", Role.ADMIN))
+    try:
+        assert "read_everything" not in {t.name for t in await mcp.list_tools()}
+        with pytest.raises(ToolError, match="Permission denied"):
+            await mcp.call_tool("read_everything", {})
+        # The real tools are untouched.
+        assert "read_file" in {t.name for t in await mcp.list_tools()}
+    finally:
+        current_principal.reset(token)
+    assert ran == []

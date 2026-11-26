@@ -133,3 +133,26 @@ def test_vercel_cron_calls_the_sweep_route() -> None:
     # Hobby projects may run a cron once a day at most.
     minute, hour, *rest = config["crons"][0]["schedule"].split()
     assert minute.isdigit() and hour.isdigit() and rest == ["*", "*", "*"]
+
+
+def test_app_sweep_fails_the_run_when_held_files_cannot_be_swept() -> None:
+    """The cron's held-file job is the forced sweep: not skipped because an upload swept
+    recently, and a Blob store that cannot be listed is a failed run, not a quiet 200."""
+    from tests.test_drop_pieces import FakeBlob
+
+    blob = FakeBlob()
+    app = build_app(
+        make_settings(cron_secret=SECRET), build_tree(), store=MemoryStore(), blob_api=blob
+    )
+    c = TestClient(app)
+    good = {"Authorization": f"Bearer {SECRET}"}
+    assert c.get("/internal/sweep", headers=good).status_code == 200
+    assert c.get("/internal/sweep", headers=good).status_code == 200
+    assert blob.lists == 2  # both runs listed the store; neither was gated
+
+    def away(*args, **kwargs):
+        raise RuntimeError("blob store is away")
+
+    blob.list = away  # type: ignore[method-assign]
+    r = c.get("/internal/sweep", headers=good)
+    assert r.status_code == 500 and r.json() == {"status": "failed"}
