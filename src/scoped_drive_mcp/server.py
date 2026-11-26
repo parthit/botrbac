@@ -119,7 +119,7 @@ from .tools.instructions import (
     ONEDRIVE_INSTRUCTIONS,
 )
 from .tools.instructions import WATCH_MAIL as WATCH_MAIL  # imported from here by tests
-from .uploads import UploadSessions
+from .uploads import DirectUploads, UploadSessions
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
 logger = logging.getLogger(__name__)
@@ -766,7 +766,14 @@ def build_app(
     )
     notion = _notion_service(settings, vault, actor_kv, notion_api_factory, notion_oauth)
     onedrive = _onedrive_service(settings, vault, actor_kv, onedrive_api_factory, onedrive_oauth)
-    uploads = UploadSessions(kv, settings.max_bytes)
+    # Upload links (start_upload with direct): the same Blob store and signer as held
+    # files, inside the same free-tier budget.
+    direct_uploads = (
+        DirectUploads(drop_blob.api, blob_signer, drop_budget)
+        if drop_blob is not None and blob_signer is not None
+        else None
+    )
+    uploads = UploadSessions(kv, settings.max_bytes, direct=direct_uploads)
     mcp = create_mcp(
         service,
         access,

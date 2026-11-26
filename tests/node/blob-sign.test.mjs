@@ -84,9 +84,9 @@ test("a signed put is answered with a URL and the upload headers", async () => {
   assert.equal(options.validUntil, NOW + 900 * 1000);
   assert.deepEqual(options.allowedContentTypes, ["application/octet-stream"]);
   assert.equal(options.cacheControlMaxAge, 60);
-  // The token can sign uploads and reads only, never more than one sealed piece.
+  // The token can sign uploads and reads only, never more than one assistant upload.
   assert.deepEqual(fake.calls.issueOptions.operations, ["put", "get"]);
-  assert.equal(fake.calls.issueOptions.maximumSizeInBytes, 4 * 1024 * 1024 + 29);
+  assert.equal(fake.calls.issueOptions.maximumSizeInBytes, 50 * 1024 * 1024);
 });
 
 test("nothing is signed for a file whose hold has ended, or held past Blob's own expiry", async () => {
@@ -265,4 +265,44 @@ test("the real presignUrl accepts what is asked of it", async (t) => {
   const download = new URL((await got.json()).url);
   assert.equal(download.origin, "https://store123.private.blob.vercel-storage.com");
   assert.equal(download.pathname, `/${pathname}`);
+});
+
+// ---- assistant uploads (uploads/<expiry>/<id>) -----------------------------------------
+
+const UPLOAD = `uploads/${Math.floor(NOW / 1000) + 900}/AbCdEfGhIjKlMnOp_-12`;
+const uploadPut = { op: "put", pathname: UPLOAD, maxBytes: 20 * 1024 * 1024, validForSeconds: 900, ttlDays: 1 };
+
+test("an assistant upload gets a put URL for that pathname, up to the whole file", async () => {
+  const { fake, handle } = handler();
+  const res = await handle(request(uploadPut));
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.match(data.url, /^https:\/\/vercel\.com\/api\/blob\//);
+  const [options] = fake.calls.presigned;
+  assert.equal(options.pathname, UPLOAD);
+  assert.equal(options.maximumSizeInBytes, 20 * 1024 * 1024);
+  assert.equal(options.allowOverwrite, false);
+  assert.equal(options.addRandomSuffix, false);
+  assert.equal(options.access, "private");
+});
+
+test("an assistant upload is never readable through the signer, and is bounded", async () => {
+  const { fake, handle } = handler();
+  const now = Math.floor(NOW / 1000);
+  const bad = [
+    { op: "get", pathname: UPLOAD, validForSeconds: 60 },
+    { ...uploadPut, maxBytes: 50 * 1024 * 1024 + 1 },
+    { ...uploadPut, pathname: `uploads/${now}/AbCdEfGhIjKlMnOp` },
+    { ...uploadPut, pathname: `uploads/${now + 2 * 86400}/AbCdEfGhIjKlMnOp` },
+    { ...uploadPut, pathname: `uploads/${now + 60}/short` },
+    { ...uploadPut, pathname: `uploads/${now + 60}/AbCdEfGhIjKlMnOp/0` },
+    { ...uploadPut, pathname: `uploads/${now + 60}/../drops/AbCdEfGhIjKlMnOp` },
+    { ...uploadPut, pathname: `uploads/${now + 60}/AbCdEfGhIjKlMnOp.pdf` },
+  ];
+  for (const payload of bad) {
+    assert.equal((await handle(request(payload))).status, 400, JSON.stringify(payload));
+  }
+  assert.equal(fake.calls.presigned.length, 0);
+  // A held-file piece keeps its own, smaller cap.
+  assert.equal((await handle(request({ ...put, maxBytes: 4 * 1024 * 1024 + 30 }))).status, 400);
 });

@@ -1,5 +1,7 @@
 // Signs Vercel Blob URLs for held files (drops), so the browser uploads and downloads
-// pieces straight to and from Blob instead of through the Python function. The Python SDK
+// pieces straight to and from Blob instead of through the Python function, and upload
+// URLs for files an assistant sends (uploads.py, start_upload with direct), so the
+// assistant's sandbox uploads the file itself instead of copying it into tool calls. The Python SDK
 // has no issueSignedToken/presignUrl; @vercel/blob does.
 //
 // Not public. Only the Python app (src/scoped_drive_mcp/drop_storage.py, HttpBlobSigner)
@@ -10,8 +12,9 @@
 // needed. Older than 60 seconds is refused. The body is JSON:
 //   {op: "put", pathname, maxBytes, validForSeconds, ttlDays}
 //   {op: "get", pathname, validForSeconds}
-// and only pathnames of held-file pieces (drops/<expiry>/<id>/<n>) whose expiry has not
-// passed are signed. An upload URL is for that one pathname, at most maxBytes, as
+// and only pathnames of held-file pieces (drops/<expiry>/<id>/<n>) or of assistant
+// uploads (uploads/<expiry>/<id>, "put" only: the Python app reads them back with its
+// own token) whose expiry has not passed are signed. An upload URL is for that one pathname, at most maxBytes, as
 // application/octet-stream, and never over a blob that is already there.
 // The answer is {url} (plus {headers} the browser sends with a PUT).
 
@@ -19,9 +22,13 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 // The same shape as drop_storage._BLOB_PATH; the first number is the drop's expiry.
 export const PATHNAME = /^drops\/(\d{1,12})\/[A-Za-z0-9_-]{1,64}\/\d{1,4}$/;
+// The same shape as uploads.blob_path; the number is when the upload expires.
+export const UPLOAD_PATHNAME = /^uploads\/(\d{1,12})\/[A-Za-z0-9_-]{16,64}$/;
 export const MAX_AGE_SECONDS = 60;
 // One sealed piece (drop_storage.PIECE_BYTES + SEAL_OVERHEAD).
 export const MAX_PIECE_BYTES = 4 * 1024 * 1024 + 29;
+// One whole file an assistant uploads: the most MAX_BYTES may be (config.py).
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const CONTENT_TYPE = "application/octet-stream";
 // Blob's CDN may keep a piece this long after it is deleted (the least Blob allows).
 const CACHE_SECONDS = 60;
@@ -73,15 +80,19 @@ export function parseRequest(body, nowSeconds) {
   if (!req || typeof req !== "object" || Array.isArray(req)) return "invalid request";
   const { op, pathname, validForSeconds } = req;
   if (op !== "put" && op !== "get") return "invalid op";
-  const match = typeof pathname === "string" ? PATHNAME.exec(pathname) : null;
+  const held = typeof pathname === "string" ? PATHNAME.exec(pathname) : null;
+  const upload = typeof pathname === "string" ? UPLOAD_PATHNAME.exec(pathname) : null;
+  const match = held || upload;
   if (!match) return "invalid pathname";
+  // Nobody is given a read URL for an assistant's upload.
+  if (upload && op !== "put") return "invalid op";
   // Nothing for a file whose hold has ended, and no upload held longer than Blob keeps it.
   const expiry = Number(match[1]);
   if (expiry <= nowSeconds) return "expired pathname";
   if (!isInt(validForSeconds, 1, MAX_VALID_SECONDS)) return "invalid validForSeconds";
   if (op === "get") return { op, pathname, validForSeconds };
   const { maxBytes, ttlDays } = req;
-  if (!isInt(maxBytes, 1, MAX_PIECE_BYTES)) return "invalid maxBytes";
+  if (!isInt(maxBytes, 1, upload ? MAX_UPLOAD_BYTES : MAX_PIECE_BYTES)) return "invalid maxBytes";
   if (!isInt(ttlDays, 1, MAX_TTL_DAYS)) return "invalid ttlDays";
   if (expiry > nowSeconds + ttlDays * 86400) return "invalid pathname";
   return { op, pathname, validForSeconds, maxBytes, ttlDays };
@@ -128,12 +139,13 @@ export function makeHandler({ blob, env = process.env, now = () => Date.now() })
     if (!cached || cached.validUntil - now() < TOKEN_REFRESH_MS) {
       // A token is for one pathname or for all of them (Blob has no prefix scope), so
       // this one is for all: its signing key never leaves this function, and each URL
-      // is signed for one checked pathname only. No delete, no head, one piece at most.
+      // is signed for one checked pathname only, with its own size cap. No delete, no
+      // head, one whole assistant upload at most.
       cached = await blob.issueSignedToken({
         pathname: "*",
         operations: ["put", "get"],
         validUntil: now() + TOKEN_LIFETIME_MS,
-        maximumSizeInBytes: MAX_PIECE_BYTES,
+        maximumSizeInBytes: MAX_UPLOAD_BYTES,
       });
     }
     return cached;

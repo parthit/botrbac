@@ -8,6 +8,15 @@ fixed-size pieces, and asks for it to be finished. Nothing reaches Drive until e
 is here and the assembled bytes match the declared size and hash, so a bad copy never
 becomes a broken file in someone's Drive.
 
+**Upload links** (`DirectUploads`): an assistant whose sandbox can make HTTPS requests
+asks for one with `direct`. It gets a presigned Vercel Blob URL (api/blob-sign.mjs) for
+one pathname, `uploads/<expiry>/<upload id>`, at most the declared size, that can't
+overwrite, valid until the session expires, and uploads the whole file there itself, so
+the bytes never pass through the model. Finishing reads it back from Blob and runs the
+same checks; pieces sent with append_chunk still work for the same session. The file
+sits unencrypted in the private store until the session is finished, cancelled or
+expires (the Blob sweep deletes what is left).
+
 Sessions live in the key-value store (each request may run on a different serverless
 instance), expire UPLOAD_TTL seconds after they start, and belong to the sign-in that
 started them: another token, another connected app or another person gets
@@ -19,6 +28,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import math
 import re
 import secrets
@@ -26,7 +36,11 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .drop_storage import PIECE_BYTES, UPLOAD_BLOB_PREFIX, BlobApi, BlobBudget, BlobSigner
+from .errors import report_exception
 from .store import KeyValueStore
+
+logger = logging.getLogger(__name__)
 
 UPLOAD_TTL = 15 * 60
 # Bytes per piece. Every piece but the last is exactly chunk_size bytes, so the number of
@@ -83,6 +97,42 @@ def _int(value: Any, what: str) -> int:
     return value
 
 
+class DirectUploads:
+    """Upload links into the deployment's private Blob store (see the module notes).
+    `budget` keeps them inside the same free-tier caps as held files."""
+
+    def __init__(self, api: BlobApi, signer: BlobSigner, budget: BlobBudget | None) -> None:
+        self.api = api
+        self.signer = signer
+        self.budget = budget
+
+
+def blob_path(upload_id: str, expires_at: float) -> str:
+    return f"{UPLOAD_BLOB_PREFIX}{math.ceil(expires_at)}/{upload_id}"
+
+
+def _unavailable(why: str) -> UploadError:
+    return UploadError(
+        "direct_unavailable",
+        f"{why} Start again without direct and send the file with append_chunk.",
+    )
+
+
+def upload_command(url: str, headers: dict[str, str]) -> str:
+    """The curl command that uploads FILE to `url`. Header values come from the signer
+    and are checked to be plain tokens; the URL is checked by drop_storage."""
+    parts = ["curl -sS --fail-with-body -X PUT"]
+    for name, value in sorted(headers.items()):
+        parts.append(f"-H '{name}: {value}'")
+    parts.append("--data-binary @FILE")
+    parts.append(f"'{url}'")
+    return " ".join(parts)
+
+
+_HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
+_HEADER_VALUE = re.compile(r"[A-Za-z0-9._/+-]{1,128}")
+
+
 class UploadSessions:
     def __init__(
         self,
@@ -91,11 +141,13 @@ class UploadSessions:
         *,
         clock: Callable[[], float] = time.time,
         ttl: int = UPLOAD_TTL,
+        direct: DirectUploads | None = None,
     ) -> None:
         self.store = store
         self.max_bytes = max_bytes
         self.clock = clock
         self.ttl = ttl
+        self.direct = direct
 
     # ---- keys ------------------------------------------------------------------------
 
@@ -145,12 +197,17 @@ class UploadSessions:
         chunk_size: Any = DEFAULT_CHUNK,
         owner: str | None = None,
         target: str = "drive",
+        direct: bool = False,
     ) -> dict[str, Any]:
         """Open a session. The caller has already checked the name, type and parent.
         `target` is where finish_upload writes the file: "drive" (Google Drive, the
         person's own or `owner`'s shared folder) or "onedrive" (the person's OneDrive)."""
         if target not in TARGETS:
             raise UploadError("invalid_input", "unknown upload target")
+        if not isinstance(direct, bool):
+            raise UploadError("invalid_input", "direct must be true or false")
+        if direct and self.direct is None:
+            raise _unavailable("This server can't give upload links (no Blob store).")
         if not who.get("email"):
             raise UploadError("unauthenticated", "Sign in before uploading.")
         size = _int(size, "size")
@@ -198,6 +255,7 @@ class UploadSessions:
         upload_id = secrets.token_urlsafe(18)
         now = self.clock()
         expires_at = now + self.ttl
+        link = self._link(upload_id, expires_at, size) if direct else None
         meta = {
             "email": who.get("email"),
             "token_name": who.get("token_name"),
@@ -212,16 +270,57 @@ class UploadSessions:
             "chunk_size": chunk_size,
             "chunk_count": chunk_count,
             "expires_at": expires_at,
+            "blob_path": link["path"] if link else None,
         }
         self.store.set(self._meta_key(upload_id), json.dumps(meta), ex=self.ttl)
         self.store.hset(self._open_key(email), upload_id, str(expires_at))
-        return {
+        started: dict[str, Any] = {
             "upload_id": upload_id,
             "chunk_size": chunk_size,
             "chunk_count": chunk_count,
             "last_chunk_size": size - (chunk_count - 1) * chunk_size,
             "expires_in_seconds": self.ttl,
         }
+        if link:
+            started["upload_url"] = link["url"]
+            started["upload_headers"] = link["headers"]
+            started["upload_command"] = upload_command(link["url"], link["headers"])
+        return started
+
+    def _link(self, upload_id: str, expires_at: float, size: int) -> dict[str, Any]:
+        """A presigned PUT for this upload's pathname, at most `size` bytes. Signed first
+        and charged to the Blob budget after, so a failed signing costs nothing. A link
+        that is never used still counts: there is no telling whether it was."""
+        assert self.direct is not None
+        budget = self.direct.budget
+        if budget is not None and not budget.allows(max(1, math.ceil(size / PIECE_BYTES))):
+            raise _unavailable("Upload links are used up for now.")
+        path = blob_path(upload_id, expires_at)
+        try:
+            signed = self.direct.signer.sign_put(path, size, self.ttl, 1)
+        except Exception as exc:
+            report_exception(exc, where="upload_link")
+            raise _unavailable("An upload link could not be made just now.") from None
+        raw = signed.get("headers") if isinstance(signed, dict) else None
+        headers = dict(raw) if isinstance(raw, dict) else {}
+        url = signed.get("url") if isinstance(signed, dict) else None
+        unsafe = [
+            name
+            for name, value in headers.items()
+            if not (
+                isinstance(name, str)
+                and isinstance(value, str)
+                and _HEADER_NAME.fullmatch(name)
+                and _HEADER_VALUE.fullmatch(value)
+            )
+        ]
+        if unsafe or not isinstance(url, str) or "'" in url:
+            # Dropping a header would make the upload fail at Blob for no stated reason.
+            logger.error("refused an upload link with %d unexpected header(s)", len(unsafe))
+            raise _unavailable("An upload link could not be made just now.")
+        if budget is not None and not budget.reserve(max(1, math.ceil(size / PIECE_BYTES))):
+            raise _unavailable("Upload links are used up for now.")
+        return {"path": path, "url": url, "headers": headers}
 
     def _load(self, who: dict[str, str | None], upload_id: Any) -> dict[str, Any]:
         if not isinstance(upload_id, str) or not _ID_RE.fullmatch(upload_id):
@@ -327,6 +426,36 @@ class UploadSessions:
                 "upload_busy", "This upload is already being finished. Wait for that call."
             )
         try:
+            data = self._uploaded(meta)
+        except BaseException:
+            self.release(upload_id)
+            raise
+        if data is None:
+            data = self._assembled(upload_id, meta)
+        self._check(upload_id, meta, data)
+        return meta, data
+
+    def _uploaded(self, meta: dict[str, Any]) -> bytes | None:
+        """The file uploaded through the session's link, or None when nothing is there."""
+        path = meta.get("blob_path")
+        if not path:
+            return None
+        if self.direct is None:
+            # Blob was turned off after this upload started.
+            return None
+        try:
+            return self.direct.api.get(str(path))
+        except Exception as exc:
+            report_exception(exc, where="upload_link_read")
+            raise UploadError(
+                "upload_unavailable",
+                "The uploaded file could not be read from storage just now. Call "
+                "finish_upload again.",
+            ) from None
+
+    def _assembled(self, upload_id: str, meta: dict[str, Any]) -> bytes:
+        """The pieces sent with append_chunk, joined. Releases the claim on failure."""
+        try:
             pieces: list[str] = []
             missing: list[int] = []
             for index in range(meta["chunk_count"]):
@@ -336,6 +465,13 @@ class UploadSessions:
                 elif not missing:
                     pieces.append(piece)
             if missing:
+                if meta.get("blob_path") and len(missing) == meta["chunk_count"]:
+                    raise UploadError(
+                        "upload_not_received",
+                        "Nothing has arrived for this upload yet. Run upload_command "
+                        "(or send the pieces with append_chunk), then call finish_upload "
+                        "again.",
+                    )
                 raise UploadError(
                     "missing_chunks",
                     f"{len(missing)} of {meta['chunk_count']} chunks have not been received. "
@@ -343,10 +479,14 @@ class UploadSessions:
                     missing=missing[:MISSING_SHOWN],
                     missing_count=len(missing),
                 )
-            data = b"".join(base64.b64decode(p) for p in pieces)
+            return b"".join(base64.b64decode(p) for p in pieces)
         except BaseException:
             self.release(upload_id)
             raise
+
+    def _check(self, upload_id: str, meta: dict[str, Any], data: bytes) -> None:
+        """A size or hash mismatch discards the session: some byte is wrong, and there is
+        no telling which."""
         digest = hashlib.sha256(data).hexdigest()
         if len(data) != meta["size"] or digest != meta["sha256"]:
             try:
@@ -362,7 +502,6 @@ class UploadSessions:
                 expected_sha256=meta["sha256"],
                 received_sha256=digest,
             )
-        return meta, data
 
     def release(self, upload_id: str) -> None:
         self.store.delete(self._claim_key(upload_id))
@@ -373,6 +512,13 @@ class UploadSessions:
             meta = json.loads(raw) if raw else {}
         # Delete the session first, so nothing can use the pieces while they go.
         self.store.delete(self._meta_key(upload_id))
+        path = meta.get("blob_path")
+        if path and self.direct is not None:
+            try:
+                self.direct.api.delete([str(path)])
+            except Exception as exc:
+                # The Blob sweep deletes it once its expiry has passed.
+                report_exception(exc, where="upload_link_delete")
         if meta.get("email"):
             self.store.hdel(self._open_key(str(meta["email"])), upload_id)
         for index in range(int(meta.get("chunk_count") or 0)):

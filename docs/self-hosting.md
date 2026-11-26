@@ -84,11 +84,13 @@ public needs brand verification (`drive.file` is not a restricted scope, so no s
 3. **Storage:** in the project, **Storage → Create / Connect** → **Upstash for Redis** (free plan) → connect
    it to this project. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` (or the `UPSTASH_REDIS_REST_*`
    pair) for you. Neon Postgres works too: it adds `DATABASE_URL`.
-4. **Optional, for files people send each other:** **Storage → Create → Blob**, access **Private**, and
+4. **Optional, for files people send each other and assistant upload links:** **Storage → Create → Blob**, access **Private**, and
    connect it to this project (Vercel adds `BLOB_READ_WRITE_TOKEN`). Held files then go to Blob,
    encrypted. The project also deploys a small Node.js function, `api/blob-sign.mjs` (Vercel installs it from
    `package.json`). With a Blob store and `ENCRYPTION_KEY` (step 3) it lets browsers upload and download
-   those files straight to and from Blob, encrypted in the browser; there is nothing to set. If
+   those files straight to and from Blob, encrypted in the browser, and gives assistants that can run
+   `curl` an upload link (`start_upload` with `direct=true`, [tools.md](tools.md#upload-links-directtrue));
+   there is nothing to set. If
    **Settings → Deployment Protection** covers `*.vercel.app` URLs (Vercel Authentication with "All
    deployments except custom domains", or "Standard Protection"), also turn on **Protection Bypass for
    Automation** there and redeploy: Vercel then adds `VERCEL_AUTOMATION_BYPASS_SECRET`, which the app
@@ -298,7 +300,7 @@ uv run ruff check . && uv run ruff format --check .
 | `DROP_HOLD_HOURS` | 24 | hours a file a paired person sent is held for its recipient to save (24 to 168); then it is deleted |
 | `DROP_MAX_MB` | 20 | largest file a person may send from the dashboard (1 to 100). It is sent in 4 MB pieces, under Vercel's 4.5 MB request limit. An assistant's `send_file` keeps the `MAX_BYTES` limit |
 | `BLOB_READ_WRITE_TOKEN` (or `BLOB_STORE_ID`) | unset | set by Vercel when a Blob store is connected to the project. Held files then go to Blob instead of Redis or Postgres. Use a **private** store |
-| `DROP_BLOB_MONTHLY_UPLOADS` | 1500 | Blob uploads a calendar month (each 4 MB piece is one). The free tier includes 2,000 and turns Blob off for 30 days past it |
+| `DROP_BLOB_MONTHLY_UPLOADS` | 1500 | Blob uploads a calendar month (each 4 MB piece is one; an assistant's upload link counts one per 4 MB of the file). The free tier includes 2,000 and turns Blob off for 30 days past it |
 | `BLOB_SIGNER_URL` | unset | where `api/blob-sign.mjs` answers. Unset: on Vercel, production calls `APP_BASE_URL` and other deployments their own `VERCEL_URL`; elsewhere there is no signer. `off` sends every file through the app |
 | `VERCEL_AUTOMATION_BYPASS_SECRET` | unset | set by Vercel when **Protection Bypass for Automation** is on. Sent to the signer on protected deployment URLs |
 | `DROP_BLOB_STORAGE_MB` | 800 | MB that held files may take in Blob (the free tier includes 1 GB). Sends are refused past either cap until it frees up |
