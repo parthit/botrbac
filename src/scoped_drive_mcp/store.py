@@ -1611,17 +1611,13 @@ class TokenVault:
     def clear_onedrive(self) -> None:
         self.store.delete(ONEDRIVE_TOKEN_KEY)
 
-    def set_bot(self, token: str, email: str) -> None:
-        self._put(BOT_TOKEN_KEY, token, email)
-
     def bot(self) -> dict[str, str] | None:
+        """A bot-account token from before sign-in became per person. Nothing writes
+        one any more; this only reads what an old store may still hold."""
         return self._take(BOT_TOKEN_KEY)
 
     def clear_owner(self) -> None:
         self.store.delete(OWNER_TOKEN_KEY)
-
-    def clear_bot(self) -> None:
-        self.store.delete(BOT_TOKEN_KEY)
 
 
 # ---- activity log -----------------------------------------------------------
@@ -1929,23 +1925,6 @@ class TenantDirectory:
         if self.admin_email and self.has_owner_refresh(self.admin_email):
             found.add(self.admin_email)
         return sorted(found, key=lambda email: (self.created_at(email) or "", email))
-
-    def email_in_use(self, candidate: str, *, except_user: str, reserved_bot: str | None) -> bool:
-        """True when `candidate` is someone else's dashboard address or bot address."""
-        candidate = candidate.lower()
-        dashboards = set(self.store.hgetall(USERS_INDEX))
-        if self.admin_email:
-            dashboards.add(self.admin_email)
-        if candidate in dashboards:
-            return True
-        if reserved_bot and candidate == reserved_bot and except_user != self.admin_email:
-            return True
-        for user in dashboards:
-            if user == except_user:
-                continue
-            if self.stored_bot_email(user) == candidate:
-                return True
-        return False
 
 
 def build_store(settings: Any) -> PrefixedStore:

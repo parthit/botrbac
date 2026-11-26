@@ -299,6 +299,10 @@ class GoogleDriveClient:
         except HttpError as exc:
             if exc.resp is not None and exc.resp.status == 404:
                 raise DriveNotFoundError(str(exc.resp.status)) from None
+            # The error's text includes the request URL, and a list request's URL holds
+            # the search text (`q=`) and file ids. Whoever logs this error logs its
+            # text, so the URL is dropped here; the status and Google's reason stay.
+            exc.uri = None
             raise
 
     def get_file(self, file_id: str, fields: str) -> dict[str, Any]:
