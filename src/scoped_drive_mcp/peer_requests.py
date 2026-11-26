@@ -4,7 +4,7 @@ A paired person can ask, from their dashboard, for something the other person ha
 shared with them (described in their own words), or for more on an item they can already
 see: edit access, or more time before a share ends. The request shows up on the other
 person's Requests page. No MCP tool reads or writes these records, so the text never
-reaches an assistant on either side; nothing in server.py, service.py or access.py
+reaches an assistant on either side; nothing in server.py, tools/, service.py or access.py
 imports this module.
 
 A request never names a file the requester cannot already see. A described request

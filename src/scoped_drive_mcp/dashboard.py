@@ -237,7 +237,7 @@ class DashboardContext:
     # Notion (notion.NotionService), when its OAuth client is configured. None hides it.
     notion: Any = None
     # NOTION_ALLOW_CREATE: assistants that may edit can add Notion pages. Changes only
-    # what the pages say about Notion; the tool itself is registered in server.py.
+    # what the pages say about Notion; the tool itself is registered in tools/notion.py.
     notion_create: bool = False
     # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
     onedrive: Any = None
