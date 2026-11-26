@@ -3,8 +3,17 @@
 {% block title %}Terminal roles{% endblock %}
 {% block content %}
 <h1>Roles</h1>
-<p class="muted lead">A role is the list of tools an agent may use. Each connected computer has one, and you can start an agent with <code>--role</code> to narrow it for one run.</p>
+<p class="muted lead">A role is the list of tools an agent may use. Anything not on the list is blocked.</p>
 {{ terminal_tabs('roles') }}
+<section class="card term-how" id="roles-how" aria-labelledby="roles-how-title">
+  <h2 id="roles-how-title">How roles are used</h2>
+  <ol class="term-how-steps">
+    <li><b>Make a role here</b> <span class="muted">(or use a built-in one). A starter fills in a sensible list you can edit.</span></li>
+    <li><b>Give it to a computer</b> <span class="muted">on the <a href="/terminal">Terminals</a> tab: pick it in the Role column and press Change. A role does nothing until a computer uses it.</span></li>
+    <li><b>Optional: narrow one run.</b> <span class="muted"><code>botrbac run --role Reviewer -- claude</code> gets only the tools both the computer's role and Reviewer allow. It can narrow, never widen.</span></li>
+  </ol>
+  <p class="small term-goal">Think of the computer's role as the most any agent there may do, and <code>--role</code> as a tighter limit for one session. A common setup is one everyday role per computer, such as <b>Coding</b>, plus a <b>Reviewer</b> role for runs that should only read.</p>
+</section>
 {% if not has_terminals %}
 <p class="warn" id="roles-not-used">A role does nothing until a computer uses it. <a href="/terminal#setup">Connect a computer</a> first, then pick its role here or on the Terminals tab.</p>
 {% endif %}
@@ -27,5 +36,5 @@
   {% endfor %}
   </tbody>
 </table>
-<p class="muted small">Patterns: <code>github/*</code> is every tool on the github server, <code>github/get_*</code> its tools starting with <code>get_</code>, <code>claude-code/Read</code> one of an agent's own tools, and <code>cmd/gh</code> the <code>gh</code> program in an agent's shell. <a href="https://github.com/parthit/botrbac/blob/main/docs/terminal.md#roles">More about roles</a></p>
+<p class="muted small">Patterns: <code>claude-code/Edit</code> is one of Claude Code's own tools, <code>github/*</code> is every tool on the github server, <code>github/get_*</code> its tools starting with <code>get_</code>, and <code>cmd/gh</code> the <code>gh</code> program in an agent's shell. <a href="https://github.com/parthit/botrbac/blob/main/docs/terminal.md#roles">More about roles</a></p>
 {% endblock %}

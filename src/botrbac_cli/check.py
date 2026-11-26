@@ -102,12 +102,11 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
         return True, "ok"
     if by_command:
         return False, (
-            f"Blocked by Bot RBAC: {decision.reason}. Run allowed programs one at a time, "
-            "or ask the person to add cmd/<program> to the role on the Terminal page."
+            f"Blocked by Bot RBAC: {decision.reason}. Run allowed programs one at a time. "
+            + policy.fix_hint("cmd/<program>")
         )
     return False, (
-        f"Blocked by Bot RBAC: {tool_id} is {decision.reason}. "
-        "Ask the person to change the role on the Terminal page if this tool is needed."
+        f"Blocked by Bot RBAC: {tool_id} is {decision.reason}. " + policy.fix_hint(tool_id)
     )
 
 

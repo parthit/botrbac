@@ -95,6 +95,22 @@ args = ["gateway", "--agent", "codex"]</pre>
 <p class="muted lead">Control what AI agents on your computers can do. Works with any agent that supports MCP: Claude Code, Codex, Cursor, Gemini CLI and others.</p>
 {{ terminal_tabs('terminals') }}
 
+<section class="card term-how" id="how-it-works" aria-labelledby="how-title">
+  <h2 id="how-title">How it works</h2>
+  <p class="small term-flow" aria-hidden="true"><code>your agent</code> → <code>botrbac on your computer</code> → checks the role → runs the tool, or blocks it</p>
+  <ol class="term-how-steps">
+    <li><b>Connect a computer.</b> <span class="muted">This puts <code>botrbac</code> between the AI agents on it and their tools: MCP servers, and with Claude Code also its shell and file edits.</span></li>
+    <li><b>Give the computer a role.</b> <span class="muted">A role is a list of tools that are allowed; everything else is blocked. Pick it in the <b>Role</b> column of <b>Your terminals</b> and press <b>Change</b>. That is the only place a role gets tied to a computer.</span></li>
+    <li><b>Adjust from Activity.</b> <span class="muted">When an agent is blocked, <a href="/terminal/activity">Activity</a> shows the exact tool name. If it should be allowed, add it to the role.</span></li>
+  </ol>
+  <p class="small term-goal"><b>Where you want to end up:</b> each computer on a role that fits the work you do there (not Full access), and no unguarded servers. <a href="/terminal/roles/new">Make a role</a> from a starter, or keep the built-ins:</p>
+  <ul class="small term-goal-list">
+    <li><b>Read-only</b>: agents can look but not change anything. Every new computer starts here.</li>
+    <li><b>Full access</b>: nothing is blocked; the checks are switched off, but calls are still logged.</li>
+    <li><b>No tools</b>: blocks everything, to pause a computer.</li>
+  </ul>
+</section>
+
 {% if not terminals %}
 {{ setup_card(true) }}
 <h2>Your terminals</h2>
@@ -109,7 +125,8 @@ args = ["gateway", "--agent", "codex"]</pre>
     <td data-label="Name"><div class="term-name"><b>{{ t.name }}</b>
       <span class="muted small">{{ t.hostname }}{% if t.os %} · {{ t.os }}{% endif %}{% if t.version %} · botrbac {{ t.version }}{% endif %}</span>
       {% if t.hook_missing %}<span class="pill pending" title="Its own tools (shell, file edits) are no longer checked. Run botrbac doctor on that computer.">{{ t.hook_missing | join(", ") }} hook off</span>{% endif %}
-      {% if t.unguarded %}<span class="pill pending" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>{% endif %}</div></td>
+      {% if t.unguarded %}<span class="pill pending" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>
+      <span class="small term-fix" id="unguarded-{{ t.id }}"><b>{{ t.unguarded | join(", ") }}</b> {{ "talks" if t.unguarded | length == 1 else "talk" }} to the agent directly, so the role does not cover {{ "it" if t.unguarded | length == 1 else "them" }}. To fix, on that computer run <code>botrbac doctor</code>: it prints the command for each, usually <code>botrbac wrap claude-code --user</code>.</span>{% endif %}</div></td>
     <td data-label="Role">
       <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/role">
         <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -120,6 +137,9 @@ args = ["gateway", "--agent", "codex"]</pre>
         </select>
         <button type="submit">Change<span class="sr-only"> role for {{ t.name }}</span></button>
       </form>
+      {% if t.role_id == "full" %}<p class="muted small term-role-note">Nothing is blocked on this computer.</p>
+      {% elif t.role_id == "read-only" %}<p class="muted small term-role-note">Agents can read, not edit or run commands.</p>
+      {% elif t.role_id == "none" or t.role_id not in role_names %}<p class="muted small term-role-note">Every tool is blocked.</p>{% endif %}
     </td>
     <td data-label="Last seen">{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
     <td data-label="Waiting">{% if t.queued %}{{ t.queued }} row{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>

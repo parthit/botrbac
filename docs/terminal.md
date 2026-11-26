@@ -15,6 +15,23 @@ botrbac gateway ── role check ── audit row (SQLite) ──► website wh
 your MCP servers (GitHub, filesystem, …)
 ```
 
+## In one minute
+
+- **Terminal**: a computer running `botrbac`, connected to your account. Agents on it call their tools
+  through botrbac, which checks each call against the computer's role.
+- **Role**: a list of allowed tools (`claude-code/Edit`, `github/get_*`, `cmd/git`). Anything else is
+  blocked. Each computer has one, set on **Terminal → Terminals** in the Role column (pick, then
+  **Change**). That is the only place a role is tied to a computer.
+- **Built-in roles**: Read-only (new computers start here), Full access (nothing blocked), No tools
+  (pause). **Terminal → Roles → New role** has templates (*Reviewer*, *Coding*, *Coding, limited shell*).
+- **Activity**: every call, allowed or blocked, with the exact tool name to add when something you want
+  is blocked.
+- **Unguarded server**: an MCP server the agent reaches directly, so no role covers it. `botrbac doctor`
+  prints the fix, usually `botrbac wrap claude-code --user`.
+- **`--role`**: narrows one session below the computer's role; it can never widen it.
+
+The goal: every computer on a role that fits the work done there, and no unguarded servers.
+
 ## Set up
 
 The **Terminal** page on the website offers three ways. Each ends with you approving one code in the

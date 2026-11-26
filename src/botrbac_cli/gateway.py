@@ -154,7 +154,7 @@ class Gateway:
             self.queue.add(decision="deny", reason=decision.reason, **row)
             return _error(
                 f"Blocked by Bot RBAC: {route.tool_id} is {decision.reason}. "
-                "Ask the person to change the role on the Terminal page if this tool is needed."
+                + policy.fix_hint(route.tool_id)
             )
         try:
             result = await route.upstream.session.call_tool(route.tool.name, arguments)

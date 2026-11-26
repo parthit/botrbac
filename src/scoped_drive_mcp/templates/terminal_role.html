@@ -18,7 +18,27 @@
 {% set picked = [] %}
 {% for server, tools in seen.items() %}{% for t in tools %}{% if (server ~ '/' ~ t) in ticked_now %}{% set _ = picked.append(server ~ '/' ~ t) %}{% endif %}{% endfor %}{% endfor %}
 {% if error %}<div class="flash error" role="alert" id="role-error">{% if f.field == 'patterns' %}Not saved. <a href="#patterns">Check the patterns</a>: {{ error }}{% else %}Not saved: {{ error }}{% endif %}</div>{% endif %}
-<p class="muted lead">A role does nothing on its own: give it to a connected computer on the <a href="/terminal">Terminals</a> tab, or start an agent with <code>--role NAME</code>.</p>
+<p class="muted lead">List the tools agents may use; everything else is blocked. A role does nothing on its own: after saving, give it to a computer on the <a href="/terminal">Terminals</a> tab (Role column, then Change), or start an agent with <code>--role NAME</code>.</p>
+{% set starters = [
+  ("Reviewer", "Reads code and looks things up. No edits, no shell.",
+   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "*/read*", "*/get*", "*/list*", "*/search*"]),
+  ("Coding", "Claude Code can read, edit and run any shell command. MCP servers: read tools only.",
+   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "*/read*", "*/get*", "*/list*", "*/search*"]),
+  ("Coding, limited shell", "Like Coding, but the shell may run only the programs listed with cmd/. Add more as Activity shows them.",
+   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "cmd/git", "cmd/gh", "cmd/ls", "cmd/cat", "cmd/grep", "cmd/npm", "cmd/node", "cmd/python3", "cmd/uv", "*/read*", "*/get*", "*/list*", "*/search*"]),
+] %}
+{% if not role %}
+<section class="card term-starters" id="starters" aria-labelledby="starters-title">
+  <h2 id="starters-title">Start from a template</h2>
+  <p class="muted small">Adds its patterns below (and the name, if empty). Edit them before saving.</p>
+  <ul class="term-examples">
+    {% for name, what, pats in starters %}
+    <li><button type="button" class="term-example" data-insert="{{ pats | join('\n') }}" data-name="{{ name }}" data-target="patterns">{{ name }}</button> <span class="muted small">{{ what }}</span></li>
+    {% endfor %}
+  </ul>
+  <p class="muted small">Not sure? Start with <b>Coding</b> on your own computer. When something you want is blocked, <a href="/terminal/activity">Activity</a> shows its exact name to add here.</p>
+</section>
+{% endif %}
 <form class="stack term-role" method="post" action="/terminal/roles/save" novalidate>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   {% if role %}<input type="hidden" name="role_id" value="{{ role.id }}">{% endif %}

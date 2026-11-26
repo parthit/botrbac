@@ -146,7 +146,9 @@ def test_roles_pages(world, memstore, oauth) -> None:
 
     role_id = listing.split('id="role-r_', 1)[1].split('"', 1)[0]
     c.post(f"/terminal/roles/r_{role_id}/delete", data={"csrf": token})
-    assert "Reviewer" not in c.get("/terminal/roles").text
+    after = c.get("/terminal/roles").text
+    table = after.split('id="roles"', 1)[1].split("</table>", 1)[0]
+    assert f'id="role-r_{role_id}"' not in table and "Reviewer" not in table
 
 
 def test_hand_typed_pattern_survives_an_edit(world, memstore, oauth) -> None:
