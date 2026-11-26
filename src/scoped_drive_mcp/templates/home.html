@@ -7,8 +7,8 @@
     <li><i class="sq" aria-hidden="true"></i><span><b>Sign in, then connect.</b> Signing in shares only your email. Each service is a separate permission.</span></li>
     <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every call.</b> Anything else is refused.</span></li>
   </ul>
-  <p class="sub">Bot RBAC is an access-control gateway that sits between AI agents, like Grok and Muse, and your accounts. It starts with Google Drive: you sign in, connect Drive, pick the files and folders an assistant may use, and this server refuses the rest. More services will follow.</p>
-  <p class="disclosure">Signing in asks Google only for your email. Connecting Google Drive is a second, separate step that asks for access to only the files you pick in Google’s file picker. Google keeps the rest of your Drive closed to Bot RBAC, and this server lets an assistant use only the items you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
+  <p class="sub">Bot RBAC is an access-control gateway that sits between AI agents, like Grok and Muse, and your accounts. You sign in, connect Google Drive and, if you like, Notion or OneDrive, then pick the files, folders and pages an assistant may use. This server refuses the rest.</p>
+  <p class="disclosure">Signing in asks Google only for your email. Connecting Google Drive is a second, separate step that asks for access to only the files you pick in Google’s file picker. Google keeps the rest of your Drive closed to Bot RBAC. Notion and OneDrive are optional, each with its own permission screen and its own list. In every service, this server lets an assistant use only the items you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
   <div class="ctas">
     {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
   </div>
@@ -21,7 +21,7 @@
     <article class="sticker">
       <p class="eye">Assistant asks</p>
       <p class="ask">read Q3 memo</p>
-      <p class="ask dim">read the rest of Drive</p>
+      <p class="ask dim">read everything else</p>
     </article>
     <span class="arrow" aria-hidden="true"></span>
     <article class="sticker gate">
@@ -31,7 +31,7 @@
     </article>
     <span class="arrow" aria-hidden="true"></span>
     <article class="sticker">
-      <p class="eye">Your service (Google Drive)</p>
+      <p class="eye">Your service (Drive, Notion, OneDrive)</p>
       <p class="ask">Q3 memo</p>
       <p class="ask dim">nothing you did not allow</p>
     </article>
@@ -46,12 +46,12 @@
   </article>
   <article class="card product" id="connect">
     <h2>Connect</h2>
-    <p>Choose a service, like Google Drive, and grant access to it separately.</p>
+    <p>Google Drive first, then Notion or OneDrive if you want them. Each is granted separately.</p>
     <p class="proof">One permission per service</p>
   </article>
   <article class="card product" id="pick">
     <h2>Allow</h2>
-    <p>A file or a folder. That list is what an assistant can use.</p>
+    <p>A file, a folder or a Notion page. That list is what an assistant can use.</p>
     <p class="proof">Checked on every call</p>
   </article>
   <article class="card product" id="revoke">

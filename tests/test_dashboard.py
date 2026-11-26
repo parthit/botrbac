@@ -136,7 +136,7 @@ def test_login_page_is_public(c) -> None:
     assert "apis.google.com" not in r.headers["content-security-policy"]
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
     # Google requires the data disclosure immediately before the consent button.
-    assert r.text.index("files and folders you allow") < r.text.index("Sign in with Google")
+    assert r.text.index("files, folders and pages you allow") < r.text.index("Sign in with Google")
     assert "Only the" not in r.text and "only the owner" not in r.text.lower()
 
 
