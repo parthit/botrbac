@@ -5,7 +5,7 @@ description = "MCP server that gives AI assistants only the Google Drive files y
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "mcp>=1.30,<2",
+    "mcp>=1.30,<3",
     "google-api-python-client>=2.150",
     "google-auth>=2.35",
     "google-auth-oauthlib>=1.2",
