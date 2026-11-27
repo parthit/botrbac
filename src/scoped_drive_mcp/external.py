@@ -39,6 +39,7 @@ from .errors import report_exception
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 from .service import DriveService
 from .store import Allowlist
+from .untrusted import wrap
 
 T = TypeVar("T")
 
@@ -170,7 +171,7 @@ def wrap_untrusted(text: str) -> str:
     # Replaced, not deleted: deleting lets a marker split around a copy of itself
     # ("<<<END U" + marker + "NTRUSTED ...>>>") join back up into a real one.
     body = text.replace(SHARED_START, "[removed-marker]").replace(SHARED_END, "[removed-marker]")
-    return f"{SHARED_START}\n{body}\n{SHARED_END}"
+    return wrap(body, SHARED_START, SHARED_END)
 
 
 @contextmanager

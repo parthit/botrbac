@@ -368,6 +368,23 @@ class TokenVault:
 # ---- activity log -----------------------------------------------------------
 
 
+# At most this many rows an hour from one connected app (see ActivityLog._own_app_row).
+APP_ROWS_PER_HOUR = 120
+# The fields that name what a call was about, most specific first.
+_TARGET_FIELDS = (
+    "file_id",
+    "folder_id",
+    "page_id",
+    "item_id",
+    "parent_id",
+    "request_id",
+    "upload_id",
+    "link_id",
+    "msg_id",
+    "drop_id",
+)
+
+
 class ActivityLog:
     """The last ACTIVITY_MAX audit records, newest first."""
 
@@ -409,6 +426,15 @@ class ActivityLog:
                 str(record.get("decision")),
                 str(record.get("reason")),
             ]
+        elif record.get("event") == "owner" and record.get("decision") == "deny":
+            # Refusals the server noticed for a signed-in person (a reused token, a form
+            # from another site): a burst of them is kept once an hour per kind and app.
+            parts = [
+                "refused",
+                str(record.get("action")),
+                str(record.get("reason")),
+                str(record.get("app") or record.get("terminal") or ""),
+            ]
         elif guest:
             allowed = record.get("decision") == "allow"
             parts = [
@@ -418,8 +444,18 @@ class ActivityLog:
                 str(record.get("reason")),
                 str(record.get("file_id") or record.get("folder_id") or "") if allowed else "",
             ]
+        elif record.get("event") == "tool_call":
+            # One of the person's own apps. Each app may put at most APP_ROWS_PER_HOUR
+            # rows here an hour, and a repeat of the same call on the same item is kept
+            # once an hour, so a steered bot cannot push the record of what it did
+            # earlier off the list by calling list_folder 500 times. The server log
+            # still has every call; one row says when an app's rows were cut short.
+            return self._own_app_row(record)
         else:
             return True
+        return self._first_this_hour(parts)
+
+    def _first_this_hour(self, parts: list[str]) -> bool:
         digest = hashlib.sha256("\x00".join(parts).encode()).hexdigest()[:32]
         try:
             return self.store.set_if_absent(f"activity_seen:{digest}", "1", ex=GUEST_ROW_EVERY)
@@ -427,6 +463,44 @@ class ActivityLog:
             # Not knowing whether it is a repeat is no reason to lose the record.
             logger.warning("activity repeat check failed; keeping the row", exc_info=True)
             return True
+
+    def _own_app_row(self, record: dict[str, Any]) -> bool:
+        app = str(record.get("app") or record.get("token_name") or "")
+        target = next(
+            (str(record[k]) for k in _TARGET_FIELDS if isinstance(record.get(k), str)), ""
+        )
+        if not self._first_this_hour(
+            [
+                "app",
+                app,
+                str(record.get("tool")),
+                str(record.get("decision")),
+                str(record.get("reason")),
+                target,
+            ]
+        ):
+            return False
+        digest = hashlib.sha256(app.encode()).hexdigest()[:32]
+        try:
+            count = self.store.incr(f"activity_app:{digest}", ex=GUEST_ROW_EVERY)
+        except Exception:
+            logger.warning("activity budget check failed; keeping the row", exc_info=True)
+            return True
+        if count <= APP_ROWS_PER_HOUR:
+            return True
+        if count == APP_ROWS_PER_HOUR + 1:
+            marker = {
+                "ts": record.get("ts"),
+                "event": "owner",
+                "action": "activity_limited",
+                "token_name": record.get("token_name"),
+                "app": record.get("app"),
+                "decision": "deny",
+                "reason": "too_many_calls",
+            }
+            self.store.lpush(ACTIVITY_KEY, json.dumps(marker, separators=(",", ":")))
+            self.store.ltrim(ACTIVITY_KEY, 0, self.max_items - 1)
+        return False
 
     def recent(self, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

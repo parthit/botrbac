@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 from ..agent_roles import AgentRole, AgentRoleError
-from ..audit import audit_owner
+from ..audit import app_tag, audit_owner
 from ..auth import current_actor
 from ..bridge import MailboxError
 from ..mcp_oauth import APP_ROLES
@@ -35,6 +35,7 @@ class SettingsPages:
     role_delete: FormHandler
     oauth_grant_rename: FormHandler
     revoke_oauth_grant: FormHandler
+    revoke_all: FormHandler
 
 
 def settings_pages(
@@ -295,6 +296,8 @@ def settings_pages(
         except MailboxError as exc:
             flash(request, "error", exc.message)
         else:
+            # Pairings decide who can read the Sharing list, so every change is on record.
+            audit_owner(f"pairing_{action}", link=link_id, purge="1" if purge else None)
             flash(request, "ok", message)
         return RedirectResponse("/sharing?tab=people", status_code=303)
 
@@ -367,6 +370,14 @@ def settings_pages(
                 kind, message = "ok", "Wake-up saved. Use Send test wake to check it works."
         except MailboxError as exc:
             kind, message, changed = "error", exc.message, False
+        else:
+            if action != "test":
+                # Never the URL or key: which app's wake-up changed, and how.
+                audit_owner(
+                    f"webhook_{action or 'save'}",
+                    app=app_tag(app) if app else None,
+                    from_app=app_tag(from_app) if from_app else None,
+                )
         return action_done(request, kind, message, back, changed=changed)
 
     async def oauth_grant_role(request: Request, form: dict[str, str]) -> Response:
@@ -452,11 +463,44 @@ def settings_pages(
             return action_done(
                 request, "error", "That connection was not found.", "/settings#assistants"
             )
-        audit_owner("oauth_revoke")
+        audit_owner("oauth_revoke", app=app_tag(grant_id))
         return action_done(
             request,
             "ok",
             "Disconnected the assistant. Its tokens no longer work.",
+            "/settings#assistants",
+        )
+
+    def _revoke_everything(email: str) -> tuple[int, int]:
+        """Every connected app and terminal of `email`. Ending an app also ends its
+        pairings with your other assistants and deletes its wake-up (mcp_oauth.on_revoke).
+        Pairings with other people, and what is on Files and Sharing, are left as they
+        are: those are people, not assistants."""
+        apps = terminals = 0
+        if ctx.mcp_oauth is not None:
+            for grant in ctx.mcp_oauth.list_grants(email):
+                if ctx.mcp_oauth.revoke(grant.id, email=email):
+                    apps += 1
+        feature = getattr(ctx, "terminal", None)
+        if feature is not None:
+            for terminal in feature.terminals.for_person(email):
+                if feature.terminals.revoke(email, terminal.id):
+                    terminals += 1
+        return apps, terminals
+
+    async def revoke_all(request: Request, form: dict[str, str]) -> Response:
+        """The emergency stop: disconnect every assistant at once."""
+        email = str(request.session.get("owner") or "")
+        apps, terminals = await blocking(_revoke_everything, email)
+        audit_owner("revoke_all", apps=str(apps), terminals=str(terminals))
+        parts = [f"{apps} app{'' if apps == 1 else 's'}"]
+        if terminals:
+            parts.append(f"{terminals} terminal{'' if terminals == 1 else 's'}")
+        return action_done(
+            request,
+            "ok",
+            f"Disconnected {' and '.join(parts)}. Their tokens no longer work; "
+            "each one has to sign in and be allowed again.",
             "/settings#assistants",
         )
 
@@ -472,4 +516,5 @@ def settings_pages(
         role_delete=role_delete,
         oauth_grant_rename=oauth_grant_rename,
         revoke_oauth_grant=revoke_oauth_grant,
+        revoke_all=revoke_all,
     )

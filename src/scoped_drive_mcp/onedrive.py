@@ -60,6 +60,7 @@ from .onedrive_client import (
 from .policy import PayloadToolError
 from .service import DOWNLOAD_BYTE_CAP, is_text_like
 from .store import AllowEntry, Allowlist, TokenVault
+from .untrusted import wrap
 
 logger = logging.getLogger(__name__)
 
@@ -453,7 +454,7 @@ class OneDriveService:
             if len(text) > self.max_chars:
                 text = text[: self.max_chars]
                 result["truncated"] = True
-            result["content"] = f"{UNTRUSTED_START}\n{text}\n{UNTRUSTED_END}"
+            result["content"] = wrap(text, UNTRUSTED_START, UNTRUSTED_END)
             return result
 
         return self._run(run)

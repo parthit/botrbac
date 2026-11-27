@@ -8,6 +8,14 @@
   <a class="btn{{ ' primary' if key == view }}" href="{{ href }}"{% if key == view %} aria-current="page"{% endif %}>{{ label }} <span class="muted">{{ count }}</span></a>
   {% endfor %}
 </nav>
+{% if apps | length > 1 or app %}
+<nav class="actions activity-filters" aria-label="Show one assistant">
+  <a class="btn{{ ' primary' if not app }}" href="{{ all_apps_href }}"{% if not app %} aria-current="page"{% endif %}>Every assistant</a>
+  {% for tag, name, href in apps %}
+  <a class="btn{{ ' primary' if tag == app }}" href="{{ href }}"{% if tag == app %} aria-current="page"{% endif %}>{{ name }}</a>
+  {% endfor %}
+</nav>
+{% endif %}
 {% if hidden_checks %}
 <p class="muted" id="routine-checks">
   {% if show_checks %}Showing {{ hidden_checks }} routine check{{ "s" if hidden_checks != 1 }} (an assistant asking whether a request was answered or mail arrived). <a href="{{ checks_href }}">Hide them</a>

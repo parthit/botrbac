@@ -49,6 +49,7 @@ from .notion_client import (
 )
 from .policy import PayloadToolError
 from .store import AllowEntry, Allowlist, TokenVault
+from .untrusted import wrap
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +336,7 @@ class NotionService:
                 "url": obj.get("url"),
                 "last_edited_time": obj.get("last_edited_time"),
                 "truncated": truncated,
-                "content": f"{UNTRUSTED_START}\n{text}\n{UNTRUSTED_END}",
+                "content": wrap(text, UNTRUSTED_START, UNTRUSTED_END),
             }
 
         return self._run(read)

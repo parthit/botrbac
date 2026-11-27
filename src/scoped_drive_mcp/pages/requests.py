@@ -18,6 +18,7 @@ from ..access import (
     AccessRequests,
     validate_request_id,
 )
+from ..audit import app_tag
 from ..auth import current_actor
 from ..drive_client import DriveNotFoundError
 from ..errors import report_exception
@@ -286,6 +287,18 @@ def request_pages(kit: Kit) -> RequestPages:
             limit = ACTIVITY_PAGE
         limit = max(ACTIVITY_PAGE, min(limit, 500))
         records = await blocking(ctx.activity.recent)
+        # One connected app's rows only (?app= is the tag Activity rows carry).
+        grants = (
+            await blocking(ctx.mcp_oauth.list_grants, current_actor.get())
+            if ctx.mcp_oauth is not None
+            else []
+        )
+        app_choices = [(app_tag(g.id), f"{g.client_name} (…{g.id[-5:]})") for g in grants]
+        app = request.query_params.get("app") or ""
+        if app not in {tag for tag, _ in app_choices}:
+            app = ""
+        if app:
+            records = [r for r in records if r.get("app") == app]
         rows = [describe(r) for r in records]
         shown_ids = [i for i, row in enumerate(rows) if matches(row, view, show_checks)]
         page = shown_ids[:limit]
@@ -297,7 +310,7 @@ def request_pages(kit: Kit) -> RequestPages:
         counts = {k: sum(1 for r in rows if matches(r, k, show_checks)) for k in ACTIVITY_FILTERS}
 
         def href(**changes: Any) -> str:
-            params = {"view": view, "checks": "1" if show_checks else "", "show": ""}
+            params = {"view": view, "app": app, "checks": "1" if show_checks else "", "show": ""}
             params.update({k: str(v) for k, v in changes.items()})
             pairs = [(k, v) for k, v in params.items() if v and not (k == "view" and v == "all")]
             return "/activity" + (f"?{urlencode(pairs)}" if pairs else "")
@@ -313,6 +326,9 @@ def request_pages(kit: Kit) -> RequestPages:
             show_checks=show_checks,
             hidden_checks=sum(1 for r in rows if r.polling),
             checks_href=href(checks="" if show_checks else "1"),
+            app=app,
+            apps=[(tag, name, href(app=tag)) for tag, name in app_choices],
+            all_apps_href=href(app=""),
         )
 
     return RequestPages(

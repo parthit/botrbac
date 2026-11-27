@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..untrusted import defang_markers
+
 HOUR = 3600
 DAY = 24 * HOUR
 MESSAGE_TTL = 14 * DAY
@@ -91,7 +93,7 @@ def neutralize(body: str) -> str:
     cleaned = _INJECTION.sub("[removed-instruction-phrase]", _TAG.sub(tags, body))
     for marker in (UNTRUSTED_START, UNTRUSTED_END):
         cleaned = cleaned.replace(marker, "[removed-marker]")
-    return cleaned
+    return defang_markers(cleaned)
 
 
 def present_untrusted(body: str) -> str:
