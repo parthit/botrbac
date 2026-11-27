@@ -215,7 +215,7 @@ header {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 40px;
+  height: 44px;
   padding: 0 10px;
   border-radius: 999px;
   color: var(--ink2);
@@ -361,8 +361,8 @@ button, .btn, summary.btn {
   border: 1px solid var(--line2);
   background: transparent;
   border-radius: 999px;
-  height: 40px;
-  padding: 0 16px;
+  height: 44px;
+  padding: 0 18px;
   cursor: pointer;
   color: var(--ink);
   text-decoration: none;
@@ -422,10 +422,9 @@ input[type="text"], input[type="search"], input[type="url"], input[type="passwor
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 3px 8px;
+  font: 500 12px/1.3 var(--font);
+  letter-spacing: 0;
+  padding: 3px 9px;
   border-radius: 999px;
   background: var(--wash);
   color: var(--ink2);
@@ -941,7 +940,7 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
 .consent-account p, .consent-account .switch-account { margin: 0; }
 .consent-account b { color: var(--ink); font-weight: 600; }
 .switch-account button {
-  height: auto; padding: 0; border: 0; border-radius: 4px; background: none;
+  height: auto; min-height: 44px; padding: 0 4px; border: 0; border-radius: 4px; background: none;
   font-weight: 500; color: var(--accent); text-decoration: underline; text-underline-offset: 3px;
 }
 .switch-account button:hover { background: none; color: var(--ink); }
@@ -1066,10 +1065,10 @@ dl.talks-to .pill { text-transform: none; letter-spacing: 0; font: 500 13px/1.2 
 .dismissable > .note-text { flex: 1 1 auto; min-width: 0; padding-top: 2px; }
 button.dismiss {
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
   padding: 0;
-  margin: -2px -6px -2px 0;
+  margin: -12px -14px -12px 0;
   border: 0;
   border-radius: 999px;
   font: 400 20px/1 var(--font);
@@ -1167,7 +1166,7 @@ dialog.confirm .actions { justify-content: flex-end; }
 form.role-form { display: inline; margin: 0; }
 @media (max-width: 640px) {
   form.role-form { display: flex; align-items: center; gap: 8px 10px; margin: 0 0 12px; }
-  form.role-form label { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+  form.role-form label { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; white-space: nowrap; }
   form.role-form select { flex: 1 1 auto; width: auto; min-width: 0; max-width: 360px; }
 }
 
@@ -1205,7 +1204,9 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
 
 /* Files rows: each toggle says whose access it changes. */
 .act-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
-.act-who { font: 500 11px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); min-width: 9.5em; }
+.act-who { font: 500 13px/1.2 var(--font); color: var(--ink3); min-width: 8em; }
+/* With only one line of actions, the "Your assistant" label adds nothing. */
+.file-actions > .act-line:only-child > .act-who { display: none; }
 .file-actions:has(.act-line) { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 /* Radio and checkbox rows: the control sits beside its text, not above it. */
 .stack label.check { flex-direction: row; align-items: flex-start; gap: 10px; font-weight: 500; font-size: 15px; margin: 0 0 10px; }
@@ -1237,15 +1238,6 @@ form[role="search"] input[type="search"] { flex: 1 1 12rem; width: auto; max-wid
   .act-line { justify-content: space-between; }
 }
 
-/* ---- Page changes ------------------------------------------------------------------
-   Every tab and nav link is a full page load. Where the browser supports it, the new page
-   fades in over the old one and the header stays still, instead of a blank flash. */
-@view-transition { navigation: auto; }
-header { view-transition-name: site-header; }
-::view-transition-old(root), ::view-transition-new(root) { animation-duration: 140ms; }
-@media (prefers-reduced-motion: reduce) {
-  @view-transition { navigation: none; }
-}
 @media (max-width: 420px) {
   .tabs { gap: 0; }
   .tabs a { padding: 0 8px; }
@@ -1484,3 +1476,54 @@ button.term-example { font: 500 13px var(--mono); height: 36px; padding: 0 12px;
 }
 .term-role textarea + p { margin-top: 8px; }
 @media (min-width: 721px) { .term-table td[data-label="Role"] .term-form { flex-wrap: nowrap; } }
+
+/* ---- Launch fixes ------------------------------------------------------------------ */
+/* App pages (Connect, Services) line their lead up with the heading. */
+.hero.app-hero .sub, .hero.app-hero .disclosure { margin-left: 0; margin-right: 0; }
+/* A count that is information, not something waiting (Allowed 3). */
+.count.neutral { background: var(--wash); color: var(--ink2); }
+/* Text links inside running copy get a taller hit area without moving the line. */
+p a:not([class]), span.muted a:not([class]) { padding-block: 10px; }
+/* Overview: something is blocked until the person acts. */
+.action-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.action-banner p { margin: 0; }
+/* Overview: the first-run checklist. */
+.setup-steps { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 14px; }
+.setup-steps li { display: grid; grid-template-columns: 32px 1fr; gap: 12px; align-items: start; }
+.setup-steps li p { margin: 6px 0 0; }
+.setup-steps .tick { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font: 600 14px/1 var(--font); background: var(--wash); color: var(--ink2); }
+.setup-steps li.done .tick { background: color-mix(in srgb, var(--ok) 16%, var(--card)); color: var(--ok); }
+.setup-steps li.done b { color: var(--ink2); font-weight: 500; }
+/* Request page: each option is one full-width, 44px row. */
+fieldset.choices { border: 0; padding: 0; margin: 0 0 8px; display: grid; gap: 4px; }
+fieldset.choices legend { font-weight: 600; margin-bottom: 6px; }
+label.choice { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
+label.choice input { width: 20px; height: 20px; flex: none; }
+.actions.decision { margin-top: 12px; }
+/* Settings: what an assistant reaches, and the parts that can be switched off. */
+.reach { margin: 8px 0; }
+.feature-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: 4px 0 12px; }
+.feature-form fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0 18px; }
+.feature-form label.check, fieldset.features label { min-height: 44px; }
+label.check { display: inline-flex; align-items: center; gap: 8px; }
+label.check input, fieldset.features input { width: 20px; height: 20px; flex: none; }
+fieldset.features { border: 0; padding: 0; margin: 16px 0 0; display: grid; gap: 8px; }
+fieldset.features legend { font-weight: 600; margin-bottom: 6px; }
+/* Files: the longer explanation stays one click away. */
+details.explain { margin: 4px 0 12px; }
+details.explain > summary { cursor: pointer; min-height: 44px; display: inline-flex; align-items: center; font-weight: 500; color: var(--ink2); }
+details.explain > p { margin: 4px 0 0; max-width: 70ch; }
+/* Landing: the full disclosure, folded. */
+details.exact { margin: 0 auto 16px; max-width: 640px; text-align: left; }
+details.exact > summary { cursor: pointer; min-height: 44px; display: inline-flex; align-items: center; font-weight: 500; color: var(--ink2); }
+/* Mailbox page. */
+.mail-list { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 12px; }
+.mail-list .card { margin: 0; }
+.mail-head { margin: 0 0 8px; }
+.mail-body { margin: 0; white-space: pre-wrap; word-break: break-word; font: 400 14px/1.5 var(--mono); background: var(--wash); border-radius: 8px; padding: 10px 12px; max-height: 24em; overflow: auto; }
+#next-step > h2 { margin-top: 0; }
+details.explain > summary, details.exact > summary { list-style: none; gap: 8px; }
+details.explain > summary::-webkit-details-marker, details.exact > summary::-webkit-details-marker { display: none; }
+details.explain > summary::before, details.exact > summary::before { content: "›"; display: inline-block; font-weight: 600; transition: transform 0.15s; }
+details[open].explain > summary::before, details[open].exact > summary::before { transform: rotate(90deg); }
+fieldset.features legend .muted { font-weight: 400; }

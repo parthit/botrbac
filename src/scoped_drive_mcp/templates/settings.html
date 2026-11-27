@@ -168,6 +168,19 @@
     </label>
     <button type="submit">Save<span class="sr-only"> what {{ a.name }} can do</span></button>
   </form>
+  <p class="reach" id="reach-{{ a.id }}">Can open <b>{{ a.reach }} allowed item{{ "" if a.reach == 1 else "s" }}</b>{% if a.agent_role %}, the ones in its role <b>{{ a.agent_role }}</b> · <a href="/settings#role-{{ a.agent_role }}">View role</a>{% else %}: your whole Allowed list, the same for every assistant · <a href="/files?tab=allowed">View the list</a>{% endif %}</p>
+  {% if not a.agent_role and (mailbox_feature or shared_feature) %}
+  <form class="feature-form" method="post" action="/oauth/grants/features" id="features-{{ a.id }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="grant_id" value="{{ a.id }}">
+    <fieldset>
+      <legend class="sr-only">Also allow {{ a.name }} to use</legend>
+      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Mailbox <span class="muted hint">messages with your other assistants</span></span></label>{% else %}{% if a.features.mailbox %}<input type="hidden" name="feature_mailbox" value="on">{% endif %}{% endif %}
+      {% if shared_feature %}<label class="check"><input type="checkbox" name="feature_shared" value="on"{% if a.features.shared %} checked{% endif %}> <span>Shared with me <span class="muted hint">what paired people share with you</span></span></label>{% else %}{% if a.features.shared %}<input type="hidden" name="feature_shared" value="on">{% endif %}{% endif %}
+    </fieldset>
+    <button type="submit">Save<span class="sr-only"> what else {{ a.name }} can use</span></button>
+  </form>
+  {% endif %}
   {% if a.agent_role %}<p class="muted small" id="bound-{{ a.id }}">Connected through the role <b>{{ a.agent_role }}</b>. It only works at that role’s address, on that role’s files.</p>{% endif %}
   {% if a.legacy_full %}<p class="muted small">{{ a.name }} has Full access because it was connected before you could choose. Lower it if it only needs to read.</p>{% endif %}
   {% if wake_on %}

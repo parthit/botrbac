@@ -7,7 +7,7 @@
 {% block content %}
 <h1>Files</h1>
 {{ files_tabs('all', allow_count, notion_tab, onedrive_tab) }}
-<p class="muted lead"><b>Allow</b> lets your own assistants use an item. <b>Share</b> lets the assistants of people you are paired with read it. The two are separate: you can do either, both or neither. An allowed folder includes everything inside it.</p>
+<p class="muted lead"><b>Allow</b> lets your own assistants use an item; an allowed folder includes everything inside it.{% if has_pairing %} <b>Share</b> lets paired people’s assistants read it.{% endif %}</p>
 {% if picking %}
 <div class="warn">Choosing an item for this request:
   <b>{{ picking.description or picking.file_name or "a file the assistant asked for" }}</b>.
@@ -33,12 +33,12 @@
   <button type="button" class="primary" id="pick-drive" data-next="{{ here }}"{% if picking %} data-request="{{ picking.id }}"{% endif %}>Add from Google Drive</button>
   {% endif %}
 </form>
-<p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Sign in again, or try later.</p>
+<p id="pick-error" class="flash error" hidden role="alert">Google’s file picker didn’t open. Allow pop-ups for this site and try again. If it still fails, reload the page or reconnect Google Drive in <a href="/settings#services">Settings</a>.</p>
 {% if picker_ready and not peer_picking %}{% include "_safari_note.html" %}{% endif %}
 
 {% if not q %}
 {% if is_root and hidden_count %}<p class="muted" id="hidden-note">{{ hidden_count }} {{ "item" if hidden_count == 1 else "items" }} you removed from Bot RBAC {{ "is" if hidden_count == 1 else "are" }} not listed. Google still lists Bot RBAC as able to open {{ "it" if hidden_count == 1 else "them" }} until you remove the app in your <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">Google Account</a>. Pick an item again with <b>Add from Google Drive</b> to bring it back.</p>{% endif %}
-{% if is_root %}<p class="muted" id="root-note">Files you chose from Google Drive, plus the ones Bot RBAC created. Google keeps the rest of your Drive closed to it. <b>Choosing a file doesn’t give any assistant access</b>: Allow does that. A folder you chose still opens to show what’s inside, so a file can appear both here and in its folder.</p>{% endif %}
+{% if is_root %}<details class="muted explain" id="root-note"><summary>What’s listed here</summary><p>Everything you picked with <b>Add from Google Drive</b> is allowed for your assistants straight away. This list also shows files Bot RBAC created, and items you removed from Allowed, which stay listed so you can allow them again. Google keeps the rest of your Drive closed to Bot RBAC. A folder opens to show what’s inside, so a file can appear both here and in its folder.</p></details>{% endif %}
 {% if current and not is_root %}<h2 class="folder-title">{{ file_icon("folder") }} {{ crumbs[-1].name }}</h2>{% endif %}
 <p class="crumbs">
   {% for c in crumbs %}
@@ -112,6 +112,8 @@
       A shortcut row shows its target's state: Allow stores the target, so Remove and
       Stop sharing post the target's id (r.acts_on). -#}
   {%- set t = r.target %}
+  {#- Allow / Remove on a folder posts normally (no data-async): it changes the state of
+      every row inside that folder, so the whole list is drawn again. -#}
   <li class="file" data-row data-access="{{ 'on' if r.granted else 'off' }}" data-share="{{ 'on' if r.ext_shared else 'off' }}" data-acts-on="{{ r.acts_on }}"{% if r.covered_by %} data-covered{% endif %}{% if r.shared_by %} data-shared-under{% endif %}>
     <div class="file-name">
       {% if not picking and not peer_picking %}{{ batch_check("batch-files", r.acts_on, r.name, r.covered_by, r.shared_by) }}{% endif %}
@@ -161,14 +163,14 @@
         <div class="act-line"><span class="act-who">Your assistant</span>
         {#- Under an allowed folder the item stays available after Remove, so the confirm
             says so; and Allow is not offered, because it is already available. -#}
-        <form class="inline" method="post" action="/revoke" data-async data-flip="access" data-access-when="on" data-confirm="{% if r.covered_by %}Remove this item’s own entry? It stays available through “{{ r.covered_by }}”.{% elif t %}Remove the target “{{ t.name }}” from the assistant?{% else %}Remove this from the assistant?{% endif %}"{% if not r.granted %} hidden{% endif %}>
+        <form class="inline" method="post" action="/revoke"{% if not r.is_folder %} data-async{% endif %} data-flip="access" data-access-when="on" data-confirm="{% if r.covered_by %}Remove this item’s own entry? It stays available through “{{ r.covered_by }}”.{% elif t %}Remove the target “{{ t.name }}” from the assistant?{% else %}Remove “{{ r.name }}”{% if r.is_folder %} and everything inside it{% endif %}? None of your assistants can open {{ "them" if r.is_folder else "it" }} from their next request. Anything already read is not recalled.{% endif %}"{% if not r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.acts_on }}">
           <input type="hidden" name="next" value="{{ here }}">
           <button class="danger" type="submit">{{ "Remove the target" if t else "Remove" }}<span class="sr-only"> {{ t.name if t else r.name }}</span></button>
         </form>
         {% if not r.covered_by %}
-        <form class="inline" method="post" action="/grant" data-async data-flip="access" data-access-when="off"{% if r.granted %} hidden{% endif %}>
+        <form class="inline" method="post" action="/grant"{% if not r.is_folder %} data-async{% endif %} data-flip="access" data-access-when="off"{% if r.granted %} hidden{% endif %}>
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="file_id" value="{{ r.id }}">
           <input type="hidden" name="next" value="{{ here }}">

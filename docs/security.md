@@ -95,8 +95,13 @@
 - **OAuth for assistants:** remote MCP clients that cannot hold a static bearer register themselves and send you
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection acts on `/mcp` with the role you choose on the consent page
-  (Read only unless you pick more) and still cannot pass the allowlist.
-  Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
+  (Read only unless you pick more) and still cannot pass the allowlist. The consent page also has a box each
+  for the **Mailbox** and **Shared with me**. Unticked, that part's tools are neither listed nor callable for
+  the app (`policy.FEATURE_TOOLS`); they start ticked only when they can do something (another assistant to
+  talk to, someone who shares with you), and can be changed per app in Settings. Apps approved before the
+  boxes keep both parts. A damaged switch record turns both parts off rather than on.
+  Revoke it under **Assistants** in Settings. The owner can read mail between their own assistants on
+  Sharing › Mailbox; that view marks nothing as read. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
   Redirect URLs are an exact allow list (Claude, ChatGPT/Dots, Cursor, Grok Bot, Muse). The consent page
   names the app by the service its redirect belongs to; the name the app registered with is shown only as
   a secondary line, because any app can choose any name. `http://localhost:8787/callback` and
@@ -229,7 +234,7 @@
   paired with, and a request expires after 14 days.
 - **Paired people's writes.** A paired person's assistant can write only inside items you marked
   editable for them, and only create, upload, update and rename (never trash, move or share). Inside an
-  editable folder it can't rename anything on your Sharing list, on your own assistants' Access list or
+  editable folder it can't rename anything on your Sharing list, on your own assistants' Allowed list or
   the root folder, and it can't overwrite the content of an item on either list unless you marked
   that file itself editable. The hourly write limit counts only writes that passed every check. Files it
   wrote or renamed are marked in Drive `appProperties`, which only this app can read or change, so another

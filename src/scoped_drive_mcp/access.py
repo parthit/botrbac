@@ -350,7 +350,7 @@ class AccessService:
             "approval_url": self.approval_url(req.id),
             "file_id": req.file_id,
             "message": (
-                "This item has not been shared with you. Show the user this approval link "
+                "This item is not on the owner's Allowed list. Show the user this approval link "
                 f"and ask them to approve access: {self.approval_url(req.id)} . After they "
                 "approve, retry the same call (or check with check_access_request using "
                 "request_id)."

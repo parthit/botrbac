@@ -47,6 +47,8 @@ class Principal:
     # OAuth only: the named role this connection was approved for, when it signed in
     # through a role's address. It is then refused everywhere but that address.
     bound_role: str | None = None
+    # OAuth only: tools of the parts the owner switched off for this app (policy.FEATURES).
+    tools_off: frozenset[str] = frozenset()
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)

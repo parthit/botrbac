@@ -22,7 +22,7 @@
   {% endif %}
   <p class="muted">Asked {{ req.created_at | when }}{% if req.decided_at %} · decided {{ req.decided_at | when }}{% endif %}</p>
   {% if req.status == "approved" and (req.granted_name or req.granted_id) %}
-  <p>Shared: <b>{{ req.granted_name or "an item" }}</b></p>
+  <p>Allowed: <b>{{ req.granted_name or "an item" }}</b></p>
   {% endif %}
   {% if owner_meta and owner_meta.webViewLink %}
   <p><a href="{{ owner_meta.webViewLink }}" target="_blank" rel="noopener noreferrer">Open in Drive</a></p>
@@ -34,7 +34,7 @@
       {% if req.reason and req.tool != "request_access" %}<dt>Reason recorded</dt><dd>{{ req.reason }}</dd>{% endif %}
       {% if req.token_name %}<dt>Connection name</dt><dd>{{ req.token_name }}</dd>{% endif %}
       <dt>Tool</dt><dd>{{ tool_label(req.tool) }} <span class="muted">({{ req.tool }})</span></dd>
-      {% if req.granted_id %}<dt>Shared item id</dt><dd><code>{{ req.granted_id }}</code></dd>{% endif %}
+      {% if req.granted_id %}<dt>Allowed item id</dt><dd><code>{{ req.granted_id }}</code></dd>{% endif %}
     </dl>
   </details>
 </div>
@@ -43,21 +43,19 @@
 <div class="card">
   {% if req.file_id %}
     {% if options %}
-    <form method="post" action="/requests/{{ req.id }}/approve">
+    <form method="post" action="/requests/{{ req.id }}/approve" id="approve-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <fieldset style="border:none;padding:0;margin:0;">
-        <legend>What should the assistant be allowed to use?</legend>
+      <fieldset class="choices">
+        <legend>What should your assistants be allowed to use?</legend>
         {% for o in options %}
-        <p><label><input type="radio" name="target_id" value="{{ o.id }}" {{ "checked" if loop.first }}>
-          {{ o.label }}: <b>{{ o.name }}</b> <span class="muted">({{ describe_mime(o.mime_type) }})</span></label></p>
+        <label class="choice"><input type="radio" name="target_id" value="{{ o.id }}" {{ "checked" if loop.first }}>
+          <span>{{ o.label }}: <b>{{ o.name }}</b> <span class="muted">({{ describe_mime(o.mime_type) }})</span></span></label>
         {% endfor %}
       </fieldset>
-      <div class="actions">
-        <button class="primary" type="submit">Approve</button>
-      </div>
+      <p class="muted small">It goes on your Allowed list, which every assistant you connected can use.</p>
     </form>
     {% elif owner_meta %}
-    <p>Your whole My Drive can't be shared from this request. Deny it, or <a href="/files?request={{ req.id }}">pick a different item</a>.</p>
+    <p>Your whole My Drive can't be allowed from this request. Deny it, or <a href="/files?request={{ req.id }}">pick a different item</a>.</p>
     {% elif shared_by %}
     <h2 id="not-in-drive">This file isn’t in your Drive</h2>
     <p><b>{{ shared_by }}</b> shares it with you through Mailbox, so your assistant can already read it with <code>read_shared_file</code>. There is nothing to approve here. Deny this request to close it.</p>
@@ -69,7 +67,7 @@
     <p>Google only lets Bot RBAC open files you pick. If this file is yours, choose it in Google’s file picker to approve the request. If it isn’t yours or doesn’t exist, deny the request so the assistant stops waiting.</p>
     {% if picker_ready %}
     <p><button type="button" class="primary" id="pick-drive" data-next="/requests/{{ req.id }}" data-request="{{ req.id }}">Choose the file to approve</button></p>
-    <p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
+    <p id="pick-error" class="flash error" hidden role="alert">Google’s file picker didn’t open. Allow pop-ups for this site and try again. If it still fails, reload the page or reconnect Google Drive in <a href="/settings#services">Settings</a>.</p>
     {% include "_safari_note.html" %}
     {% else %}
     <p class="muted">Google’s file picker isn’t set up on this server, so the file can’t be chosen here. Ask whoever runs it to set <code>GOOGLE_PICKER_API_KEY</code> and <code>GOOGLE_CLOUD_PROJECT_NUMBER</code>.</p>
@@ -77,13 +75,16 @@
     <p>If the assistant meant a different file, <a href="/files?request={{ req.id }}">pick it from Files</a>.</p>
     {% endif %}
   {% else %}
-    <p>Find the item the assistant asked for and share it.</p>
+    <p>Find the item the assistant asked for and allow it.</p>
     <p><a class="btn primary" href="/files?request={{ req.id }}">Pick an item</a></p>
   {% endif %}
-  <form method="post" action="/requests/{{ req.id }}/deny" data-confirm="Deny this request? The assistant is told it was denied, and this cannot be undone.">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="danger" type="submit">Deny</button>
-  </form>
+  <div class="actions decision">
+    {% if req.file_id and options %}<button class="primary" type="submit" form="approve-form">Approve</button>{% endif %}
+    <form class="inline" method="post" action="/requests/{{ req.id }}/deny" data-confirm="Deny this request? The assistant is told it was denied, and this cannot be undone.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" type="submit">Deny</button>
+    </form>
+  </div>
 </div>
 {% endif %}
 <p><a href="/requests">All requests</a></p>

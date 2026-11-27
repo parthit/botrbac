@@ -267,12 +267,15 @@ def test_connect_page_heading_after_drive_is_connected(owner_c) -> None:
 
 def test_overview_says_what_to_do_next(owner_c) -> None:
     page = owner_c.get("/").text
-    assert "Next: choose files your assistant can use" in page
-    assert 'href="/files">Choose files</a>' in page
+    assert "Pick the folders your assistant can read" in page
+    assert 'href="/files">Pick files and folders</a>' in page
     assert "setup cards above" not in page
     assert "Copy the MCP URL above" in owner_c.get("/settings").text
     post(owner_c, "/grant", file_id="loose-doc")
-    assert "Next: choose files" not in owner_c.get("/").text
+    after = owner_c.get("/").text
+    # Step 2 is done; the checklist moves on to connecting an assistant.
+    assert 'href="/files">Pick files and folders</a>' not in after
+    assert 'href="#mcp-address">Show me how</a>' in after
 
 
 # ---- G. Timestamps ---------------------------------------------------------------------

@@ -188,6 +188,20 @@ _ALLOWED = Badge("ok", "Allowed", "✓")
 _BLOCKED = Badge("bad", "Blocked", "!")
 _FAILED = Badge("bad", "Failed", "!")
 _DONE = Badge("", "Done", "✓")
+_SENT = Badge("ok", "Sent", "✓")
+_MAIL_BADGES: dict[str, Badge] = {
+    "send_message": _SENT,
+    "reply": _SENT,
+    "send_file": _SENT,
+    "request_link": Badge("pending", "Pairing", "\u25cf"),
+    "list_links": _DONE,
+    "list_inbox": _DONE,
+    "check_messages": _DONE,
+    "mark_read": _DONE,
+    "get_webhook": _DONE,
+    "set_webhook": _DONE,
+    "clear_webhook": _DONE,
+}
 
 
 @dataclass(frozen=True)
@@ -349,7 +363,9 @@ def _tool_row(
         badge = Badge("pending", "Asked", "\u25cf")
     elif decision == "allow":
         text = f"{who} {done.format(item=item)}."
-        badge = _ALLOWED
+        # "Allowed" means a file call passed the Allowed list. Mailbox and pairing calls
+        # never touch that list, so they get a word for what happened instead.
+        badge = _MAIL_BADGES.get(tool, _ALLOWED)
     elif decision == "deny" and missing:
         text = f"{who} tried to {attempt.format(item=item)}."
         badge = _BLOCKED

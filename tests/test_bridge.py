@@ -884,7 +884,7 @@ def test_consent_names_the_account_mailbox_and_return_host(p2_app) -> None:
     assert "Use a different account" in text
     assert "Mailbox" in text and "paired" in text
     assert "Shared with me" in text
-    assert "Access list" in text
+    assert "Allowed list" in text
     assert "files you have shared" not in text
     assert "go back to <b>anysphere.cursor-mcp</b>" in text
 

@@ -191,7 +191,7 @@ def test_browse_outside_allowed_folders_is_unchanged(c) -> None:
     page = c.get("/files?folder=priv").text
     other = _row(page, "other.txt")
     assert "Not allowed" in other and 'action="/grant"' in other
-    assert "Remove “" not in page
+    assert ">Remove “" not in page
 
 
 def test_stop_sharing_inside_a_shared_folder_is_truthful(people) -> None:
@@ -405,3 +405,33 @@ def test_search_stops_guessing_when_the_lookup_budget_runs_out(c, monkeypatch) -
     # Share / Stop sharing only appear once there is a pairing; Remove is always there.
     form = row[row.index('action="/revoke"') :].split("</form>", 1)[0]
     assert 'name="file_id" value="priv-secret"' in form
+
+
+def test_top_of_files_shows_items_inside_an_allowed_folder_as_allowed(c) -> None:
+    # The top of Files lists every picked item, wherever it sits. One inside an allowed
+    # folder must not offer Allow as if the assistant could not reach it.
+    post(c, "/grant", file_id="proj")
+    page = c.get("/files").text
+    notes = _row(page, "notes.txt")
+    assert "Allowed via folder “Projects”" in notes
+    assert 'action="/grant"' not in notes
+    sub = _row(page, "Sub")
+    assert "Allowed via folder “Projects”" in sub
+    # Outside it, still a plain Allow.
+    assert 'action="/grant"' in _row(page, "other.txt")
+    # The shortcut whose target is in Private stays "not allowed"; allow Private and it
+    # shows the folder that covers its target.
+    assert "Target not allowed" in _shown(_row(page, "link to payroll"))
+    post(c, "/grant", file_id="priv")
+    row = _shown(_row(c.get("/files").text, "link to payroll"))
+    assert "Target allowed via folder “Private”" in row
+
+
+def test_allow_on_a_folder_redraws_the_list(c) -> None:
+    # A folder's Allow changes every row inside it, so it posts normally (no data-async).
+    page = c.get("/files").text
+    projects = _row(page, "Projects")
+    grant = projects.split('action="/grant"')[1].split(">")[0]
+    assert "data-async" not in grant
+    notes = _row(page, "notes.txt")
+    assert "data-async" in notes.split('action="/grant"')[1].split(">")[0]

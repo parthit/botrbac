@@ -36,30 +36,20 @@
     never does more than the role allows, whatever you choose below. It does not work at any other address.</p>
   {% endif %}
   <ul class="consent-can">
-    <li><b>Use the items on your Access list,</b> as far as you choose below. <span class="muted">Anything not on that list is
-      refused by this server, even though your connected Drive is visible to it. It can never change who a
-      file is shared with, or permanently delete a file.</span></li>
-    {% if mailbox_on %}
-    <li><b>Use your Mailbox</b> with your other assistants: send and read short messages between your own
-      apps. <span class="muted">Another person’s assistant can never message it. It can also start or join a pairing; nothing
-      turns on until it is approved on the Sharing page.</span></li>
-    {% endif %}
-    {% if shared_on %}
-    <li><b>Read what paired people share with you</b> (Shared with me), read-only. <span class="muted">Your own
-      Sharing list is what their assistants can read; this does not change it.</span></li>
-    {% endif %}
+    <li><b>Use the items on your Allowed list,</b> as far as you choose below. <span class="muted">Everything
+      else is refused. It can never change who a file is shared with, or permanently delete a file.</span></li>
   </ul>
   {% if requested_scope and requested_scope != scope %}
   <details>
     <summary>Technical details</summary>
-    <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server still only grants the items on your Access list.</p>
+    <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server still only grants the items on your Allowed list.</p>
   </details>
   {% endif %}
   <form method="post" action="/oauth/authorize">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
     <fieldset class="roles" id="consent-role">
-      <legend>What may {{ platform.label }} do with your Access list?</legend>
+      <legend>What may {{ platform.label }} do with your Allowed list?</legend>
       <label class="role"><input type="radio" name="role" value="viewer" checked>
         <span><b>Read only</b> <span class="role-tag">Recommended</span>
           <span class="muted">Search, list, read and download.</span></span></label>
@@ -70,6 +60,23 @@
         <span><b>Full</b>
           <span class="muted">Also move items to Drive trash (recoverable for 30 days).</span></span></label>
     </fieldset>
+    {% if mailbox_on or shared_on %}
+    <fieldset class="features" id="consent-features">
+      <legend>Anything else? <span class="muted">You can change these later in Settings.</span></legend>
+      <input type="hidden" name="features_shown" value="{{ ((['mailbox'] if mailbox_on else []) + (['shared'] if shared_on else [])) | join(',') }}">
+      {% if mailbox_on %}
+      <label class="role"><input type="checkbox" name="feature_mailbox" value="on"{% if mailbox_default %} checked{% endif %}>
+        <span><b>Mailbox</b>
+          <span class="muted">Send and read short messages with your other assistants. You can read every message under Sharing › Mailbox.
+          Another person’s assistant can never message it.</span></span></label>
+      {% endif %}
+      {% if shared_on %}
+      <label class="role"><input type="checkbox" name="feature_shared" value="on"{% if shared_default %} checked{% endif %}>
+        <span><b>Shared with me</b>
+          <span class="muted">Read what people you’re paired with share with you, and files they send you. Your own Sharing list doesn’t change.</span></span></label>
+      {% endif %}
+    </fieldset>
+    {% endif %}
     <div class="actions">
       <button class="primary" type="submit" name="decision" value="allow">Allow</button>
       <button class="danger" type="submit" name="decision" value="deny">Deny</button>

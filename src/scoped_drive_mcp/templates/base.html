@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Bot RBAC{% endblock %} · Bot RBAC</title>
+{% block meta %}{% endblock %}
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="/fonts/geist-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/geist-500.woff2" as="font" type="font/woff2" crossorigin>
@@ -23,17 +24,21 @@
     {% if owner %}
     <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav id="site-nav" aria-label="Dashboard">
+      {#- While Drive is still being connected, the other pages have nothing to show yet. -#}
+      {% if not (nav.startswith('/connect') and drive_connected is defined and not drive_connected) %}
       <a href="/" {{ current(nav == '/') }}>Overview</a>
       <a href="/files" {{ current(nav.startswith('/files')) }}>Files</a>
+      <a href="/settings#assistants" {{ current(nav.startswith('/settings')) }}>Assistants</a>
       <a href="/requests" {{ current(nav.startswith('/requests')) }}>Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
       <a href="/sharing" {{ current(nav.startswith('/shar')) }}>Sharing{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
       <a href="/activity" {{ current(nav == '/activity') }}>Activity</a>
-      {% if terminal_tab %}<a href="/terminal" {{ current(nav.startswith('/terminal')) }}>Terminal</a>{% endif %}
+      {% endif %}
       <details class="account">
         <summary aria-label="Account menu for {{ owner }}"><span class="avatar" aria-hidden="true">{{ owner[:1] | upper }}</span><span class="summary-email">{{ owner }}</span></summary>
         <div class="account-menu">
           <span class="nav-user">{{ owner }}</span>
-          <a href="/settings" {{ current(nav.startswith('/settings') or nav.startswith('/connect')) }}>Settings</a>
+          <a href="/settings" {{ current(nav.startswith('/connect')) }}>Settings</a>
+          {% if terminal_tab %}<a href="/terminal" {{ current(nav.startswith('/terminal')) }}>Terminal</a>{% endif %}
           {% if is_admin %}
           <a href="/admin" {{ current(nav == '/admin') }}>People <span class="muted">(admin)</span></a>
           {% endif %}
@@ -67,6 +72,7 @@
     <nav aria-label="Legal">
       <a href="/privacy">Privacy policy</a>
       <a href="/terms">Terms of service</a>
+      {% if site.contact %}<a href="mailto:{{ site.contact }}">Contact</a>{% endif %}
       {% if not owner %}<a href="/login">Sign in</a>{% endif %}
     </nav>
   </div>

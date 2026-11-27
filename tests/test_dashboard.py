@@ -146,13 +146,14 @@ def test_login_page_is_public(c) -> None:
         (
             "/",
             (
-                "access-control gateway",
+                "without handing over the whole Drive",
                 "Google Drive",
                 ">Privacy policy</a>",
                 ">Terms of service</a>",
                 'href="/privacy"',
                 'href="/terms"',
-                "Your own Google account",
+                "Signing in shares only your email",
+                '<meta name="description"',
             ),
         ),
         ("/terms", ("access-control gateway",)),
@@ -206,7 +207,7 @@ def test_owner_journey_sign_in_connect_allow_read_revoke(c, world) -> None:
     assert r.status_code == 303 and r.headers["location"] == "/browse"
     assert world.files["proj"].permissions == []  # nothing is shared in Drive
     page = c.get("/files").text
-    assert "Remove" in page and 'data-confirm="Remove this from the assistant?"' in page
+    assert "Remove" in page and 'data-confirm="Remove “' in page
     page = c.get("/files?folder=proj").text
     assert "via folder" in page and "Everything in this folder is available" in page
     assert "Projects" in c.get("/files?tab=allowed").text
@@ -835,7 +836,7 @@ def test_files_tab_says_where_files_come_from(owner_c) -> None:
     page = unescape(owner_c.get("/files").text)
     tabs = page[page.index('<nav class="tabs" aria-label="Files">') :].split("</nav>", 1)[0]
     assert ">From Google Drive</a>" in tabs and "All files" not in tabs
-    assert "doesn’t give any assistant access" in page
+    assert "is allowed for your assistants straight away" in page
 
 
 def test_grant_errors_are_shown(owner_c) -> None:
@@ -931,7 +932,7 @@ def test_pages_carry_the_markup_for_in_place_updates(owner_c) -> None:
     page = owner_c.get("/files?tab=allowed").text
     assert 'data-async data-on-success="remove-row"' in page
     # The empty-state block is on the page (hidden) so ui.js can show it after the last row.
-    assert "Nothing is allowed yet" in page
+    assert "Nothing is allowed" in page
 
     # confirm.js asks before data-confirm forms and leaves async forms to ui.js.
     r = owner_c.get("/confirm.js")
@@ -1029,7 +1030,7 @@ def test_activity_is_capped(p2_app) -> None:
 def test_overview_and_health_report_status(owner_c) -> None:
     page = owner_c.get("/").text
     assert f"{BASE_URL}/mcp" in page
-    assert "uses your Google account" in page
+    assert "never sign in to Google as you" in page
     assert "files and folders you allow" in page
     assert "Assistant acts as" not in page
     # Operator notes moved from Overview to Settings, admin only.
@@ -1042,7 +1043,7 @@ def test_overview_and_health_report_status(owner_c) -> None:
 def test_non_admin_overview_hides_operator_notes(c) -> None:
     login(c, "eve-code")
     page = c.get("/").text
-    assert "uses your Google account" in page
+    assert "never sign in to Google as you" in page
     assert "files and folders you allow" in page
     # One MCP address for every client.
     assert page.count(f'data-copy="{BASE_URL}/mcp"') == 1

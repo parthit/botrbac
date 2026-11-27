@@ -123,6 +123,7 @@ def observability_on() -> bool:
 
 _env.globals["observability_on"] = observability_on
 _env.globals["asset_url"] = lambda name: asset_url(name)
+_env.globals["site"] = {"base_url": "", "contact": None}
 
 # Connect Notion posts a form that redirects to Notion's consent screen, which may pass
 # through Notion's sign-in. form-action is checked along that redirect chain.
@@ -738,6 +739,12 @@ def legal_routes() -> list[Route]:
 
 def build_dashboard(ctx: DashboardContext) -> Starlette:
     settings = ctx.settings
+    # Public facts about this site for the page head and footer: its address (share
+    # previews) and who to contact, when the deployment sets one.
+    _env.globals["site"] = {
+        "base_url": (settings.app_base_url or "").rstrip("/"),
+        "contact": settings.contact_email,
+    }
     missing = settings.dashboard_missing()
     if missing or ctx.oauth is None:
 
@@ -983,6 +990,17 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def not_found(request: Request) -> Response:
         return render(request, "error.html", 404, message="Page not found.")
 
+    signed_in_not_found = owner_only(not_found)
+
+    async def unknown_page(request: Request) -> Response:
+        """An address that is not a page. Signed out, say so instead of sending a mistyped
+        link to the sign-in screen as if the page existed."""
+        if await signed_in_user(request):
+            return await signed_in_not_found(request)
+        return render_plain(
+            "error.html", 404, message="This page doesn’t exist.", title="Page not found"
+        )
+
     routes = [
         Route("/confirm.js", confirm_script, methods=["GET"]),
         Route("/login", safely(signin.login), methods=["GET"]),
@@ -1013,6 +1031,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/sharing/audience", csrf_protected(share.share_audience), methods=["POST"]),
         Route("/first-reads/clear", csrf_protected(share.first_reads_clear), methods=["POST"]),
         Route("/oauth/grants/role", csrf_protected(prefs.oauth_grant_role), methods=["POST"]),
+        Route(
+            "/oauth/grants/features", csrf_protected(prefs.oauth_grant_features), methods=["POST"]
+        ),
         Route("/roles/save", csrf_protected(prefs.role_save), methods=["POST"]),
         Route("/roles/delete", csrf_protected(prefs.role_delete), methods=["POST"]),
         Route("/oauth/grants/rename", csrf_protected(prefs.oauth_grant_rename), methods=["POST"]),
@@ -1079,7 +1100,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             if ctx.terminal
             else []
         ),
-        Route("/{path:path}", owner_only(not_found), methods=["GET"]),
+        Route("/{path:path}", unknown_page, methods=["GET"]),
     ]
     app = Starlette(
         routes=routes,
