@@ -17,6 +17,11 @@ updates:
     groups:
       python:
         patterns: ["*"]
+    # mcp 2.x renamed FastMCP to MCPServer and changed other APIs; the server is written
+    # for 1.x (pyproject pins mcp<2). Moving to 2.x is its own piece of work, not a bump.
+    ignore:
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /
