@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 
 [[package]]
@@ -1026,14 +1026,15 @@ wheels = [
 
 [[package]]
 name = "upstash-redis"
-version = "1.9.0"
+version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "anyio" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/d2/4ef68e114c499531b19199016480b0d439b62f8dfff047852123b90e9613/upstash_redis-1.9.0.tar.gz", hash = "sha256:a970603791101271ad30eaa9e68de4678b653c09f373864188452c23938a9b19", size = 55036, upload-time = "2026-11-02T12:06:19.495Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/93/99bef8fc40c3ccb22f55fa7a064e2c62ad73e5ea19829665474fb85c37b9/upstash_redis-1.10.0.tar.gz", hash = "sha256:b3523de773d580ca254c63880af2535c62ee0ab423fe78aedfe0c3c35b04fe7d", size = 55066, upload-time = "2026-11-24T08:43:53.117Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/5b/f6e86474f3ad5ef11f4aed569dde87411eed46b2d02bf31afcc33a0e3cf5/upstash_redis-1.9.0-py3-none-any.whl", hash = "sha256:81153171c427c13d454cc280b6a1d88f24ce25c82daee1d3ee64276d0558b20d", size = 57336, upload-time = "2026-11-02T12:06:18.212Z" },
+    { url = "https://files.pythonhosted.org/packages/18/cd/c44a5e426f3fe6f5c65e37c753518b78ecb3510f95c57d9923a81a9568c0/upstash_redis-1.10.0-py3-none-any.whl", hash = "sha256:297df5ee903eed3cb39315344fffee266538ec8fc2867a7a90cff08a08d7aaa2", size = 57349, upload-time = "2026-11-24T08:43:52.25Z" },
 ]
 
 [[package]]
