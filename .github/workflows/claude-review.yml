@@ -20,7 +20,7 @@ jobs:
           # Claude reads untrusted PR content; don't leave the GITHUB_TOKEN in .git/config.
           persist-credentials: false
 
-      - uses: anthropics/claude-code-action@acfe7992852970efb4fee683d63d628e3e52df67 # v1
+      - uses: anthropics/claude-code-action@eb56b6666facdbd501035f4a0269d8caee2e7a8b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
