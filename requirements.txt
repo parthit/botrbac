@@ -195,7 +195,7 @@ typing-inspection==0.4.5
     #   pydantic-settings
 tzdata==2026.6 ; sys_platform == 'win32'
     # via psycopg
-upstash-redis==1.9.0
+upstash-redis==1.10.0
     # via scoped-drive-mcp
 uritemplate==4.2.0
     # via google-api-python-client
