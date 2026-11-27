@@ -1293,6 +1293,25 @@ class McpOAuth:
         views.sort(key=lambda item: item.created_at, reverse=True)
         return views
 
+    def revoke_all(self, email: str) -> tuple[int, int]:
+        """End every connection of `email`, including approvals whose code has not been
+        exchanged yet (list_grants does not show those). Returns (ended, failed): one
+        failure does not stop the rest."""
+        ended = failed = 0
+        for grant_id, raw in self.store.hgetall(GRANTS_KEY).items():
+            try:
+                if OAuthGrant.from_json(raw).email != email:
+                    continue
+            except (ValueError, KeyError, TypeError):
+                continue
+            try:
+                if self.revoke(grant_id, email):
+                    ended += 1
+            except Exception:
+                failed += 1
+                logging.getLogger(__name__).warning("revoke_all: one connection failed")
+        return ended, failed
+
     def revoke(self, grant_id: str, email: str | None = None, *, reason: str = "") -> bool:
         """End a connection. `reason` says why when the server ended it on its own
         (a reused token, expiry, too many connections): that is written to the

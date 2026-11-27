@@ -37,6 +37,7 @@ from .backends import (
 from .keys import (
     ACCESS_EDIT,
     ACCESS_READ,
+    ACTIVITY_CHANGES_KEY,
     ACTIVITY_KEY,
     ACTIVITY_MAX,
     AGENT_ROLES_KEY,
@@ -101,6 +102,7 @@ from .wrappers import (
 __all__ = [
     "ACCESS_EDIT",
     "ACCESS_READ",
+    "ACTIVITY_CHANGES_KEY",
     "ACTIVITY_KEY",
     "ACTIVITY_MAX",
     "AGENT_ROLES_KEY",
@@ -234,6 +236,7 @@ def import_admin_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
         _copy_string(source, dest, KEY_PREFIX + OWNER_TOKEN_KEY)
         _copy_string(source, dest, KEY_PREFIX + BOT_TOKEN_KEY)
         _copy_list(source, dest, KEY_PREFIX + ACTIVITY_KEY)
+        _copy_list(source, dest, KEY_PREFIX + ACTIVITY_CHANGES_KEY)
         index_key = KEY_PREFIX + "requests:index"
         _copy_list(source, dest, index_key)
         for rid in dest.lrange(index_key, 0, -1):

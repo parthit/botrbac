@@ -517,6 +517,10 @@ def _owner_row(
         failed = {
             "grant": f"Allowing {item} failed: Google Drive returned an error.",
             "revoke": f"Removing {item} only partly worked: Google Drive returned an error.",
+            "revoke_all": (
+                f"Disconnecting all your assistants only partly worked: "
+                f"{record.get('failed') or 'some'} could not be disconnected. Try again."
+            ),
         }
         text = failed.get(action, f"Something failed: {action.replace('_', ' ')}.")
         badge = _FAILED

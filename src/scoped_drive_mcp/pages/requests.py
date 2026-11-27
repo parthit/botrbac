@@ -2,6 +2,7 @@
 denying one, and the activity log.
 """
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,9 @@ from ..scope import InvalidInputError, validate_drive_id
 from ..store import EXTERNAL_ALLOWLIST_KEY, Allowlist
 from .common import ACTIVITY_LOOKUPS, ACTIVITY_PAGE, OwnerNotConnectedError, describe_mime
 from .kit import FormHandler, Handler, Kit
+
+# A connection tag on an Activity row (audit.app_tag).
+_APP_TAG = re.compile(r"[0-9a-f]{12}")
 
 
 @dataclass(frozen=True)
@@ -287,15 +291,23 @@ def request_pages(kit: Kit) -> RequestPages:
             limit = ACTIVITY_PAGE
         limit = max(ACTIVITY_PAGE, min(limit, 500))
         records = await blocking(ctx.activity.recent)
-        # One connected app's rows only (?app= is the tag Activity rows carry).
+        # One connected app's rows only (?app= is the tag Activity rows carry). The choices
+        # come from the rows themselves, so an app that was disconnected can still be shown;
+        # connected ones are named, others called what they were (their token name).
         grants = (
             await blocking(ctx.mcp_oauth.list_grants, current_actor.get())
             if ctx.mcp_oauth is not None
             else []
         )
-        app_choices = [(app_tag(g.id), f"{g.client_name} (…{g.id[-5:]})") for g in grants]
+        named = {app_tag(g.id): f"{g.client_name} (…{g.id[-5:]})" for g in grants}
+        app_choices: dict[str, str] = {}
+        for r in records:
+            tag = r.get("app")
+            if isinstance(tag, str) and _APP_TAG.fullmatch(tag) and tag not in app_choices:
+                old = str(r.get("token_name") or "").removeprefix("oauth:") or "An app"
+                app_choices[tag] = named.get(tag) or f"{old} (disconnected)"
         app = request.query_params.get("app") or ""
-        if app not in {tag for tag, _ in app_choices}:
+        if app not in app_choices:
             app = ""
         if app:
             records = [r for r in records if r.get("app") == app]
@@ -327,7 +339,7 @@ def request_pages(kit: Kit) -> RequestPages:
             hidden_checks=sum(1 for r in rows if r.polling),
             checks_href=href(checks="" if show_checks else "1"),
             app=app,
-            apps=[(tag, name, href(app=tag)) for tag, name in app_choices],
+            apps=[(tag, name, href(app=tag)) for tag, name in app_choices.items()],
             all_apps_href=href(app=""),
         )
 

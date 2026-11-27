@@ -2,6 +2,7 @@
 bridge), the wake webhook, and the /files and /sharing hubs that pick a tab's page.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +18,8 @@ from ..bridge import MailboxError
 from ..mcp_oauth import APP_ROLES
 from .common import ROLE_LABELS, WAKE_HOME, describe_mime
 from .kit import FormHandler, Handler, Kit
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -471,31 +474,48 @@ def settings_pages(
             "/settings#assistants",
         )
 
-    def _revoke_everything(email: str) -> tuple[int, int]:
-        """Every connected app and terminal of `email`. Ending an app also ends its
-        pairings with your other assistants and deletes its wake-up (mcp_oauth.on_revoke).
-        Pairings with other people, and what is on Files and Sharing, are left as they
-        are: those are people, not assistants."""
-        apps = terminals = 0
+    def _revoke_everything(email: str) -> tuple[int, int, int]:
+        """Every connected app and terminal of `email`, and approvals not yet used.
+        Ending an app also ends its pairings with your other assistants and deletes its
+        wake-up (mcp_oauth.on_revoke). Pairings with other people, and what is on Files
+        and Sharing, are left as they are: those are people, not assistants.
+        Returns (apps, terminals, failed)."""
+        apps = terminals = failed = 0
         if ctx.mcp_oauth is not None:
-            for grant in ctx.mcp_oauth.list_grants(email):
-                if ctx.mcp_oauth.revoke(grant.id, email=email):
-                    apps += 1
+            apps, failed = ctx.mcp_oauth.revoke_all(email)
         feature = getattr(ctx, "terminal", None)
         if feature is not None:
             for terminal in feature.terminals.for_person(email):
-                if feature.terminals.revoke(email, terminal.id):
-                    terminals += 1
-        return apps, terminals
+                try:
+                    if feature.terminals.revoke(email, terminal.id):
+                        terminals += 1
+                except Exception:
+                    failed += 1
+                    logger.warning("revoke_all: one terminal failed")
+        return apps, terminals, failed
 
     async def revoke_all(request: Request, form: dict[str, str]) -> Response:
         """The emergency stop: disconnect every assistant at once."""
         email = str(request.session.get("owner") or "")
-        apps, terminals = await blocking(_revoke_everything, email)
-        audit_owner("revoke_all", apps=str(apps), terminals=str(terminals))
+        apps, terminals, failed = await blocking(_revoke_everything, email)
+        audit_owner(
+            "revoke_all",
+            "error" if failed else "allow",
+            apps=str(apps),
+            terminals=str(terminals),
+            failed=str(failed) if failed else None,
+        )
         parts = [f"{apps} app{'' if apps == 1 else 's'}"]
         if terminals:
             parts.append(f"{terminals} terminal{'' if terminals == 1 else 's'}")
+        if failed:
+            return action_done(
+                request,
+                "error",
+                f"Disconnected {' and '.join(parts)}, but {failed} could not be disconnected "
+                "right now. Try again in a moment.",
+                "/settings#assistants",
+            )
         return action_done(
             request,
             "ok",

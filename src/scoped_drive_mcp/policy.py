@@ -162,6 +162,18 @@ OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
 _OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
 
 # Tools whose result is a new item: its id goes into the audit record.
+# Calls that change something, or reach someone, for which every allowed call is kept on
+# Activity: they are never folded or counted against the app's hourly row budget, so a
+# bot cannot hide them behind a burst of reads (store.records.ActivityLog).
+SENDING_TOOLS: frozenset[str] = frozenset(
+    {"request_access", "request_link", "send_message", "reply", "set_webhook", "clear_webhook"}
+)
+
+
+def changes_something(tool: str) -> bool:
+    return tool != "append_chunk" and (tool not in VIEWER_TOOLS or tool in SENDING_TOOLS)
+
+
 NEW_ITEM_TOOLS: frozenset[str] = frozenset(
     {"finish_upload", "save_export", "onedrive_create_folder", "onedrive_upload_file"}
 )

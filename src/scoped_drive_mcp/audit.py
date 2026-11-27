@@ -7,6 +7,7 @@ Only identifiers and decisions are logged: never file contents, names, queries o
 import hashlib
 import json
 import logging
+import re
 import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -46,18 +47,22 @@ def _actor() -> str | None:
 
 
 # Shown on the person's own Activity page, which needs them, but never written to the
-# server log: item and role names (the person's own words), and a paired person's
-# address, which is replaced by a tag there.
+# server log: item and role names (the person's own words).
 _ACTIVITY_ONLY = ("name", "label")
-_HASHED_IN_LOG = ("person",)
+# An email address anywhere in a logged value (a paired person in `person`, `guest`,
+# `owner`, `audience` or a `guest:<email> (App)` token name) becomes its tag.
+_EMAIL = re.compile(r"[^\s,;:<>()\[\]\"']+@[^\s,;:<>()\[\]\"']+\.[A-Za-z]{2,}")
+
+
+def _scrub(value: Any) -> Any:
+    if isinstance(value, str) and "@" in value:
+        return _EMAIL.sub(lambda m: actor_tag(m.group(0)), value)
+    return value
 
 
 def _emit(record: dict[str, Any]) -> None:
     # Only the server log gets the account tag; the Activity sink is already per account.
-    line = {k: v for k, v in record.items() if k not in _ACTIVITY_ONLY}
-    for key in _HASHED_IN_LOG:
-        if isinstance(line.get(key), str):
-            line[key] = actor_tag(line[key])
+    line = {k: _scrub(v) for k, v in record.items() if k not in _ACTIVITY_ONLY}
     actor = _actor()
     if actor and "actor" not in line:
         line["actor"] = actor
@@ -95,7 +100,16 @@ def audit(
     record.update({k: v[:_MAX_ID] for k, v in ids.items() if v is not None})
     record["decision"] = decision
     record["reason"] = reason[:_MAX_REASON]
+    if decision == "allow" and _changes_something(tool):
+        # Kept on Activity whatever else happens (store.records.ActivityLog).
+        record["kind"] = "change"
     _emit(record)
+
+
+def _changes_something(tool: str) -> bool:
+    from .policy import changes_something  # policy imports this module
+
+    return changes_something(tool)
 
 
 def audit_auth_failure(reason: str, path: str) -> None:

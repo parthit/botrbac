@@ -8,7 +8,7 @@ someone reports a problem ([SECURITY.md](../SECURITY.md) says how to report one)
 | What happened | Do this | What it ends |
 | --- | --- | --- |
 | One assistant is acting oddly | **Settings → Assistants → Disconnect** on that app | Its tokens, its wake-up, its pairings with your other assistants |
-| You are not sure which one | **Settings → Assistants → Disconnect all assistants** | Every connected app and terminal of your account, at once |
+| You are not sure which one | **Settings → Assistants → Disconnect all assistants** | Every connected app and terminal of your account at once, including approvals not yet used |
 | A file should not be reachable | **Files → Remove** (or untick it) | That item and everything under it, for every assistant, within `ALLOWLIST_CACHE_TTL` (2 s) |
 | A paired person should not read your Sharing list | **Sharing → People → Turn off** | Their reads of your Sharing list; their files to you (or use **Stop files from them**) |
 | Your Google account may be compromised | **Settings → Connections → Disconnect** Google Drive, then remove "Bot RBAC" at myaccount.google.com/permissions | The stored Drive sign-in (revoked at Google) |
@@ -26,13 +26,14 @@ files for 30 days.
     `code_reuse`): a copy of an app's token was used. The server already disconnected it.
   - *"A terminal's sign-in token was used twice"* (`terminal_refresh_reuse`): disconnect
     that terminal on the Terminal page unless you know it retried.
-  - *"made so many calls this hour"* (`activity_limited`): one app passed
-    `APP_ROWS_PER_HOUR` (120) rows in an hour. Its later calls are only in the server log.
+  - *"made so many calls this hour"* (`activity_limited`): one app or paired person passed
+    120 read/refused rows in an hour (or 300 in a day). Its later reads are only in the server
+    log; its writes and sends are always on Activity.
   - *"tried to read … Blocked"*: an assistant asked for something outside its list.
 - **Server log** (Vercel → Logs, operator only): one JSON line per tool call and dashboard
   action. `actor` is a 12-character tag of the account (`audit.actor_tag(email)`), `app` a
   tag of the connection (`audit.app_tag(grant_id)`). It never holds file contents, names,
-  search text, message bodies, tokens or a paired person's address. To find one person's
+  search text, message bodies, tokens or email addresses (each address is replaced by its tag). To find one person's
   lines, compute their tag in a Python shell and search for it.
 
 ## 3. Rotate secrets (operator)
