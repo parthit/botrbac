@@ -16,6 +16,7 @@ ROLES = [
     {"id": "reviewer", "name": "Reviewer", "patterns": ["claude-code/Read", "claude-code/Bash"]},
     {"id": "gitonly", "name": "Git only", "patterns": ["claude-code/*", "cmd/git"]},
     {"id": "full", "name": "Full access", "patterns": ["*"]},
+    {"id": "none", "name": "No tools", "patterns": [], "builtin": True},
 ]
 
 
@@ -155,3 +156,11 @@ def test_nested_run_and_roles_show_the_narrowing(monkeypatch, capsys) -> None:
     monkeypatch.setattr(policy, "refresh", lambda api: None)
     assert main(["roles"]) == 0
     assert "This run is narrowed to: Reviewer\n" in capsys.readouterr().out
+
+
+def test_a_built_in_role_is_not_offered_for_editing(monkeypatch) -> None:
+    _enter(monkeypatch, "No tools")
+    text = _call("Read")
+    assert "is not in role 'No tools', a role this run was narrowed to" in text
+    assert "wider --role ('No tools' is built in and cannot be changed)." in text
+    assert "add claude-code/Read" not in text

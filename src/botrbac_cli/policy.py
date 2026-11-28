@@ -86,6 +86,12 @@ def _shell_runs(programs: list[str], limit: int = 12) -> str:
     return f"The shell here runs only: {shown}{more}. " if programs else ""
 
 
+def _built_in(name: str) -> bool:
+    """Whether the site says the role with this name is one of its own, which nobody edits."""
+    roles = ((load_cached() or {}).get("policy") or {}).get("roles") or []
+    return any(isinstance(r, dict) and r.get("builtin") and r.get("name") == name for r in roles)
+
+
 def blocked_text(what: str, decision: Decision, pattern: str | None = None) -> str:
     """The whole message a blocked agent reads. `what` is the tool id; `pattern` is what
     a role would need to gain (the tool id unless given). Each kind of block gets the
@@ -109,11 +115,16 @@ def blocked_text(what: str, decision: Decision, pattern: str | None = None) -> s
     if decision.blocker == "session":
         site = _site()
         roles = f"{site}/terminal/roles" if site else "the Terminal page"
+        change = (
+            f" ({decision.blocked_by!r} is built in and cannot be changed)"
+            if _built_in(decision.blocked_by)
+            else f", or to add {pattern} to {decision.blocked_by!r} at {roles}"
+        )
         return (
             f"{head}{said}, a role this run was narrowed to with botrbac run --role. "
             f"{_shell_runs(decision.programs)}This is the person's rule, not a fault to "
             "work around. If it is needed, ask them to start the run again with a wider "
-            f"--role, or to add {pattern} to {decision.blocked_by!r} at {roles}."
+            f"--role{change}."
         )
     return f"{head}{said}. {_shell_runs(decision.programs)}{fix_hint(pattern)}"
 
