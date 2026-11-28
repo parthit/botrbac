@@ -714,7 +714,7 @@
   // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
   var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
-    var other = note.querySelector("[data-pick-other]");
+    var other = note.querySelector("[data-note-other]");
     var touch = note.querySelector("[data-safari-ios]");
     if (ios && other && touch) { other.hidden = true; touch.hidden = false; }
     note.hidden = false;
@@ -884,10 +884,10 @@
     button.addEventListener("click", onPickClick);
   });
   // The note's two buttons act for the pick button used last (the first one, before any).
-  Array.prototype.forEach.call(document.querySelectorAll("[data-pick-fullpage]"), function (button) {
+  Array.prototype.forEach.call(document.querySelectorAll("[data-fullpage-pick]"), function (button) {
     button.addEventListener("click", openFullPage);
   });
-  Array.prototype.forEach.call(document.querySelectorAll("[data-pick-inpage]"), function (button) {
+  Array.prototype.forEach.call(document.querySelectorAll("[data-inpage-pick]"), function (button) {
     button.addEventListener("click", openInPage);
   });
 })();

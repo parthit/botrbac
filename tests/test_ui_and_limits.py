@@ -272,7 +272,7 @@ def test_safari_picker_note_only_with_the_picker(owner_c, p2_settings) -> None:
         if picker:
             note = re.search(r"<div[^>]*data-safari-note[^>]*>", page.text).group(0)
             assert "hidden" in note  # ui.js reveals it: its buttons need the script
-            assert "data-pick-fullpage" in page.text
+            assert "data-fullpage-pick" in page.text
 
 
 def test_ios_pick_buttons_open_the_full_page_picker() -> None:
