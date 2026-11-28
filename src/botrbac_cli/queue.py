@@ -8,6 +8,7 @@ Tool results are never kept.
 import contextlib
 import functools
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -19,6 +20,12 @@ from . import chain, identity, policy, provenance, sealing, state
 
 SEND_BATCH = 500
 KEEP_SENT = 5000
+
+
+def _private_file(path: Path) -> None:
+    """Make the database file readable by this user only, before SQLite opens it."""
+    with contextlib.suppress(OSError):
+        os.close(os.open(path, os.O_CREAT | os.O_RDWR, 0o600))
 
 
 def _locked(method):
@@ -41,10 +48,15 @@ class AuditQueue:
     def __init__(self, path: Path | None = None):
         self.path = path or state.home() / "audit.db"
         self._lock = threading.Lock()
+        _private_file(self.path)
         self.db = sqlite3.connect(
             self.path, timeout=10, isolation_level=None, check_same_thread=False
         )
         self.db.execute("PRAGMA journal_mode=WAL")
+        # SQLite gives -wal and -shm the main file's mode; tighten ones made before.
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                os.chmod(f"{self.path}{suffix}", 0o600)
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS rows ("
             " event_id TEXT PRIMARY KEY, ts REAL NOT NULL, body TEXT NOT NULL,"
@@ -196,6 +208,11 @@ class AuditQueue:
     @_locked
     def requeue_rejected(self) -> int:
         return self.db.execute("UPDATE rows SET sent = 0 WHERE sent = 2").rowcount
+
+    @_locked
+    def sent_kept(self) -> int:
+        """Sent rows still kept here (pruning keeps the newest KEEP_SENT)."""
+        return int(self.db.execute("SELECT COUNT(*) FROM rows WHERE sent = 1").fetchone()[0])
 
     @_locked
     def waiting(self) -> int:

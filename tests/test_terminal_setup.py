@@ -36,10 +36,11 @@ def test_setup_md_is_public_markdown(world, memstore, oauth) -> None:
     text = r.text
     assert BASE_URL in text and "{{" not in text
     assert f"botrbac login --server {BASE_URL}" in text
-    assert "claude mcp add botrbac -- botrbac gateway" in text
-    assert "~/.cursor/mcp.json" in text and '"--agent", "cursor"' in text
-    assert "[mcp_servers.botrbac]" in text and '"--agent", "codex"' in text
-    assert "~/.gemini/settings.json" in text and '"--agent", "gemini"' in text
+    assert "claude mcp add --scope user botrbac --" in text and "--home" in text
+    assert "~/.cursor/mcp.json" in text and "botrbac add-gateway --agent cursor" in text
+    assert "~/.codex/config.toml" in text and "botrbac add-gateway --agent codex" in text
+    assert "~/.gemini/settings.json" in text and "botrbac add-gateway --agent gemini" in text
+    assert "botrbac doctor" in text and "Already set up" in text
     assert "Never print, log or paste tokens" in text
 
 
@@ -91,7 +92,7 @@ _BODIES = {
     "uv": "",
     "botrbac": (
         'case "$1" in\n'
-        '  status) [ -f "$HOME/.logged-in" ] || exit 1 ;;\n'
+        f'  status) [ -f "$HOME/.logged-in" ] || exit 1; echo "Server:   {BASE_URL}" ;;\n'
         '  login) echo "Link: x"; echo "Code: ABCD-EFGH"; touch "$HOME/.logged-in" ;;\n'
         "esac"
     ),
@@ -266,7 +267,11 @@ class _LoginApi:
         }
 
     def poll_login(self, device_code):
-        return _LoginApi.polls.pop(0) if _LoginApi.polls else {"access_token": "x"}
+        if _LoginApi.polls:
+            return _LoginApi.polls.pop(0)
+        # As the real Api does; a self-hosted server without a key sends unsigned policies.
+        state.write_json("credentials.json", {"server": "https://rbac.self-hosted.test"})
+        return {"access_token": "x"}
 
     def policy(self):
         return {"email": "me@example.com", "role": {"name": "Read-only"}}
@@ -354,7 +359,7 @@ def test_terminal_page_leads_with_setup(world, memstore, oauth) -> None:
     for agent in ("cursor", "codex", "gemini"):
         assert f"--agent {agent}</code>" in page  # listed without JavaScript too
     assert f"botrbac login --server {BASE_URL}" in page
-    assert "claude mcp add botrbac -- botrbac gateway" in page
+    assert "claude mcp add --scope user botrbac -- botrbac --home ~/.config/botrbac gateway" in page
     assert page.count("data-copy=") >= 6
     # wrap is only an advanced option now.
     main_steps = page.split('id="more-options"', 1)[0]

@@ -7,6 +7,9 @@
 # Agents: claude-code (default), cursor, codex, gemini. Never uses sudo. Safe to run
 # again: it upgrades botrbac and skips steps that are already done.
 #
+# It installs botrbac with uv or pipx. If neither is there, it first installs uv with
+# Astral's installer (curl -LsSf https://astral.sh/uv/install.sh | sh) and says so first.
+#
 # It also adds the agent's pre-tool hook, so the agent's own tools (its shell, file edits)
 # follow this computer's role too. --no-hook leaves that out; `botrbac hooks remove <agent>
 # --user` undoes it later.
@@ -46,13 +49,19 @@ main() {
   export PATH
 
   step "Install botrbac"
+  say "Installs the botrbac command from $SOURCE"
+  say "into your user account (~/.local/bin), using uv or pipx."
   if have uv; then
     run uv tool install --upgrade "$SOURCE" || fail "uv could not install botrbac"
   elif have pipx; then
     run pipx install --force "$SOURCE" || fail "pipx could not install botrbac"
   else
-    say "Neither uv nor pipx is installed, so installing uv first (https://astral.sh/uv)."
-    have curl || fail "curl is needed to install uv"
+    have curl || fail "neither uv nor pipx is installed, and curl is needed to install uv"
+    say "Neither uv nor pipx is installed, so this installs uv first:"
+    say "    what:  uv, the Python package manager by Astral (https://docs.astral.sh/uv/)"
+    say "    from:  https://astral.sh/uv/install.sh (Astral's own installer, run with sh)"
+    say "    where: ~/.local/bin, for your user only (it never uses sudo)"
+    say "    (With uv or pipx already installed, this script uses that and installs nothing else.)"
     printf '    $ %s\n' "curl -LsSf https://astral.sh/uv/install.sh | sh"
     curl -LsSf https://astral.sh/uv/install.sh </dev/null | sh || fail "could not install uv"
     PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
@@ -64,7 +73,19 @@ main() {
   botrbac=$(command -v botrbac)
 
   step "Connect this computer to $SERVER"
-  if "$botrbac" status </dev/null >/dev/null 2>&1; then
+  # `botrbac status` succeeds whenever this computer is logged in anywhere, so check that
+  # the server it names is this one.
+  logged_in=no
+  if status_out=$("$botrbac" status </dev/null 2>/dev/null); then
+    current=$(printf '%s\n' "$status_out" | sed -n 's/^Server:[[:space:]]*//p' | head -n 1)
+    current=${current%/}
+    if [ "$current" = "${SERVER%/}" ]; then
+      logged_in=yes
+    elif [ -n "$current" ]; then
+      say "This computer is logged in to $current, not $SERVER; logging in to $SERVER instead."
+    fi
+  fi
+  if [ "$logged_in" = yes ]; then
     say "Already logged in. (To connect again: $botrbac login --server $SERVER)"
   else
     say "Open the link below in your browser and approve the code. This waits for you."
@@ -73,13 +94,15 @@ main() {
 
   step "Add Bot RBAC to $agent_name"
   if [ "$agent" = claude-code ]; then
+    # Name botrbac's folder, so the gateway never follows a BOTRBAC_HOME set later.
+    home_dir="${BOTRBAC_HOME:-$HOME/.config/botrbac}"
     if ! have claude; then
       say "Claude Code (claude) is not installed here, so this was skipped. Once it is, run:"
-      say "    claude mcp add --scope user botrbac -- $botrbac gateway"
+      say "    claude mcp add --scope user botrbac -- $botrbac --home $home_dir gateway"
     elif claude mcp get botrbac </dev/null >/dev/null 2>&1; then
       say "Claude Code already has a server called botrbac; left as it is."
     else
-      run claude mcp add --scope user botrbac -- "$botrbac" gateway \
+      run claude mcp add --scope user botrbac -- "$botrbac" --home "$home_dir" gateway \
         || fail "claude mcp add did not work"
     fi
   else

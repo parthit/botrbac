@@ -194,6 +194,9 @@ class Settings(BaseSettings):
     # (whichever comes first). The Activity page shows the newest 2,000; exports have all.
     terminal_activity_days: int = Field(default=180, ge=1, le=3650)
     terminal_activity_max_rows: int = Field(default=20_000, ge=100, le=1_000_000)
+    # Rows stored from one terminal per UTC day. Past it, its uploads get 429 and the rows
+    # wait on the computer, so one terminal cannot flush the person's whole log.
+    terminal_activity_rows_per_day: int = Field(default=10_000, ge=100, le=10_000_000)
 
     @field_validator(
         "root_folder_id",

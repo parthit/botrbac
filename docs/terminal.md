@@ -44,7 +44,8 @@ browser.
   hook (`botrbac hooks install <agent> --user --allow-unguarded`), so the agent's own shell and file edits
   follow the role as well; `--no-hook` leaves it out and `botrbac hooks remove <agent> --user` undoes it.
   A new computer starts as Read-only, so with the hook the agent can read but not edit or run commands
-  until you give it a wider role. It never uses sudo and can be run again. Read it first at the
+  until you give it a wider role. Before installing anything it prints what and from where. If this computer is already logged in to a
+  different site, it logs in again to this one. It never uses sudo and can be run again. Read it first at the
   same address: `https://botrbac.com/terminal/install.sh`.
 - **Paste into your agent:** `Set up Bot RBAC Terminal for me by following https://botrbac.com/terminal/setup.md`.
   The agent follows [terminal-agent-setup.md](terminal-agent-setup.md) (the same text the site serves).
@@ -53,7 +54,7 @@ browser.
   2. `botrbac login`. Open the link it prints, check the code matches, pick a role and approve. It connects
      to `https://botrbac.com` unless you give `--server URL` or set `BOTRBAC_SERVER`; the page shows the
      right command for the site you are on.
-  3. `claude mcp add botrbac -- botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
+  3. `claude mcp add --scope user botrbac -- botrbac --home ~/.config/botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
      (also `codex`, `gemini`), which adds the gateway to that agent's file in your home directory, keeps the
      other servers and a backup, and does nothing when it is already there.
 
@@ -94,8 +95,9 @@ tools** until you give it another role. Each role also sets an **offline grace**
 
 Patterns go by tool **names**. Read-only allows tools whose names start with read, get, list or search,
 which is not a promise about what a server's tool really does, so check them. It also allows Claude Code's
-Read, Grep, Glob and LS, which can read any file the computer's user can, including `~/.config/botrbac`.
-Roles limit which tools run, not which files those tools touch.
+Read, Grep, Glob and LS, which can read any file the computer's user can, including `~/.config/botrbac`,
+and ToolSearch, which Claude Code uses to load the MCP tools it holds back until needed (without it, no
+MCP tool can be used). Roles limit which tools run, not which files those tools touch.
 
 ## Narrower roles for one run: `--role`
 
@@ -126,7 +128,8 @@ to wrap.
   [Record commands](#record-commands) on, and shown on the session page.
 - **Terminal → Activity** links each call to its session. The session page shows the tree of sessions
   started under it and lets you **revoke** it, which blocks it and everything under it the next time the
-  terminal checks in (about a minute while online).
+  terminal checks in (about a minute while online). A session can be revoked, and its page opened, even
+  after its rows have aged out of the log.
 
 ## An agent's own tools: hooks
 
@@ -190,7 +193,8 @@ top of `src/botrbac_cli/agents.py` has the details):
 - **Gemini CLI** ([hooks reference](https://geminicli.com/docs/hooks/reference/)). A `BeforeTool` entry in
   `settings.json` with `matcher` `.*`, `name` `botrbac` and a 60 s `timeout`. MCP tools arrive as
   `mcp_<server>_<tool>` and are checked as `<server>/<tool>` (the name is split at the first `_` after
-  `mcp_`, as Gemini does, so keep `_` out of server names). Exit 2 blocks; **any other non-zero exit only
+  `mcp_`, as Gemini does, so keep `_` out of server names). A call is left to the gateway only when the
+  payload's `mcp_context` names the server exactly `botrbac`; without `mcp_context` such a call is blocked. Exit 2 blocks; **any other non-zero exit only
   warns and lets the tool run**, which is why every error in `botrbac check` exits 2. `hooksConfig.enabled:
   false`, or `botrbac` in `hooksConfig.disabled`, switches it off; doctor reports that. Confident: from
   Gemini's own docs.
@@ -201,8 +205,9 @@ top of `src/botrbac_cli/agents.py` has the details):
   sends `file_path`, checked as `cursor/Read` (the file's content in the payload is never read or kept);
   the MCP event sends `tool_name`, `tool_input` as a JSON string, and the server's `url` or `command` but
   not its name, so the server is named after the url's host or the command's program (`npx -y
-  @modelcontextprotocol/server-github` is `server-github`), and a server whose command is `botrbac gateway`
-  is the gateway. Cursor reads the answer from stdout, `{"permission": "allow"}` or `{"permission": "deny",
+  @modelcontextprotocol/server-github` is `server-github`), and only a server whose command is the gateway's own
+  (`botrbac gateway`) is treated as the gateway; one merely called `botrbac` is checked as
+  `botrbac-upstream/<tool>`. Cursor reads the answer from stdout, `{"permission": "allow"}` or `{"permission": "deny",
   "user_message": …, "agent_message": …}`, so `botrbac check --agent cursor` always prints JSON and exits
   0. Cursor lets an action go ahead when a hook crashes unless the entry has `failClosed`, which the
   installer sets. If your Cursor version ignores `failClosed`, a missing botrbac lets calls through.
@@ -230,13 +235,18 @@ program is its first word after `VAR=value` assignments, and `/usr/bin/gh` count
 program it runs: `sudo gh` needs `cmd/sudo` and `cmd/gh`. The call is **blocked** when the command uses
 `$(…)`, backticks, `<(…)`, `>(…)`, `eval`, `bash -c`/`sh -c`, a `( … )` subshell, shell control flow
 (`if`, `for`, `while`, `case`, `!` …), a variable as the program, or anything else it cannot read; the
-reason says why. Heredocs are read as commands too, so a role with `cmd/`
-patterns blocks most of them. The row's reason names programs only; the command itself is recorded
+reason says why. Also blocked: heredocs (`<<`, `<<-`; `<<<` is fine), ANSI-C and locale quoting (`$'…'`,
+`$"…"`) and quotes inside `${…}`. A `#` at the start of a word starts a comment to the end of the line,
+as in bash, and the lines after it are still checked. A number is a file descriptor only when it touches
+the redirect (`2>f`); in `2 >f`, `2` is the program. An MCP server named `cmd` is checked as
+`cmd-upstream/<tool>`, so it can never match `cmd/` patterns. The row's reason names programs only; the command itself is recorded
 only with [Record commands](#record-commands) on, and then sealed.
 
 This protects against the agent, not the computer's owner, and goes by name: a program that starts others
 (`make`, `npm run`, `find -exec`, `timeout`, `nice`, git aliases, scripts) runs whatever it runs, so
-allowing `cmd/timeout` allows anything `timeout` can start.
+allowing `cmd/timeout` allows anything `timeout` can start. Environment variables an allowed program
+reads can make it run something else too (`GIT_PAGER=…`, `GIT_SSH_COMMAND=…`, `LD_PRELOAD=…`), so
+`cmd/git` is a limit on names, not a sandbox.
 
 For an agent botrbac does not set up, make its pre-tool hook run `botrbac check --agent <name>` with the
 tool call as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with
@@ -253,11 +263,14 @@ that the server called `botrbac` in the agent's config is the gateway (`botrbac 
 
 The policy (role, roles you may narrow to, revoked sessions) is cached on the computer with the time it was
 fetched, signed by the site (see [below](#what-it-can-and-cannot-guarantee)). Without internet the cached policy is used for the role's offline grace, then **every tool is
-blocked** until the terminal checks in again. A computer with no cached policy blocks everything.
+blocked** until the terminal checks in again. A computer with no cached policy, or no login
+(`credentials.json`), blocks everything.
 
 Every decision is written to `~/.config/botrbac/audit.db` and sent when the site can be reached: every
 minute from a running gateway, when a gateway or `botrbac run` ends, and on `botrbac sync`. Rows have an id,
-so a batch sent twice is stored once. **Terminal → Activity** marks rows that were recorded offline and
+so a batch sent twice is stored once. An upload can be answered 409 (another upload from this terminal is
+under way) or 429 (the terminal's daily row budget, `TERMINAL_ACTIVITY_ROWS_PER_DAY`, is used up); the
+rows wait on the computer and are sent later. Only one sync runs at a time on a computer. **Terminal → Activity** marks rows that were recorded offline and
 sent later. Rows are chained as they are written (below), so rows deleted or changed on the computer while
 it was offline show up as missing or altered once it syncs.
 
@@ -273,15 +286,27 @@ cover that, from strongest to weakest:
 - **Signed role.** The site signs every policy it sends, and botrbac remembers the site's key from login.
   If the cached role on the computer is edited, every tool is blocked until `botrbac sync` fetches a fresh
   one. The offline grace counts from when the site issued the policy, so editing the saved fetch time does
-  not stretch it. (Needs `ENCRYPTION_KEY` on the server; computers logged in before this pick up the key at
-  their next token refresh.)
+  not stretch it. A policy issued for another terminal, or older than the newest one this computer has
+  seen, is refused too, so an old file with a wider role cannot be put back. Once a key has been seen
+  (it is kept in `credentials.json`, `state.json` and `terminal_key.json`, and survives `logout`), or the
+  server is `https://botrbac.com`, an unsigned policy is refused. Unsigned policies are used only from a
+  self-hosted server that has never sent a key. (Needs `ENCRYPTION_KEY` on the server; computers logged in
+  before this pick up the key at their next token refresh. To move a computer to a server without a key
+  afterwards, delete `policy_key` from `state.json` and `terminal_key.json` by hand.)
+- **Pinned folder.** The hooks and the gateway are installed as `botrbac --home <absolute folder> …`, and
+  `--home` wins over `BOTRBAC_HOME`, so an agent that starts a child with `BOTRBAC_HOME` pointing at a
+  folder holding a policy it wrote does not change what the installed hook checks. Run `botrbac hooks
+  install` and `botrbac wrap` again after upgrading so the entries get `--home`.
 - **Protected files.** Whatever the role, a tool call that would change Claude Code's settings
   (`.claude/settings.json`, `.claude/settings.local.json`), `~/.claude.json`, the other agents' hook and MCP
   files (`.codex/hooks.json`, `.codex/config.toml`, `.gemini/settings.json`, `.cursor/hooks.json`,
   `.cursor/mcp.json`) or botrbac's own folder is refused, as is one that mentions `disableAllHooks` or `botrbac hooks remove`. Paths are followed through
   symlinks and `..`. Reading those files is allowed, except botrbac's login file, which holds its tokens.
-  This reads the call's text, so it is a speed bump: a path built at run time (variables, a script written
-  elsewhere) gets past it.
+  Removing, moving or changing the folders that hold these files (`~/.claude`, `~/.codex`, `~/.gemini`,
+  `~/.cursor`, the project's own, botrbac's folder) is refused too, as is `rm` or `mv` of your home or
+  project folder. Globs, split quotes, `cd DIR && …` and `sh -c` are followed; looking (`ls`, `find`,
+  `grep`) and `mkdir` stay allowed. This reads the call's text, so it is a speed bump: a path built at run
+  time (variables, a script written elsewhere) gets past it.
 - **Noticing.** `botrbac doctor` says when the hook is missing or switched off by `disableAllHooks` (or
   Codex's `[features] hooks = false`, Gemini's `hooksConfig`), and each sync tells the site, which marks the
   computer "hook off" on the Terminal page.
@@ -322,7 +347,9 @@ After each batch the site answers with a **checkpoint** for that terminal, `{ter
 ts}`, signed with the same key as the policy. The CLI keeps the newest in `state.json`. `botrbac verify`
 walks the chain in `audit.db`, fetches the latest checkpoint (or uses the kept one with `--offline`),
 checks its signature against the key pinned at login, and says whether the row the site signed is still
-here, unchanged. It exits 1 if anything is wrong. **Terminal → Activity → Checkpoints** downloads every
+here, unchanged. It exits 1 if anything is wrong. If the checkpoint's row was already pruned locally, it
+says "Not verified" rather than "Record intact", and exits 1 when fewer sent rows remain than botrbac
+keeps. **Terminal → Activity → Checkpoints** downloads every
 terminal's checkpoint, with the site's public key, as JSON.
 
 What this shows and what it doesn't. Deleting, reordering or editing rows on the computer breaks the
@@ -333,9 +360,15 @@ computer. Rows deleted from the end of the queue before they were ever sent are 
 row's gap (or not at all, if nothing follows). Anchoring checkpoints in a public transparency log such as
 Sigstore Rekor, so that the site itself could not rewrite history unnoticed, is future work.
 
-The site keeps rows for `TERMINAL_ACTIVITY_DAYS` (default 180) and at most `TERMINAL_ACTIVITY_MAX_ROWS`
+Each terminal may store at most `TERMINAL_ACTIVITY_ROWS_PER_DAY` rows (default 10,000) per UTC day, and
+blocked rows are kept in a list of their own with the same limits, so a flood of allowed rows from one
+computer cannot push blocks out of the log. The site keeps rows for `TERMINAL_ACTIVITY_DAYS` (default 180) and at most `TERMINAL_ACTIVITY_MAX_ROWS`
 per person (default 20,000), whichever comes first. Old rows are trimmed by when they arrived. The Activity
-page shows the newest 2,000; exports stream everything kept.
+page shows 100 rows at a time, newest first, with **Older** to go further back through everything
+kept. Its filters (computer, agent, blocked only) are applied as it reads, so they reach the whole log;
+one page reads at most 5,000 rows, and when nothing matches in those it offers to look further back.
+Exports stream everything kept. Each row is about 1–2 KB (up to about 40 KB with a recorded command), so
+raising `TERMINAL_ACTIVITY_MAX_ROWS` costs only storage in your Redis.
 
 Audit rows hold identifiers and decisions: the tool name, agent, role, session, and allow or block. Hook
 rows add the agent's own ids (session, prompt, tool call, subagent), the permission mode, the working
@@ -363,8 +396,9 @@ With it on, rows also carry:
 - `input_digest` (`sha256:<hex>`) and `input_size` (bytes) of the whole command or tool input, taken
   before the 8,000-character cut, so a long input can be matched against a copy you have.
 
-The prompt and the task are sealed like the command, each bound to its row and its field
-name, so none can be moved onto another row or swapped for another field. Without Record commands none of
+The prompt and the task are sealed like the command and bound to their row, so neither can be moved
+onto another row. The prompt travels in its `prompt` row's command field (that row has no other
+command); the task is also bound to its field name. Without Record commands none of
 them is sent.
 
 You can read it; the agents can't. The site's public key travels in the signed policy. The CLI seals each
@@ -461,18 +495,19 @@ for you; anyone who reads the commit sees the site's address and the session id.
 | `botrbac login [--server URL]` | Connect this computer (device code approved on the website; default `https://botrbac.com`) |
 | `botrbac add-gateway --agent A` | Add the gateway to Cursor's, Codex's or Gemini CLI's config (others kept, backed up) |
 | `botrbac status` | Account, role, policy age, rows waiting, current session |
-| `botrbac servers add/remove/list` | The MCP servers the gateway sits in front of |
+| `botrbac servers add/remove/list [--url U]` | The MCP servers the gateway sits in front of |
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
-| `botrbac wrap <agent> [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |
+| `botrbac wrap <agent> [--user] [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |
 | `botrbac doctor` | Login, policy age, each agent's hook and gateway, servers that bypass Bot RBAC |
-| `botrbac run --role R [--task T] -- cmd …` | Run a command in a narrower session |
+| `botrbac run --role R [--task T] [--agent A] -- cmd …` | Run a command in a narrower session |
 | `botrbac shell-init` | Shell functions for `<agent> --botrbac --role R` |
-| `botrbac hooks install A [--user]` | Check the agent's own tools too: `claude-code`, `codex`, `gemini`, `cursor` |
+| `botrbac hooks install A [--user] [--allow-unguarded]` | Check the agent's own tools too: `claude-code`, `codex`, `gemini`, `cursor` |
 | `botrbac hooks remove A [--user]` | Take botrbac's hook out of that agent's file (others kept, backed up) |
-| `botrbac check --agent A` | The hook adapter (reads the tool call on stdin) |
-| `botrbac sync` / `botrbac log` | Send waiting rows now / show recent rows |
+| `botrbac check --agent A [--tool T] [--format json] [--block-unguarded]` | The hook adapter (reads the tool call on stdin) |
+| `botrbac sync [--retry-rejected]` / `botrbac log [-n N]` | Send waiting rows now (`--retry-rejected` also resends rows the site refused) / show the last N rows (20) |
 | `botrbac verify [--offline]` | Check `audit.db`'s hash chain and the site's signed checkpoint |
-| `botrbac trailer install [--repo P]` / `remove` | Opt-in git hook: `Botrbac-Session:` trailer on commits made in a session |
+| `botrbac trailer install [--repo P] [--site URL]` / `remove` | Opt-in git hook: `Botrbac-Session:` trailer on commits made in a session |
+| `botrbac --home PATH …` | Use this folder instead of `BOTRBAC_HOME` (installed hooks and the gateway carry it) |
 | `botrbac logout` | Forget this computer's login and key (disconnect it on the website too) |
 
 Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json` (mode 0600),

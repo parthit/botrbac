@@ -40,8 +40,20 @@ VERBS = {
     "TodoWrite": "Updated its to-do list",
 }
 
-_PROGRAMS = re.compile(r"^running (.+?) is not in role (.+)$")
-_TOOL = re.compile(r"^not in role (.+)$")
+_PROGRAMS = re.compile(r"running (.+?) is not in role (.+)", re.DOTALL)
+_TOOL = re.compile(r"not in role (.+)", re.DOTALL)
+_SPLIT = re.compile(r"[,\s]+")
+
+
+def _programs(listed: str) -> list[str]:
+    """The program names in "cmd/curl, cmd/wget" (or "cmd/curl cmd/wget", as rows stored
+    before commas were kept say it): words starting with cmd/, without it."""
+    out: list[str] = []
+    for word in _SPLIT.split(listed):
+        name = word.removeprefix("cmd/")
+        if word.startswith("cmd/") and name and name not in out:
+            out.append(name)
+    return out
 
 
 def agent_name(agent: Any) -> str:
@@ -144,9 +156,9 @@ def tried(sentence: str) -> str:
 def blocked_because(reason: Any, role: Any = "") -> dict[str, Any]:
     """Why a call was blocked, in words, and whether changing the role would fix it."""
     reason = str(reason or "").strip()
-    m = _PROGRAMS.match(reason)
-    if m:
-        programs = [p.strip().removeprefix("cmd/") for p in m.group(1).split(",") if p.strip()]
+    m = _PROGRAMS.fullmatch(reason)
+    programs = _programs(m.group(1)) if m else []
+    if m and programs:
         listed = ", ".join(programs)
         noun = "program" if len(programs) == 1 else "programs"
         return {
@@ -156,7 +168,7 @@ def blocked_because(reason: Any, role: Any = "") -> dict[str, Any]:
             "add": [f"cmd/{p}" for p in programs],
             "role": _unquote(m.group(2)),
         }
-    m = _TOOL.match(reason)
+    m = _TOOL.fullmatch(reason)
     if m:
         return {
             "text": f"The role “{_unquote(m.group(1))}” doesn't allow this tool.",

@@ -1,6 +1,8 @@
 """Files the CLI keeps on this computer, all under one directory.
 
-`$BOTRBAC_HOME`, or `~/.config/botrbac`:
+`botrbac --home PATH`, else `$BOTRBAC_HOME`, else `~/.config/botrbac`. The commands
+botrbac writes into agents' settings (hooks, the gateway) name the folder with --home,
+so a BOTRBAC_HOME an agent sets for a child process cannot point them at another one.
 
 - credentials.json  server URL and this terminal's tokens (mode 0600)
 - policy.json       the last policy the server sent, with when it was fetched
@@ -14,14 +16,54 @@ import contextlib
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+_HOME_OVERRIDE: Path | None = None
+
+
+def set_home(path: str | os.PathLike[str] | None) -> None:
+    """Use this folder whatever BOTRBAC_HOME says (`botrbac --home PATH`)."""
+    global _HOME_OVERRIDE
+    _HOME_OVERRIDE = Path(path).expanduser().absolute() if path else None
+
 
 def home() -> Path:
-    path = Path(os.environ.get("BOTRBAC_HOME") or Path.home() / ".config" / "botrbac")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = _HOME_OVERRIDE or Path(
+        os.environ.get("BOTRBAC_HOME") or Path.home() / ".config" / "botrbac"
+    )
+    if path.is_dir():
+        # It holds tokens and the audit record: this user only, even if it was made
+        # with a looser umask.
+        with contextlib.suppress(OSError):
+            if path.stat().st_mode & 0o077:
+                os.chmod(path, 0o700)
+    else:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
     return path
+
+
+def home_path() -> Path:
+    """The folder as an absolute path, for commands written into agents' settings."""
+    return home().absolute()
+
+
+@contextlib.contextmanager
+def file_lock(name: str) -> Iterator[None]:
+    """An exclusive lock across processes on `name` in the folder (POSIX flock); where
+    fcntl is missing (Windows), no lock."""
+    with open(home() / name, "a") as handle:
+        try:
+            import fcntl
+        except ImportError:  # Windows
+            yield
+            return
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def read_json(name: str, default: Any = None) -> Any:

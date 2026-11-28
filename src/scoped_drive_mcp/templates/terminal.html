@@ -55,7 +55,7 @@
       </li>
       <li>
         <b>Add Bot RBAC to your agent</b>
-        {{ copy_line("cmd-add", "claude mcp add botrbac -- botrbac gateway && botrbac hooks install claude-code --user --allow-unguarded", "Add to Claude Code") }}
+        {{ copy_line("cmd-add", "claude mcp add --scope user botrbac -- botrbac --home ~/.config/botrbac gateway && botrbac hooks install claude-code --user --allow-unguarded", "Add to Claude Code") }}
         <p class="muted small">That is for Claude Code: it adds the gateway, and a hook so Claude's shell and file edits follow the role too. Restart the agent so it loads the new server.</p>
         <details class="how term-more">
           <summary>Using another agent?</summary>

@@ -128,6 +128,7 @@ def test_hooks_command(home, monkeypatch, capsys) -> None:
     assert "check --agent codex --block-unguarded" in codex["hooks"][0]["command"]
     assert main(["hooks", "install", "aider"]) == 0
     assert "botrbac check --agent aider" in capsys.readouterr().out
+    assert "--home" in codex["hooks"][0]["command"]
 
 
 def test_unexpected_error_blocks(monkeypatch, capsys) -> None:

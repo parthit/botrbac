@@ -158,6 +158,20 @@ def promote_pending() -> None:
         os.replace(source, state.home() / KEY_FILE)
 
 
+def remember_policy_key(key: str | None) -> None:
+    """Keep the website's policy key in state.json and terminal_key.json too, next to
+    credentials.json, so taking it out of one file does not switch signature checks off.
+    Logging out keeps it in state.json for the same reason."""
+    if not key:
+        return
+    data = state.read_json("state.json", {}) or {}
+    if isinstance(data, dict) and data.get("policy_key") != key:
+        state.write_json("state.json", {**data, "policy_key": key})
+    record = state.read_json(KEY_FILE)
+    if isinstance(record, dict) and record.get("private_key") and record.get("policy_key") != key:
+        state.write_json(KEY_FILE, {**record, "policy_key": key}, private=True)
+
+
 def forget() -> None:
     state.remove(KEY_FILE)
     state.remove(PENDING_FILE)

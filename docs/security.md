@@ -437,11 +437,15 @@ accepted only on `/api/terminal/*`; `/mcp` does not look them up, and API tokens
 accepted on `/api/terminal/*`. Every token check also re-checks that the person may still sign in.
 Disconnecting a terminal deletes its record, so its tokens stop working at once. Device codes expire after
 10 minutes, are single-use, and polling faster than the interval gets `slow_down`; the open endpoints are
-rate-limited per address and the token endpoints per terminal.
+rate-limited per address, and refresh is also limited per terminal (30 per 10 minutes). A refresh token
+used twice ends the terminal's tokens: its live refresh token is revoked, its access tokens are refused for
+an hour, and the computer must log in again (logged at most once an hour per terminal).
 
 Roles, terminals, tokens, device codes, revoked sessions and the Record commands setting are stored under
 `term:` and signed like OAuth records. Audit batches are capped (500 rows, 2 MB), every field is stripped
-to a small character set and capped, rows are de-duplicated by the client's event id, and only identifiers
+to a small character set and capped (`reason` keeps `, $ ( )` so block reasons read correctly), rows are
+de-duplicated by the client's event id (a resend with the same id but a different hash counts as a fork),
+one upload runs at a time per terminal (409 otherwise), and only identifiers
 and decisions are stored in the clear.
 
 **Record commands** (off by default, per person) adds what the agent ran to each row: the command, or
@@ -484,7 +488,9 @@ detectable once the server or a checkpoint has seen them. It does not make rows 
 user can write new, well-chained rows before they are sent, and a row deleted from the end of the queue
 before it was ever sent leaves a mark only when a later row arrives. Checkpoints are not yet anchored in a
 public log (Rekor), so they do not protect against the site's operator. Rows are kept for
-`TERMINAL_ACTIVITY_DAYS` (180) and at most `TERMINAL_ACTIVITY_MAX_ROWS` (20,000) per person.
+`TERMINAL_ACTIVITY_DAYS` (180) and at most `TERMINAL_ACTIVITY_MAX_ROWS` (20,000) per person, with blocked
+rows in a separate list under the same limits. Each terminal may add `TERMINAL_ACTIVITY_ROWS_PER_DAY`
+(10,000) rows per UTC day; past that, uploads get 429 and the rows wait on the computer.
 
 **Terminal keys.** Each terminal has its own Ed25519 key, made at `botrbac login`
 (`src/botrbac_cli/identity.py`). The private half stays on the computer in `terminal_key.json` (0600) and

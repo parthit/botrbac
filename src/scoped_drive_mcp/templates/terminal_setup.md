@@ -1,6 +1,7 @@
 # Set up Bot RBAC Terminal (instructions for a coding agent)
 
-You are setting up Bot RBAC Terminal for the person you are working with. Bot RBAC Terminal lets them
+You are setting up Bot RBAC Terminal for the person you are working with. If botrbac is already
+installed here (`botrbac --version` works), skip to [Already set up](#already-set-up-check-or-update). Bot RBAC Terminal lets them
 decide, on the website {{ server }}, which tools the AI agents on this computer may use. You will
 install the `botrbac` command, connect this computer to their account, and add `botrbac gateway` to
 your own MCP configuration. The person only has to approve one login code in their browser.
@@ -46,8 +47,10 @@ uv --version && uv tool install git+https://github.com/parthit/botrbac
 pipx --version && pipx install git+https://github.com/parthit/botrbac
 ```
 
-If neither `uv` nor `pipx` is installed, ask the person whether to install uv
-(`curl -LsSf https://astral.sh/uv/install.sh | sh`), then open a new shell or use `~/.local/bin/uv`.
+If neither `uv` nor `pipx` is installed, ask the person whether to install uv with Astral's installer
+(`curl -LsSf https://astral.sh/uv/install.sh | sh`, into `~/.local/bin`, no sudo), then open a new shell
+or use `~/.local/bin/uv`. (The one-line installer at {{ server }}/terminal/install.sh, which the person
+runs themselves, does this step without asking, after printing what it installs and from where.)
 
 Check it worked: `botrbac --version`. If the command is not found, run `uv tool update-shell` (or
 `pipx ensurepath`) and use the full path, usually `~/.local/bin/botrbac`. Note the full path for step 3:
@@ -84,67 +87,29 @@ for the agent you are, unless the person asks for more.
 ### Claude Code
 
 ```sh
-claude mcp add botrbac -- botrbac gateway
+claude mcp add --scope user botrbac -- "$(command -v botrbac)" --home "${BOTRBAC_HOME:-$HOME/.config/botrbac}" gateway
 ```
 
-To add it for every project rather than this one, check that `claude mcp add --help` lists `--scope`,
-then use `claude mcp add --scope user botrbac -- botrbac gateway`. Check with
-`claude mcp list`.
+`--scope user` adds it for every project, and `--home` names botrbac's folder, as the install script
+does. If `claude mcp add --help` does not list `--scope` (an old Claude Code), leave `--scope user` out.
+If Claude Code already has a server called `botrbac`, leave it and let step 4 (`botrbac doctor`) say
+whether it needs updating. Check with `claude mcp list`.
 
 Every agent also gets a hook so its own shell and file edits follow the role. Add it in step 6, last:
 once it is in place and the role is Read-only, your own shell commands are blocked.
 
-### Cursor: `~/.cursor/mcp.json`
-
-Merge this entry into the `mcpServers` object. If the file does not exist, create it with exactly this:
-
-```json
-{
-  "mcpServers": {
-    "botrbac": { "command": "botrbac", "args": ["gateway", "--agent", "cursor"] }
-  }
-}
-```
-
-### Codex: `~/.codex/config.toml`
-
-Append this table, unless `[mcp_servers.botrbac]` is already there:
-
-```toml
-[mcp_servers.botrbac]
-command = "botrbac"
-args = ["gateway", "--agent", "codex"]
-```
-
-### Gemini CLI: `~/.gemini/settings.json`
-
-Merge this entry into the `mcpServers` object (create the object if it is missing):
-
-```json
-{
-  "mcpServers": {
-    "botrbac": { "command": "botrbac", "args": ["gateway", "--agent", "gemini"] }
-  }
-}
-```
-
-### Merging into an existing JSON file
-
-Read the file, parse it, add `mcpServers.botrbac` and write it back with every other key unchanged.
-For example:
+### Cursor, Codex or Gemini CLI
 
 ```sh
-python3 - "$HOME/.cursor/mcp.json" cursor <<'EOF'
-import json, pathlib, sys
-path, agent = pathlib.Path(sys.argv[1]), sys.argv[2]
-data = json.loads(path.read_text()) if path.exists() else {}
-data.setdefault("mcpServers", {})["botrbac"] = {"command": "botrbac", "args": ["gateway", "--agent", agent]}
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(data, indent=2) + "\n")
-EOF
+botrbac add-gateway --agent cursor    # ~/.cursor/mcp.json
+botrbac add-gateway --agent codex     # ~/.codex/config.toml
+botrbac add-gateway --agent gemini    # ~/.gemini/settings.json
 ```
 
-If the file is not valid JSON, do not overwrite it: show the person the error and ask.
+It adds the `botrbac` entry and keeps every other server, backs the file up first
+(`<file>.botrbac-backup-<time>`; tell the person where), and changes nothing when the entry is already
+there and current. Add `--dry-run` to see what it would do. If it says the file is not valid JSON or TOML,
+do not edit the file yourself: show the person the error and ask.
 
 ## 4. Check it
 
@@ -158,6 +123,8 @@ Good output:
 - `status` shows `Account:` with the person's email, `Role:` with a role name, and `Policy: … online`.
 - `doctor` starts with `✓ logged in to {{ server }}` and `✓ policy is 0.0 days old`.
 - `! no servers yet` is fine: no MCP servers sit behind the gateway yet (see step 7).
+- Any other line followed by `fix: …` (for example "the botrbac hook in … is from an older botrbac"):
+  run that `fix:` command. Those are safe to run without asking, except `botrbac wrap` (below).
 - A line `✗ <agent>: <name> in <file> is not behind botrbac` means that MCP server is used directly,
   without Bot RBAC (the website shows it as an **unguarded server**). Tell the person which ones, and
   offer to move them with the `fix:` command `doctor` prints below that line, usually
@@ -206,6 +173,21 @@ themselves; the hook refuses it from an agent). Skip this step only if the perso
   `eval "$(botrbac shell-init)"` to the shell's startup file (ask first) so `claude --botrbac --role NAME`
   works.
 
+## Already set up: check or update
+
+When botrbac is already installed (the person asks you to check it, something seems off, or they
+updated botrbac):
+
+1. Update it if they ask: `uv tool upgrade botrbac` (or `pipx upgrade botrbac`).
+2. `botrbac status`: which account and site, the role, and how many rows are waiting to be sent.
+3. `botrbac doctor`: run each `fix:` command it prints (ask first only for `botrbac wrap`). After an
+   update it usually asks to run `botrbac hooks install <agent> --user --allow-unguarded` and
+   `botrbac add-gateway --agent <agent>` again, so their entries match the new version.
+4. Run `botrbac doctor` again until it has no `✗` lines, then tell the person to restart the agent.
+
+If `status` shows a different site than {{ server }}, run `{{ login }}` to connect this computer
+to {{ server }} instead.
+
 ## Troubleshooting
 
 | Problem | What to do |
@@ -217,6 +199,10 @@ themselves; the hook refuses it from an agent). Skip this step only if the perso
 | Bot RBAC tools do not show in the agent | Restart the agent. Check `claude mcp list` or the config file, and that the command path works. |
 | `botrbac: command not found` in the agent | Use the full path from `command -v botrbac` in the config. |
 | A tool call fails with `Blocked by Bot RBAC: …` | Working as intended: the role does not allow that tool. Do not try to get around it. Tell the person the exact pattern the error names (such as `claude-code/Bash` or `cmd/npm`) and that they can add it to the role on {{ server }}/terminal/roles, or give this computer another role on {{ server }}/terminal. |
+| `Blocked by Bot RBAC: … botrbac does not run commands that use …`, `… could not read this command`, `… does not read $'…'` and similar | The role has `cmd/` rules, so each program in a shell command must be readable. Run simpler commands: one program per command or joined with `&&`/`\|`, no `$(…)`, backticks, heredocs or `bash -c`. Write files with your file-editing tool instead of `cat <<EOF`. |
+| `Blocked by Bot RBAC: … which Bot RBAC protects` | You tried to change an agent's settings or botrbac's own files. Tell the person what you wanted to change; they make that change themselves. |
+| `status` shows rows waiting that do not go down | Run `botrbac sync`. `Offline: … (… row_budget_exceeded …)` means this computer sent its rows for today; they go out by themselves tomorrow. `busy` means another upload was running: try again in a minute. `This terminal was disconnected` means: run `{{ login }}` again. |
+| A command `botrbac` printed refers to `--home` | That is botrbac's folder, normally `~/.config/botrbac`. Keep it in commands as printed. |
 | The website shows "unguarded servers" | Run `botrbac doctor`; it names each one and the `fix:` command. Ask before running it. |
 
 Full documentation: https://github.com/parthit/botrbac/blob/main/docs/terminal.md

@@ -24,6 +24,8 @@ REFRESH_TTL = 90 * 24 * 3600
 # A terminal's signing key lasts as long as the terminal (the store needs some expiry).
 KEY_TTL = 10 * 365 * 24 * 3600
 MAX_TERMINALS = 50
+# A reused refresh token is written to the owner's Activity at most this often per terminal.
+REUSE_NOTE_EVERY = 3600
 EDITABLE = frozenset({"name", "role_id"})
 _USER_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # no vowels: codes never spell words
 _META_MAX = 80
@@ -64,6 +66,9 @@ class Terminal:
     # A key added at a refresh is shown to the owner: a stolen refresh token could add
     # one first and lock the real computer out (terminal.identity).
     key_registered: dict[str, Any] = field(default_factory=dict)
+    # When a refresh token that already worked came back: {"at": ts}. Its tokens were
+    # ended then, so the computer has to log in again.
+    refresh_reuse: dict[str, Any] = field(default_factory=dict)
 
 
 class DeviceError(Exception):
@@ -229,6 +234,17 @@ class Terminals:
             "terminal_id": terminal.id,
         }
 
+    def refresh_owner(self, refresh_token: str) -> str | None:
+        """The terminal a refresh token was issued to (live or already used), for the
+        token endpoint's per-terminal rate limit. None for one never issued."""
+        if not refresh_token.startswith("brt_rt_"):
+            return None
+        digest = _sha(refresh_token)
+        terminal_id = self.store.get(f"term:rt:{digest}") or self.store.get(
+            f"term:rt:{digest}:used"
+        )
+        return terminal_id if terminal_id and terminal_id.startswith("t_") else None
+
     def refresh(self, refresh_token: str) -> dict[str, Any] | None:
         if not refresh_token.startswith("brt_rt_"):
             return None
@@ -253,11 +269,20 @@ class Terminals:
 
     def _note_reuse(self, digest: str) -> None:
         """A refresh token that already worked once came back: either a copy of it was
-        taken, or the program retried. Written to the person's Activity (once an hour
-        per terminal) so they can disconnect the terminal; the token is refused."""
+        taken, or the program retried. Whoever holds the newer tokens may be the thief,
+        so the terminal's tokens are ended: its live refresh token is revoked and its
+        access tokens stop working, and the computer has to log in again. The terminal
+        record says when; the person's Activity gets it at most once an hour per
+        terminal (so a flood of retries is not a flood of audit lines)."""
         terminal_id = self.store.get(f"term:rt:{digest}:used")
         terminal = self.get(terminal_id) if terminal_id and terminal_id != "1" else None
         if terminal is None:
+            return
+        self._end_tokens(terminal.id)
+        self.touch(terminal.id, refresh_reuse={"at": self.clock()})
+        if not self.store.set_if_absent(
+            f"term:terminal:{terminal.id}:reuse_noted", "1", ex=REUSE_NOTE_EVERY
+        ):
             return
         from ..audit import audit_owner
         from ..auth import current_actor
@@ -269,11 +294,26 @@ class Terminals:
                 "deny",
                 reason="refresh_reuse",
                 terminal=terminal.id,
+                tokens="ended",
             )
         except Exception:  # noqa: BLE001 - the token is refused either way
             logging.getLogger(__name__).warning("could not audit a reused terminal token")
         finally:
             current_actor.reset(token)
+
+    @staticmethod
+    def _ended_key(terminal_id: str) -> str:
+        return f"term:terminal:{terminal_id}:ended"
+
+    def _end_tokens(self, terminal_id: str) -> None:
+        """Revoke the live refresh token, and refuse every access token issued so far
+        (they are not listed, so a flag outlives the longest of them). No new tokens can
+        be issued without the refresh token, so the terminal must log in again."""
+        live = self.store.get(self._rt_key(terminal_id))
+        if live:
+            self.store.delete(f"term:rt:{live}")
+        self.store.delete(self._rt_key(terminal_id))
+        self.store.set(self._ended_key(terminal_id), str(self.clock()), ex=ACCESS_TTL + 60)
 
     def resolve(self, access_token: str) -> Terminal | None:
         if not access_token.startswith("brt_at_"):
@@ -287,6 +327,8 @@ class Terminals:
             return None
         if terminal is None or not self._live(terminal) or not self.signed_in(terminal.email):
             return None
+        if self.store.get(self._ended_key(terminal.id)):
+            return None  # a reused refresh token ended its tokens (_note_reuse)
         return terminal
 
     def _live(self, terminal: Terminal) -> bool:
@@ -331,7 +373,15 @@ class Terminals:
             k: v
             for k, v in seen.items()
             if k
-            in ("last_seen", "queued", "unguarded", "hook_missing", "coverage", "key_registered")
+            in (
+                "last_seen",
+                "queued",
+                "unguarded",
+                "hook_missing",
+                "coverage",
+                "key_registered",
+                "refresh_reuse",
+            )
         }
         if self.store.get(f"term:terminal:{terminal_id}") is None:
             return  # disconnected meanwhile: write nothing
@@ -376,7 +426,15 @@ class Terminals:
         # Saved without what the terminal reports about itself (touch keeps that apart).
         updated = replace(terminal, **changes)
         self._save(
-            replace(updated, last_seen=0.0, queued=0, unguarded=[], hook_missing=[], coverage={})
+            replace(
+                updated,
+                last_seen=0.0,
+                queued=0,
+                unguarded=[],
+                hook_missing=[],
+                coverage={},
+                refresh_reuse={},
+            )
         )
         if not self._live(updated):
             # Disconnected while this edit was in flight: don't leave the record behind.

@@ -68,12 +68,16 @@ BUILTIN: dict[str, Role] = {
             "claude-code/Grep",
             "claude-code/Glob",
             "claude-code/LS",
+            # Loads the definitions of MCP tools Claude Code holds back until needed; it
+            # runs nothing, and without it no MCP tool can be used.
+            "claude-code/ToolSearch",
         ],
         builtin=True,
         description=(
             "Tools whose names start with read, get, list or search, and Claude Code's "
-            "Read, Grep, Glob and LS. No shell, no edits. This goes by the name only: "
-            "check what each server's tools really do."
+            "Read, Grep, Glob, LS and ToolSearch (which only loads MCP tool definitions). "
+            "No shell, no edits. This goes by the name only: check what each server's "
+            "tools really do."
         ),
     ),
     FULL: Role(

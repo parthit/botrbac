@@ -10,6 +10,7 @@ from editing the files back.
 import contextlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -47,12 +48,46 @@ def known_configs(cwd: Path | None = None) -> list[AgentConfig]:
     ]
 
 
+def installed_command() -> list[str]:
+    """botrbac as written into an agent's settings (hooks, the gateway): with this
+    folder's absolute path, so a BOTRBAC_HOME the agent sets for a child process cannot
+    send the check to a folder holding a policy it wrote itself."""
+    return [*botrbac_command(), "--home", str(state.home_path())]
+
+
+def strip_home(args: list[str]) -> list[str]:
+    """`args` without a leading `--home PATH` (or `--home=PATH`)."""
+    if args[:1] == ["--home"]:
+        return args[2:]
+    if args and args[0].startswith("--home="):
+        return args[1:]
+    return args
+
+
+def pinned(spec: Any) -> bool:
+    """A gateway entry that names botrbac's folder with --home (botrbac from before
+    --home existed wrote entries without it)."""
+    args = [str(a) for a in (spec or {}).get("args") or []] if isinstance(spec, dict) else []
+    return strip_home(args) != args
+
+
+def stale_gateways(cwd: Path | None = None) -> list[AgentConfig]:
+    """Agent files whose botrbac gateway entry has no --home: run add-gateway (or, for
+    Claude Code, `claude mcp add` again) to bring it up to date."""
+    out = []
+    for config in known_configs(cwd):
+        spec = servers_in(config).get(GATEWAY_NAME)
+        if is_gateway(spec) and not pinned(spec):
+            out.append(config)
+    return out
+
+
 def is_gateway(spec: Any) -> bool:
     if not isinstance(spec, dict):
         return False
     command = str(spec.get("command") or "")
     args = [str(a) for a in spec.get("args") or []]
-    if Path(command).name == "botrbac" and args[:1] == ["gateway"]:
+    if Path(command).name == "botrbac" and strip_home(args)[:1] == ["gateway"]:
         return True
     return "botrbac_cli" in args and "gateway" in args
 
@@ -107,7 +142,7 @@ def to_upstream(spec: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def gateway_entry(agent: str) -> dict[str, Any]:
-    command = botrbac_command()
+    command = installed_command()
     return {"command": command[0], "args": [*command[1:], "gateway", "--agent", agent]}
 
 
@@ -228,11 +263,14 @@ def add_gateway(config: AgentConfig, dry_run: bool = False) -> dict[str, Any]:
     left alone and reported (`name_taken`). The file is backed up before it changes."""
     result: dict[str, Any] = {"file": str(config.path), "changed": False, "backup": None}
     existing = servers_in(config) if config.path.exists() else {}
+    update = False
     if GATEWAY_NAME in existing:
-        if is_gateway(existing[GATEWAY_NAME]):
+        if not is_gateway(existing[GATEWAY_NAME]):
+            result["name_taken"] = True
             return result
-        result["name_taken"] = True
-        return result
+        if pinned(existing[GATEWAY_NAME]):
+            return result
+        update = True  # from an older botrbac: rewrite it with --home
     entry = gateway_entry(config.agent)
     if config.kind == "codex":
         before = config.path.read_text() if config.path.exists() else ""
@@ -242,11 +280,25 @@ def add_gateway(config: AgentConfig, dry_run: bool = False) -> dict[str, Any]:
             except tomllib.TOMLDecodeError as exc:
                 raise ValueError(f"{config.path} is not valid TOML; it was left as it is") from exc
         args = ", ".join(json.dumps(a) for a in entry["args"])
-        sep = "" if not before or before.endswith("\n") else "\n"
-        text = (
-            f"{before}{sep}\n[mcp_servers.{GATEWAY_NAME}]\n"
+        table = (
+            f"[mcp_servers.{GATEWAY_NAME}]\n"
             f"command = {json.dumps(entry['command'])}\nargs = [{args}]\n"
         )
+        if update:
+            # Replace the old table, up to the next table header or the end.
+            pattern = re.compile(
+                rf"^\[mcp_servers\.{GATEWAY_NAME}\]\s*\n(?:(?!\[).*\n?)*", re.MULTILINE
+            )
+            text, n = pattern.subn(lambda _m: table, before, count=1)
+            if n != 1 or not is_gateway(
+                (tomllib.loads(text).get("mcp_servers") or {}).get(GATEWAY_NAME)
+            ):
+                raise ValueError(
+                    f"{config.path}: could not update the botrbac entry; it was left as it is"
+                )
+        else:
+            sep = "" if not before or before.endswith("\n") else "\n"
+            text = f"{before}{sep}\n{table}"
     else:
         try:
             data = json.loads(config.path.read_text() or "{}") if config.path.exists() else {}

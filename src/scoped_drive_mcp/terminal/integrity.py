@@ -11,7 +11,8 @@ from that terminal. The stored row gets `chain`:
              before it, or its hash does not match its contents (edited)
 - unchained  sent by a CLI from before the chain
 
-A row sent again (same event_id) is a duplicate and is not judged again. A row that
+A row sent again (same event_id) is a duplicate and is not judged again; one sent again
+with a different hash (edited after it was first sent) is counted as a fork. A row that
 arrives late into a gap is `ok` when it links to the rows on either side of it. The
 first chained row from a terminal starts its chain (`start`): a computer that logs in
 again is a new terminal here, and its seq goes on from where it was.
@@ -120,6 +121,11 @@ class ChainBatch:
                 self._key(link.seq), f"{link.row_hash}:{link.prev_hash}", ex=self.ttl
             )
         return {"chain": status, "seq": link.seq, "row_hash": link.row_hash}
+
+    def note_fork(self) -> None:
+        """A row sent again under an id already stored, with a different hash."""
+        self.changed = True
+        self.state["forks"] += 1
 
     def _status(self, link: Link) -> str:
         last = int(self.state["seq"])
@@ -244,17 +250,41 @@ def trim_by_age(store: Any, key: str, cutoff: float, max_rows: int) -> int:
 
 
 def read_all(
-    store: Any, key: str, cutoff: float, max_rows: int, chunk: int = 1000
+    store: Any,
+    key: str,
+    cutoff: float,
+    max_rows: int,
+    chunk: int = 1000,
+    also: tuple[str, ...] = (),
+    until: float | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Every row within retention, newest received first, read a chunk at a time."""
-    for start in range(0, max_rows, chunk):
-        batch = store.lrange(key, start, min(start + chunk, max_rows) - 1)
-        for raw in batch:
-            try:
-                row = json.loads(raw)
-            except ValueError:
-                continue
-            if isinstance(row, dict) and float(row.get("received") or row.get("ts") or 0) >= cutoff:
+    """Every row within retention, newest received first, read a chunk at a time, then
+    the rows of each list in `also` not already read. Rows are read by position, and an
+    upload during the export pushes rows in at the head, so the same row can come back
+    in a later chunk: each event id is yielded once, and rows that arrived after `until`
+    (the export's start) are left out. At most `max_rows` positions of each list."""
+    seen: set[str] = set()
+    for name in (key, *also):
+        for start in range(0, max_rows, chunk):
+            batch = store.lrange(name, start, min(start + chunk, max_rows) - 1)
+            for raw in batch:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    arrived = float(row.get("received") or row.get("ts") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if arrived < cutoff or (until is not None and arrived > until):
+                    continue
+                event_id = row.get("event_id")
+                if isinstance(event_id, str):
+                    if event_id in seen:
+                        continue
+                    seen.add(event_id)
                 yield row
-        if len(batch) < chunk:
-            return
+            if len(batch) < chunk:
+                break

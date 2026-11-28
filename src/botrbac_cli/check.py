@@ -31,7 +31,7 @@ from typing import Any
 
 from . import agents, policy, provenance
 from .gateway import safe_tool
-from .patterns import normalize_server
+from .patterns import COMMAND_SERVER, normalize_server
 from .protect import refusal
 from .queue import AuditQueue
 from .sealing import describe
@@ -56,14 +56,23 @@ def tool_name(payload: Any) -> str:
     return ""
 
 
+def _server_part(name: str) -> str:
+    """A server or agent name as the first half of a tool id. `cmd` is reserved for
+    `cmd/<program>` patterns, so an MCP server (or agent) called `cmd` is checked as
+    `cmd-upstream/…`, the name the gateway gives it too (coverage._free_name): its tools
+    can never match a `cmd/` pattern."""
+    server = normalize_server(name)
+    return f"{server}-upstream" if server == COMMAND_SERVER else server
+
+
 def classify(agent: str, name: str) -> tuple[str, bool]:
     """(tool id, is an MCP tool that bypasses the gateway)."""
     if name.startswith(GATEWAY_PREFIX):
         return "", False
     if name.startswith("mcp__"):
         _, server, rest = (name.split("__", 2) + ["", ""])[:3]
-        return f"{normalize_server(server)}/{safe_tool(rest or 'tool')}", True
-    return f"{normalize_server(agent)}/{safe_tool(name)}", False
+        return f"{_server_part(server)}/{safe_tool(rest or 'tool')}", True
+    return f"{_server_part(agent)}/{safe_tool(name)}", False
 
 
 def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tuple[bool, str]:

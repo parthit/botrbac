@@ -15,10 +15,10 @@
 <p class="muted small story-meta">Session …{{ tree.start.session_id[-8:] }}</p>
 <h1>{% if tree.start.task %}{{ tree.start.task }}{% else %}A session on {{ tree.start.terminal }}{% endif %}</h1>
 {{ terminal_tabs('activity') }}
-<p class="muted">Started on {{ tree.start.terminal }} with the role “{{ tree.start.role }}”. Anything started inside it, like helper agents, can only use the same tools or fewer. <a href="/terminal/activity?terminal={{ tree.start.terminal_id }}">See its activity</a>.{% if tree.start.parent_session_id %} It was itself started inside <a href="/terminal/sessions/{{ tree.start.parent_session_id }}">another session</a>.{% endif %}</p>
+<p class="muted">Started on {{ tree.start.terminal }} with the role “{{ tree.start.role }}”. Anything started inside it, like helper agents, can only use the same tools or fewer. <a href="/terminal/activity?terminal={{ tree.start.terminal_id | urlencode }}">See its activity</a>.{% if tree.start.parent_session_id %} It was itself started inside <a href="/terminal/sessions/{{ tree.start.parent_session_id | urlencode }}">another session</a>.{% endif %}</p>
 <ul class="session-tree" id="session-tree">{{ node(tree) }}</ul>
 {% if not tree.revoked %}
-<form class="term-form" method="post" action="/terminal/sessions/{{ tree.start.session_id }}/revoke" data-confirm="Revoke this session? Every tool in it and in everything started under it is blocked.">
+<form class="term-form" method="post" action="/terminal/sessions/{{ tree.start.session_id | urlencode }}/revoke" data-confirm="Revoke this session? Every tool in it and in everything started under it is blocked.">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit" class="danger" id="revoke-session">Revoke this session</button>
   <span class="muted">Stops it: every tool in it, and in everything started under it, is blocked from the next check-in (about a minute).</span>

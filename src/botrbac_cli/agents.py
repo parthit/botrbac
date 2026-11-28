@@ -40,14 +40,13 @@ import json
 import shlex
 import shutil
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .coverage import backup_file, is_gateway, servers_in, write_atomic
+from .coverage import GATEWAY_NAME, backup_file, is_gateway, servers_in, write_atomic
 from .patterns import normalize_server
-from .shell import botrbac_command
 
 # The agents botrbac knows. Their names are what audit rows carry in `agent`.
 AGENTS = ("claude-code", "codex", "gemini", "cursor")
@@ -89,10 +88,11 @@ CURSOR_READ = "Read"
 
 
 def hook_command(agent: str, block_unguarded: bool) -> str:
-    parts = [*botrbac_command(), "check", "--agent", agent]
-    if block_unguarded:
-        parts.append("--block-unguarded")
-    return " ".join(shlex.quote(p) for p in parts)
+    # hooks imports this module, so import it here. It bakes in --home, so a BOTRBAC_HOME
+    # the agent sets for a child process cannot send the check to a folder it wrote.
+    from . import hooks
+
+    return hooks.hook_command(block_unguarded, agent=agent)
 
 
 def runs_check(command: Any) -> bool:
@@ -392,12 +392,62 @@ def doctor_report(say: Callable[[str], None], cwd: Path | None = None) -> None:
         if status != "installed":
             say(f"    fix: botrbac hooks install {agent} --user --allow-unguarded")
         if not gateway:
-            fix = (
-                "claude mcp add --scope user botrbac -- botrbac gateway"
-                if agent == "claude-code"
-                else f"botrbac add-gateway --agent {agent}"
-            )
-            say(f"    fix: {fix}")
+            say(f"    fix: {gateway_fix(agent)}")
+    for agent, path in stale_hooks(cwd):
+        say(f"! {agent}: the botrbac hook in {path} is from an older botrbac")
+        user = " --user" if path.parent.parent == Path.home() else ""
+        say(f"    fix: botrbac hooks install {agent}{user} --allow-unguarded")
+    from .coverage import stale_gateways
+
+    for config in stale_gateways(cwd):
+        say(f"! {config.agent}: the botrbac entry in {config.path} is from an older botrbac")
+        say(f"    fix: {gateway_fix(config.agent, update=True)}")
+
+
+def _commands(data: Any) -> Iterator[str]:
+    """Every string under a "command" key, anywhere in a parsed settings file."""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == "command" and isinstance(value, str):
+                yield value
+            else:
+                yield from _commands(value)
+    elif isinstance(data, list):
+        for value in data:
+            yield from _commands(value)
+
+
+def stale_hooks(cwd: Path | None = None) -> list[tuple[str, Path]]:
+    """(agent, file) for each botrbac hook written by a botrbac from before --home: it
+    still works, but follows an inherited BOTRBAC_HOME. `hooks install` again fixes it."""
+    from .hooks import claude_code_settings_files
+
+    here = cwd or Path.cwd()
+    files = [("claude-code", f) for f in claude_code_settings_files(here)]
+    for agent, relative in HOOK_FILES.items():
+        files += [(agent, Path.home() / relative), (agent, here / relative)]
+    out: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for agent, path in files:
+        if path in seen:
+            continue
+        seen.add(path)
+        for command in _commands(_read_json(path)):
+            if runs_check(command) and "--home" not in shlex.split(command):
+                out.append((agent, path))
+                break
+    return out
+
+
+def gateway_fix(agent: str, update: bool = False) -> str:
+    """The command that adds (or brings up to date) the gateway entry for one agent."""
+    if agent != "claude-code":
+        return f"botrbac add-gateway --agent {agent}"
+    from .coverage import installed_command
+
+    add = " ".join(shlex.quote(p) for p in installed_command())
+    command = f"claude mcp add --scope user botrbac -- {add} gateway"
+    return f"claude mcp remove --scope user botrbac && {command}" if update else command
 
 
 # ---- payload adapters ----------------------------------------------------------------
@@ -418,7 +468,12 @@ def normalize(agent: str, payload: Any) -> Any:
 
 
 def _gemini(payload: dict[str, Any]) -> dict[str, Any]:
-    """Gemini names MCP tools `mcp_<server>_<tool>`; check reads `mcp__<server>__<tool>`."""
+    """Gemini names MCP tools `mcp_<server>_<tool>`; check reads `mcp__<server>__<tool>`.
+
+    The server is the one `mcp_context` names. Without it the split is a guess (server
+    `botrbac_x` and the gateway look alike in `mcp_botrbac_x_tool`), so a guess is
+    checked as an ordinary server, never trusted as the gateway: a guess of `botrbac`
+    comes back with no tool name, which check blocks."""
     name = payload.get("tool_name")
     if not isinstance(name, str) or not name.startswith("mcp_") or name.startswith("mcp__"):
         return payload
@@ -427,8 +482,12 @@ def _gemini(payload: dict[str, Any]) -> dict[str, Any]:
     rest = name[len("mcp_") :]
     if isinstance(server, str) and server and rest.startswith(server + "_"):
         tool = rest[len(server) + 1 :]
+        if server != GATEWAY_NAME:
+            server = _not_gateway(server)  # `botrbac__x` must not read as the gateway
     else:
         server, _, tool = rest.partition("_")
+        if server == GATEWAY_NAME:
+            return {k: v for k, v in payload.items() if k != "tool_name"}
     return {**payload, "tool_name": f"mcp__{server}__{tool or 'tool'}"}
 
 
@@ -473,13 +532,13 @@ _LAUNCHERS = frozenset({"npx", "uvx", "bunx", "pnpx", "node", "python", "python3
 
 def _cursor_server(payload: dict[str, Any]) -> str:
     """Cursor's MCP event does not say which server by name; it gives the server's url or
-    command. The botrbac gateway is recognised by its command, as in coverage.is_gateway."""
+    command. Only the gateway's own command (as in coverage.is_gateway) names the gateway."""
     for key in ("server_name", "server", "mcp_server"):
         if isinstance(payload.get(key), str) and payload[key]:
-            return payload[key]
+            return _not_gateway(payload[key])
     url = payload.get("url")
     if isinstance(url, str) and url:
-        return urlsplit(url).hostname or "unknown"
+        return _not_gateway(urlsplit(url).hostname or "unknown")
     command = payload.get("command")
     if isinstance(command, str) and command.strip():
         try:
@@ -487,13 +546,22 @@ def _cursor_server(payload: dict[str, Any]) -> str:
         except ValueError:
             return "unknown"
         if parts and is_gateway({"command": parts[0], "args": parts[1:]}):
-            return "botrbac"
+            return GATEWAY_NAME
         words = [p for p in parts if not p.startswith("-")]
         name = Path(words[0]).name if words else "unknown"
         if name in _LAUNCHERS and len(words) > 1:
             name = Path(words[1]).name
-        return name.split("@")[0] or "unknown"
+        return _not_gateway(name.split("@")[0] or "unknown")
     return "unknown"
+
+
+def _not_gateway(name: str) -> str:
+    """Only the gateway's own command makes a call `mcp__botrbac__…`: a server merely
+    called botrbac (by its label, host or program) is checked as `botrbac-upstream`, the
+    name the gateway would give it (coverage._free_name)."""
+    if normalize_server(name) == GATEWAY_NAME or name.startswith(GATEWAY_NAME + "__"):
+        return f"{GATEWAY_NAME}-upstream"
+    return name
 
 
 # ---- answers ---------------------------------------------------------------------------

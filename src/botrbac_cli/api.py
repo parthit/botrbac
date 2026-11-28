@@ -62,6 +62,7 @@ class Api:
         return _code(r)
 
     def _save(self, issued: dict[str, Any]) -> None:
+        key = issued.get("policy_key") or _creds().get("policy_key")
         state.write_json(
             "credentials.json",
             {
@@ -71,10 +72,11 @@ class Api:
                 "expires_at": time.time() + int(issued.get("expires_in") or 3600) - 60,
                 "terminal_id": issued.get("terminal_id"),
                 # Pinned at login: later policies must be signed with its private half.
-                "policy_key": issued.get("policy_key") or _creds().get("policy_key"),
+                "policy_key": key,
             },
             private=True,
         )
+        identity.remember_policy_key(key)
 
     # ---- authenticated calls -----------------------------------------------------
 

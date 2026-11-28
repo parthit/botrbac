@@ -9,7 +9,7 @@ a hint, never used to decide anything. Anything unexpected is dropped.
 import re
 from typing import Any
 
-_AGENT = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+_AGENT = re.compile(r"[a-z][a-z0-9-]{0,39}")
 _LISTS = ("agents_detected", "agents_hooked", "hook_off")
 MAX_AGENTS = 10
 MAX_SERVERS = 10**6
@@ -20,7 +20,7 @@ def _agents(value: Any) -> list[str]:
         return []
     out: list[str] = []
     for item in value[: MAX_AGENTS * 2]:
-        if isinstance(item, str) and _AGENT.match(item) and item not in out:
+        if isinstance(item, str) and _AGENT.fullmatch(item) and item not in out:
             out.append(item)
     return out[:MAX_AGENTS]
 
