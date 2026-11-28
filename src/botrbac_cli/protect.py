@@ -187,11 +187,26 @@ def _shell_words(command: str, base: Path, depth: int = 0) -> list[Word]:
         else:
             kind = "change"
         last = max((i for i, a in enumerate(args) if not a.startswith("-")), default=0)
+        # `cp -t DIR src…` (also install, ln, mv, rsync): the destination comes first,
+        # so with a target flag every word may be where the copy goes.
+        targets = [
+            a.split("=", 1)[1] if a.startswith("--target-directory=") else a[2:]
+            for a in args
+            if a.startswith("--target-directory=") or (a.startswith("-t") and len(a) > 2)
+        ]
+        dest: int | None = None
+        if name in _COPY_COMMANDS:
+            flag = next((i for i, a in enumerate(args) if a in ("-t", "--target-directory")), None)
+            if flag is not None:
+                dest = flag + 1  # the word after -t is where the copy goes
+            if flag is not None or targets:
+                last = len(args)  # every other word is a source
+            out += [(t, base, "change") for t in targets if t]
         for i, word in enumerate(args):
             # A commit message names paths without touching them, and a copy changes
             # only where it goes (`cp -r ~/.claude backup` is fine, `cp x ~/.claude` not).
             message = name == "git" and i > 0 and args[i - 1] in ("-m", "--message")
-            source = name in _COPY_COMMANDS and i < last
+            source = name in _COPY_COMMANDS and i < last and i != dest
             out.append((word, base, "look" if message or source else kind))
         if len(out) > _MAX_WORDS:
             break

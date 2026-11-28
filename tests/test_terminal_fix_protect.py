@@ -124,3 +124,23 @@ def test_reading_settings_through_the_shell_is_still_refused() -> None:
     # Unchanged: a shell command that names a protected file is refused, even `cat`,
     # because the hook cannot tell what the command does with it.
     assert refusal("Bash", {"command": "cat ~/.claude/settings.json"})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp -t ~/.claude /tmp/settings.json",
+        "cp --target-directory ~/.claude /tmp/settings.json",
+        "cp --target-directory=~/.claude /tmp/settings.json",
+        "cp -t~/.claude /tmp/settings.json",
+        "install -t ~/.claude /tmp/settings.json",
+        "ln -s -t ~/.codex /tmp/hooks.json",
+        "rsync -a /tmp/x/ ~/.gemini/",
+    ],
+)
+def test_copies_with_the_destination_first_are_refused(command) -> None:
+    assert refusal("Bash", {"command": command}), command
+
+
+def test_copying_a_folder_out_with_target_first_passes() -> None:
+    assert refusal("Bash", {"command": "cp -r -t backup src docs"}) is None
