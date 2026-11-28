@@ -58,3 +58,50 @@ def test_outcome_words() -> None:
     assert present.outcome({"outcome": "ok", "duration_ms": 5600}) == "Finished in 5.6 s"
     assert present.outcome({"outcome": "error"}) == "Failed"
     assert present.outcome(None) == ""
+
+
+def test_multi_program_block_and_quoted_role() -> None:
+    why = present.blocked_because("running cmd/curl, cmd/wget is not in role 'Coding, limited'")
+    assert why["text"] == "The role “Coding, limited” doesn't allow the programs curl, wget."
+    assert why["add"] == ["cmd/curl", "cmd/wget"] and why["role"] == "Coding, limited"
+
+
+def test_fix_link_goes_straight_to_the_role_with_the_pattern() -> None:
+    from types import SimpleNamespace
+
+    mine = SimpleNamespace(id="r_1", builtin=False)
+    builtin = SimpleNamespace(id="read-only", builtin=True)
+    roles = {"Mine": mine, "Read-only": builtin}
+    why = present.blocked_because("running cmd/curl is not in role Mine")
+    assert present.fix_link(why, "claude-code/Bash", roles) == "/terminal/roles/r_1?add=cmd/curl"
+    tool = present.blocked_because("not in role 'Read-only'")
+    assert present.fix_link(tool, "claude-code/Write", roles) == (
+        "/terminal/roles/new?from=read-only&add=claude-code/Write"
+    )
+    gone = present.blocked_because("not in role Deleted")
+    assert present.fix_link(gone, "x/y", roles) == "/terminal/roles"
+
+
+def test_role_summary_in_words() -> None:
+    lines = present.role_summary(
+        ["claude-code/*", "claude-code/Read", "claude-code/Grep", "github/get_*",
+         "*/read*", "cmd/git", "cmd/ls", "notion/search"]
+    )  # fmt: skip
+    assert lines == [
+        "All of Claude Code's tools",
+        "Claude Code: Read, Grep",
+        "github tools starting with “get_”",
+        "Any server's tools starting with “read”",
+        "notion: search",
+        "Shell programs: git, ls",
+    ]
+
+
+def test_tools_in_rows_include_refused_programs() -> None:
+    rows = [
+        {"decision": "allow", "tool": "claude-code/Bash"},
+        {"decision": "deny", "tool": "claude-code/Bash",
+         "reason": "running cmd/curl, cmd/wget is not in role R"},
+        {"decision": "prompt", "tool": ""},
+    ]  # fmt: skip
+    assert present.tools_in(rows) == ["claude-code/Bash", "cmd/curl", "cmd/wget"]

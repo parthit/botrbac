@@ -18,6 +18,7 @@ from scoped_drive_mcp.store import MemoryStore
 from scoped_drive_mcp.terminal.feature import TerminalFeature
 from scoped_drive_mcp.terminal.ingest import TerminalActivity, clean_row
 from tests import dash
+from tests.conftest import OWNER_EMAIL
 from tests.terminal_helpers import bearer, cache_policy, connect_terminal, terminal_app
 
 NOW = 1_800_000_000.0
@@ -538,3 +539,32 @@ def test_http_status_is_not_an_exit_code() -> None:
 
     out = provenance.result_fields({"tool_response": {"status_code": 200, "body": "x"}}, False)
     assert out["outcome"] == "ok" and "exit_code" not in out
+
+
+def test_allow_link_opens_the_role_with_the_program_added(world, memstore, oauth) -> None:
+    app = terminal_app(world, memstore, oauth)
+    c = dash.client(app)
+    dash.login(c)
+    issued = connect_terminal(c, role_id="full")
+    token = dash.csrf(c, "/terminal/roles/new")
+    c.post(
+        "/terminal/roles/save",
+        data={"csrf": token, "name": "Coding, limited shell",
+              "patterns": "claude-code/*\ncmd/git", "offline_days": "7"},
+    )  # fmt: skip
+    role = next(r for r in app.state.terminal.roles.all(OWNER_EMAIL) if not r.builtin)
+    blocked = _row(
+        decision="deny", reason="running cmd/curl is not in role 'Coding, limited shell'",
+        role="Coding, limited shell",
+    )  # fmt: skip
+    c.post("/api/terminal/audit", json={"rows": [blocked]}, headers=bearer(issued))
+
+    page = c.get("/terminal/activity").text
+    assert "Coding, limited shell" in page  # the comma survives
+    assert f'href="/terminal/roles/{role.id}?add=cmd/curl"' in page
+    edit = c.get(f"/terminal/roles/{role.id}?add=cmd/curl").text
+    assert 'id="role-adding"' in edit and "cmd/git" in edit
+    assert 'value="cmd/curl" checked' in edit  # offered as a tick box, already ticked
+    # Hooks report no tool list, but what they saw is offered to tick now.
+    assert "curl" in app.state.terminal.roles.seen_tools(OWNER_EMAIL).get("cmd", [])
+    assert c.get(f"/terminal/roles/{role.id}?add=bad pattern!").status_code == 200

@@ -17,6 +17,7 @@
 {% set ticked_now = f.ticked if typed else (role.patterns if role else []) %}
 {% set picked = [] %}
 {% for server, tools in seen.items() %}{% for t in tools %}{% if (server ~ '/' ~ t) in ticked_now %}{% set _ = picked.append(server ~ '/' ~ t) %}{% endif %}{% endfor %}{% endfor %}
+{% if adding %}<div class="flash ok" role="status" id="role-adding">Adding {% for a in adding %}<code>{{ a }}</code>{{ ", " if not loop.last }}{% endfor %} to {% if role %}“{{ role.name }}”{% else %}a new role{% endif %}. Check the list below, then press <b>Save</b>{% if role %}; every computer with this role can use it from its next check-in{% endif %}.</div>{% endif %}
 {% if error %}<div class="flash error" role="alert" id="role-error">{% if f.field == 'patterns' %}Not saved. <a href="#patterns">Check the patterns</a>: {{ error }}{% else %}Not saved: {{ error }}{% endif %}</div>{% endif %}
 <p class="muted lead">List the tools agents may use; everything else is blocked. A role does nothing on its own: after saving, give it to a computer on the <a href="/terminal">Terminals</a> tab (Role column, then Change), or start an agent with <code>--role NAME</code>.</p>
 {% set starters = [
@@ -72,7 +73,7 @@
       </ul>
     </div>
     {% if f.field == 'patterns' %}<p class="term-field-error" id="patterns-error">{{ error }}</p>{% endif %}
-    <textarea id="patterns" name="patterns" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="{{ 'patterns-error ' if f.field == 'patterns' }}patterns-help"{% if f.field == 'patterns' %} aria-invalid="true" autofocus{% endif %}>{% if typed %}{{ f.patterns }}{% elif role %}{% for p in role.patterns if p not in picked %}{{ p }}
+    <textarea id="patterns" name="patterns" rows="{{ [6, ((f.patterns or '').count('\n') + 2) if typed else ((role.patterns | length + 1) if role else 6)] | max }}" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="{{ 'patterns-error ' if f.field == 'patterns' }}patterns-help"{% if f.field == 'patterns' %} aria-invalid="true" autofocus{% endif %}>{% if typed %}{{ f.patterns }}{% elif role %}{% for p in role.patterns if p not in picked %}{{ p }}
 {% endfor %}{% endif %}</textarea>
     <p class="muted small">Shell programs (<code>cmd/…</code>) are checked only with the agent's hook installed, and only when its shell tool, such as <code>claude-code/Bash</code>, is allowed too. A role without any <code>cmd/</code> pattern lets the shell run anything.</p>
   </fieldset>
