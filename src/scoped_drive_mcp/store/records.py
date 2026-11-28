@@ -26,6 +26,7 @@ from .keys import (
     NOTION_TOKEN_KEY,
     ONEDRIVE_TOKEN_KEY,
     OWNER_TOKEN_KEY,
+    TWITTER_TOKEN_KEY,
 )
 
 # One logger name for the whole package, the one `store.py` logged under.
@@ -357,6 +358,51 @@ class TokenVault:
 
     def clear_onedrive(self) -> None:
         self.store.delete(ONEDRIVE_TOKEN_KEY)
+
+    def set_twitter(
+        self,
+        access_token: str,
+        refresh_token: str | None,
+        email: str,
+        expires_at: float,
+        user_id: str = "",
+        username: str = "",
+        scopes: str = "",
+    ) -> None:
+        """This person's X connection. Encrypted like the Drive token, and naming the
+        account it belongs to, so a record copied into another person's slot is refused.
+        `scopes` is what X granted (space-separated); posting needs tweet.write in it."""
+        if self._fernet is None:
+            raise RuntimeError("ENCRYPTION_KEY is not set")
+        payload = {
+            "t": access_token,
+            "email": email,
+            "at": utc_now(),
+            "exp": str(int(expires_at)),
+            "user_id": user_id,
+            "username": username,
+            "scp": scopes,
+        }
+        if refresh_token:
+            payload["r"] = refresh_token
+        self.store.set(
+            TWITTER_TOKEN_KEY, self._fernet.encrypt(json.dumps(payload).encode()).decode()
+        )
+
+    def twitter(self) -> dict[str, str] | None:
+        """The stored X connection for the current person, or None."""
+        record = self._take(TWITTER_TOKEN_KEY)
+        if not record or not record.get("t"):
+            return None
+        want = self.expected() if self.expected is not None else None
+        have = record.get("email")
+        if want and (not have or str(have).strip().lower() != want.strip().lower()):
+            logger.warning("stored X connection belongs to a different account; ignored")
+            return None
+        return record
+
+    def clear_twitter(self) -> None:
+        self.store.delete(TWITTER_TOKEN_KEY)
 
     def bot(self) -> dict[str, str] | None:
         """A bot-account token from before sign-in became per person. Nothing writes

@@ -20,6 +20,7 @@ from .keys import (
     KEY_PREFIX,
     NOTION_ALLOWLIST_KEY,
     ONEDRIVE_ALLOWLIST_KEY,
+    TWITTER_ALLOWLIST_KEY,
 )
 
 # One logger name for the whole package, the one `store.py` logged under.
@@ -61,6 +62,7 @@ _SIGNED_HASHES = frozenset(
         EXTERNAL_ALLOWLIST_KEY,
         NOTION_ALLOWLIST_KEY,
         ONEDRIVE_ALLOWLIST_KEY,
+        TWITTER_ALLOWLIST_KEY,
         AGENT_ROLES_KEY,
     }
 )

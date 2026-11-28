@@ -3,7 +3,7 @@
 {% block title %}Files from OneDrive{% endblock %}
 {% block content %}
 <h1>Files</h1>
-{{ files_tabs('onedrive', allow_count, notion_tab, onedrive_tab) }}
+{{ files_tabs('onedrive', allow_count, notion_tab, onedrive_tab, twitter_tab) }}
 {% if not onedrive_connected %}
 <div class="card empty" id="onedrive-connect">
   <h2>OneDrive isn’t connected</h2>

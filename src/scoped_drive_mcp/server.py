@@ -89,6 +89,7 @@ from .store import (
     KEY_PREFIX,
     NOTION_ALLOWLIST_KEY,
     ONEDRIVE_ALLOWLIST_KEY,
+    TWITTER_ALLOWLIST_KEY,
     ActivityLog,
     Allowlist,
     FirstReads,
@@ -111,14 +112,19 @@ from .tools import mailbox as mailbox_tools
 from .tools import notion as notion_tools
 from .tools import onedrive as onedrive_tools
 from .tools import shared as shared_tools
+from .tools import twitter as twitter_tools
 from .tools import uploads as upload_tools
 from .tools.instructions import (
     INSTRUCTIONS,
     NOTION_CREATE_INSTRUCTIONS,
     NOTION_INSTRUCTIONS,
     ONEDRIVE_INSTRUCTIONS,
+    TWITTER_INSTRUCTIONS,
+    TWITTER_POST_INSTRUCTIONS,
 )
 from .tools.instructions import WATCH_MAIL as WATCH_MAIL  # imported from here by tests
+from .twitter import TwitterService
+from .twitter_client import HttpTwitterApi, TwitterApi, TwitterOAuth
 from .uploads import DirectUploads, UploadSessions
 from .wake import DEFAULT_ALLOWLIST, WakeSettings, decode_kek
 
@@ -184,13 +190,17 @@ def create_mcp(
     onedrive: OneDriveService | None = None,
     uploads: UploadSessions | None = None,
     notion_create: bool = False,
+    twitter: TwitterService | None = None,
+    twitter_post: bool = False,
 ) -> ScopedFastMCP:
     mcp = ScopedFastMCP(
         "scoped-drive",
         instructions=INSTRUCTIONS
         + (NOTION_INSTRUCTIONS if notion is not None else "")
         + (NOTION_CREATE_INSTRUCTIONS if notion is not None and notion_create else "")
-        + (ONEDRIVE_INSTRUCTIONS if onedrive is not None else ""),
+        + (ONEDRIVE_INSTRUCTIONS if onedrive is not None else "")
+        + (TWITTER_INSTRUCTIONS if twitter is not None else "")
+        + (TWITTER_POST_INSTRUCTIONS if twitter is not None and twitter_post else ""),
         stateless_http=True,
         json_response=True,
         streamable_http_path=MCP_PATH,
@@ -215,6 +225,7 @@ def create_mcp(
     drop_tools.register(mcp, drops)
     notion_tools.register(mcp, notion, notion_create)
     onedrive_tools.register(mcp, onedrive)
+    twitter_tools.register(mcp, twitter, twitter_post)
 
     return mcp
 
@@ -448,6 +459,37 @@ def _notion_service(
     )
 
 
+def _twitter_service(
+    settings: Settings,
+    vault: TokenVault,
+    actor_kv: KeyValueStore,
+    api_factory: Callable[[str], TwitterApi] | None,
+    twitter_oauth: TwitterOAuth | None,
+) -> TwitterService | None:
+    # X: offered only when its OAuth client is configured (or a test injects one).
+    if twitter_oauth is None and settings.twitter_configured:
+        assert settings.twitter_oauth_client_id is not None
+        assert settings.twitter_oauth_client_secret is not None
+        twitter_oauth = TwitterOAuth(
+            settings.twitter_oauth_client_id.get_secret_value().strip(),
+            settings.twitter_oauth_client_secret.get_secret_value().strip(),
+            f"{settings.app_base_url}/connect/twitter/callback",
+        )
+    return (
+        TwitterService(
+            lambda: vault,
+            Allowlist(actor_kv, TWITTER_ALLOWLIST_KEY),
+            api_factory or HttpTwitterApi,
+            twitter_oauth,
+            base_url=settings.app_base_url,
+            allow_post=settings.twitter_allow_post,
+            max_chars=settings.max_chars,
+        )
+        if twitter_oauth is not None
+        else None
+    )
+
+
 def _onedrive_service(
     settings: Settings,
     vault: TokenVault,
@@ -529,6 +571,8 @@ def build_app(
     notion_oauth: NotionOAuth | None = None,
     onedrive_api_factory: Callable[[str], OneDriveApi] | None = None,
     onedrive_oauth: OneDriveOAuth | None = None,
+    twitter_api_factory: Callable[[str], TwitterApi] | None = None,
+    twitter_oauth: TwitterOAuth | None = None,
     blob_api: BlobApi | None = None,
     blob_signer: BlobSigner | None = None,
 ) -> Starlette:
@@ -766,6 +810,7 @@ def build_app(
     )
     notion = _notion_service(settings, vault, actor_kv, notion_api_factory, notion_oauth)
     onedrive = _onedrive_service(settings, vault, actor_kv, onedrive_api_factory, onedrive_oauth)
+    twitter = _twitter_service(settings, vault, actor_kv, twitter_api_factory, twitter_oauth)
     # Upload links (start_upload with direct): the same Blob store and signer as held
     # files, inside the same free-tier budget.
     direct_uploads = (
@@ -784,6 +829,8 @@ def build_app(
         onedrive,
         uploads,
         notion_create=settings.notion_allow_create,
+        twitter=twitter,
+        twitter_post=settings.twitter_allow_post,
     )
 
     if oauth is None and settings.oauth_client_configured and settings.app_base_url:
@@ -859,6 +906,8 @@ def build_app(
         notion=notion,
         notion_create=notion is not None and settings.notion_allow_create,
         onedrive=onedrive,
+        twitter=twitter,
+        twitter_post=twitter is not None and settings.twitter_allow_post,
         drops=drop_box,
         terminal=terminal,
     )

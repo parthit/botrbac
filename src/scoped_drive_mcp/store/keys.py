@@ -18,6 +18,8 @@ ACCESS_EDIT = "edit"
 NOTION_ALLOWLIST_KEY = "notion_allowlist"
 # What this person's assistants may read in OneDrive (chosen on Files, "From OneDrive").
 ONEDRIVE_ALLOWLIST_KEY = "onedrive_allowlist"
+# The X accounts and lists this person's assistants may read (chosen on Files, "From X").
+TWITTER_ALLOWLIST_KEY = "twitter_allowlist"
 ACTIVITY_KEY = "activity"
 # Changes (writes, dashboard actions, messages): kept apart so reads cannot push them out.
 ACTIVITY_CHANGES_KEY = "activity:changes"
@@ -28,6 +30,7 @@ OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
 BOT_TOKEN_KEY = "vault:bot_refresh_token"  # noqa: S105 - a key name
 NOTION_TOKEN_KEY = "vault:notion_token"  # noqa: S105 - a key name
 ONEDRIVE_TOKEN_KEY = "vault:onedrive_token"  # noqa: S105 - a key name
+TWITTER_TOKEN_KEY = "vault:twitter_token"  # noqa: S105 - a key name
 USERS_INDEX = "users:index"
 REDIS_IMPORT_FLAG = "sdm:meta:redis_admin_imported"  # on the raw store, not the sdm: view
 REDIS_IMPORT_LOCK = "sdm:meta:redis_admin_import_lock"  # same raw store; expires if a copy dies

@@ -62,6 +62,19 @@
      account.live.com/consent/Manage (personal account) or myapps.microsoft.com (work or
      school account) to end the permission at Microsoft.</p>
 
+  <h2>X (Twitter) data we access</h2>
+  <p>Connecting X is optional, and only offered when this deployment has set it up. X then
+     asks you to let Bot RBAC read posts, accounts and lists your X account can see{% if twitter_post %}, and post for you{% endif %}.
+     X can’t limit that to some accounts, so this app lets an assistant read only the posts
+     of the X accounts and lists you allow on Files. {% if twitter_post %}An assistant you
+     let edit can also post on your account; this app never likes, reposts, follows, sends
+     messages or deletes posts.{% else %}This app never posts, likes, reposts, follows or
+     sends messages.{% endif %} Your X handle is used only to show which account is
+     connected. The X tokens are stored encrypted, like the Google refresh token. Posts are
+     read only to answer an assistant’s request and are not stored. Disconnect X in
+     Settings to delete the tokens and ask X to revoke them, or remove Bot RBAC on X under
+     Settings → Security and account access → Apps and sessions.</p>
+
   <h2>How we use it</h2>
   <p>Google user data is used only to provide the features on the home page and in the
      dashboard:</p>

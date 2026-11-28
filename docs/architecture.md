@@ -97,7 +97,7 @@ that handles one person's data cannot name another's.
 
 | Records | Key (below the prefix) | Notes |
 |---|---|---|
-| Allowlist, Sharing list, Notion and OneDrive lists | `allowlist`, `ext_allowlist`, … (hashes) | **Signed.** Field is the file id |
+| Allowlist, Sharing list, Notion, OneDrive and X lists | `allowlist`, `ext_allowlist`, … (hashes) | **Signed.** Field is the file id |
 | Stored sign-ins | `vault:*` | Fernet-encrypted with `ENCRYPTION_KEY`; the record names its account |
 | Connected apps | `oauth:grants`, `oauth:at:<hash>`, `oauth:rt:<hash>`, `oauth:code:<hash>` | **Signed.** Tokens stored as SHA-256 only, each with a TTL |
 | Access requests | `req:<id>`, pending index | TTL; deduplicated per file |

@@ -55,6 +55,8 @@ from .keys import (
     REDIS_IMPORT_FLAG,
     REDIS_IMPORT_LOCK,
     REDIS_IMPORT_LOCK_TTL,
+    TWITTER_ALLOWLIST_KEY,
+    TWITTER_TOKEN_KEY,
     USERS_INDEX,
 )
 from .records import (
@@ -128,6 +130,8 @@ __all__ = [
     "NOTION_TOKEN_KEY",
     "ONEDRIVE_ALLOWLIST_KEY",
     "ONEDRIVE_TOKEN_KEY",
+    "TWITTER_ALLOWLIST_KEY",
+    "TWITTER_TOKEN_KEY",
     "OWNER_TOKEN_KEY",
     "PostgresStore",
     "PrefixedStore",

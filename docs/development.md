@@ -19,7 +19,7 @@ scripts/terminal_agent_setup.py  writes docs/terminal-agent-setup.md from templa
 src/scoped_drive_mcp/
   server.py                   build_app(), the one place everything is wired together; ScopedFastMCP
   tools/                      MCP tool registration, one module per group (drive, uploads, access,
-                              mailbox, shared, drops, notion, onedrive) + instructions
+                              mailbox, shared, drops, notion, onedrive, twitter) + instructions
   config.py                   env-var settings (pydantic-settings), missing-settings report
   ops.py                      /health/ready and the scheduled clean-up route (/internal/sweep)
   errors.py                   report_exception: one place unexpected errors go
@@ -44,6 +44,7 @@ src/scoped_drive_mcp/
   connections.py              the services a person can connect, one consent step each
   notion.py / notion_client.py        Notion: tools / OAuth and API calls
   onedrive.py / onedrive_client.py    OneDrive: tools / OAuth and Microsoft Graph calls
+  twitter.py / twitter_client.py      X (Twitter): tools / OAuth 2.0 with PKCE and X API v2 calls
 
   People and their assistants
   access.py                   access requests (storage, dedupe, request tools)
@@ -72,7 +73,7 @@ src/scoped_drive_mcp/
   dashboard.py                session, CSRF and error wrappers, security headers, static assets,
                               and the route table
   pages/                      the pages themselves, one module per group (signin, connections, files,
-                              sharing, drops, requests, admin, consent, settings); kit.py is what
+                              sharing, drops, requests, admin, consent, settings, twitter); kit.py is what
                               dashboard.py hands them, common.py what they share
   humanize.py                 plain-language timestamps, names and activity rows; reads nothing
   templates/                  dashboard HTML (Jinja2), app.css, ui.js, fonts
