@@ -283,8 +283,8 @@ def test_activity_page_marks_rows_that_are_not_ok(world, memstore, oauth) -> Non
     rows = _rows(4)
     c.post("/api/terminal/audit", json={"rows": [rows[0], rows[2]]}, headers=bearer(issued))
     page = c.get("/terminal/activity").text
-    assert "rows missing before" in page
-    assert "1 row missing" in c.get("/terminal").text
+    assert "Some earlier records from this computer haven" in page
+    assert "1 activity record hasn" in c.get("/terminal").text
 
 
 def test_feature_without_a_key_sends_unsigned_checkpoints() -> None:

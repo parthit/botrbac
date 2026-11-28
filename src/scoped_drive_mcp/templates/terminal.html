@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_terminal_health.html" import terminal_health %}
 {% from "_terminal_tabs.html" import terminal_tabs %}
 {% block title %}Terminal{% endblock %}
 {% macro copy_line(id, value, label="Copy") -%}
@@ -101,9 +102,9 @@ args = ["gateway", "--agent", "codex"]</pre>
   <ol class="term-how-steps">
     <li><b>Connect a computer.</b> <span class="muted">This puts <code>botrbac</code> between the AI agents on it and their tools: MCP servers, and with Claude Code also its shell and file edits.</span></li>
     <li><b>Give the computer a role.</b> <span class="muted">A role is a list of tools that are allowed; everything else is blocked. Pick it in the <b>Role</b> column of <b>Your terminals</b> and press <b>Change</b>. That is the only place a role gets tied to a computer.</span></li>
-    <li><b>Adjust from Activity.</b> <span class="muted">When an agent is blocked, <a href="/terminal/activity">Activity</a> shows the exact tool name. If it should be allowed, add it to the role.</span></li>
+    <li><b>Adjust from Activity.</b> <span class="muted">When an agent is blocked, <a href="/terminal/activity">Activity</a> says what it tried, why it was stopped, and how to allow it if it should have been.</span></li>
   </ol>
-  <p class="small term-goal"><b>Where you want to end up:</b> each computer on a role that fits the work you do there (not Full access), and no unguarded servers. <a href="/terminal/roles/new">Make a role</a> from a starter, or keep the built-ins:</p>
+  <p class="small term-goal"><b>Where you want to end up:</b> each computer on a role that fits the work you do there (not Full access), and every agent and tool server going through Bot RBAC. <a href="/terminal/roles/new">Make a role</a> from a starter, or keep the built-ins:</p>
   <ul class="small term-goal-list">
     <li><b>Read-only</b>: agents can look but not change anything. Every new computer starts here.</li>
     <li><b>Full access</b>: nothing is blocked; the checks are switched off, but calls are still logged.</li>
@@ -125,14 +126,7 @@ args = ["gateway", "--agent", "codex"]</pre>
     <td data-label="Name"><div class="term-name"><b>{{ t.name }}</b>
       <span class="muted small">{{ t.hostname }}{% if t.os %} · {{ t.os }}{% endif %}{% if t.version %} · botrbac {{ t.version }}{% endif %}</span>
       {% set ch = chains.get(t.id) if chains else none %}
-      {% if ch %}{% if ch.forks %}<span class="pill bad" id="chain-{{ t.id }}" title="Rows that do not fit this computer's record (edited, reordered or replaced). See Activity.">{{ ch.forks }} altered row{{ "s" if ch.forks != 1 }}</span>{% elif ch.missing %}<span class="pill pending" id="chain-{{ t.id }}" title="Rows missing from this computer's record: deleted there, or not sent yet.">{{ ch.missing }} row{{ "s" if ch.missing != 1 }} missing</span>{% else %}<span class="muted small" id="chain-{{ t.id }}">record intact{% if ch.start and ch.start > 1 %} from row {{ ch.start }}{% endif %}</span>{% endif %}{% endif %}
-      {% if t.key_registered and t.key_registered.via == "refresh" %}<span class="pill pending" title="This computer's signing key was added when it renewed its token, not when you approved it. If that computer was not updated around then, disconnect it and connect it again.">key added at refresh {{ t.key_registered.at | epoch | when }}</span>{% elif not t.key_registered and t.last_seen %}<span class="pill" title="An older botrbac with no signing key: its rows are unsigned, and anyone with its token could send rows as it.">unsigned</span>{% endif %}
-      {% if t.hook_missing %}<span class="pill pending" title="Its own tools (shell, file edits) are no longer checked. Run botrbac doctor on that computer.">{{ t.hook_missing | join(", ") }} hook off</span>{% endif %}
-      {% if t.unguarded %}<span class="pill pending" title="{{ t.unguarded | join(', ') }}">{{ t.unguarded | length }} unguarded server{{ "s" if t.unguarded | length != 1 }}</span>
-      <span class="small term-fix" id="unguarded-{{ t.id }}"><b>{{ t.unguarded | join(", ") }}</b> {{ "talks" if t.unguarded | length == 1 else "talk" }} to the agent directly, so the role does not cover {{ "it" if t.unguarded | length == 1 else "them" }}. To fix, on that computer run <code>botrbac doctor</code>: it prints the command for each, usually <code>botrbac wrap claude-code --user</code>.</span>{% endif %}
-      {% set cov = t.coverage or {} %}{% if cov.agents_detected %}{% set gaps = unhooked(cov) %}{% set n_found = cov.agents_detected | length %}{% set n_off = cov.unguarded_servers or 0 %}
-      <span class="pill {{ 'pending' if gaps or n_off else 'ok' }}" id="coverage-{{ t.id }}" title="Agents found: {{ cov.agents_detected | join(', ') }}">Coverage {{ n_found - gaps | length }}/{{ n_found }} agent{{ "s" if n_found != 1 }} hooked, {{ n_off }} unguarded server{{ "s" if n_off != 1 }}</span>
-      {% if gaps %}<span class="small term-fix" id="coverage-fix-{{ t.id }}"><b>{{ gaps | join(", ") }}</b> {{ "runs" if gaps | length == 1 else "run" }} {{ "its" if gaps | length == 1 else "their" }} own tools (shell, file edits) without a check. To fix, on that computer run {% for a in gaps %}<code>botrbac hooks install {{ a }} --user --allow-unguarded</code>{{ ", " if not loop.last }}{% endfor %}.</span>{% endif %}{% endif %}</div></td>
+      {{ terminal_health(t, ch, unhooked, agent_name) }}</div></td>
     <td data-label="Role">
       <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/role">
         <input type="hidden" name="csrf" value="{{ csrf }}">

@@ -30,7 +30,7 @@ from ..audit import audit_owner
 from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
 from . import export as otlp_export
-from . import identity
+from . import identity, present
 from .coverage import clean_coverage, unhooked
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
 from .ingest import RETENTION_DAYS, RETENTION_MAX_ROWS, IngestError, TerminalActivity
@@ -490,6 +490,7 @@ class TerminalFeature:
                 agents=AGENTS,
                 install_cmds={a: install_command(site, a) for a, _ in AGENTS},
                 unhooked=unhooked,
+                agent_name=present.agent_name,
             )
 
         async def device_page(request: Request) -> Response:
@@ -700,7 +701,9 @@ class TerminalFeature:
                 delegation=identity.chain_text,
                 webhook=hook,
                 can_webhook=self.webhook.ready,
-                rows=self.open_commands(shown[:limit]),
+                stories=present.stories(self.open_commands(shown[:limit])),
+                trouble=present.trouble,
+                agent_name=present.agent_name,
                 recording=recording,
                 can_record=self._command_key is not None,
                 more=len(shown) > limit,
@@ -859,7 +862,15 @@ class TerminalFeature:
             tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
             if tree is None:
                 return render(request, "error.html", 404, message="Session not found.")
-            return render(request, "terminal_session.html", tree=self.open_tree(tree))
+            return render(
+                request,
+                "terminal_session.html",
+                tree=self.open_tree(tree),
+                agent_name=present.agent_name,
+                blocked_because=present.blocked_because,
+                describe=present.action,
+                tried=present.tried,
+            )
 
         async def session_revoke(request: Request, _form: Any) -> Response:
             sid = request.path_params["session_id"]

@@ -492,16 +492,18 @@ def test_coverage_shows_on_the_terminals_page(world, memstore, oauth) -> None:
         "unguarded_servers": 0,
     }
     page = c.get("/terminal").text
-    assert "Coverage 2/3 agents hooked, 0 unguarded servers" in page
-    assert "<b>codex</b> runs its own tools" in page
+    assert (
+        "<b>Codex isn&#39;t being checked.</b>" in page
+        or "<b>Codex isn't being checked.</b>" in page
+    )
     assert "botrbac hooks install codex --user --allow-unguarded" in page
 
     full = {**report, "agents_detected": ["cursor"], "agents_hooked": ["cursor"],
             "unguarded_servers": 1}  # fmt: skip
     c.post("/api/terminal/audit", json={"rows": [], "coverage": full}, headers=bearer(issued))
     page = c.get("/terminal").text
-    assert "Coverage 1/1 agent hooked, 1 unguarded server" in page
-    assert "runs its own tools" not in page
+    assert "1 tool server goes around Bot RBAC" in page
+    assert "being checked" not in page
 
     # An old CLI sends no coverage: the last report stays, and junk is ignored.
     for junk in (None, "x", {"unguarded_servers": -3}):

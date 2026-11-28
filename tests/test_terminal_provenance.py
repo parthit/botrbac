@@ -462,15 +462,18 @@ def test_activity_page_filters_and_export(world, memstore, oauth) -> None:
     page = c.get("/terminal/activity").text
     assert "please list the files" in page and "List files" in page
     assert "agent&#39;s claim, not checked" in page or "agent's claim, not checked" in page
-    assert "github.com/o/r@0123456789" in page and "/home/me/proj" in page
-    assert "exit 2" in page and "failed" in page
-    assert "85 ms" in page and "exit ·" not in page and "exit  ·" not in page
+    assert "github.com/o/r (main) at commit <code>0123456789</code>" in page
+    assert "/home/me/proj" in page
+    assert "You asked:" in page and "In its own words:" in page
+    assert "Failed (exit code 2, 7 ms)" in page
+    assert "Finished in 85 ms" not in page or "exit code" in page  # merged into its call
+    assert "exit ·" not in page
 
     only = c.get("/terminal/activity", params={"prompt_id": "p-1"}).text
     assert "please list the files" in only and 'id="activity-scope"' in only
-    assert only.count('data-label="When"') == 2
+    assert only.count('class="step ') == 1 and only.count('class="card story') == 1
     by_session = c.get("/terminal/activity", params={"agent_session_id": "as-2"}).text
-    assert by_session.count('data-label="When"') == 1
+    assert by_session.count('class="step ') == 1
 
     csv_text = c.get("/terminal/activity/export?format=csv").text
     header = csv_text.splitlines()[0].split(",")

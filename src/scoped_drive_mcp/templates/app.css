@@ -1534,3 +1534,50 @@ details.explain > summary::-webkit-details-marker, details.exact > summary::-web
 details.explain > summary::before, details.exact > summary::before { content: "›"; display: inline-block; font-weight: 600; transition: transform 0.15s; }
 details[open].explain > summary::before, details[open].exact > summary::before { transform: rotate(90deg); }
 fieldset.features legend .muted { font-weight: 400; }
+
+/* Terminal activity as stories: one card per prompt, its steps in order. */
+.term-stories { display: grid; gap: 14px; }
+.story { padding: 18px 22px; }
+.story-meta { margin: 0 0 6px; }
+.story-title { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.01em; }
+.story-label { margin: 0 0 4px; }
+.story-ask {
+  margin: 0 0 6px; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--wash);
+  border-radius: 0 10px 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9.5em; overflow: auto;
+}
+.bad-text { color: var(--bad); font-weight: 500; }
+.steps { list-style: none; margin: 12px 0 0; padding: 0; counter-reset: step; }
+.step { position: relative; padding: 12px 0 12px 16px; border-top: 1px solid var(--line); }
+.step::before { content: ""; position: absolute; left: 0; top: 16px; bottom: 16px; width: 3px; border-radius: 2px; background: var(--line); }
+.step.allowed::before { background: var(--ok); }
+.step.blocked::before { background: var(--bad); }
+.step.failed::before, .step.error::before { background: var(--warn); }
+.step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.step .term-ran { margin: 8px 0 0; }
+.step p { margin: 6px 0 0; }
+.why-blocked { color: var(--bad); }
+.warn-line { color: var(--warn); }
+.step-outcome { margin-top: 4px; }
+details.term-tech { margin-top: 4px; border-top: 0; }
+details.term-tech > summary { cursor: pointer; color: var(--ink3); font-size: 13px; font-weight: 500; padding: 4px 0; min-height: 32px; display: inline-flex; align-items: center; }
+.term-tech dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 6px 0 0; font-size: 13px; }
+.term-tech dt { color: var(--ink3); }
+.term-tech dd { margin: 0; overflow-wrap: anywhere; }
+.inline-details { display: inline-block; }
+.term-nudge p { margin: 0 0 10px; }
+details.term-advanced { margin-top: 28px; border-top: 1px solid var(--line); }
+details.term-advanced > summary { padding: 0; }
+.term-advanced > summary { cursor: pointer; list-style: none; }
+.term-advanced > summary h2 { display: inline; font-size: 18px; }
+.term-advanced > summary::before { content: "›"; display: inline-block; margin-right: 8px; transition: transform 0.15s; font-weight: 600; }
+.term-advanced[open] > summary::before { transform: rotate(90deg); }
+.term-advanced section { margin-top: 18px; }
+.term-advanced h3 { font-size: 16px; margin: 0 0 6px; }
+@media (max-width: 640px) { .term-tech dl { grid-template-columns: 1fr; } .story { padding: 16px; } }
+
+/* A computer's health on the Terminals page. */
+.term-health { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; font-size: 14px; }
+.term-health li { overflow-wrap: anywhere; }
+.term-health li.h-warn { color: var(--warn); }
+.term-health li.h-bad { color: var(--bad); }
+.term-health code { word-break: normal; overflow-wrap: normal; white-space: normal; }

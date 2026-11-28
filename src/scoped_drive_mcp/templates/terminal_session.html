@@ -1,26 +1,27 @@
 {% extends "base.html" %}
 {% from "_terminal_tabs.html" import terminal_tabs %}
-{% block title %}Session{% endblock %}
+{% block title %}{{ tree.start.task or "Session" }}{% endblock %}
 {% macro node(n) -%}
 <li>
-  <strong>{{ n.start.agent or n.start.program or "agent" }}</strong> as <strong>{{ n.start.role }}</strong>
-  <span class="muted">· {{ n.calls }} call{{ "s" if n.calls != 1 }}{% if n.blocked %} · {{ n.blocked | length }} blocked{% endif %} · started {{ n.start.ts | epoch | when }}</span>
+  <strong>{{ agent_name(n.start.agent or n.start.program) }}</strong> with the role <strong>{{ n.start.role }}</strong>
+  <span class="muted">· {{ n.calls }} step{{ "s" if n.calls != 1 }}{% if n.blocked %} · {{ n.blocked | length }} blocked{% endif %} · started {{ n.start.ts | epoch | when }}</span>
   {% if n.revoked %}<span class="pill bad">revoked</span>{% endif %}
   {% if n.start.task %}<p class="term-claim small"><span class="muted">Task:</span> {{ n.start.task }}</p>{% elif n.start.task_unreadable %}<p class="term-claim small muted">Task recorded, but it cannot be opened.</p>{% endif %}
-  {% if n.blocked %}<ul>{% for b in n.blocked[:10] %}<li class="muted">blocked <code>{{ b.tool }}</code>: {{ b.reason }}</li>{% endfor %}</ul>{% endif %}
+  {% if n.blocked %}<ul>{% for b in n.blocked[:10] %}{% set why = blocked_because(b.reason) %}<li class="muted"><span class="pill bad">Blocked</span> {{ tried(describe(b).sentence) }}: {{ why.text }}{% if why.role_fix %} <a href="/terminal/roles">To allow it, {{ why.fix }}</a>.{% endif %}</li>{% endfor %}</ul>{% endif %}
   {% if n.children %}<ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>{% endif %}
 </li>
 {%- endmacro %}
 {% block content %}
-<h1>Session <code>…{{ tree.start.session_id[-8:] }}</code></h1>
+<p class="muted small story-meta">Session …{{ tree.start.session_id[-8:] }}</p>
+<h1>{% if tree.start.task %}{{ tree.start.task }}{% else %}A session on {{ tree.start.terminal }}{% endif %}</h1>
 {{ terminal_tabs('activity') }}
-<p class="muted">Started on {{ tree.start.terminal }} with <code>botrbac run --role {{ tree.start.role }}</code>. Everything started inside it can only use the same tools or fewer.{% if tree.start.parent_session_id %} It was itself started inside <a href="/terminal/sessions/{{ tree.start.parent_session_id }}">another session</a>.{% endif %}</p>
+<p class="muted">Started on {{ tree.start.terminal }} with the role “{{ tree.start.role }}”. Anything started inside it, like helper agents, can only use the same tools or fewer. <a href="/terminal/activity?terminal={{ tree.start.terminal_id }}">See its activity</a>.{% if tree.start.parent_session_id %} It was itself started inside <a href="/terminal/sessions/{{ tree.start.parent_session_id }}">another session</a>.{% endif %}</p>
 <ul class="session-tree" id="session-tree">{{ node(tree) }}</ul>
 {% if not tree.revoked %}
 <form class="term-form" method="post" action="/terminal/sessions/{{ tree.start.session_id }}/revoke" data-confirm="Revoke this session? Every tool in it and in everything started under it is blocked.">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit" class="danger" id="revoke-session">Revoke this session</button>
-  <span class="muted">Blocks every tool in it and in everything started under it.</span>
+  <span class="muted">Stops it: every tool in it, and in everything started under it, is blocked from the next check-in (about a minute).</span>
 </form>
 {% endif %}
 {% endblock %}

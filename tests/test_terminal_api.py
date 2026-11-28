@@ -117,8 +117,9 @@ def test_policy_and_audit_over_http(world, memstore, oauth) -> None:
     assert bad.status_code == 400
 
     page = c.get("/terminal/activity").text
-    assert "github/create_issue" in page and "blocked" in page
-    assert "1 unguarded server" in c.get("/terminal").text
+    assert "Used create issue on github" in page and "Blocked" in page
+    assert "<code>github/create_issue</code>" in page  # the exact tool, under Details
+    assert "1 tool server" in c.get("/terminal").text
     assert "get_issue" in c.get("/terminal/roles/new").text  # tool picker
 
     blocked = c.get("/terminal/activity?blocked=1").text

@@ -385,7 +385,7 @@ def test_pages_explain_how_roles_tie_to_computers(world, memstore, oauth) -> Non
     assert 'id="how-it-works"' in page and "Role</b> column" in page
     assert "Agents can read, not edit or run commands." in page  # Read-only, in plain words
     # An unguarded server says what it means and how to fix it.
-    assert "<b>notion</b> talks to the agent directly" in page
+    assert "(notion) goes around Bot RBAC" in page
     assert "<code>botrbac doctor</code>" in page and "botrbac wrap claude-code --user" in page
 
     roles = c.get("/terminal/roles").text
