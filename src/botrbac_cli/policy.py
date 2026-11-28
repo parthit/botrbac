@@ -14,6 +14,7 @@ so an old, wider policy cannot be put back.
 """
 
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -139,12 +140,14 @@ def check_policy(policy: Any, creds: Any = None) -> str:
     return ""
 
 
-def save(policy: dict[str, Any]) -> None:
+def save(policy: dict[str, Any]) -> str:
     """Cache a policy from the server. One that does not check out is not cached (the
-    one already here stays), and a good signed one moves the newest-seen mark."""
+    one already here stays), and a good signed one moves the newest-seen mark. Returns
+    "" when cached, else why not."""
     with state.file_lock(".policy.lock"):
-        if check_policy(policy):
-            return
+        refused = check_policy(policy)
+        if refused:
+            return refused
         state.write_json("policy.json", {"policy": policy, "fetched_at": time.time()})
         if policy.get("signature"):
             data = state.read_json("state.json", {}) or {}
@@ -152,6 +155,7 @@ def save(policy: dict[str, Any]) -> None:
             if issued > float(data.get(NEWEST) or 0):
                 data[NEWEST] = issued
                 state.write_json("state.json", data)
+    return ""
 
 
 def refresh(api: Any) -> dict[str, Any] | None:
@@ -163,7 +167,15 @@ def refresh(api: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(policy, dict):
         return None
-    save(policy)
+    if save(policy):
+        # Most often the site's signing key changed (its ENCRYPTION_KEY was replaced),
+        # so this computer no longer recognises it. Say so rather than fail quietly.
+        print(
+            "botrbac: the role the website sent could not be checked against the key "
+            "this computer saved at login, so the role saved earlier is still used. If "
+            "the website's ENCRYPTION_KEY changed, run botrbac login again.",
+            file=sys.stderr,
+        )
     return policy
 
 

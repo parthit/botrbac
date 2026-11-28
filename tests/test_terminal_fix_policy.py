@@ -265,3 +265,21 @@ def test_two_syncs_never_upload_at_once() -> None:
 def test_servers_add_cmd_is_refused(capsys) -> None:
     assert main(["servers", "add", "cmd", "--url", "https://example.org/mcp"]) == 2
     assert "reserved" in capsys.readouterr().err
+
+
+def test_a_fresh_policy_signed_with_another_key_is_reported_not_cached(capsys) -> None:
+    _login()
+    good = _signed()
+    _write_policy(good)
+    other = signing.key_from_secret("a different ENCRYPTION_KEY")
+    stranger = _signed(role={"id": "w", "name": "Wide", "patterns": ["*"]})
+    del stranger["signature"]
+    stranger["signature"] = signing.sign(other, stranger)
+
+    class Api:
+        def policy(self):
+            return stranger
+
+    policy.refresh(Api())
+    assert "run botrbac login again" in capsys.readouterr().err
+    assert state.read_json("policy.json")["policy"] == good

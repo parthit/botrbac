@@ -144,3 +144,9 @@ def test_copies_with_the_destination_first_are_refused(command) -> None:
 
 def test_copying_a_folder_out_with_target_first_passes() -> None:
     assert refusal("Bash", {"command": "cp -r -t backup src docs"}) is None
+
+
+def test_unbalanced_quotes_still_catch_a_protected_folder() -> None:
+    # bash refuses to run these (syntax error), but the check still names the folder.
+    assert refusal("Bash", {"command": "rm -rf ~/.claude '"})
+    assert refusal("Bash", {"command": 'mv ~/.codex /tmp/x "'})
