@@ -29,7 +29,6 @@
   {% elif r.action.shown %}<p class="small"><code>{{ r.action.shown }}</code></p>
   {% elif r.command_unreadable %}<p class="small muted">What it sent was recorded, but can't be opened (this site's key changed).</p>
   {% elif r.command_error %}<p class="small muted">The computer couldn't record what it sent ({{ r.command_error }}).</p>{% endif %}
-  {% if r.description %}<p class="term-claim small"><span class="muted">In its own words:</span> “{{ r.description }}” <span class="muted">(the agent's claim, not checked)</span></p>{% elif r.description_unreadable %}<p class="term-claim small muted">Its reason was recorded, but can't be opened.</p>{% endif %}
   {% if r.blocked %}<p class="why-blocked small">{{ r.blocked.text }}{% if r.blocked.role_fix %} <a href="/terminal/roles">To allow it, {{ r.blocked.fix }}</a>.{% elif r.blocked.fix %} To fix it, {{ r.blocked.fix }}.{% endif %}</p>
   {% elif r.decision == 'error' %}<p class="why-blocked small">Bot RBAC couldn't check this call ({{ r.reason }}), so it was stopped.</p>{% endif %}
   {% if r.outcome %}<p class="small muted step-outcome">{{ r.outcome }}</p>{% endif %}
@@ -43,7 +42,7 @@
 {{ terminal_tabs('activity') }}
 {% if can_record and not recording %}
 <section class="card term-nudge" id="record-nudge">
-  <p><b>You're seeing which tools agents used, not what they did with them.</b> Turn on <b>Record commands</b> to also see your prompts, the exact commands, and the reason the agent gave for each one. Only you can read them.</p>
+  <p><b>You're seeing which tools agents used, not what they did with them.</b> Turn on <b>Record commands</b> to also see your prompts and the exact command behind every step. Only you can read them.</p>
   <form class="term-form" method="post" action="/terminal/activity/record">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="record" value="1">
@@ -109,7 +108,7 @@
   {% if can_record %}
   <section class="term-record" id="record-commands" aria-labelledby="record-title">
     <h3 id="record-title">Record commands {% if recording %}<span class="pill ok">on</span>{% else %}<span class="pill">off</span>{% endif %}</h3>
-    <p class="small">Shows your prompts, the exact command each agent ran (secrets included), and the reason it gave. Each computer locks this with this site's key before saving it, so agents on that computer can't read it back. Only you see it, here and in exports. What a command printed is never recorded. Very long commands are cut at 8,000 characters.</p>
+    <p class="small">Shows your prompts and the exact command each agent ran (secrets included). Each computer locks this with this site's key before saving it, so agents on that computer can't read it back. Only you see it, here and in exports. What a command printed is never recorded. Very long commands are cut at 8,000 characters.</p>
     <form class="term-form" method="post" action="/terminal/activity/record">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="record" value="{{ '0' if recording else '1' }}">

@@ -245,11 +245,14 @@ class TerminalFeature:
         return self._command_key
 
     def open_commands(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Copies of `rows` with each sealed command, description and task opened, for
-        the owner's eyes only. One that will not open (ENCRYPTION_KEY changed) says so
-        with `<field>_unreadable`."""
+        """Copies of `rows` with each sealed command and task opened, for the owner's eyes
+        only. One that will not open (ENCRYPTION_KEY changed) says so with
+        `<field>_unreadable`. A `description` stored before it was dropped (the model's
+        own summary of its command, not evidence) is left out of pages and exports."""
         out = []
         for row in rows:
+            if "description" in row:
+                row = {k: v for k, v in row.items() if k != "description"}
             event_id = str(row.get("event_id", ""))
             fields = [("command", event_id)] + [(n, f"{event_id}:{n}") for n in SEALED_FIELDS]
             for name, aad in fields:

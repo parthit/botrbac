@@ -453,10 +453,12 @@ and opens it only for its owner's Activity page and exports. Commands are cut at
 recorded command is what the computer reported, not proof of what ran: the public key is enough to seal,
 so a hostile agent on the computer can seal whatever it likes onto rows, as it can already forge rows. See
 [terminal.md](terminal.md#record-commands) for what this does and does not hide.
-The prompt (UserPromptSubmit), the model's description of a shell command and a `botrbac run --task` are
-user or model text, so they follow the same rule: sealed on the computer, sent only with Record commands
-on, kept only if they open for that row, with `<event id>:<field>` as associated data so one cannot be
-moved onto another row or field. The description is the agent's claim, shown as such, not checked.
+The prompt (UserPromptSubmit) and a `botrbac run --task` are user text, so they follow the same rule:
+sealed on the computer, sent only with Record commands on, kept only if they open for that row, with
+`<event id>:<field>` as associated data so one cannot be moved onto another row or field. A tool call's
+own `description` (the model's summary of its command) is never collected, stored or shown: it is the
+model's claim about itself, not evidence. Rows stored before this keep it out of pages, exports and the
+webhook.
 `input_digest` (sha256 of the whole input) and `input_size` are kept only while recording is on.
 
 Stored **in the clear**, as metadata like the hostname: the agent's own ids (session, prompt, tool call,

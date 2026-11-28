@@ -381,7 +381,7 @@ def test_webhook_signs_and_leaves_commands_out_unless_asked() -> None:
     assert hook.save("me@example.com", "https://hooks.example.com/botrbac", True) is None
     hook.deliver("me@example.com", [row], key)
     posted = json.loads(sent[-1]["body"])["rows"][0]
-    assert posted["command"] == "echo TOKEN" and posted["description"] == "list files"
+    assert posted["command"] == "echo TOKEN" and "description" not in posted
     # Opted in but recording is off (no key): still nothing.
     hook.deliver("me@example.com", [row], None)
     assert "command" not in json.loads(sent[-1]["body"])["rows"][0]

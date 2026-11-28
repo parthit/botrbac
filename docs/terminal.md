@@ -342,8 +342,12 @@ rows add the agent's own ids (session, prompt, tool call, subagent), the permiss
 folder and its git remote, branch and commit, and for a finished call its outcome, exit code, duration and
 result size. These are stored in the clear, like the computer's name. Tool results and the contents of
 files read are never recorded. Unless you turn on Record commands, neither is what was sent to a tool, nor
-the prompt, nor the agent's description of a command, nor a `--task`, and a session start records only the
-program's name.
+the prompt, nor a `--task`, and a session start records only the program's name.
+
+Why an agent ran something comes only from what you gave it: the prompt it was answering (every call
+carries that prompt's id) and the session's `--task`. What the model says about its own command, such as
+the one-line `description` Claude Code's Bash tool carries, is never kept. A model can write anything
+there, so it would read like evidence without being any.
 
 ### Record commands
 
@@ -355,13 +359,11 @@ cut at 8,000 characters. It is off until you turn it on, and applies to all your
 With it on, rows also carry:
 
 - the **prompt** you typed, on the `prompt` row (UserPromptSubmit);
-- the **agent's reason** for a shell command (Claude Code's Bash `description`), shown as "agent's claim,
-  not checked": it is what the model said it was doing, not proof of it;
 - the **task** given with `botrbac run --task "…"`, on the session's start row and its session page;
 - `input_digest` (`sha256:<hex>`) and `input_size` (bytes) of the whole command or tool input, taken
   before the 8,000-character cut, so a long input can be matched against a copy you have.
 
-The prompt, the reason and the task are sealed like the command, each bound to its row and its field
+The prompt and the task are sealed like the command, each bound to its row and its field
 name, so none can be moved onto another row or swapped for another field. Without Record commands none of
 them is sent.
 

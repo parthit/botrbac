@@ -4,9 +4,10 @@ All optional, so rows from older CLIs are accepted as they are. In the clear (me
 like the hostname): the agent's own ids, the permission mode, the cwd and the git
 checkout (`repo` as host/owner/name, `branch`, `head`), and a result row's outcome and
 sizes. Sealed, and kept only while "Record commands" is on and only if they open for
-this row and field: `description` (the model's stated reason for a shell command) and
-`task` (`botrbac run --task`). `input_digest` and `input_size` are kept only while
-recording is on, as they describe the recorded command.
+this row and field: `task` (`botrbac run --task`). A `description` (the model's own
+summary of its command) is never stored: rows from CLIs that sent one lose it here.
+`input_digest` and `input_size` are kept only while recording is on, as they describe
+the recorded command.
 """
 
 import re
@@ -22,7 +23,7 @@ ID_FIELDS = (
     "agent_type",
     "parent_agent_id",
 )
-SEALED_FIELDS = ("description", "task")
+SEALED_FIELDS = ("task",)
 # Every field this module may add, in the order exports list them.
 FIELDS = (
     *ID_FIELDS,
@@ -31,7 +32,6 @@ FIELDS = (
     "repo",
     "branch",
     "head",
-    "description",
     "task",
     "input_digest",
     "input_size",

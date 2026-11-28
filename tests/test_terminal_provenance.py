@@ -1,4 +1,4 @@
-"""Terminal: hook provenance and intent (ids, prompts, results, description, git)."""
+"""Terminal: hook provenance and intent (ids, prompts, results, git)."""
 
 import hashlib
 import io
@@ -119,7 +119,7 @@ def test_fields_are_parsed_defensively() -> None:
 # ---- PreToolUse rows ----------------------------------------------------------------
 
 
-def test_pre_tool_row_keeps_ids_and_seals_the_description() -> None:
+def test_pre_tool_row_keeps_ids_and_never_the_models_description() -> None:
     _recording()
     command = f"GH_TOKEN={SECRET} " + "echo hi; " * 1200  # longer than the 8,000 cut
     payload = {
@@ -133,11 +133,8 @@ def test_pre_tool_row_keeps_ids_and_seals_the_description() -> None:
     assert row["agent_session_id"] == "abc-123" and row["tool_use_id"] == "toolu_01"
     assert row["cwd"] == "/home/me/proj" and row["permission_mode"] == "acceptEdits"
     assert SECRET not in json.dumps(row)
-    assert sealing.open_sealed(KEY, f"{row['event_id']}:description", row["description"]) == (
-        f"List PRs using {SECRET}"
-    )
-    with pytest.raises(sealing.SealError):  # bound to its field
-        sealing.open_sealed(KEY, row["event_id"], row["description"])
+    # The model's own summary of its command is not evidence: never kept, sealed or not.
+    assert "description" not in row
     # The digest covers the whole command, not the cut one that was sealed.
     data = command.encode()
     assert row["input_digest"] == "sha256:" + hashlib.sha256(data).hexdigest()
@@ -262,28 +259,20 @@ def _row(**over):
     return row
 
 
-def test_sealed_description_round_trip_through_clean_row() -> None:
+def test_server_never_keeps_a_description() -> None:
+    """An older CLI may still send the model's description, sealed properly: dropped."""
     row = _row()
     row["description"] = sealing.seal(PUBLIC, f"{row['event_id']}:description", "List files")
     row["input_digest"] = "sha256:" + "a" * 64
     row["input_size"] = 12
     kept = clean_row(row, NOW, KEY)
-    assert kept["description"] == row["description"]
+    assert "description" not in kept
     assert kept["input_digest"] == row["input_digest"] and kept["input_size"] == 12
-    (opened,) = TerminalFeature(MemoryStore(), signing_secret="test secret").open_commands([kept])
-    assert opened["description"] == "List files" and not opened["description_unreadable"]
-    off = clean_row(row, NOW)  # recording off: none of it
-    assert "description" not in off and "input_digest" not in off and "input_size" not in off
-
-
-def test_server_drops_a_description_sealed_with_the_wrong_aad() -> None:
-    row = _row()
-    eid = row["event_id"]
-    for wrong in (eid, f"{eid}:task", f"{uuid.uuid4().hex}:description"):
-        row["description"] = sealing.seal(PUBLIC, wrong, "moved")
-        assert "description" not in clean_row(row, NOW, KEY)
-    row["description"] = "plain text"
-    assert "description" not in clean_row(row, NOW, KEY)
+    off = clean_row(row, NOW)  # recording off: no digest either
+    assert "input_digest" not in off and "input_size" not in off
+    # One already stored before this change stays out of pages and exports.
+    (opened,) = TerminalFeature(MemoryStore(), signing_secret="test secret").open_commands([row])
+    assert "description" not in opened and "description_unreadable" not in opened
 
 
 def test_server_validates_context_fields() -> None:
@@ -448,7 +437,6 @@ def test_activity_page_filters_and_export(world, memstore, oauth) -> None:
         branch="main",
         head="0123456789abcdef",
     )
-    call["description"] = sealing.seal(public, f"{call['event_id']}:description", "List files")
     result = _row(
         decision="result", tool_use_id="toolu_1", outcome="error", exit_code=2, duration_ms=7
     )
@@ -460,11 +448,11 @@ def test_activity_page_filters_and_export(world, memstore, oauth) -> None:
     assert sent.json()["accepted"] == 5
 
     page = c.get("/terminal/activity").text
-    assert "please list the files" in page and "List files" in page
-    assert "agent&#39;s claim, not checked" in page or "agent's claim, not checked" in page
+    assert "please list the files" in page
+    assert "claim, not checked" not in page and "In its own words" not in page
     assert "github.com/o/r (main) at commit <code>0123456789</code>" in page
     assert "/home/me/proj" in page
-    assert "You asked:" in page and "In its own words:" in page
+    assert "You asked:" in page
     assert "Failed (exit code 2, 7 ms)" in page
     assert "Finished in 85 ms" not in page or "exit code" in page  # merged into its call
     assert "exit ·" not in page
@@ -480,11 +468,11 @@ def test_activity_page_filters_and_export(world, memstore, oauth) -> None:
     for name in (
         "agent_session_id", "prompt_id", "tool_use_id", "agent_id", "agent_type",
         "parent_agent_id", "permission_mode", "cwd", "repo", "branch", "head",
-        "description", "task", "input_digest", "input_size", "outcome", "exit_code",
+        "task", "input_digest", "input_size", "outcome", "exit_code",
         "duration_ms", "result_size",
     ):  # fmt: skip
         assert name in header
-    assert "List files" in csv_text
+    assert "please list the files" in csv_text and "description" not in header
     lines = c.get("/terminal/activity/export?format=jsonl&prompt_id=p-1").text.splitlines()
     assert len(lines) == 2 and {json.loads(x)["prompt_id"] for x in lines} == {"p-1"}
 

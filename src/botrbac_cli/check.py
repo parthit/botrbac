@@ -14,8 +14,9 @@ A shell tool (Claude Code's Bash, Codex's shell, Gemini's run_shell_command; see
 shellcmd.SHELL_TOOLS) is checked twice when the role has `cmd/` patterns: the tool
 itself, then every program in its command as `cmd/<program>`. The row's reason names
 programs only. The command itself (or another tool's input) is recorded only when the
-person turned on "Record commands", and then only sealed to the website's key, as is
-Bash's `description` (the model's stated reason).
+person turned on "Record commands", and then only sealed to the website's key. A tool's
+own `description` field (Bash's one-line summary, written by the model) is never kept:
+what the model says about its own command is not evidence of why it ran.
 
 The same command handles more hook events, by the payload's `hook_event_name`:
 UserPromptSubmit writes a `prompt` row (the prompt sealed, with Record commands on),
@@ -95,7 +96,6 @@ def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) ->
     row.update(provenance.hook_fields(payload))
     row.update(provenance.git_context(row.get("cwd")))
     row["command"] = _what_ran(agent, tool, payload, tool_input)
-    row["sealed"] = {"description": _description(agent, tool, tool_input)}
     guarded = refusal(tool, tool_input if tool_input is not None else payload)
     if guarded:
         _record(decision="deny", reason="protected file", role="", **row)
@@ -141,15 +141,6 @@ def _what_ran(agent: str, tool: str, payload: Any, tool_input: Any) -> str | Non
         if command is not None:
             return command
     return describe(tool_input if tool_input is not None else payload)
-
-
-def _description(agent: str, tool: str, tool_input: Any) -> str | None:
-    """The model's own one-line reason for a shell command (Bash's `description`).
-    It is the agent's claim, not checked; kept only sealed, with Record commands on."""
-    if not is_shell_tool(normalize_server(agent), tool) or not isinstance(tool_input, dict):
-        return None
-    text = tool_input.get("description")
-    return text if isinstance(text, str) and text.strip() else None
 
 
 def observe(agent: str, payload: Any, event: str) -> None:
