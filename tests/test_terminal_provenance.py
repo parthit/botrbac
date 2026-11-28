@@ -453,15 +453,18 @@ def test_activity_page_filters_and_export(world, memstore, oauth) -> None:
         decision="result", tool_use_id="toolu_1", outcome="error", exit_code=2, duration_ms=7
     )
     other = _row(prompt_id="p-2", agent_session_id="as-2")
-    rows = [prompt, call, result, other]
+    # A finished call with no exit code (Claude Code's PostToolUse) shows none.
+    quiet = _row(decision="result", tool_use_id="toolu_2", outcome="ok", duration_ms=85)
+    rows = [prompt, call, result, other, quiet]
     sent = c.post("/api/terminal/audit", json={"rows": rows}, headers=bearer(issued))
-    assert sent.json()["accepted"] == 4
+    assert sent.json()["accepted"] == 5
 
     page = c.get("/terminal/activity").text
     assert "please list the files" in page and "List files" in page
     assert "agent&#39;s claim, not checked" in page or "agent's claim, not checked" in page
     assert "github.com/o/r@0123456789" in page and "/home/me/proj" in page
     assert "exit 2" in page and "failed" in page
+    assert "85 ms" in page and "exit ·" not in page and "exit  ·" not in page
 
     only = c.get("/terminal/activity", params={"prompt_id": "p-1"}).text
     assert "please list the files" in only and 'id="activity-scope"' in only
