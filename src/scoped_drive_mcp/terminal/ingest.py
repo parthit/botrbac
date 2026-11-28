@@ -41,6 +41,11 @@ REVOKED_KEY = "term:revoked:{email}"
 SETTINGS_KEY = "term:settings:{email}"
 # The most rows the Activity page reads at once. Exports read everything kept.
 ACTIVITY_MAX = 2000
+# The Activity page: rows per page, and at most how many rows one page request reads
+# from the store (in chunks) looking for rows that match its filters.
+PAGE_ROWS = 100
+PAGE_SCAN = 5000
+PAGE_CHUNK = 500
 # How long rows are kept (TERMINAL_ACTIVITY_DAYS), and a hard cap on how many
 # (TERMINAL_ACTIVITY_MAX_ROWS), whichever comes first.
 RETENTION_DAYS = 180
@@ -350,6 +355,80 @@ class TerminalActivity:
             if isinstance(row, dict):
                 out.append(row)
         return out
+
+    def page(
+        self,
+        email: str,
+        keep: Callable[[dict[str, Any]], bool],
+        *,
+        after: str | None = None,
+        count: int = PAGE_ROWS,
+        blocked: bool = False,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """One page of the Activity log: up to `count` rows `keep` accepts, newest
+        received first, starting after the cursor `after` (from the previous page).
+
+        Reads at most PAGE_SCAN rows from the store per call, so a page costs the same
+        whatever the log's size. With `blocked`, it reads the blocked rows kept apart,
+        which hold every block still kept. The cursor is "<position>:<received>:<event
+        id>" of the last row shown; rows pushed in front since then shift positions, so
+        rows are skipped until that row (or anything older than it) is passed.
+        Returns the rows and the next cursor (None when the log ends)."""
+        key = (DENIES_KEY if blocked else ACTIVITY_KEY).format(email=email)
+        pos, anchor_received, anchor_id = 0, None, None
+        if after:
+            parts = after.split(":")
+            try:
+                if len(parts) == 3:
+                    pos = min(max(0, int(parts[0])), 10_000_000)
+                    if is_id(parts[2]):
+                        anchor_received, anchor_id = float(parts[1]), parts[2]
+            except ValueError:
+                pos, anchor_received, anchor_id = 0, None, None
+        skipping = anchor_id is not None
+        if skipping:
+            # Start at the last row shown: if nothing arrived since, it is the first row
+            # read, and rows of its own upload (same arrival time) after it still show.
+            pos = max(0, pos - 1)
+        cutoff = self.cutoff()
+        out: list[dict[str, Any]] = []
+        scanned = 0
+        while scanned < PAGE_SCAN:
+            raws = self.store.lrange(key, pos, pos + PAGE_CHUNK - 1)
+            if not raws:
+                return out, None
+            for raw in raws:
+                pos += 1
+                scanned += 1
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                received = float(row.get("received") or row.get("ts") or 0)
+                if skipping:
+                    if row.get("event_id") == anchor_id:
+                        skipping = False
+                        continue
+                    if anchor_received is not None and received >= anchor_received:
+                        continue
+                    skipping = False
+                if received < cutoff:
+                    return out, None
+                if keep(row):
+                    out.append(row)
+                    if len(out) >= count:
+                        last_id = row.get("event_id") if is_id(row.get("event_id")) else ""
+                        return out, f"{pos}:{received!r}:{last_id}"
+            if len(raws) < PAGE_CHUNK:
+                return out, None
+        # Read as far as one page may: there may be more beyond, so offer a cursor.
+        last = out[-1] if out else None
+        if last is not None and is_id(last.get("event_id")):
+            got = float(last.get("received") or last.get("ts") or 0)
+            return out, f"{pos}:{got!r}:{last['event_id']}"
+        return out, f"{pos}:0:"
 
     def recent(self, email: str, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         """The newest `limit` rows, and blocked rows kept apart that are not among them

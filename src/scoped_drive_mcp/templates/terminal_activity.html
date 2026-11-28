@@ -93,9 +93,12 @@
 </article>
 {% endfor %}
 </div>
-{% if more %}<p><a class="btn" href="/terminal/activity?{{ export_query }}{{ '&' if export_query }}show={{ limit + 100 }}">Show more</a></p>{% endif %}
+{% if older_query or newest_query is not none %}<nav class="actions" aria-label="More activity">
+  {% if newest_query is not none %}<a class="btn ghost" href="/terminal/activity{{ '?' ~ newest_query if newest_query }}" id="activity-newest">Newest</a>{% endif %}
+  {% if older_query %}<a class="btn" href="/terminal/activity?{{ older_query }}" id="activity-older">Older</a>{% endif %}
+</nav>{% endif %}
 {% elif total %}
-<p class="muted">Nothing matches. <a href="/terminal/activity">Show all activity</a></p>
+<p class="muted">{% if newest_query is not none %}No older activity matches. <a href="/terminal/activity{{ '?' ~ newest_query if newest_query }}">Back to the newest</a>{% if older_query %} or <a href="/terminal/activity?{{ older_query }}">keep looking further back</a>{% endif %}.{% else %}Nothing matches in the newest activity.{% if older_query %} <a href="/terminal/activity?{{ older_query }}">Look further back</a>.{% endif %} <a href="/terminal/activity">Show all activity</a>{% endif %}</p>
 {% else %}
 <div class="card empty" id="no-activity">
   <h2>No activity yet</h2>

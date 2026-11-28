@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import anyio.to_thread
 from starlette.requests import Request
@@ -34,6 +35,7 @@ from . import identity, present
 from .coverage import clean_coverage, unhooked
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
 from .ingest import (
+    PAGE_ROWS,
     RETENTION_DAYS,
     RETENTION_MAX_ROWS,
     ROWS_PER_DAY,
@@ -98,7 +100,9 @@ TERMINAL_LIMIT = 240
 REFRESH_LIMIT = 30
 MAX_BODY = 2 * 1024 * 1024
 MAX_UNGUARDED = 50
-ACTIVITY_PAGE = 100
+ACTIVITY_PAGE = PAGE_ROWS
+# Newest rows read to fill the agent filter and tell whether there is any activity.
+ACTIVITY_SAMPLE = 500
 _TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 SETUP_MD = _TEMPLATES / "terminal_setup.md"
 INSTALL_SH = _TEMPLATES / "terminal_install.sh"
@@ -733,17 +737,27 @@ class TerminalFeature:
 
         async def activity_page(request: Request) -> Response:
             email = _me()
-            rows = await _run(self.activity.recent, email)
+            q = request.query_params
+            after = str(q.get("after") or "")[:200] or None
+            # One page at a time, read from the store with the filters applied, so the
+            # page costs the same however many rows are kept.
+            shown, cursor = await _run(
+                self.activity.page,
+                email,
+                wanted(request),
+                after=after,
+                count=ACTIVITY_PAGE,
+                blocked=q.get("blocked") == "1",
+            )
+            # A small sample of the newest rows: whether there is any activity at all,
+            # and the agents to offer in the filter.
+            sample = await _run(self.activity.recent, email, ACTIVITY_SAMPLE)
             terminals = await _run(self.terminals.for_person, email)
-            agents = sorted({r["agent"] for r in rows if r.get("agent")})
-            shown = filtered(request, rows)
-            try:
-                limit = max(ACTIVITY_PAGE, min(int(request.query_params.get("show") or 0), 2000))
-            except ValueError:
-                limit = ACTIVITY_PAGE
+            agents = sorted({r["agent"] for r in [*sample, *shown] if r.get("agent")})
             recording = await _run(self.activity.records_commands, email)
             hook = await _run(self.webhook.get, email)
-            opened = await _run(self.open_commands, shown[:limit])
+            opened = await _run(self.open_commands, shown)
+            filters = [(k, v) for k, v in q.multi_items() if k not in ("after", "show")]
             return render(
                 request,
                 "terminal_activity.html",
@@ -755,13 +769,13 @@ class TerminalFeature:
                 agent_name=present.agent_name,
                 recording=recording,
                 can_record=self._command_key is not None,
-                more=len(shown) > limit,
-                limit=limit,
-                total=len(rows),
+                older_query=urlencode([*filters, ("after", cursor)]) if cursor else None,
+                newest_query=urlencode(filters) if after else None,
+                total=len(sample) + len(shown),
                 terminals=terminals,
                 agents=agents,
                 q=request.query_params,
-                export_query=request.url.query,
+                export_query=urlencode(filters),
             )
 
         async def activity_export(request: Request) -> Response:

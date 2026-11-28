@@ -363,7 +363,11 @@ Each terminal may store at most `TERMINAL_ACTIVITY_ROWS_PER_DAY` rows (default 1
 blocked rows are kept in a list of their own with the same limits, so a flood of allowed rows from one
 computer cannot push blocks out of the log. The site keeps rows for `TERMINAL_ACTIVITY_DAYS` (default 180) and at most `TERMINAL_ACTIVITY_MAX_ROWS`
 per person (default 20,000), whichever comes first. Old rows are trimmed by when they arrived. The Activity
-page shows the newest 2,000; exports stream everything kept.
+page shows 100 rows at a time, newest first, with **Older** to go further back through everything
+kept. Its filters (computer, agent, blocked only) are applied as it reads, so they reach the whole log;
+one page reads at most 5,000 rows, and when nothing matches in those it offers to look further back.
+Exports stream everything kept. Each row is about 1–2 KB (up to about 40 KB with a recorded command), so
+raising `TERMINAL_ACTIVITY_MAX_ROWS` costs only storage in your Redis.
 
 Audit rows hold identifiers and decisions: the tool name, agent, role, session, and allow or block. Hook
 rows add the agent's own ids (session, prompt, tool call, subagent), the permission mode, the working
