@@ -25,6 +25,8 @@ from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
 from .ingest import IngestError, TerminalActivity
+from .provenance import FIELDS as PROVENANCE_FIELDS
+from .provenance import SEALED_FIELDS
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -217,21 +219,34 @@ class TerminalFeature:
         return self._command_key
 
     def open_commands(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Copies of `rows` with each sealed command opened, for the owner's eyes only.
-        A command that will not open (ENCRYPTION_KEY changed) says so."""
+        """Copies of `rows` with each sealed command, description and task opened, for
+        the owner's eyes only. One that will not open (ENCRYPTION_KEY changed) says so
+        with `<field>_unreadable`."""
         out = []
         for row in rows:
-            sealed = row.get("command")
-            if sealed and self._command_key is not None:
-                try:
-                    text = sealing.open_sealed(self._command_key, row["event_id"], sealed)
-                except sealing.SealError:
-                    text = None
-                row = {**row, "command": text, "command_unreadable": text is None}
-            elif sealed:
-                row = {**row, "command": None, "command_unreadable": True}
+            event_id = str(row.get("event_id", ""))
+            fields = [("command", event_id)] + [(n, f"{event_id}:{n}") for n in SEALED_FIELDS]
+            for name, aad in fields:
+                sealed = row.get(name)
+                if not sealed:
+                    continue
+                text = None
+                if self._command_key is not None:
+                    try:
+                        text = sealing.open_sealed(self._command_key, aad, sealed)
+                    except sealing.SealError:
+                        text = None
+                row = {**row, name: text, f"{name}_unreadable": text is None}
             out.append(row)
         return out
+
+    def open_tree(self, tree: dict[str, Any]) -> dict[str, Any]:
+        """A session tree (TerminalActivity.session) with each start row opened."""
+        return {
+            **tree,
+            "start": self.open_commands([tree["start"]])[0],
+            "children": [self.open_tree(c) for c in tree.get("children") or []],
+        }
 
     @property
     def policy_key(self) -> str | None:
@@ -567,6 +582,9 @@ class TerminalFeature:
                 rows = [r for r in rows if r.get("agent") == q["agent"]]
             if q.get("blocked") == "1":
                 rows = [r for r in rows if r.get("decision") == "deny"]
+            for key in ("prompt_id", "agent_session_id"):
+                if q.get(key):
+                    rows = [r for r in rows if r.get(key) == q[key]]
             return rows
 
         async def activity_page(request: Request) -> Response:
@@ -602,6 +620,7 @@ class TerminalFeature:
                 "ts", "terminal", "terminal_id", "agent", "tool", "command",
                 "command_error", "decision", "reason", "role", "session_id",
                 "parent_session_id", "via", "event_id", "received",
+                *PROVENANCE_FIELDS,
             ]  # fmt: skip
             if request.query_params.get("format") == "jsonl":
                 text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
@@ -648,7 +667,7 @@ class TerminalFeature:
             tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
             if tree is None:
                 return render(request, "error.html", 404, message="Session not found.")
-            return render(request, "terminal_session.html", tree=tree)
+            return render(request, "terminal_session.html", tree=self.open_tree(tree))
 
         async def session_revoke(request: Request, _form: Any) -> Response:
             sid = request.path_params["session_id"]

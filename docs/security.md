@@ -453,6 +453,21 @@ and opens it only for its owner's Activity page and exports. Commands are cut at
 recorded command is what the computer reported, not proof of what ran: the public key is enough to seal,
 so a hostile agent on the computer can seal whatever it likes onto rows, as it can already forge rows. See
 [terminal.md](terminal.md#record-commands) for what this does and does not hide.
+The prompt (UserPromptSubmit), the model's description of a shell command and a `botrbac run --task` are
+user or model text, so they follow the same rule: sealed on the computer, sent only with Record commands
+on, kept only if they open for that row, with `<event id>:<field>` as associated data so one cannot be
+moved onto another row or field. The description is the agent's claim, shown as such, not checked.
+`input_digest` (sha256 of the whole input) and `input_size` are kept only while recording is on.
+
+Stored **in the clear**, as metadata like the hostname: the agent's own ids (session, prompt, tool call,
+subagent), the permission mode, the hook's **cwd**, and the git **repo** (the `origin` remote as
+host/owner/name, with userinfo, tokens, scheme and port stripped on the computer and checked again on the
+server), **branch** and **head** commit. Folder and branch names can say something about the work, so
+they are visible to anyone who can read the activity log. Result rows hold the outcome, exit code,
+duration and result size, never result text. The hook runs only `git rev-parse` and `git config --get`
+in the cwd, with fsmonitor off and no prompts, under a one-second limit; a git failure never changes a
+decision. The prompt and result hooks always exit 0, so a fault there never blocks the agent; PreToolUse
+still fails closed.
 CSV export prefixes cells that would start a spreadsheet formula.
 
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's

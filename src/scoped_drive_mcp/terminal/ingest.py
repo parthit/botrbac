@@ -18,6 +18,8 @@ from typing import Any
 from botrbac_cli import sealing
 from botrbac_cli.patterns import is_tool_id
 
+from . import provenance
+
 ACTIVITY_KEY = "term:activity:{email}"
 SEEN_KEY = "term:seen:{email}:{event_id}"
 REVOKED_KEY = "term:revoked:{email}"
@@ -25,7 +27,10 @@ SETTINGS_KEY = "term:settings:{email}"
 ACTIVITY_MAX = 2000
 BATCH_MAX = 500
 SEEN_TTL = 30 * 24 * 3600
-DECISIONS = frozenset({"allow", "deny", "error", "session"})
+# `prompt` (UserPromptSubmit, no tool) and `result` (a finished call) come from hooks.
+DECISIONS = frozenset({"allow", "deny", "error", "session", "prompt", "result"})
+NO_TOOL = frozenset({"session", "prompt"})
+CALLS = frozenset({"allow", "deny", "error"})
 _ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _WORD = re.compile(r"[^A-Za-z0-9_.:/@ -]+")
 
@@ -65,13 +70,13 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
     if not _ID.match(event_id) or decision not in DECISIONS:
         return None
     tool = str(raw.get("tool") or "")
-    if decision != "session" and not is_tool_id(tool):
+    if decision not in NO_TOOL and not is_tool_id(tool):
         return None
     row: dict[str, Any] = {
         "event_id": event_id,
         "ts": _ts(raw.get("ts"), now) or now,
         "decision": decision,
-        "tool": tool[:200] if decision != "session" else "",
+        "tool": tool[:200] if decision not in NO_TOOL else "",
         "agent": _word(raw.get("agent"), 40),
         "reason": _word(raw.get("reason"), 300),
         "role": _word(raw.get("role"), 64),
@@ -89,6 +94,7 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
             pass
         else:
             row["command"] = command
+    row.update(provenance.clean_fields(raw, event_id, decision, command_key))
     if command_key is not None and raw.get("command_error") and "command" not in row:
         # The computer could not seal this one: say so, without any of the command.
         row["command_error"] = _word(raw.get("command_error"), 40) or "error"
@@ -190,7 +196,7 @@ class TerminalActivity:
                 children.setdefault(parent, []).append(sid)
 
         def node(sid: str, depth: int) -> dict[str, Any]:
-            calls = [r for r in rows if r.get("session_id") == sid and r["decision"] != "session"]
+            calls = [r for r in rows if r.get("session_id") == sid and r["decision"] in CALLS]
             return {
                 "start": starts[sid],
                 "calls": len(calls),

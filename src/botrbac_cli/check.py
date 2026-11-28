@@ -14,14 +14,21 @@ A shell tool (Claude Code's Bash, Codex's shell, Gemini's run_shell_command; see
 shellcmd.SHELL_TOOLS) is checked twice when the role has `cmd/` patterns: the tool
 itself, then every program in its command as `cmd/<program>`. The row's reason names
 programs only. The command itself (or another tool's input) is recorded only when the
-person turned on "Record commands", and then only sealed to the website's key.
+person turned on "Record commands", and then only sealed to the website's key, as is
+Bash's `description` (the model's stated reason).
+
+The same command handles more hook events, by the payload's `hook_event_name`:
+UserPromptSubmit writes a `prompt` row (the prompt sealed, with Record commands on),
+PostToolUse and PostToolUseFailure a `result` row (outcome, exit code, sizes; never the
+result). Those always exit 0 and print nothing. Any other event is a PreToolUse check.
+Rows also carry the agent's own ids, the cwd and its git checkout (provenance.py).
 """
 
 import json
 import sys
 from typing import Any
 
-from . import policy
+from . import policy, provenance
 from .gateway import safe_tool
 from .patterns import normalize_server
 from .protect import refusal
@@ -30,6 +37,10 @@ from .sealing import describe
 from .shellcmd import CommandError, command_text, is_shell_tool, programs
 
 GATEWAY_PREFIX = "mcp__botrbac__"
+# Hook events that only record. Every other event (PreToolUse, or none) is a check.
+PROMPT_EVENTS = frozenset({"UserPromptSubmit"})
+# Event -> whether the call failed.
+RESULT_EVENTS = {"PostToolUse": False, "PostToolUseFailure": True}
 _NAME_KEYS = ("tool_name", "toolName", "tool", "name")
 
 
@@ -61,6 +72,12 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
             payload = json.loads(raw) if raw.strip() else {}
         except ValueError:
             return False, "botrbac could not read the tool call"
+    return _check(agent, payload, tool, block_unguarded)
+
+
+def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) -> tuple[bool, str]:
+    """PreToolUse: allow or block one call. `payload` is None with `--tool`."""
+    if tool is None:
         tool = tool_name(payload)
     if not tool:
         return False, "botrbac could not tell which tool this is"
@@ -74,7 +91,10 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
         **policy.session_fields(),
     }
     tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
+    row.update(provenance.hook_fields(payload))
+    row.update(provenance.git_context(row.get("cwd")))
     row["command"] = _what_ran(agent, tool, payload, tool_input)
+    row["sealed"] = {"description": _description(agent, tool, tool_input)}
     guarded = refusal(tool, tool_input if tool_input is not None else payload)
     if guarded:
         _record(decision="deny", reason="protected file", role="", **row)
@@ -122,6 +142,32 @@ def _what_ran(agent: str, tool: str, payload: Any, tool_input: Any) -> str | Non
     return describe(tool_input if tool_input is not None else payload)
 
 
+def _description(agent: str, tool: str, tool_input: Any) -> str | None:
+    """The model's own one-line reason for a shell command (Bash's `description`).
+    It is the agent's claim, not checked; kept only sealed, with Record commands on."""
+    if not is_shell_tool(normalize_server(agent), tool) or not isinstance(tool_input, dict):
+        return None
+    text = tool_input.get("description")
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def observe(agent: str, payload: Any, event: str) -> None:
+    """UserPromptSubmit, PostToolUse and PostToolUseFailure: write a `prompt` or
+    `result` row. These hooks never block anything and print nothing."""
+    name = normalize_server(agent)
+    extra = policy.session_fields()
+    if event in PROMPT_EVENTS:
+        row, text = provenance.prompt_row(name, payload)
+        _record(command=text, **row, **extra)
+        return
+    tool = tool_name(payload)
+    tool_id, _bypass = classify(agent, tool) if tool else ("", False)
+    if not tool_id:
+        return  # the gateway records its own tools' results
+    row = provenance.result_row(name, tool_id, payload, RESULT_EVENTS[event])
+    _record(**row, **extra)
+
+
 def _decide_command(enforcer: policy.Enforcer, payload: Any, role: str) -> policy.Decision:
     """The shell tool is allowed; now every program in its command must be. Anything
     that cannot be read is blocked. The reason names programs, never the command."""
@@ -147,13 +193,38 @@ def _record(**row: Any) -> None:
         print(f"botrbac: could not record this call: {exc}", file=sys.stderr)
 
 
+_UNREADABLE = object()
+
+
+def _observe_quietly(agent: str, payload: Any, event: str) -> int:
+    """Exit 0 whatever happens: these hooks must never block the agent, and on stdout
+    UserPromptSubmit would add text to the conversation."""
+    try:
+        observe(agent, payload, event)
+    except Exception as exc:  # noqa: BLE001
+        print(f"botrbac: could not record this {event}: {type(exc).__name__}", file=sys.stderr)
+    return 0
+
+
 def run(agent: str, tool: str | None, block_unguarded: bool, fmt: str) -> int:
     """Any unexpected error blocks the call. Claude Code only blocks on exit code 2: an
     uncaught exception (exit 1) would let the tool run."""
     try:
         # All of it: a large Write or Edit carries the whole file in tool_input.
         raw = "" if tool is not None else sys.stdin.read()
-        allowed, reason = check(agent, raw, tool, block_unguarded)
+        payload: Any = None
+        if tool is None:
+            try:
+                payload = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                payload = _UNREADABLE
+            event = provenance.event_name(payload)
+            if event in PROMPT_EVENTS or event in RESULT_EVENTS:
+                return _observe_quietly(agent, payload, event)
+        if payload is _UNREADABLE:
+            allowed, reason = False, "botrbac could not read the tool call"
+        else:
+            allowed, reason = _check(agent, payload, tool, block_unguarded)
     except Exception as exc:  # noqa: BLE001 - fail closed
         allowed, reason = False, f"Blocked by Bot RBAC: the check failed ({type(exc).__name__})"
     if fmt == "json":

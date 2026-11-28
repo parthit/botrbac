@@ -122,6 +122,8 @@ to wrap.
 - This relies on the agent keeping `BOTRBAC_SESSION`. An agent that can run shell commands could start
   `botrbac gateway` without it and get the terminal's own role (never more). If that matters, make the
   terminal's role itself narrow, or block the agent's shell tool with the hook below.
+- `--task "fix the flaky login test"` says what the session is for. It is recorded only sealed, with
+  [Record commands](#record-commands) on, and shown on the session page.
 - **Terminal → Activity** links each call to its session. The session page shows the tree of sessions
   started under it and lets you **revoke** it, which blocks it and everything under it the next time the
   terminal checks in (about a minute while online).
@@ -141,6 +143,27 @@ tool call. The call is checked as `claude-code/<Tool>`, so give roles the tools 
 `claude-code/Read`, `claude-code/Edit` or `claude-code/*`. With `--block-unguarded`, MCP tools that do not
 come through `botrbac gateway` are blocked; pass `--allow-unguarded` to check them as `<server>/<tool>`
 instead.
+
+It also adds `UserPromptSubmit`, `PostToolUse` and `PostToolUseFailure` hooks running the same command.
+`botrbac check` reads `hook_event_name` from the payload: `PreToolUse` (or no event) is the check above;
+the other three only record a row, always exit 0 and print nothing, so they never block or add text to
+the conversation.
+
+- **UserPromptSubmit** writes a `prompt` row: no tool, the prompt's id, and the prompt itself sealed
+  (only with [Record commands](#record-commands) on).
+- **PostToolUse** and **PostToolUseFailure** write a `result` row: the tool, the call's `tool_use_id`,
+  `outcome` (`ok` or `error`), and the exit code, duration and result size in bytes when the agent sends
+  them. Never the result itself.
+
+Every hook row also keeps the agent's own ids, so the Activity page can tie a prompt to the calls it led
+to and each call to its result (a row's prompt and agent-session links show only those rows, and exports
+carry the ids): `agent_session_id` (the agent's session; Bot RBAC's own `session_id` is the
+`botrbac run` session), `prompt_id`, `tool_use_id`, `agent_id`, `agent_type` and `parent_agent_id` (for
+subagents), plus `permission_mode` and `cwd`. Codex's `turn_id` and Cursor's `conversation_id` and
+`generation_id` are read too. At `PreToolUse` the row also gets the git checkout in `cwd`: `repo` (the
+`origin` remote as `host/owner/name`, with any user name, token and scheme taken out), `branch` and `head`
+(the commit). git gets about a second, the answer is cached for a few seconds in `git-cache.json`, and a
+failure just leaves them out; it never changes the decision. `botrbac hooks remove` takes all four out.
 
 ### Shell commands: `cmd/<program>`
 
@@ -223,9 +246,13 @@ Extras for stricter setups, outside botrbac: put the hook and gateway in Claude 
 `permissions.deny` rules for `Edit(~/.claude/**)` and `Edit(~/.config/botrbac/**)`; and run the agent in
 Claude Code's sandbox, which keeps its shell from writing its own settings.
 
-Audit rows hold identifiers and decisions: the tool name, agent, role, session, and allow or block. Tool
-results and the contents of files read are never recorded. Unless you turn on Record commands, neither is
-what was sent to a tool, and a session start records only the program's name.
+Audit rows hold identifiers and decisions: the tool name, agent, role, session, and allow or block. Hook
+rows add the agent's own ids (session, prompt, tool call, subagent), the permission mode, the working
+folder and its git remote, branch and commit, and for a finished call its outcome, exit code, duration and
+result size. These are stored in the clear, like the computer's name. Tool results and the contents of
+files read are never recorded. Unless you turn on Record commands, neither is what was sent to a tool, nor
+the prompt, nor the agent's description of a command, nor a `--task`, and a session start records only the
+program's name.
 
 ### Record commands
 
@@ -233,6 +260,19 @@ Turn it on under **Terminal → Activity** to see the exact command each agent r
 shell tool's command line, another tool's input (for Write, the file it wrote), the MCP arguments the
 gateway passed on, and the whole `botrbac run` command line. Blocked calls are recorded too. Each one is
 cut at 8,000 characters. It is off until you turn it on, and applies to all your terminals.
+
+With it on, rows also carry:
+
+- the **prompt** you typed, on the `prompt` row (UserPromptSubmit);
+- the **agent's reason** for a shell command (Claude Code's Bash `description`), shown as "agent's claim,
+  not checked": it is what the model said it was doing, not proof of it;
+- the **task** given with `botrbac run --task "…"`, on the session's start row and its session page;
+- `input_digest` (`sha256:<hex>`) and `input_size` (bytes) of the whole command or tool input, taken
+  before the 8,000-character cut, so a long input can be matched against a copy you have.
+
+The prompt, the reason and the task are sealed like the command, each bound to its row and its field
+name, so none can be moved onto another row or swapped for another field. Without Record commands none of
+them is sent.
 
 You can read it; the agents can't. The site's public key travels in the signed policy. The CLI seals each
 command to it (X25519, AES-GCM, bound to the row) before the row is written to `audit.db`, so the queue
@@ -261,7 +301,7 @@ check-in). Commands already recorded stay, and keep showing to you, until their 
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
 | `botrbac wrap <agent> [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |
 | `botrbac doctor` | Login, policy age, servers that bypass Bot RBAC |
-| `botrbac run --role R -- cmd …` | Run a command in a narrower session |
+| `botrbac run --role R [--task T] -- cmd …` | Run a command in a narrower session |
 | `botrbac shell-init` | Shell functions for `<agent> --botrbac --role R` |
 | `botrbac hooks install claude-code` | Check Claude Code's own tools too |
 | `botrbac check --agent A` | The hook adapter (reads the tool call on stdin) |
@@ -269,7 +309,7 @@ check-in). Commands already recorded stay, and keep showing to you, until their 
 | `botrbac logout` | Forget this computer's login (disconnect it on the website too) |
 
 Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json` (mode 0600),
-`policy.json`, `config.json`, `audit.db`, `sessions/` and `state.json`.
+`policy.json`, `config.json`, `audit.db`, `sessions/`, `state.json` and `git-cache.json`.
 
 ## Server side
 

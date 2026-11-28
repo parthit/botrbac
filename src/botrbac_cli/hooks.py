@@ -2,7 +2,9 @@
 
 Writes a PreToolUse hook into Claude Code's settings (the project's
 .claude/settings.json, or ~/.claude/settings.json with --user), keeping everything else
-in the file and a backup of it. Running it twice changes nothing.
+in the file and a backup of it. Running it twice changes nothing. UserPromptSubmit,
+PostToolUse and PostToolUseFailure hooks run the same command, which records the
+prompt and each call's outcome there and never blocks.
 """
 
 import json
@@ -14,6 +16,16 @@ from . import state
 from .coverage import backup_file, write_atomic
 from .shell import botrbac_command
 
+# Claude Code hook event -> its matcher (None: the event takes none). All run the same
+# `botrbac check`, which reads the event from the payload: PreToolUse checks the call;
+# the others only record (the prompt, the call's outcome) and never block.
+EVENTS: dict[str, str | None] = {
+    "PreToolUse": "*",
+    "UserPromptSubmit": None,
+    "PostToolUse": "*",
+    "PostToolUseFailure": "*",
+}
+
 
 def hook_command(block_unguarded: bool) -> str:
     parts = [*botrbac_command(), "check", "--agent", "claude-code"]
@@ -23,7 +35,7 @@ def hook_command(block_unguarded: bool) -> str:
 
 
 def _ours(entry: Any) -> bool:
-    """A PreToolUse entry this command added: it runs botrbac's own `check --agent`."""
+    """A hook entry this command added: it runs botrbac's own `check --agent`."""
     if not isinstance(entry, dict):
         return False
     for hook in entry.get("hooks") or []:
@@ -42,7 +54,7 @@ def _ours(entry: Any) -> bool:
 
 
 def remove_claude_code(path: Path) -> dict[str, Any]:
-    """Take out the hook `install_claude_code` added, leaving everything else."""
+    """Take out the hooks `install_claude_code` added, leaving everything else."""
     if not path.exists():
         return {"file": str(path), "backup": None, "changed": False}
     before = path.read_text()
@@ -51,23 +63,30 @@ def remove_claude_code(path: Path) -> dict[str, Any]:
     except ValueError as exc:
         raise ValueError(f"{path} is not valid JSON; it was left as it is") from exc
     hooks = data.get("hooks") if isinstance(data, dict) else None
-    existing = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
-    if not isinstance(existing, list) or not any(_ours(e) for e in existing):
+    if not isinstance(hooks, dict):
         return {"file": str(path), "backup": None, "changed": False}
-    kept = [e for e in existing if not _ours(e)]
-    if kept:
-        hooks["PreToolUse"] = kept
-    else:
-        del hooks["PreToolUse"]
-        if not hooks:
-            del data["hooks"]
+    changed = False
+    for event in EVENTS:
+        existing = hooks.get(event)
+        if not isinstance(existing, list) or not any(_ours(e) for e in existing):
+            continue
+        changed = True
+        kept = [e for e in existing if not _ours(e)]
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if not changed:
+        return {"file": str(path), "backup": None, "changed": False}
+    if not hooks:
+        del data["hooks"]
     backup = backup_file(path)
     write_atomic(path, json.dumps(data, indent=2) + "\n")
     return {"file": str(path), "backup": backup, "changed": True}
 
 
 def install_claude_code(path: Path, block_unguarded: bool = True) -> dict[str, Any]:
-    """Add (or update) the hook. Writes, and backs up, only when something changes."""
+    """Add (or update) the hooks. Writes, and backs up, only when something changes."""
     data: dict[str, Any] = {}
     before = None
     if path.exists():
@@ -79,19 +98,20 @@ def install_claude_code(path: Path, block_unguarded: bool = True) -> dict[str, A
         if not isinstance(data, dict):
             raise ValueError(f"{path} is not a JSON object; it was left as it is")
     hooks = data.setdefault("hooks", {})
-    existing = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
-    if not isinstance(hooks, dict) or not isinstance(existing or [], list):
+    odd = not isinstance(hooks, dict) or any(
+        not isinstance(hooks.get(event) or [], list) for event in EVENTS
+    )
+    if odd:
         raise ValueError(
             f"{path} has a hooks section botrbac does not understand; it was left as it is"
         )
-    entries = [e for e in existing or [] if not _ours(e)]
-    entries.append(
-        {
-            "matcher": "*",
-            "hooks": [{"type": "command", "command": hook_command(block_unguarded)}],
-        }
-    )
-    hooks["PreToolUse"] = entries
+    command = {"type": "command", "command": hook_command(block_unguarded)}
+    for event, matcher in EVENTS.items():
+        entries = [e for e in hooks.get(event) or [] if not _ours(e)]
+        entry: dict[str, Any] = {"matcher": matcher} if matcher is not None else {}
+        entry["hooks"] = [dict(command)]
+        entries.append(entry)
+        hooks[event] = entries
     text = json.dumps(data, indent=2) + "\n"
     if before is not None and json.loads(before or "{}") == data:
         return {"file": str(path), "backup": None, "changed": False}

@@ -159,7 +159,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     api = _api(args) if state.read_json("credentials.json") else None
     try:
-        return run(args.role, args.command_line, args.agent, api)
+        return run(args.role, args.command_line, args.agent, api, args.task)
     except SessionError as exc:
         print(f"botrbac: {exc}", file=sys.stderr)
         return 2
@@ -411,6 +411,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run", help="run an agent with a narrower role: run --role X -- claude")
     p.add_argument("--role", required=True, help="a role's name or id from the website")
     p.add_argument("--agent", help="name to record (default: the program's name)")
+    p.add_argument(
+        "--task", help="what this session is for (recorded sealed, with Record commands on)"
+    )
     p.set_defaults(fn=cmd_run)
     p = sub.add_parser("shell-init", help="shell functions for `claude --botrbac --role X`")
     p.add_argument("--shell", choices=["bash", "zsh", "fish"])

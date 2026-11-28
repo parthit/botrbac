@@ -1400,6 +1400,9 @@ textarea:focus-visible, input[type="number"]:focus-visible { outline: 2px solid 
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.term-claim { margin: 6px 0 0; overflow-wrap: anywhere; }
+.term-where { margin: 4px 0 0; overflow-wrap: anywhere; }
+.term-where a + a { margin-left: 6px; }
 .term-tools { margin: 0 0 14px; }
 .term-server { font-weight: 600; margin: 0 0 6px; }
 .term-ticks { display: flex; flex-wrap: wrap; gap: 6px 8px; }

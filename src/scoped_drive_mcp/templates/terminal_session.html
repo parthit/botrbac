@@ -6,6 +6,7 @@
   <strong>{{ n.start.agent or n.start.program or "agent" }}</strong> as <strong>{{ n.start.role }}</strong>
   <span class="muted">· {{ n.calls }} call{{ "s" if n.calls != 1 }}{% if n.blocked %} · {{ n.blocked | length }} blocked{% endif %} · started {{ n.start.ts | epoch | when }}</span>
   {% if n.revoked %}<span class="pill bad">revoked</span>{% endif %}
+  {% if n.start.task %}<p class="term-claim small"><span class="muted">Task:</span> {{ n.start.task }}</p>{% elif n.start.task_unreadable %}<p class="term-claim small muted">Task recorded, but it cannot be opened.</p>{% endif %}
   {% if n.blocked %}<ul>{% for b in n.blocked[:10] %}<li class="muted">blocked <code>{{ b.tool }}</code>: {{ b.reason }}</li>{% endfor %}</ul>{% endif %}
   {% if n.children %}<ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>{% endif %}
 </li>

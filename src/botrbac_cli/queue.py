@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import policy, sealing, state
+from . import policy, provenance, sealing, state
 
 SEND_BATCH = 500
 KEEP_SENT = 5000
@@ -50,21 +50,47 @@ class AuditQueue:
             " sent INTEGER NOT NULL DEFAULT 0)"
         )
 
-    def add(self, command: str | None = None, **fields: Any) -> dict[str, Any]:
+    def add(
+        self,
+        command: str | None = None,
+        sealed: dict[str, str | None] | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
         """Queue a row. `command` (what the agent ran) is kept only sealed to the
         website's key, and only when the person turned on "Record commands"; it is
-        never written to this file as text."""
+        never written to this file as text. With it go `input_digest` and `input_size`
+        of the whole command, before sealing cuts it.
+
+        `sealed` holds other text fields ({"description": ..., "task": ...}), sealed
+        the same way with `event_id:<name>` as associated data, so one cannot be moved
+        onto another row or another field. Without the key they are dropped."""
         row = {"event_id": uuid.uuid4().hex, "ts": time.time(), **fields}
-        if command is not None:
-            # Recording must never cost the row: if the key or the sealing fails, the
-            # row is kept without the command, marked so the owner sees one is missing.
-            try:
-                key = policy.command_key()
-                if key:
-                    row["command"] = sealing.seal(key, row["event_id"], str(command))
-            except Exception as exc:  # noqa: BLE001
-                row.pop("command", None)
+        extras = {k: v for k, v in (sealed or {}).items() if v is not None}
+        if command is None and not extras:
+            return self._insert(row)
+        # Recording must never cost the row: if the key or the sealing fails, the row
+        # is kept without the text, marked so the owner sees some is missing.
+        try:
+            key = policy.command_key()
+        except Exception as exc:  # noqa: BLE001
+            key = None
+            if command is not None:
                 row["command_error"] = type(exc).__name__
+        if key and command is not None:
+            try:
+                text = str(command)
+                row["command"] = sealing.seal(key, row["event_id"], text)
+                row.update(provenance.input_digest(text))
+            except Exception as exc:  # noqa: BLE001
+                for name in ("command", "input_digest", "input_size"):
+                    row.pop(name, None)
+                row["command_error"] = type(exc).__name__
+        if key:
+            for name, value in extras.items():
+                try:
+                    row[name] = sealing.seal(key, f"{row['event_id']}:{name}", str(value))
+                except Exception:  # noqa: BLE001 - the row matters more than the text
+                    row.pop(name, None)
         return self._insert(row)
 
     @_locked
