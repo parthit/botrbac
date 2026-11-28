@@ -42,6 +42,8 @@ from .sealing import describe
 from .shellcmd import CommandError, command_text, is_shell_tool, programs
 
 GATEWAY_PREFIX = "mcp__botrbac__"
+# The audit row's reason for a call that goes around the gateway (the website shows it).
+UNGUARDED = "MCP servers must go through botrbac gateway (run: botrbac wrap)"
 # Hook events that only record. Every other event (PreToolUse, or none) is a check.
 PROMPT_EVENTS = frozenset({"UserPromptSubmit"})
 # Event -> whether the call failed.
@@ -152,10 +154,17 @@ def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) ->
         _record(decision="deny", reason="protected file", role="", **row)
         return False, f"Blocked by Bot RBAC: {tool_id}: {guarded}."
     if bypass and block_unguarded:
-        reason = "MCP servers must go through botrbac gateway (run: botrbac wrap)"
+        reason = UNGUARDED
         if tool.startswith(GATEWAY_PREFIX):
             reason = impostor(tool, cwd if isinstance(cwd, str) else None) or reason
         _record(decision="deny", reason=reason, role="", **row)
+        if reason == UNGUARDED:
+            # `botrbac wrap` changes the agent's MCP settings, which an agent may not do.
+            return False, (
+                f"Blocked by Bot RBAC: {tool_id} does not go through the botrbac gateway, "
+                "so no role covers it. An agent cannot fix this: ask the person to run "
+                "botrbac wrap for this agent (botrbac doctor prints the exact command)."
+            )
         return False, f"Blocked by Bot RBAC: {tool_id}: {reason}"
     enforcer = policy.Enforcer()
     decision = enforcer.decide(tool_id)
@@ -178,14 +187,16 @@ def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) ->
     )
     if decision.allowed:
         return True, "ok"
-    if by_command:
-        return False, (
-            f"Blocked by Bot RBAC: {decision.reason}. Run allowed programs one at a time. "
-            + policy.fix_hint("cmd/<program>")
-        )
-    return False, (
-        f"Blocked by Bot RBAC: {tool_id} is {decision.reason}. " + policy.fix_hint(tool_id)
-    )
+    return False, policy.blocked_text(tool_id, decision, _wanted(decision))
+
+
+def _wanted(decision: policy.Decision) -> str | None:
+    """The `cmd/` patterns a role would need for a refused command, as the reason lists
+    them ("running cmd/curl, cmd/wget is not in role …"). None for a tool."""
+    reason = decision.reason
+    if not reason.startswith("running "):
+        return None
+    return reason[len("running ") :].split(" is not in role ", 1)[0]
 
 
 def _what_ran(agent: str, tool: str, payload: Any, tool_input: Any) -> str | None:
@@ -221,12 +232,15 @@ def _decide_command(enforcer: policy.Enforcer, payload: Any, role: str) -> polic
     """The shell tool is allowed; now every program in its command must be. Anything
     that cannot be read is blocked. The reason names programs, never the command."""
     command = command_text(payload)
+    unreadable = {"blocker": "unreadable", "programs": enforcer.shell_programs()}
     if command is None:
-        return policy.Decision(False, "botrbac could not find the shell command", role)
+        return policy.Decision(
+            False, "botrbac could not find the shell command", role, **unreadable
+        )
     try:
         found = programs(command)
     except CommandError as exc:
-        return policy.Decision(False, str(exc), role)
+        return policy.Decision(False, str(exc), role, **unreadable)
     decision = enforcer.decide_programs(found)
     if decision.allowed:
         decision.reason = "ok: runs " + ", ".join(found[:10])

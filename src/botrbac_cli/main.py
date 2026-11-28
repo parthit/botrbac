@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import os
 import platform
 import socket
@@ -171,6 +172,11 @@ def cmd_roles(args: argparse.Namespace) -> int:
             print(f"  {pattern}")
         return 0
     print(f"This computer's role: {mine.get('name', '?')}")
+    session = policy.load_session(os.environ.get(policy.SESSION_ENV))
+    if session:
+        names = [n for n in session.get("role_names") or [session.get("role_name")] if n]
+        if names:
+            print(f"This run is narrowed to: {', then '.join(str(n) for n in names)}")
     print("Roles (narrow one run with: botrbac run --role NAME -- claude):")
     width = max((len(str(r.get("name", ""))) for r in roles), default=0)
     for role in roles:
@@ -676,6 +682,12 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["BOTRBAC_HOME"] = str(state.home_path())
     try:
         return int(args.fn(args) or 0)
+    except BrokenPipeError:
+        # `botrbac roles | head`: the reader left. Not an error worth a traceback.
+        with contextlib.suppress(OSError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        # A hook's answer that could not be written must not read as "allow" (exit 2 blocks).
+        return 2 if args.cmd == "check" else 1
     except NotLoggedIn as exc:
         print(str(exc), file=sys.stderr)
         return 1

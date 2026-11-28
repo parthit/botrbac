@@ -72,6 +72,22 @@ Then put MCP servers behind the gateway so their tools follow the role:
 Tools appear to the agent as `<server>__<tool>`. Tools the role does not allow are not listed, and calling
 one anyway returns an error that names the role.
 
+### What a blocked agent is told
+
+Every refusal starts with `Blocked by Bot RBAC:` and names the one fix that would work, so the agent
+asks you for the right thing:
+
+| The message says | Why | What helps |
+| --- | --- | --- |
+| `github/create_issue is not in role 'Dev'` … "add github/create_issue to this computer's role" | The computer's role does not list the tool. | Add the pattern, or use the "To allow it" link on **Activity**. |
+| `… is not in role 'Reviewer', a role this run was narrowed to with botrbac run --role` | The computer's role allows it; a `--role` does not. The message names the role that refused, not just the innermost one. | Start the run with a wider `--role`, or add the pattern to that role. |
+| `running cmd/head is not in role …` "The shell here runs only: git, ls." | A role with `cmd/` patterns does not list that program. | Add `cmd/head`, or the agent runs only listed programs. |
+| `botrbac does not check …` / `could not read this command` … "no role change is needed" | The command uses `$(…)`, a loop, a heredoc or similar, which a role with `cmd/` patterns cannot check. | Nothing on the site: the agent runs it again as plain commands. |
+| `not logged in` / `offline for more than N days` / `this session was revoked` … "Every tool is blocked until that is fixed" | No usable login, policy or session. | `botrbac login`, `botrbac sync`, or a new run. A wider role changes nothing. |
+| `… does not go through the botrbac gateway` | An unguarded server, with the hook's `--block-unguarded`. | You run `botrbac wrap` (an agent may not change its own MCP settings). |
+
+The audit row's reason, which **Activity** reads, is unchanged.
+
 ## Roles
 
 **Terminal → Roles** on the website. Making a role is mostly ticking boxes:
@@ -136,7 +152,8 @@ to wrap.
 
 - The session id travels in `BOTRBAC_SESSION`, which every process the agent starts inherits: subagents,
   `codex exec`, scripts and gateways. A session started inside another one gets the intersection again, so
-  it can only **narrow**; asking for a wider role changes nothing.
+  it can only **narrow**; asking for a wider role changes nothing. `botrbac run` says so when it starts inside
+  another session, and `botrbac roles` shows the roles the current run is narrowed to.
 - Subagents running inside the agent's own process share its connection and so its role.
 - This relies on the agent keeping `BOTRBAC_SESSION`. An agent that can run shell commands could start
   `botrbac gateway` without it and get the terminal's own role (never more). If that matters, make the

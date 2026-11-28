@@ -40,6 +40,17 @@ def find_role(pol: dict[str, Any], wanted: str) -> dict[str, Any] | None:
     return named[0] if named else None
 
 
+def _names(parent: dict[str, Any] | None) -> list[str]:
+    """The role names of the sessions this one starts inside, outermost first."""
+    if not parent:
+        return []
+    chain = parent.get("chain") or []
+    names = parent.get("role_names")
+    if isinstance(names, list) and len(names) == len(chain):
+        return [str(n) for n in names]
+    return [str(parent.get("role_name"))] * len(chain)  # started by an older botrbac
+
+
 def start(
     role_name: str,
     program: str,
@@ -74,6 +85,8 @@ def start(
         "chain": [*(parent.get("chain") or []), list(role.get("patterns") or [])]
         if parent
         else [list(role.get("patterns") or [])],
+        # Each role's name, alongside `chain`, so a refusal can name the role that refused.
+        "role_names": [*_names(parent), str(role.get("name"))],
         "role_id": role.get("id"),
         "role_name": role.get("name"),
         "program": Path(program).name,
@@ -109,6 +122,11 @@ def run(
     session = start(role_name, command[0], agent, command, task)
     terminal_role = (policy.load_cached() or {}).get("policy", {}).get("role", {}).get("name")
     note = f" within this terminal's role {terminal_role!r}" if terminal_role else ""
+    outer = session["role_names"][:-1]
+    if outer:
+        # Asking for a wider role inside a session changes nothing: say so up front.
+        inside = ", ".join(repr(n) for n in reversed(outer))
+        note = f", inside {inside}{note}. A run only narrows: a tool must be in all of them"
     print(
         f"botrbac: session {session['id'][:8]} as {session['role_name']!r}{note}.",
         file=sys.stderr,

@@ -153,10 +153,7 @@ class Gateway:
             return _error(f"Blocked by Bot RBAC: {route.tool_id}: {guarded}.")
         if not decision.allowed:
             self.queue.add(decision="deny", reason=decision.reason, **row)
-            return _error(
-                f"Blocked by Bot RBAC: {route.tool_id} is {decision.reason}. "
-                + policy.fix_hint(route.tool_id)
-            )
+            return _error(policy.blocked_text(route.tool_id, decision))
         try:
             result = await route.upstream.session.call_tool(route.tool.name, arguments)
         except Exception as exc:  # noqa: BLE001 - report to the agent, keep the gateway up

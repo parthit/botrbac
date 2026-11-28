@@ -31,9 +31,19 @@ CLOCK_SKEW = 300
 
 @dataclass
 class Decision:
+    """`role` is the role in force (the innermost `--role`, else the computer's). When a
+    call is blocked, `blocker` says what kind of thing refused it, so the agent is told
+    the fix that would work: "state" (no login, no usable policy, a revoked session:
+    no role change helps), "terminal" (the computer's role), "session" (a `--role` this
+    run was narrowed to; `blocked_by` names it) or "unreadable" (a shell command botrbac
+    cannot check). `programs` is what the refusing role lets the shell run."""
+
     allowed: bool
     reason: str
     role: str
+    blocker: str = ""
+    blocked_by: str = ""
+    programs: list[str] = field(default_factory=list)
 
 
 _SITE_CACHE: dict[tuple[str, int], str] = {}
@@ -63,11 +73,60 @@ def fix_hint(pattern: str) -> str:
     site = _site()
     roles = f"{site}/terminal/roles" if site else "the Terminal page"
     return (
-        "This is the person's rule, not a fault to work around. If the tool is needed, ask "
-        f"them to add {pattern} to this computer's role at {roles} (a built-in role such as "
-        "Read-only cannot be edited: make a new role there and give it to the computer), "
-        "or to give the computer a wider role on the Terminal page."
+        "This is the person's rule, not a fault to work around. If it is needed, ask them "
+        f"to add {pattern} to this computer's role at {roles} (the blocked call on the "
+        'site\'s Activity page has a "To allow it" link that does this, for a built-in '
+        "role too), or to give the computer a wider role."
     )
+
+
+def _shell_runs(programs: list[str], limit: int = 12) -> str:
+    shown = ", ".join(programs[:limit])
+    more = f", +{len(programs) - limit} more" if len(programs) > limit else ""
+    return f"The shell here runs only: {shown}{more}. " if programs else ""
+
+
+def _built_in(name: str) -> bool:
+    """Whether the site says the role with this name is one of its own, which nobody edits."""
+    roles = ((load_cached() or {}).get("policy") or {}).get("roles") or []
+    return any(isinstance(r, dict) and r.get("builtin") and r.get("name") == name for r in roles)
+
+
+def blocked_text(what: str, decision: Decision, pattern: str | None = None) -> str:
+    """The whole message a blocked agent reads. `what` is the tool id; `pattern` is what
+    a role would need to gain (the tool id unless given). Each kind of block gets the
+    fix that would work for it, and only that one."""
+    reason = decision.reason
+    head = "Blocked by Bot RBAC: "
+    if decision.blocker == "state":
+        return (
+            f"{head}{reason}. Every tool is blocked until that is fixed, whatever the "
+            "role, so do not ask for a wider one. Tell the person."
+        )
+    if decision.blocker == "unreadable":
+        return (
+            f"{head}{reason}. {_shell_runs(decision.programs)}This role limits which "
+            "programs the shell runs, so botrbac must be able to read the command: plain "
+            "commands joined by ; && || or |, with no $(…), backticks, loops, heredocs or "
+            "subshells. Run it again in that form; no role change is needed."
+        )
+    said = reason if reason.startswith("running ") else f"{what} is {reason}"
+    pattern = pattern or what
+    if decision.blocker == "session":
+        site = _site()
+        roles = f"{site}/terminal/roles" if site else "the Terminal page"
+        change = (
+            f" ({decision.blocked_by!r} is built in and cannot be changed)"
+            if _built_in(decision.blocked_by)
+            else f", or to add {pattern} to {decision.blocked_by!r} at {roles}"
+        )
+        return (
+            f"{head}{said}, a role this run was narrowed to with botrbac run --role. "
+            f"{_shell_runs(decision.programs)}This is the person's rule, not a fault to "
+            "work around. If it is needed, ask them to start the run again with a wider "
+            f"--role{change}."
+        )
+    return f"{head}{said}. {_shell_runs(decision.programs)}{fix_hint(pattern)}"
 
 
 def load_cached() -> dict[str, Any] | None:
@@ -226,14 +285,15 @@ class Enforcer:
         cached = load_cached()
         return cached is None or self.clock() - float(cached.get("fetched_at") or 0) > REFRESH_AFTER
 
-    def chain(self) -> tuple[list[list[str]], str, str]:
-        """(pattern lists, role name, reason when nothing is allowed)."""
+    def layers(self) -> tuple[list[tuple[str, list[str]]], str, str]:
+        """(every role in force as (name, patterns), outermost first: the computer's
+        role, then each `--role`; the innermost name; the reason when nothing is allowed)."""
         policy, why = self._state()
         if policy is None:
             return [], "", why
         role = policy.get("role") or {}
-        chain = [list(role.get("patterns") or [])]
         name = str(role.get("name") or role.get("id") or "")
+        layers = [(name, list(role.get("patterns") or []))]
         if self.session_id:
             session = load_session(self.session_id)
             if session is None:
@@ -241,17 +301,36 @@ class Enforcer:
             ids = [str(s) for s in session.get("lineage") or [self.session_id]]
             if set(ids) & set(policy.get("revoked_sessions") or []):
                 return [], name, "this session was revoked on the website"
-            chain += [list(p) for p in session.get("chain") or []]
             name = str(session.get("role_name") or name)
-        return chain, name, ""
+            chain = [list(p) for p in session.get("chain") or []]
+            # Sessions started by an older botrbac did not keep each role's name.
+            names = session.get("role_names")
+            if not isinstance(names, list) or len(names) != len(chain):
+                names = [name] * len(chain)
+            layers += [(str(n), p) for n, p in zip(names, chain, strict=True)]
+        return layers, name, ""
+
+    def chain(self) -> tuple[list[list[str]], str, str]:
+        """(pattern lists, role name, reason when nothing is allowed)."""
+        layers, name, why = self.layers()
+        return [patterns for _name, patterns in layers], name, why
 
     def decide(self, tool: str) -> Decision:
-        chain, name, why = self.chain()
+        layers, name, why = self.layers()
         if why:
-            return Decision(False, why, name)
-        if chain_allows(chain, tool):
+            return Decision(False, why, name, blocker="state")
+        if chain_allows([patterns for _n, patterns in layers], tool):
             return Decision(True, "ok", name)
-        return Decision(False, f"not in role {name!r}", name)
+        # Name the role that refuses (the outermost one that does): it is the one to change.
+        at = next((i for i, (_n, p) in enumerate(layers) if not chain_allows([p], tool)), 0)
+        by = layers[at][0] if layers else name
+        return Decision(
+            False,
+            f"not in role {by!r}",
+            name,
+            blocker="session" if at else "terminal",
+            blocked_by=by,
+        )
 
     def limits_commands(self) -> bool:
         """Whether any role in force has `cmd/` patterns (so a shell tool's command is
@@ -259,15 +338,45 @@ class Enforcer:
         chain, _name, _why = self.chain()
         return any(has_command_rules(patterns) for patterns in chain)
 
+    def shell_programs(self) -> list[str]:
+        """The programs every role in force lets the shell run, to tell an agent whose
+        command could not be read. Names listed outright only: a pattern such as
+        `cmd/git*` is left out rather than guessed at."""
+        layers, _name, _why = self.layers()
+        chain = [patterns for _layer, patterns in layers]
+        named = dict.fromkeys(
+            program
+            for patterns in chain
+            for program in _programs_of(patterns)
+            if "*" not in program
+        )
+        return [program for program in named if chain_allows_command(chain, program)]
+
     def decide_programs(self, programs: list[str]) -> Decision:
-        chain, name, why = self.chain()
+        layers, name, why = self.layers()
         if why:
-            return Decision(False, why, name)
-        refused = [p for p in programs if not chain_allows_command(chain, p)]
-        if refused:
-            listed = ", ".join(f"cmd/{p}" for p in refused[:5])
-            return Decision(False, f"running {listed} is not in role {name!r}", name)
+            return Decision(False, why, name, blocker="state")
+        if not layers:
+            return Decision(False, f"not in role {name!r}", name, blocker="terminal")
+        for at, (by, patterns) in enumerate(layers):
+            if not has_command_rules(patterns):
+                continue
+            refused = [p for p in programs if not chain_allows_command([patterns], p)]
+            if refused:
+                listed = ", ".join(f"cmd/{p}" for p in refused[:5])
+                return Decision(
+                    False,
+                    f"running {listed} is not in role {by!r}",
+                    name,
+                    blocker="session" if at else "terminal",
+                    blocked_by=by,
+                    programs=_programs_of(patterns),
+                )
         return Decision(True, "ok", name)
+
+
+def _programs_of(patterns: list[str]) -> list[str]:
+    return [p[len("cmd/") :] for p in patterns if p.startswith("cmd/")]
 
 
 def command_key() -> str | None:
