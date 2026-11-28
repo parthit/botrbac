@@ -21,7 +21,7 @@ import json
 import sys
 from typing import Any
 
-from . import policy
+from . import agents, policy
 from .gateway import safe_tool
 from .patterns import normalize_server
 from .protect import refusal
@@ -61,6 +61,7 @@ def check(agent: str, raw: str, tool: str | None, block_unguarded: bool) -> tupl
             payload = json.loads(raw) if raw.strip() else {}
         except ValueError:
             return False, "botrbac could not read the tool call"
+        payload = agents.normalize(agent, payload)  # Cursor's and Gemini's shapes
         tool = tool_name(payload)
     if not tool:
         return False, "botrbac could not tell which tool this is"
@@ -158,6 +159,10 @@ def run(agent: str, tool: str | None, block_unguarded: bool, fmt: str) -> int:
         allowed, reason = False, f"Blocked by Bot RBAC: the check failed ({type(exc).__name__})"
     if fmt == "json":
         print(json.dumps({"decision": "allow" if allowed else "deny", "reason": reason}))
+        return 0
+    answer = agents.response(agent, allowed, reason)  # Cursor reads JSON, not the exit code
+    if answer is not None:
+        print(answer)
         return 0
     if not allowed:
         print(reason, file=sys.stderr)

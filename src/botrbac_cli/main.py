@@ -288,6 +288,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         what = "switched off (disableAllHooks)" if status == "disabled" else "missing"
         print(f"✗ {agent} hook is {what}: its own tools are not checked")
         print(f"    fix: botrbac hooks install {agent} --user --allow-unguarded")
+    from .agents import doctor_report
+
+    doctor_report(print)
     found = unguarded()
     for config, name in found:
         print(f"✗ {config.agent}: {name} in {config.path} is not behind botrbac")
@@ -308,11 +311,9 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     from .hooks import expect_hook, install_claude_code, remove_claude_code
 
     if args.agent != "claude-code":
-        print(
-            "Automatic hook setup is only for Claude Code. For another agent, make its "
-            f"pre-tool hook run: botrbac check --agent {args.agent} (see docs/terminal.md)."
-        )
-        return 0
+        from .agents import cmd_hooks as other_agent_hooks
+
+        return other_agent_hooks(args)
     base = Path.home() if args.user else Path.cwd()
     settings = base / ".claude" / "settings.json"
     if args.action == "remove":
@@ -444,10 +445,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--format", choices=["exit", "json"], default="exit")
     p.set_defaults(fn=cmd_check)
-    p = sub.add_parser("hooks", help="add or remove the pre-tool hook for an agent")
+    p = sub.add_parser(
+        "hooks", help="add or remove the pre-tool hook: claude-code, codex, gemini, cursor"
+    )
     p.add_argument("action", choices=["install", "remove"])
     p.add_argument("agent")
-    p.add_argument("--user", action="store_true", help="all projects (~/.claude/settings.json)")
+    p.add_argument(
+        "--user",
+        action="store_true",
+        help="every project: the agent's file in your home (~/.claude/settings.json, "
+        "~/.codex/hooks.json, ~/.gemini/settings.json, ~/.cursor/hooks.json)",
+    )
     p.add_argument(
         "--allow-unguarded",
         action="store_true",

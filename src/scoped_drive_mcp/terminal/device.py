@@ -56,6 +56,8 @@ class Terminal:
     unguarded: list[str] = field(default_factory=list)
     # Agents whose pre-tool hook was installed and is now missing or switched off.
     hook_missing: list[str] = field(default_factory=list)
+    # The computer's coverage report (terminal/coverage.py): agents found, agents hooked.
+    coverage: dict[str, Any] = field(default_factory=dict)
 
 
 class DeviceError(Exception):
@@ -302,7 +304,7 @@ class Terminals:
         allowed = {
             k: v
             for k, v in seen.items()
-            if k in ("last_seen", "queued", "unguarded", "hook_missing")
+            if k in ("last_seen", "queued", "unguarded", "hook_missing", "coverage")
         }
         if self.store.get(f"term:terminal:{terminal_id}") is None:
             return  # disconnected meanwhile: write nothing
@@ -346,7 +348,9 @@ class Terminals:
             return None
         # Saved without what the terminal reports about itself (touch keeps that apart).
         updated = replace(terminal, **changes)
-        self._save(replace(updated, last_seen=0.0, queued=0, unguarded=[], hook_missing=[]))
+        self._save(
+            replace(updated, last_seen=0.0, queued=0, unguarded=[], hook_missing=[], coverage={})
+        )
         if not self._live(updated):
             # Disconnected while this edit was in flight: don't leave the record behind.
             self.store.delete(f"term:terminal:{terminal_id}")

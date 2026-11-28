@@ -38,6 +38,17 @@ def _forget_report() -> None:
     state.write_json("state.json", data)
 
 
+def _coverage(unguarded: Any) -> dict[str, Any]:
+    """agents.coverage_summary, or an empty report if looking fails: it must never stop
+    the rows being sent."""
+    from .agents import coverage_summary
+
+    try:
+        return coverage_summary(unguarded=unguarded if isinstance(unguarded, list) else None)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _send(
     api: Any, rows: list[dict[str, Any]], meta: dict[str, Any], budget: _Budget | None = None
 ) -> tuple[list[str], list[str]]:
@@ -108,6 +119,7 @@ def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
             meta["tools"] = extra.get("tools") or []
             if "unguarded" in extra:
                 meta["unguarded"] = extra["unguarded"]
+            meta["coverage"] = _coverage(extra.get("unguarded"))
         clean = [{k: v for k, v in r.items() if k not in ("sent", "status")} for r in rows]
         try:
             ok, refused = _send(api, clean, meta)

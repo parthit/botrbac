@@ -23,6 +23,7 @@ from botrbac_cli.api import DEFAULT_SERVER
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
+from .coverage import clean_coverage, unhooked
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
 from .ingest import IngestError, TerminalActivity
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
@@ -341,6 +342,9 @@ class TerminalFeature:
                 changes["unguarded"] = sorted(
                     {str(u)[:64] for u in unguarded if isinstance(u, str) and u.strip()}
                 )[:MAX_UNGUARDED]
+            coverage = clean_coverage(data.get("coverage"))
+            if coverage is not None:
+                changes["coverage"] = coverage
             await _run(self.terminals.touch, terminal.id, **changes)
             return JSONResponse(result)
 
@@ -385,6 +389,7 @@ class TerminalFeature:
                 login_cmd=login_command(site),
                 agents=AGENTS,
                 install_cmds={a: install_command(site, a) for a, _ in AGENTS},
+                unhooked=unhooked,
             )
 
         async def device_page(request: Request) -> Response:

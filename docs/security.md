@@ -466,14 +466,18 @@ until its own grace runs out. A cached policy with a signature but no pinned key
 removing both the pinned key and the signature makes it look unsigned, which only the protected-files
 check below and `botrbac doctor` stand against. Changing `ENCRYPTION_KEY` changes the key: terminals block until their next
 token refresh (at most an hour, when online) brings the new one. Whatever the role, the CLI refuses tool calls that would change Claude Code's settings files,
-`~/.claude.json` or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
+`~/.claude.json`, the hook and MCP files of Codex, Gemini CLI and Cursor, or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
 (`src/botrbac_cli/protect.py`; text and resolved paths, so a path built at run time gets past it). A missing
 or disabled hook is reported by `botrbac doctor` and shown on the Terminal page.
 A session can only narrow the terminal's role (the check is the intersection of every role in the chain).
 The CLI trusts the computer's user: session files and `BOTRBAC_SESSION` are not signed, so an agent that can
 run shell commands can drop back to the terminal's own role (never above it) by starting a gateway without
-the variable. The hook adapter fails closed on any error (exit 2), but an agent that cannot find the
-`botrbac` program at all usually lets the call through. Read-only and other name-based patterns limit
+the variable. The hook adapter fails closed on any error (exit 2; for Cursor, a JSON `deny`), and a
+payload it cannot place (an unknown Cursor event, a shell event without a command) has no tool name and is
+blocked. An agent that cannot find the `botrbac` program at all usually lets the call through; Gemini CLI
+also lets it through on any exit code but 2, and Cursor unless the entry has `failClosed`, which botrbac
+sets. The coverage summary a terminal sends (agents found, agents hooked) is its own say-so and is only
+shown, never used to allow anything. Read-only and other name-based patterns limit
 which tools run, not which files a tool such as Claude Code's Read can open.
 
 `cmd/<program>` patterns limit which programs an agent's shell tool runs (`src/botrbac_cli/shellcmd.py`). When a

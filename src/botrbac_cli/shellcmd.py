@@ -17,7 +17,10 @@ from typing import Any
 # Agent name -> the names of its shell tool. Add an agent here to check its commands.
 SHELL_TOOLS: dict[str, frozenset[str]] = {
     "claude-code": frozenset({"Bash"}),
-    "codex": frozenset({"shell"}),
+    # Codex's hooks name its shell `Bash` (codex-rs/hooks); `shell` is its older name.
+    "codex": frozenset({"shell", "Bash"}),
+    # Cursor's beforeShellExecution, as agents.py hands it to check.
+    "cursor": frozenset({"Shell"}),
     "gemini": frozenset({"run_shell_command"}),
     "gemini-cli": frozenset({"run_shell_command"}),
 }

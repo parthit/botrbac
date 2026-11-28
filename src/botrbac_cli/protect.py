@@ -19,6 +19,15 @@ from typing import Any
 
 from . import state
 
+# Codex's, Gemini CLI's and Cursor's files that hold botrbac's hook or gateway.
+OTHER_AGENT_FILES = (
+    ".codex/hooks.json",
+    ".codex/config.toml",
+    ".gemini/settings.json",
+    ".cursor/hooks.json",
+    ".cursor/mcp.json",
+)
+
 # Tools that only read. They may look at protected files, but not at the login.
 READ_TOOLS = frozenset(
     {"Read", "Grep", "Glob", "LS", "NotebookRead", "read_file", "read_many_files",
@@ -49,10 +58,15 @@ def markers() -> tuple[set[str], set[str]]:
         ".claude/settings.json",
         ".claude/settings.local.json",
         ".claude.json",
+        # The other agents' hook files (agents.HOOK_FILES), and the ones that list the
+        # gateway or can switch hooks off.
+        *OTHER_AGENT_FILES,
         # botrbac's own folder, under its default name and wherever BOTRBAC_HOME puts it.
         ".config/botrbac",
     }
     protected |= _variants(home / ".claude" / "settings.json")
+    for name in OTHER_AGENT_FILES:
+        protected |= _variants(home / name)
     protected |= _variants(state.home())
     protected |= {
         # Switching hooks off, or taking botrbac's out, by command or by settings text.
@@ -72,6 +86,7 @@ def _targets() -> tuple[list[Path], Path]:
         home / ".claude.json",
         cwd / ".claude" / "settings.json",
         cwd / ".claude" / "settings.local.json",
+        *(base / name for base in (home, cwd) for name in OTHER_AGENT_FILES),
         state.home(),
     ]
     return [Path(os.path.realpath(f)) for f in files], Path(
@@ -143,8 +158,8 @@ def refusal(tool: str, arguments: Any) -> str | None:
         found = next((str(p) for p in paths for t in targets if _within(p, t)), None)
     if found is not None:
         return (
-            f"it mentions {found!r}, which Bot RBAC protects (Claude Code's settings, "
-            "~/.claude.json, botrbac's own folder, or switching hooks off). Ask the person "
-            "to make that change"
+            f"it mentions {found!r}, which Bot RBAC protects (an agent's hook or MCP "
+            "settings, ~/.claude.json, botrbac's own folder, or switching hooks off). Ask "
+            "the person to make that change"
         )
     return None
