@@ -17,6 +17,28 @@
   </form>
 </section>
 {% endif %}
+{% if can_webhook %}
+<section class="card term-webhook" id="audit-webhook" aria-labelledby="webhook-title">
+  <h2 id="webhook-title">Audit webhook {% if webhook %}<span class="pill ok">on</span>{% else %}<span class="pill">off</span>{% endif %}</h2>
+  <p class="small">After each upload, this site posts the new rows to your https address as JSON, signed with HMAC-SHA256 (<code>X-Botrbac-Signature: sha256=…</code> over <code>timestamp.body</code>). One try with a short timeout; a failed delivery is not retried. Recorded commands are left out unless you tick the box.</p>
+  {% if webhook and webhook.last %}<p class="small muted" id="webhook-last">Last delivery {{ webhook.last.at | epoch | when }}: {% if webhook.last.status %}HTTP {{ webhook.last.status }}{% else %}not delivered ({{ webhook.last.error or "error" }}){% endif %}</p>{% endif %}
+  <form class="term-form" method="post" action="/terminal/activity/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>URL <input type="url" name="url" required pattern="https://.*" placeholder="https://siem.example.com/botrbac" value="{{ webhook.url if webhook else '' }}" maxlength="512"></label>
+    <label class="inline"><input type="checkbox" name="include_commands" value="1"{% if webhook and webhook.include_commands %} checked{% endif %}> Include recorded commands, opened as text (secrets included)</label>
+    {% if webhook %}<label class="inline"><input type="checkbox" name="rotate" value="1"> Make a new secret</label>{% endif %}
+    <button type="submit" class="primary" id="webhook-save">Save webhook</button>
+    {% if webhook %}<span class="muted small">Secret ends in …{{ webhook.hint }}</span>{% endif %}
+  </form>
+  {% if webhook %}
+  <form class="term-form" method="post" action="/terminal/activity/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="remove">
+    <button type="submit" id="webhook-remove">Remove webhook</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
 {% if total %}
 <form class="actions term-filters" method="get" action="/terminal/activity" aria-label="Filter terminal activity">
   <label>Terminal
@@ -31,6 +53,7 @@
   <button type="submit">Filter</button>
   <a class="btn ghost" href="/terminal/activity/export?{{ export_query }}{{ '&' if export_query }}format=csv" id="export-csv">Export CSV</a>
   <a class="btn ghost" href="/terminal/activity/export?{{ export_query }}{{ '&' if export_query }}format=jsonl">JSON lines</a>
+  <a class="btn ghost" href="/terminal/activity/export?{{ export_query }}{{ '&' if export_query }}format=otlp" id="export-otlp">OpenTelemetry logs</a>
 </form>
 {% endif %}
 {% if rows %}
@@ -44,7 +67,8 @@
     <td data-label="Agent">{{ r.agent or "—" }}</td>
     <td data-label="Tool">{% if r.decision == 'session' %}started <code>{{ r.program or "a program" }}</code> as <strong>{{ r.role }}</strong>{% else %}<code>{{ r.tool }}</code>{% endif %}
       {% if r.command %}<pre class="term-ran" aria-label="Command">{{ r.command }}</pre>{% elif r.command_unreadable %}<br><span class="muted small">Command recorded, but it cannot be opened (this site's key changed).</span>{% elif r.command_error %}<br><span class="muted small">The computer could not record this command ({{ r.command_error }}).</span>{% endif %}
-      {% if r.session_id %}<br><a class="muted" href="/terminal/sessions/{{ r.session_id }}">session …{{ r.session_id[-6:] }}</a>{% endif %}</td>
+      {% if r.session_id %}<br><a class="muted" href="/terminal/sessions/{{ r.session_id }}">session …{{ r.session_id[-6:] }}</a>{% endif %}
+      {% if r.actor %}<br><span class="muted small term-chain" title="On whose behalf: set by this site, not by the computer">{{ delegation(r) }}</span> {% if r.signed %}<span class="pill ok" title="This batch was signed with the terminal's own key">signed</span>{% else %}<span class="pill" title="Sent by a botrbac without a signing key">unsigned</span>{% endif %}{% endif %}</td>
     <td data-label="Result">{% if r.decision == 'allow' %}<span class="pill ok">allowed</span>{% elif r.decision == 'deny' %}<span class="pill bad">blocked</span> <span class="muted">{{ r.reason }}</span>{% elif r.decision == 'session' %}<span class="pill">session</span>{% else %}<span class="pill">error</span> <span class="muted">{{ r.reason }}</span>{% endif %}</td>
   </tr>
   {% endfor %}

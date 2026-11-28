@@ -250,6 +250,68 @@ Turning it off stops new commands at once on the site (a computer stops sealing 
 check-in). Commands already recorded stay, and keep showing to you, until their rows age out of the log
 (the newest 2,000 rows are kept).
 
+### Who did it: signing and delegation
+
+`botrbac login` makes an Ed25519 key pair for this terminal. The private half stays in
+`terminal_key.json` (mode 0600); the public half goes to the site with the token exchange, and the site
+keeps it on the terminal. A computer that logged in before keys existed makes one and registers it at its
+next token refresh (within an hour while online). A key is registered once and never replaced; to get a new
+one, run `botrbac login` again.
+
+Each audit batch is signed: `X-Botrbac-Signature: ed25519=<base64>`, `X-Botrbac-Key-Id`,
+`X-Botrbac-Timestamp` and `X-Botrbac-Nonce`. The signature covers the method, the path, the sha256 of the
+body, the timestamp, the nonce and the key id (a simplified HTTP Message Signatures, RFC 9421). The site
+accepts it for 5 minutes either side of its clock and each nonce once. A terminal with a key must sign: a
+missing, wrong, stale or replayed signature gets 401 and the rows stay waiting on the computer. If
+`terminal_key.json` is lost, uploads keep failing until you run `botrbac login` again. A terminal without
+a key (an older botrbac) is still accepted, and its rows are marked unsigned.
+
+The site sets these on every row it stores, whatever the computer sent:
+
+- `signed`: whether the batch carried a good signature from the terminal's key.
+- `subject`: you, the account's email.
+- `actor`: who acted for you, shaped like RFC 8693's `act` claim:
+  `{"sub": "terminal:t_…", "act": {"sub": "agent:claude-code/<agent id>"}}`.
+- `grant`: the role (and `policy_version`) the computer says it decided under.
+
+The Activity page shows the chain on each row, for example "you → terminal vm → claude-code (subagent
+…1a2b3c4d)", with a signed or unsigned mark. The exports carry the same fields as JSON.
+
+### Export and webhook
+
+**Terminal → Activity** exports CSV, JSON lines, or OpenTelemetry logs
+(`/terminal/activity/export?format=otlp`): OTLP/JSON with one `resourceLogs` → `scopeLogs` → `logRecords`
+entry per row, ready for an OTLP collector's file or HTTP receiver. Attributes follow OpenTelemetry semantic
+conventions 1.37.0 where one fits: `gen_ai.tool.name`, `gen_ai.tool.call.id` (from `tool_use_id`),
+`gen_ai.conversation.id` (from `agent_session_id`), `gen_ai.agent.id`, `gen_ai.agent.name`,
+`gen_ai.operation.name` and `user.email`. The GenAI attributes have Development status in that version, so
+their names may still change. Everything else is under `botrbac.*` (`botrbac.decision`, `botrbac.role`,
+`botrbac.session_id`, `botrbac.event_id`, `botrbac.chain`, `botrbac.actor`, …). Blocked rows are
+`WARN`, errors `ERROR`, the rest `INFO`. Like the other exports, recorded commands appear as text, for
+you only.
+
+The **audit webhook** posts each upload's new rows to an https address you set on the same page. Saving it
+shows a secret once. Each POST is JSON (`{"v": 1, "type": "botrbac.terminal.audit", "rows": [...]}`) with
+`X-Botrbac-Timestamp` and `X-Botrbac-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<body>`
+with the secret. Check it, and refuse timestamps more than a few minutes old. Recorded commands are left
+out unless you tick "Include recorded commands"; then they are sent as text. Delivery is one try with a
+3-second timeout; a failure never fails the upload, is not retried, and shows on the page as the last
+delivery. The address must be https on port 443, with no user, query or fragment, and a name that resolves
+only to public addresses (checked again at every delivery). It needs `ENCRYPTION_KEY` on the server.
+
+### Commit trailer
+
+`botrbac trailer install [--repo PATH]` adds a git `prepare-commit-msg` hook to one repository. A commit
+made inside `botrbac run` (with `BOTRBAC_SESSION` set) then gets
+
+    Botrbac-Session: https://botrbac.com/terminal/sessions/<id>
+
+so a reviewer can open the session that made it. Nothing is installed unless you run it. Running it twice
+changes nothing, and an amend does not add a second trailer. An existing hook is moved to
+`prepare-commit-msg.botrbac-orig` and still runs first, with its exit status kept; botrbac's own part never
+fails a commit. `botrbac trailer remove` takes the hook out and puts the old one back. The link opens only
+for you; anyone who reads the commit sees the site's address and the session id.
+
 ## Commands
 
 | Command | |
@@ -266,10 +328,11 @@ check-in). Commands already recorded stay, and keep showing to you, until their 
 | `botrbac hooks install claude-code` | Check Claude Code's own tools too |
 | `botrbac check --agent A` | The hook adapter (reads the tool call on stdin) |
 | `botrbac sync` / `botrbac log` | Send waiting rows now / show recent rows |
-| `botrbac logout` | Forget this computer's login (disconnect it on the website too) |
+| `botrbac trailer install [--repo P]` / `remove` | Opt-in git hook: `Botrbac-Session:` trailer on commits made in a session |
+| `botrbac logout` | Forget this computer's login and key (disconnect it on the website too) |
 
 Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json` (mode 0600),
-`policy.json`, `config.json`, `audit.db`, `sessions/` and `state.json`.
+`terminal_key.json` (the terminal's signing key, mode 0600), `policy.json`, `config.json`, `audit.db`, `sessions/` and `state.json`.
 
 ## Server side
 
@@ -278,9 +341,11 @@ Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json
 | `GET /terminal/setup.md` | none | Setup steps for a coding agent, with this site's address |
 | `GET /terminal/install.sh` | none | The install script, with this site's address |
 | `POST /api/terminal/device` | none, rate-limited per address | Start a device login (RFC 8628) |
-| `POST /api/terminal/token` | device code or refresh token | Tokens: `brt_at_…` (1 hour), `brt_rt_…` (90 days, rotated) |
+| `POST /api/terminal/token` | device code or refresh token | Tokens: `brt_at_…` (1 hour), `brt_rt_…` (90 days, rotated); optional `public_key` registers the terminal's signing key once |
 | `GET /api/terminal/policy` | terminal access token | Role, roles, revoked sessions, version |
-| `POST /api/terminal/audit` | terminal access token | Up to 500 rows; tools seen; unguarded servers |
+| `POST /api/terminal/audit` | terminal access token, plus a signature once the terminal has a key | Up to 500 rows; tools seen; unguarded servers |
+| `GET /terminal/activity/export?format=csv\|jsonl\|otlp` | signed-in owner | Activity as CSV, JSON lines or OTLP/JSON logs |
+| `POST /terminal/activity/webhook` | signed-in owner, CSRF | Set or remove the audit webhook (`url`, `include_commands`, `rotate`, `action=remove`) |
 
 Terminal tokens work only on `/api/terminal/*`, and `/mcp` refuses them. Every key this feature writes
 starts with `term:`; roles, terminals, tokens and revocations are signed like OAuth records. Each person

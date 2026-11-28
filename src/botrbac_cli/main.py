@@ -80,8 +80,11 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 def cmd_logout(_args: argparse.Namespace) -> int:
+    from . import identity
+
     for name in ("credentials.json", "policy.json"):
         state.remove(name)
+    identity.forget()
     print("Logged out on this computer. Disconnect it on the website to end it there too.")
     return 0
 
@@ -336,6 +339,31 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_trailer(args: argparse.Namespace) -> int:
+    from .trailer import TrailerError, install, remove
+
+    repo = Path(args.repo or ".").expanduser()
+    try:
+        if args.action == "remove":
+            done = remove(repo)
+            if not done["removed"]:
+                print(f"No botrbac trailer hook in {done['hook']}")
+            else:
+                print(f"Removed the botrbac trailer hook: {done['hook']}")
+                if done["restored"]:
+                    print("Put the hook that was there before back in place.")
+            return 0
+        done = install(repo, args.site)
+    except (OSError, TrailerError) as exc:
+        print(f"botrbac: {exc}", file=sys.stderr)
+        return 1
+    print(f"{'Installed' if done['changed'] else 'Already set up'}: {done['hook']}")
+    if done["backup"]:
+        print(f"The hook that was there runs first: {done['backup']}")
+    print("Commits made inside `botrbac run` now name their session (Botrbac-Session: …).")
+    return 0
+
+
 # ---- upstream servers ------------------------------------------------------------
 
 
@@ -454,6 +482,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="check MCP tools that bypass the gateway instead of blocking them",
     )
     p.set_defaults(fn=cmd_hooks)
+    p = sub.add_parser(
+        "trailer", help="add a Botrbac-Session trailer to commits made in a session (opt-in)"
+    )
+    p.add_argument("action", choices=["install", "remove"])
+    p.add_argument("--repo", help="the git repository (default: the current directory)")
+    p.add_argument("--site", help="the website's address (default: from botrbac login)")
+    p.set_defaults(fn=cmd_trailer)
     p = sub.add_parser(
         "servers",
         help="MCP servers the gateway sits in front of",

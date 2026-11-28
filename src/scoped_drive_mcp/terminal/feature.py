@@ -23,9 +23,12 @@ from botrbac_cli.api import DEFAULT_SERVER
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
+from . import export as otlp_export
+from . import identity
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
 from .ingest import IngestError, TerminalActivity
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
+from .webhook import AuditWebhook, WebhookError
 
 Handler = Callable[[Request], Awaitable[Response]]
 FormHandler = Callable[[Request, Any], Awaitable[Response]]
@@ -87,6 +90,15 @@ AGENTS = (
     ("codex", "Codex"),
     ("gemini", "Gemini CLI"),
 )
+
+
+WEBHOOK_ERRORS = {
+    "invalid_webhook_url": "Use an https address on port 443, with no user, query or fragment.",
+    "webhook_host_unknown": "That host could not be found.",
+    "webhook_host_not_public": "That host is on a private network. Use a public https address.",
+    "webhook_disabled": "This site has no ENCRYPTION_KEY, so it cannot send audit webhooks.",
+    "": "That webhook could not be saved.",
+}
 
 
 def safe_site(base: str) -> str:
@@ -171,6 +183,7 @@ class TerminalFeature:
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
     activity: TerminalActivity = field(init=False)
+    webhook: AuditWebhook = field(init=False)
 
     def __post_init__(self) -> None:
         self._signing_key = (
@@ -182,6 +195,7 @@ class TerminalFeature:
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
         self.activity = TerminalActivity(self.store)
+        self.webhook = AuditWebhook(self.store, self.signing_secret)
 
     def site(self, request: Request) -> str:
         return safe_site(self.base_url or str(request.base_url))
@@ -272,6 +286,12 @@ class TerminalFeature:
                     return _oauth_error("invalid_grant")
             else:
                 return _oauth_error("unsupported_grant_type")
+            if data.get("public_key"):
+                # This terminal's signing key: kept at login, or at the first refresh of
+                # a terminal that has none. Never replaced (terminal.identity).
+                await _run(
+                    self.terminals.register_key, issued["terminal_id"], data.get("public_key")
+                )
             if self.policy_key:
                 issued["policy_key"] = self.policy_key
             return JSONResponse(issued, headers={"cache-control": "no-store"})
@@ -304,6 +324,19 @@ class TerminalFeature:
             raw = await _read_capped(request, MAX_BODY)
             if raw is None:
                 return JSONResponse({"error": "too_large"}, status_code=413)
+            public_key = await _run(self.terminals.public_key, terminal.id)
+            try:
+                signed = await _run(
+                    identity.verify_batch,
+                    self.store,
+                    public_key,
+                    terminal.id,
+                    request.headers,
+                    raw,
+                    time.time(),
+                )
+            except identity.SignatureRejected as exc:
+                return JSONResponse({"error": exc.code}, status_code=401)
             try:
                 data = json.loads(raw or b"{}")
             except ValueError:
@@ -311,6 +344,7 @@ class TerminalFeature:
             if not isinstance(data, dict):
                 return JSONResponse({"error": "invalid_request"}, status_code=400)
             command_key = await _run(self.command_key_for, terminal.email)
+            stored: list[dict[str, Any]] = []
             try:
                 result = await _run(
                     self.activity.add,
@@ -319,9 +353,13 @@ class TerminalFeature:
                     terminal.name,
                     data.get("rows"),
                     command_key,
+                    stamp=identity.stamper(terminal, signed, stored),
                 )
             except IngestError as exc:
                 return JSONResponse({"error": "invalid_request", "message": str(exc)}, 400)
+            if stored:
+                # Best effort, short timeout; never fails the upload (terminal.webhook).
+                await _run(self.webhook.deliver, terminal.email, stored, command_key)
             tools = data.get("tools")
             if isinstance(tools, list):
                 await _run(self.roles.note_tools, terminal.email, tools[:500])
@@ -580,9 +618,13 @@ class TerminalFeature:
             except ValueError:
                 limit = ACTIVITY_PAGE
             recording = await _run(self.activity.records_commands, email)
+            hook = await _run(self.webhook.get, email)
             return render(
                 request,
                 "terminal_activity.html",
+                delegation=identity.chain_text,
+                webhook=hook,
+                can_webhook=self.webhook.ready,
                 rows=self.open_commands(shown[:limit]),
                 recording=recording,
                 can_record=self._command_key is not None,
@@ -602,8 +644,13 @@ class TerminalFeature:
                 "ts", "terminal", "terminal_id", "agent", "tool", "command",
                 "command_error", "decision", "reason", "role", "session_id",
                 "parent_session_id", "via", "event_id", "received",
+                "signed", "subject", "actor", "grant", "policy_version",
             ]  # fmt: skip
-            if request.query_params.get("format") == "jsonl":
+            if request.query_params.get("format") == "otlp":
+                body = otlp_export.otlp_logs(rows, self.site(request))
+                text = json.dumps(body, separators=(",", ":"))
+                kind, ext = "application/json", "otlp.json"
+            elif request.query_params.get("format") == "jsonl":
                 text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
                 kind, ext = "application/x-ndjson", "jsonl"
             else:
@@ -611,6 +658,8 @@ class TerminalFeature:
                 writer = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
                 writer.writeheader()
                 for r in rows:
+                    # The delegation fields are objects: JSON in their cells.
+                    r = {k: json.dumps(v) if isinstance(v, dict) else v for k, v in r.items()}
                     # A cell starting with = + - @ would run as a formula in a spreadsheet.
                     writer.writerow(
                         {k: ("'" + v if isinstance(v, str) and v and v[0] in "=+-@\t\r" else v)
@@ -644,6 +693,37 @@ class TerminalFeature:
             )
             return RedirectResponse("/terminal/activity", status_code=303)
 
+        async def webhook_save(request: Request, form: Any) -> Response:
+            email = _me()
+            back = RedirectResponse("/terminal/activity#audit-webhook", status_code=303)
+            if str(form.get("action") or "") == "remove":
+                if await _run(self.webhook.clear, email):
+                    audit_owner("terminal_webhook_removed")
+                    kit.flash(request, "ok", "Audit webhook removed. Nothing more is sent.")
+                return back
+            url = str(form.get("url") or "").strip()
+            include = str(form.get("include_commands") or "") == "1"
+            rotate = str(form.get("rotate") or "") == "1"
+            try:
+                secret = await _run(self.webhook.save, email, url, include, rotate)
+            except WebhookError as exc:
+                kit.flash(request, "error", WEBHOOK_ERRORS.get(str(exc), WEBHOOK_ERRORS[""]))
+                return back
+            audit_owner("terminal_webhook_saved", commands="1" if include else "0")
+            if secret is None:
+                kit.flash(request, "ok", "Audit webhook saved. The secret is unchanged.")
+                return back
+            # Shown on this page only, once: it is stored encrypted and never shown again.
+            page = render(
+                request,
+                "terminal_webhook_secret.html",
+                url=url,
+                secret=secret,
+                include_commands=include,
+            )
+            page.headers["cache-control"] = "no-store"
+            return page
+
         async def session_page(request: Request) -> Response:
             tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
             if tree is None:
@@ -675,6 +755,7 @@ class TerminalFeature:
             Route("/terminal/activity", own(activity_page), methods=["GET"]),
             Route("/terminal/activity/export", own(activity_export), methods=["GET"]),
             Route("/terminal/activity/record", csrf(record_commands), methods=["POST"]),
+            Route("/terminal/activity/webhook", csrf(webhook_save), methods=["POST"]),
             Route("/terminal/sessions/{session_id}", own(session_page), methods=["GET"]),
             Route("/terminal/sessions/{session_id}/revoke", csrf(session_revoke), methods=["POST"]),
             Route("/terminal/roles/new", own(role_edit), methods=["GET"]),

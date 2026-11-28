@@ -1,13 +1,14 @@
 """The website's /api/terminal endpoints, with token refresh."""
 
 import contextlib
+import json
 import time
 from collections.abc import Iterator
 from typing import Any
 
 import httpx
 
-from . import __version__, state
+from . import __version__, identity, state
 
 # What `botrbac login` connects to without --server or BOTRBAC_SERVER.
 DEFAULT_SERVER = "https://botrbac.com"
@@ -37,6 +38,8 @@ class Api:
     # ---- login -------------------------------------------------------------------
 
     def start_login(self, hostname: str, os_name: str) -> dict[str, Any]:
+        # A fresh key for this login: its public half goes with the token exchange.
+        identity.new_pending()
         r = self.client.post(
             f"{self.server}/api/terminal/device",
             json={"hostname": hostname, "os": os_name, "version": __version__},
@@ -47,11 +50,13 @@ class Api:
 
     def poll_login(self, device_code: str) -> dict[str, Any] | str:
         """Tokens, or the RFC 8628 error code to act on."""
-        r = self.client.post(
-            f"{self.server}/api/terminal/token",
-            data={"grant_type": DEVICE_GRANT, "device_code": device_code},
-        )
+        data = {"grant_type": DEVICE_GRANT, "device_code": device_code}
+        public = identity.pending_public()
+        if public:
+            data["public_key"] = public
+        r = self.client.post(f"{self.server}/api/terminal/token", data=data)
         if r.status_code == 200:
+            identity.promote_pending()
             self._save(r.json())
             return r.json()
         return _code(r)
@@ -87,10 +92,12 @@ class Api:
                 latest.get("expires_at") or 0
             ):
                 return str(latest["access_token"])
-            r = self.client.post(
-                f"{self.server}/api/terminal/token",
-                data={"grant_type": "refresh_token", "refresh_token": latest["refresh_token"]},
-            )
+            data = {"grant_type": "refresh_token", "refresh_token": latest["refresh_token"]}
+            public = _public_key()
+            if public:
+                # Registered only if the terminal has no key yet (logged in before keys).
+                data["public_key"] = public
+            r = self.client.post(f"{self.server}/api/terminal/token", data=data)
             if r.status_code != 200:
                 if _code(r) == "invalid_grant":
                     again = _creds()
@@ -103,10 +110,24 @@ class Api:
             self._save(r.json())
             return str(r.json()["access_token"])
 
-    def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _call(
+        self,
+        method: str,
+        path: str,
+        sign: bytes | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """`sign`: the exact body to send, signed with this terminal's key."""
         for attempt in (0, 1):
             headers = {"Authorization": f"Bearer {self._token(force_refresh=attempt == 1)}"}
+            if sign is not None:
+                headers["Content-Type"] = "application/json"
+                headers.update(identity.sign_request(method, path, sign))
+                kwargs["content"] = sign
             r = self.client.request(method, f"{self.server}{path}", headers=headers, **kwargs)
+            if r.status_code == 401 and _code(r) in identity.SIGNATURE_ERRORS:
+                # The token is fine; a new one would not help.
+                raise ApiError(401, _code(r))
             if r.status_code == 401 and attempt == 0:
                 continue
             if r.status_code != 200:
@@ -118,7 +139,15 @@ class Api:
         return self._call("GET", "/api/terminal/policy")
 
     def send_audit(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self._call("POST", "/api/terminal/audit", json=body)
+        content = json.dumps(body, separators=(",", ":")).encode()
+        return self._call("POST", identity.AUDIT_PATH, sign=content)
+
+
+def _public_key() -> str | None:
+    try:
+        return str(identity.ensure()["public_key"])
+    except OSError:
+        return None
 
 
 def _creds() -> dict[str, Any]:

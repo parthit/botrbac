@@ -28,6 +28,7 @@ SEEN_TTL = 30 * 24 * 3600
 DECISIONS = frozenset({"allow", "deny", "error", "session"})
 _ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _WORD = re.compile(r"[^A-Za-z0-9_.:/@ -]+")
+_POLICY_VERSION = re.compile(r"^[A-Za-z0-9]{1,32}$")
 
 
 class IngestError(ValueError):
@@ -81,6 +82,10 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
         value = str(raw.get(key) or "")
         if _ID.match(value):
             row[key] = value
+    # Stream C: the version of the policy the CLI decided under (it goes into `grant`).
+    version = str(raw.get("policy_version") or "")
+    if _POLICY_VERSION.match(version):
+        row["policy_version"] = version
     command = raw.get("command")
     if command_key is not None and isinstance(command, str):
         try:
@@ -114,9 +119,12 @@ class TerminalActivity:
         terminal_name: str,
         rows: Any,
         command_key: Any = None,
+        stamp: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, int]:
         """`command_key`: the private key that opens sealed commands, passed only while
-        this person has "Record commands" on. Without it, commands are dropped."""
+        this person has "Record commands" on. Without it, commands are dropped.
+        `stamp`: called with each new row just before it is stored, to set the server's
+        own fields (terminal.identity: signed, subject, actor, grant)."""
         if not isinstance(rows, list):
             raise IngestError("rows must be a list")
         if len(rows) > BATCH_MAX:
@@ -134,6 +142,8 @@ class TerminalActivity:
                 duplicates += 1
                 continue
             row.update(terminal_id=terminal_id, terminal=terminal_name[:80], received=now)
+            if stamp is not None:
+                stamp(row)
             try:
                 self.store.lpush(key, json.dumps(row, separators=(",", ":")))
             except Exception:

@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import policy, sealing, state
+from . import identity, policy, sealing, state
 
 SEND_BATCH = 500
 KEEP_SENT = 5000
@@ -55,6 +55,9 @@ class AuditQueue:
         website's key, and only when the person turned on "Record commands"; it is
         never written to this file as text."""
         row = {"event_id": uuid.uuid4().hex, "ts": time.time(), **fields}
+        version = identity.policy_version()  # Stream C: goes into the row's `grant`
+        if version and "policy_version" not in row:
+            row["policy_version"] = version
         if command is not None:
             # Recording must never cost the row: if the key or the sealing fails, the
             # row is kept without the command, marked so the owner sees one is missing.
