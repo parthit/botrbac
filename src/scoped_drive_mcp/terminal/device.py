@@ -21,6 +21,8 @@ DEVICE_TTL = 600
 POLL_INTERVAL = 5
 ACCESS_TTL = 3600
 REFRESH_TTL = 90 * 24 * 3600
+# A terminal's signing key lasts as long as the terminal (the store needs some expiry).
+KEY_TTL = 10 * 365 * 24 * 3600
 MAX_TERMINALS = 50
 EDITABLE = frozenset({"name", "role_id"})
 _USER_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # no vowels: codes never spell words
@@ -292,6 +294,26 @@ class Terminals:
     def _rt_key(terminal_id: str) -> str:
         return f"term:terminal:{terminal_id}:rt"
 
+    @staticmethod
+    def _pk_key(terminal_id: str) -> str:
+        return f"term:terminal:{terminal_id}:pubkey"
+
+    def register_key(self, terminal_id: str, public_key: Any) -> bool:
+        """The terminal's Ed25519 public key (botrbac_cli.identity), kept once: at login,
+        or at the first refresh of a terminal that logged in before keys. It is never
+        replaced, so whoever holds a token later cannot swap in a key of their own.
+        Kept apart from the record the person edits, like the refresh token."""
+        from botrbac_cli.identity import parse_public
+
+        if parse_public(public_key) is None or self.get(terminal_id) is None:
+            return False
+        key = self._pk_key(terminal_id)
+        return bool(self.store.set_if_absent(key, str(public_key), ex=KEY_TTL))
+
+    def public_key(self, terminal_id: str) -> str | None:
+        value = self.store.get(self._pk_key(terminal_id))
+        return str(value) if value else None
+
     def _save(self, terminal: Terminal) -> None:
         self.store.set(f"term:terminal:{terminal.id}", json.dumps(asdict(terminal)))
 
@@ -363,6 +385,7 @@ class Terminals:
         if live:
             self.store.delete(f"term:rt:{live}")
         self.store.delete(self._rt_key(terminal_id))
+        self.store.delete(self._pk_key(terminal_id))
         self.store.delete(f"term:terminal:{terminal_id}:seen")
         self.store.delete(f"term:terminal:{terminal_id}")
         return True

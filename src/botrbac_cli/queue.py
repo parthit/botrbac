@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import chain, policy, provenance, sealing, state
+from . import chain, identity, policy, provenance, sealing, state
 
 SEND_BATCH = 500
 KEEP_SENT = 5000
@@ -67,6 +67,9 @@ class AuditQueue:
         the same way with `event_id:<name>` as associated data, so one cannot be moved
         onto another row or another field. Without the key they are dropped."""
         row = {"event_id": uuid.uuid4().hex, "ts": time.time(), **fields}
+        version = identity.policy_version()  # goes into the row's `grant` on the site
+        if version and "policy_version" not in row:
+            row["policy_version"] = version
         extras = {k: v for k, v in (sealed or {}).items() if v is not None}
         if command is None and not extras:
             return self._insert(row)

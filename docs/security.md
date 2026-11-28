@@ -484,6 +484,35 @@ before it was ever sent leaves a mark only when a later row arrives. Checkpoints
 public log (Rekor), so they do not protect against the site's operator. Rows are kept for
 `TERMINAL_ACTIVITY_DAYS` (180) and at most `TERMINAL_ACTIVITY_MAX_ROWS` (20,000) per person.
 
+**Terminal keys.** Each terminal has its own Ed25519 key, made at `botrbac login`
+(`src/botrbac_cli/identity.py`). The private half stays on the computer in `terminal_key.json` (0600) and
+never leaves it; the public half is registered with the token exchange, or at the first refresh of a
+terminal that has none, and is never replaced afterwards, so a stolen token cannot swap in another key. It
+is stored under `term:terminal:` and signed like the terminal record. Once a terminal has a key, every audit
+batch must carry a signature over the method, path, body hash, timestamp, nonce and key id; the site allows
+5 minutes of clock difference and refuses a nonce it has seen (401). A terminal without a key (an older
+CLI) is still accepted and its rows say `signed: false`. The site sets `signed`, `subject`, `actor` and
+`grant` on every row itself and drops whatever the CLI sent under those names. What a signature proves:
+the batch came from a process that can read that file, as you, on that computer. It does not prove an
+agent there did not write the rows, any more than before.
+
+**Audit webhook** (off until the owner sets a URL). The URL must be https on port 443 with no user, query
+or fragment, and not an IP address; every address the name resolves to must be public (no private,
+loopback, link-local, multicast, reserved or carrier-grade NAT ranges), checked at save and again at each
+delivery, and the connection goes to the address that was checked, with the certificate checked against
+the name (`src/scoped_drive_mcp/wake.py`). The form is CSRF-checked and the setting is signed in the store.
+The secret is random, shown once (on a `no-store` page), and stored encrypted with a key derived from
+`ENCRYPTION_KEY`. Each POST is signed with HMAC-SHA256 over `<timestamp>.<body>`. Recorded commands and
+other sealed text are left out unless the owner ticks "Include recorded commands", and then only while
+Record commands is on; with it ticked they leave the site as plain text, to wherever the URL points.
+Delivery is one try with a 3-second timeout and never fails the upload.
+
+**Commit trailer** (`botrbac trailer install`, opt-in per repository). The hook adds
+`Botrbac-Session: <site>/terminal/sessions/<id>` to commits made inside `botrbac run`. Anyone who can read
+the repository sees the site's address and the session id; the session page itself opens only for its
+owner. The site address is checked against a plain `http(s)://host[:port]` shape before it goes into the
+script, and the session id is used only if it is letters, digits, `-` and `_`, so neither can inject shell.
+
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
 owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
 a policy older than the role's offline grace, an unknown session or a revoked session all block every tool.

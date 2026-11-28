@@ -98,6 +98,8 @@ _SIGNED_PREFIXES = (
     "term:revoked:",
     # Whether commands are recorded: a store writer must not be able to switch it on.
     "term:settings:",
+    # Where audit rows are posted, and whether commands go with them.
+    "term:webhook:",
     # A request from a paired person (peer_requests.py): it names who would get access.
     "peerreq:",
 )
