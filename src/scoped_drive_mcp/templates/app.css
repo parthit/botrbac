@@ -967,6 +967,10 @@ label input[type="checkbox"], label input[type="radio"] { accent-color: var(--ac
 .role input { width: 18px; height: 18px; flex: 0 0 auto; margin: 3px 0 0; }
 .role input:focus-visible { outline: 0; }
 .role .muted { display: block; font-size: 15px; margin-top: 2px; }
+/* Role cards inside a .stack form (the terminal device page): keep the radio beside the text. */
+.stack label.role { flex-direction: row; gap: 12px; margin: 0 0 8px; font-weight: 400; font-size: 16px; }
+.stack .role input { width: 18px; }
+.card.consent .consent-check + .actions { margin-top: 18px; }
 .role-tag {
   font: 500 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--ok); margin-left: 6px; white-space: nowrap;
