@@ -12,14 +12,16 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 from ..access import (
+    APPROVED,
     OWNER_INDEX,
     OWNER_INDEX_SINCE,
     PENDING,
     REQUEST_TTL,
+    SOURCE_ONEDRIVE,
     AccessRequests,
     validate_request_id,
 )
-from ..audit import app_tag
+from ..audit import app_tag, audit_owner
 from ..auth import current_actor
 from ..drive_client import DriveNotFoundError
 from ..errors import report_exception
@@ -32,6 +34,8 @@ from ..humanize import (
     item_ids,
     matches,
 )
+from ..onedrive_client import OneDriveApiError, normalize_item_id
+from ..policy import PayloadToolError
 from ..ratelimit import allow
 from ..scope import InvalidInputError, validate_drive_id
 from ..store import EXTERNAL_ALLOWLIST_KEY, Allowlist
@@ -175,11 +179,70 @@ def request_pages(kit: Kit) -> RequestPages:
                 return peer
         return None
 
+    def onedrive_options(req: Any) -> tuple[list[dict[str, str]], bool, bool]:
+        """(options, connected, error) for a pending OneDrive request with an item id."""
+        if ctx.onedrive is None or ctx.onedrive_record() is None:
+            return [], False, False
+        try:
+            return ctx.onedrive.approval_options(req.file_id), True, False
+        except (PayloadToolError, OneDriveApiError):
+            return [], True, True
+
+    async def onedrive_detail(request: Request, req: Any) -> Response:
+        options: list[dict[str, str]] = []
+        connected = ctx.onedrive is not None and await blocking(ctx.onedrive_record) is not None
+        error = False
+        if req.file_id and req.status == PENDING:
+            options, connected, error = await blocking(onedrive_options, req)
+        meta = {"name": options[0]["name"]} if options else None
+        if meta and req.file_name != meta["name"]:
+            # The request was filed without asking OneDrive; keep the name for the list.
+            req.file_name = meta["name"]
+            await blocking(ctx.requests.save, req)
+        return render(
+            request,
+            "request.html",
+            req=req,
+            options=options,
+            owner_meta=meta,
+            onedrive_connected=connected,
+            onedrive_error=error,
+            apps=await blocking(my_app_names),
+            describe_mime=describe_mime,
+        )
+
+    def approve_onedrive(req: Any, target: str) -> str:
+        """Allow `target` for a OneDrive request. Returns the message to show."""
+        if ctx.onedrive is None:
+            raise GrantError("OneDrive is not set up on this server.")
+        if req.status != PENDING:
+            raise GrantError(f"This request was already {req.status}.")
+        clean = normalize_item_id(target)
+        if clean is None:
+            raise GrantError("Pick the requested item or its folder.")
+        if req.file_id:
+            # Only the item the assistant named, or its folder, may answer its request.
+            allowed = {o["id"] for o in ctx.onedrive.approval_options(req.file_id)}
+            if clean not in allowed:
+                raise GrantError("Pick the requested item or its folder.")
+        entry = ctx.onedrive.allow(clean)
+        if entry is None:
+            raise GrantError(
+                "That item can’t be allowed. It may have been deleted, be the top of your "
+                "OneDrive, or be a shortcut to someone else’s file."
+            )
+        ctx.requests.decide(req, APPROVED, granted_id=entry.id, granted_name=entry.name)
+        ctx.requests.clear_denials(entry.id, SOURCE_ONEDRIVE)
+        audit_owner("approve_request", request_id=req.id, file_id=entry.id, connection="onedrive")
+        return f"Approved: allowed \u201c{entry.name}\u201d in your OneDrive for your assistants."
+
     async def request_detail(request: Request) -> Response:
         rid = request.path_params["rid"]
         req = await blocking(ctx.requests.get, rid)
         if req is None:
             return await missing_request(request, rid)
+        if req.is_onedrive:
+            return await onedrive_detail(request, req)
         options = []
         owner_meta = None
         drive_error = False
@@ -217,6 +280,19 @@ def request_pages(kit: Kit) -> RequestPages:
         if req is None:
             return await missing_request(request, rid)
         target = form.get("target_id") or req.file_id
+        if req.is_onedrive:
+            if not target:
+                flash(request, "error", "Pick an item to allow first.")
+                return RedirectResponse(
+                    f"/files?tab=onedrive&request={quote(req.id)}", status_code=303
+                )
+            try:
+                flash(request, "ok", await blocking(approve_onedrive, req, target))
+            except GrantError as exc:
+                flash(request, "error", str(exc))
+            except (PayloadToolError, OneDriveApiError):
+                flash(request, "error", "OneDrive didn’t answer. Try again in a minute.")
+            return RedirectResponse(f"/requests/{quote(req.id)}", status_code=303)
         if not target:
             flash(request, "error", "Pick an item to share first.")
             return RedirectResponse(f"/files?request={quote(req.id)}", status_code=303)

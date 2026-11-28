@@ -38,14 +38,21 @@
 {% endif %}
 
 
+{% set rq = ("&request=" ~ (picking.id | urlencode)) if picking else "" %}
+{% if picking %}
+<div class="card" id="onedrive-picking" role="status">
+  <p><b>Answering a request:</b> {{ request_headline(picking, None, None) }} Choose <b>Allow</b> on the item to approve it. <a href="/requests/{{ picking.id }}">Back to the request</a></p>
+</div>
+{% endif %}
 <h2>{% if query %}Search results{% elif listing.folder %}{{ listing.folder.name }}{% else %}Your OneDrive{% endif %}</h2>
 <form method="get" action="/files" class="actions" role="search">
   <input type="hidden" name="tab" value="onedrive">
+  {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
   <label class="sr-only" for="oq">Search OneDrive</label>
   <input id="oq" type="search" name="q" value="{{ query }}" placeholder="Search your OneDrive">
   <button type="submit">Search</button>
-  {% if query or listing.folder %}<a href="/files?tab=onedrive">Back to the top</a>{% endif %}
-  {% if listing.up %}<a href="/files?tab=onedrive&amp;folder={{ listing.up | urlencode }}">Up one folder</a>{% endif %}
+  {% if query or listing.folder %}<a href="/files?tab=onedrive{{ rq }}">Back to the top</a>{% endif %}
+  {% if listing.up %}<a href="/files?tab=onedrive&amp;folder={{ listing.up | urlencode }}{{ rq }}">Up one folder</a>{% endif %}
 </form>
 {% if listing.folder and listing.folder.allowed %}<p class="pill ok" id="onedrive-folder-allowed"><span aria-hidden="true">✓</span> This folder is allowed, with everything inside it.</p>
 {% elif listing.folder and listing.folder.covered_by %}<p class="pill ok"><span aria-hidden="true">✓</span> Allowed through “{{ listing.folder.covered_by }}”</p>{% endif %}
@@ -57,12 +64,18 @@
   <tbody>
   {% for v in listing["items"] %}
   <tr>
-    <td data-label="Name">{% if v.type == "folder" %}<a href="/files?tab=onedrive&amp;folder={{ v.id | urlencode }}">{{ v.name }}</a>{% else %}{{ v.name }}{% endif %}</td>
+    <td data-label="Name">{% if v.type == "folder" %}<a href="/files?tab=onedrive&amp;folder={{ v.id | urlencode }}{{ rq }}">{{ v.name }}</a>{% else %}{{ v.name }}{% endif %}</td>
     <td data-label="Type">{{ "Folder" if v.type == "folder" else ("Notebook" if v.type == "package" else "File") }}</td>
     <td data-label="Modified" class="muted">{{ v.modified | when if v.modified else "—" }}</td>
     <td data-label="Action">
       {% if v.allowed %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
       {% elif v.covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed through “{{ v.covered_by }}”</span>
+      {% elif picking %}
+      <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="target_id" value="{{ v.id }}">
+        <button class="primary" type="submit">Allow<span class="sr-only"> {{ v.name }}</span></button>
+      </form>
       {% else %}
       <form class="inline" method="post" action="/onedrive/allow">
         <input type="hidden" name="csrf" value="{{ csrf }}">

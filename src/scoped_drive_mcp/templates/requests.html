@@ -7,7 +7,7 @@
   <tbody>
   {% for r in items %}
   <tr>
-    <td data-label="Asked for">{{ r.file_name or r.description or "An unnamed file" }}</td>
+    <td data-label="Asked for">{{ r.file_name or r.description or ("A OneDrive item" if r.is_onedrive else "An unnamed file") }}</td>
     <td data-label="Assistant">{{ assistant_label(r.token_name, apps) }}</td>
     <td data-label="Action">{{ tool_label(r.tool) }}</td>
     <td data-label="Created" class="muted">{{ r.created_at | when }}</td>

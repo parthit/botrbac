@@ -65,7 +65,23 @@ version that was checked (`If-Match`), so a change made meanwhile answers `onedr
 being written over.
 
 The tools are registered only when OneDrive is configured on the server. An item that is not allowed and one
-that does not exist get the same `onedrive_not_allowed` answer.
+that does not exist get the same answer (below).
+
+## Access requests
+
+As with Google Drive, an assistant that is refused an item gets `access_required` with an approval link
+(`"service": "onedrive"`), and `request_access(..., service="onedrive")` asks for an item by id or by
+description. The person opens the link and allows the item or the folder it is in (not the top of the drive,
+and nothing else), and the assistant retries. A request without an id is answered on **Files → From
+OneDrive**, which then shows **Allow** buttons that approve that request. Requests are listed on **Requests**
+with the Drive ones, and a denial holds for 24 hours for that item and assistant, until the person allows or
+removes it.
+
+No OneDrive call is made when a request is filed, and a missing item files a request too, so the answer
+still doesn't tell an assistant whether an item exists. The approval page looks the item up and offers only
+Deny when it can't be found. A named assistant role gets no request (as for Drive): the plain
+`onedrive_not_allowed` refusal. Without `APP_BASE_URL` there are no requests, and every refusal is
+`onedrive_not_allowed`.
 
 ## Set it up (operator)
 

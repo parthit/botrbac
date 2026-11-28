@@ -220,6 +220,8 @@ def attachment_disposition(filename: str) -> str:
 def describe_mime(mime: str) -> str:
     known = {
         FOLDER_MIME: "Folder",
+        "onedrive/folder": "Folder",
+        "onedrive/package": "Notebook",
         SHORTCUT_MIME: "Shortcut",
         "application/vnd.google-apps.document": "Google Doc",
         "application/vnd.google-apps.spreadsheet": "Google Sheet",

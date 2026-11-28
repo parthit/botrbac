@@ -972,6 +972,60 @@ class OneDriveService:
         self.allowlist.add(entry)
         return entry
 
+    # ---- access requests ----------------------------------------------------------
+
+    def is_listed(self, item_id: str) -> bool:
+        """Whether this exact item is on the person's list (no Graph call)."""
+        return self.allowlist.get(item_id) is not None
+
+    def _allowable(self, api: OneDriveApi, item_id: str) -> dict[str, Any] | None:
+        """The item, when it exists and could be allowed (not the top, not a shortcut)."""
+        try:
+            item = api.get_item(item_id)
+        except (OneDriveNotFoundError, OneDriveForbiddenError):
+            return None
+        except OneDriveApiError as exc:
+            if exc.status != 400:
+                raise
+            return None
+        if item.get("deleted") or "root" in item or "remoteItem" in item:
+            return None
+        return item
+
+    def approval_options(self, item_id: str) -> list[dict[str, str]]:
+        """What a request for `item_id` may approve: the item, and its folder unless that
+        is the top of the drive. Empty when the item can't be found."""
+        clean = normalize_item_id(item_id)
+        if clean is None:
+            return []
+
+        def run(api: OneDriveApi) -> list[dict[str, str]]:
+            item = self._allowable(api, clean)
+            if item is None:
+                return []
+            options = [
+                {
+                    "id": str(item["id"]),
+                    "name": str(item.get("name") or "Untitled"),
+                    "mime_type": mime_of(item),
+                    "label": "Allow just this item",
+                }
+            ]
+            parent_id = parent_id_of(item)
+            parent = self._allowable(api, parent_id) if parent_id else None
+            if parent is not None and mime_of(parent) == FOLDER_MIME:
+                options.append(
+                    {
+                        "id": str(parent["id"]),
+                        "name": str(parent.get("name") or "Untitled"),
+                        "mime_type": FOLDER_MIME,
+                        "label": "Allow the folder it is in",
+                    }
+                )
+            return options
+
+        return self._run(run)
+
     def remove(self, item_id: str) -> AllowEntry | None:
         clean = normalize_item_id(item_id)
         if clean is None:

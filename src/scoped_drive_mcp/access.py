@@ -4,7 +4,8 @@ dashboard at APP_BASE_URL/requests/<id>.
 
 Storage (all keys expire after 7 days):
 - `req:<id>`           the request as JSON
-- `req:pending:<file>` id of the pending request for that file (dedupe)
+- `req:pending:<file>` id of the pending request for that file (dedupe). A OneDrive item's
+                       keys use `onedrive:<item id>` in place of `<file>`, here and below
 - `requests:index`     newest-first list of request ids (capped)
 - `requests:pending`   ids that are still pending, so the nav count is not a scan of the history
 - `req:denied:<file>:<assistant>`  "<request id> <unix time>" of that assistant's last denied
@@ -29,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .onedrive_client import normalize_item_id
 from .scope import InvalidInputError, validate_drive_id
 from .store import KeyValueStore, utc_now
 
@@ -48,6 +50,10 @@ MAX_PENDING_PER_APP = 50
 OWNER_INDEX = "reqowner:"
 OWNER_INDEX_SINCE = "reqowner_since"
 MAX_TEXT = 500
+
+# Where the requested item lives. Older requests have no source: they are Drive ones.
+SOURCE_DRIVE = "drive"
+SOURCE_ONEDRIVE = "onedrive"
 
 PENDING = "pending"
 APPROVED = "approved"
@@ -94,6 +100,11 @@ class AccessRequest:
     decided_at: str | None = None
     granted_id: str | None = None
     granted_name: str | None = None
+    source: str = SOURCE_DRIVE
+
+    @property
+    def is_onedrive(self) -> bool:
+        return self.source == SOURCE_ONEDRIVE
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -103,6 +114,11 @@ class AccessRequest:
         data = json.loads(raw)
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def _slot(file_id: str, source: str = SOURCE_DRIVE) -> str:
+    """The id used in this request's store keys: OneDrive items are kept apart from Drive."""
+    return f"onedrive:{file_id}" if source == SOURCE_ONEDRIVE else file_id
 
 
 def _denied_key(file_id: str, token_name: str | None) -> str:
@@ -128,8 +144,11 @@ class AccessRequests:
         # Told each new request id, so the server can note whose it is (see OWNER_INDEX).
         self.on_create = on_create
 
-    def recent_denial(self, file_id: str, token_name: str | None) -> AccessRequest | None:
+    def recent_denial(
+        self, file_id: str, token_name: str | None, source: str = SOURCE_DRIVE
+    ) -> AccessRequest | None:
         """The request the owner denied for this file and assistant within DENIAL_WINDOW."""
+        file_id = _slot(file_id, source)
         key = _denied_key(file_id, token_name)
         raw = self.store.get(key)
         if not raw:
@@ -149,9 +168,11 @@ class AccessRequests:
             return None
         return req
 
-    def clear_denials(self, file_id: str) -> None:
+    def clear_denials(self, file_id: str, source: str = SOURCE_DRIVE) -> None:
         """The owner changed this file's access, so earlier denials no longer hold."""
-        self.store.set(_cleared_key(file_id), f"{self.clock():.3f}", ex=DENIAL_WINDOW)
+        self.store.set(
+            _cleared_key(_slot(file_id, source)), f"{self.clock():.3f}", ex=DENIAL_WINDOW
+        )
 
     def get(self, request_id: str) -> AccessRequest | None:
         try:
@@ -169,8 +190,8 @@ class AccessRequests:
     def save(self, req: AccessRequest) -> None:
         self.store.set(f"req:{req.id}", req.to_json(), ex=REQUEST_TTL)
 
-    def pending_for(self, file_id: str) -> AccessRequest | None:
-        rid = self.store.get(f"req:pending:{file_id}")
+    def pending_for(self, file_id: str, source: str = SOURCE_DRIVE) -> AccessRequest | None:
+        rid = self.store.get(f"req:pending:{_slot(file_id, source)}")
         if not rid:
             return None
         req = self.get(rid)
@@ -188,12 +209,13 @@ class AccessRequests:
         file_name: str | None = None,
         description: str | None = None,
         max_pending: int | None = None,
+        source: str = SOURCE_DRIVE,
     ) -> tuple[AccessRequest, bool]:
         """Create a pending request, or return the existing pending one for `file_id`.
         Returns (request, created). Raises TooManyPending when `max_pending` requests
         from this app are already waiting: nothing is saved then."""
         if file_id is not None:
-            existing = self.pending_for(file_id)
+            existing = self.pending_for(file_id, source)
             if existing is not None:
                 return existing, False
         if max_pending is not None and self.pending_from(token_name) >= max_pending:
@@ -206,10 +228,11 @@ class AccessRequests:
             tool=tool,
             token_name=token_name,
             reason=reason,
+            source=source,
         )
         self.save(req)
         if file_id is not None:
-            self.store.set(f"req:pending:{file_id}", req.id, ex=REQUEST_TTL)
+            self.store.set(f"req:pending:{_slot(file_id, source)}", req.id, ex=REQUEST_TTL)
         self.store.lpush(INDEX_KEY, req.id)
         self.store.ltrim(INDEX_KEY, 0, INDEX_MAX - 1)
         self.store.lpush(PENDING_INDEX, req.id)
@@ -236,13 +259,14 @@ class AccessRequests:
         req.granted_id = granted_id
         req.granted_name = granted_name
         self.save(req)
-        if req.file_id is not None and self.store.get(f"req:pending:{req.file_id}") == req.id:
-            self.store.delete(f"req:pending:{req.file_id}")
+        slot = _slot(req.file_id, req.source) if req.file_id is not None else None
+        if slot is not None and self.store.get(f"req:pending:{slot}") == req.id:
+            self.store.delete(f"req:pending:{slot}")
         if status != PENDING:
             self.store.lrem(PENDING_INDEX, req.id)
-        if status == DENIED and req.file_id is not None:
+        if status == DENIED and slot is not None:
             self.store.set(
-                _denied_key(req.file_id, req.token_name),
+                _denied_key(slot, req.token_name),
                 f"{req.id} {self.clock():.3f}",
                 ex=DENIAL_WINDOW,
             )
@@ -324,7 +348,11 @@ class AccessService:
         sharer_of: Callable[[str], str | None] | None = None,
         limited_sign_in: Callable[[], bool] | None = None,
         max_pending: int | None = MAX_PENDING_PER_APP,
+        onedrive_allowed: Callable[[str], bool] | None = None,
     ):
+        # OneDrive, when offered: whether an item is on the person's OneDrive list. No
+        # OneDrive call is made for a request; the approval page looks the item up.
+        self.onedrive_allowed = onedrive_allowed
         # One app's waiting requests are capped, so it cannot bury the Requests page.
         self.max_pending = max_pending
         self.requests = requests
@@ -344,7 +372,7 @@ class AccessService:
         return f"{self.app_base_url}/requests/{request_id}"
 
     def _payload(self, req: AccessRequest) -> dict[str, Any]:
-        return {
+        out = {
             "error": "access_required",
             "request_id": req.id,
             "approval_url": self.approval_url(req.id),
@@ -356,6 +384,14 @@ class AccessService:
                 "request_id)."
             ),
         }
+        if req.is_onedrive:
+            out["service"] = SOURCE_ONEDRIVE
+            out["message"] = (
+                "That OneDrive item is not allowed for assistants, or does not exist. Show "
+                f"the user this approval link: {self.approval_url(req.id)} . If they approve, "
+                "retry the same call (or check with check_access_request using request_id)."
+            )
+        return out
 
     def _denied_payload(self, req: AccessRequest) -> dict[str, Any]:
         return {
@@ -434,6 +470,33 @@ class AccessService:
             return self._too_many(exc.limit, file_id)
         return self._payload(req)
 
+    def onedrive_denial(
+        self, item_id: str, tool: str, token_name: str | None
+    ) -> dict[str, Any] | None:
+        """A OneDrive item was refused. File a request for it, or None to keep the refusal.
+
+        Unlike a Drive id, an item that does not exist files a request too, without asking
+        OneDrive: an assistant can't tell a missing item from one that is not allowed
+        (docs/onedrive.md). The owner sees on the approval page whether it exists."""
+        clean = normalize_item_id(item_id)
+        if clean is None or self.onedrive_allowed is None:
+            return None
+        denied = self.requests.recent_denial(clean, token_name, SOURCE_ONEDRIVE)
+        if denied is not None:
+            return self._denied_payload(denied)
+        try:
+            req, _created = self.requests.create(
+                tool=tool,
+                token_name=token_name,
+                reason=f"{tool} was refused because the item is not shared with the assistant",
+                file_id=clean,
+                max_pending=self.max_pending,
+                source=SOURCE_ONEDRIVE,
+            )
+        except TooManyPending as exc:
+            return self._too_many(exc.limit, clean)
+        return self._payload(req)
+
     def _too_many(self, limit: int, file_id: str | None) -> dict[str, Any]:
         out: dict[str, Any] = {
             "error": "too_many_requests",
@@ -454,9 +517,14 @@ class AccessService:
         file_id: str | None,
         *,
         token_name: str | None,
+        service: str = "google_drive",
     ) -> dict[str, Any]:
         description_clean = clean_text(description, "description", required=True)
         reason_clean = clean_text(reason, "reason", required=True)
+        if service == SOURCE_ONEDRIVE:
+            return self._request_onedrive(description_clean, reason_clean, file_id, token_name)
+        if service != "google_drive":
+            raise InvalidInputError('service must be "google_drive" or "onedrive"')
         if file_id is not None and file_id != "":
             validate_drive_id(file_id)
             if self.guard.is_in_scope(file_id):
@@ -488,6 +556,9 @@ class AccessService:
         except TooManyPending as exc:
             refused = self._too_many(exc.limit, file_id)
             return {"status": refused.pop("error"), **refused}
+        return self._waiting(req)
+
+    def _waiting(self, req: AccessRequest) -> dict[str, Any]:
         return {
             "status": req.status,
             "request_id": req.id,
@@ -498,20 +569,61 @@ class AccessService:
             ),
         }
 
+    def _request_onedrive(
+        self,
+        description: str | None,
+        reason: str | None,
+        file_id: str | None,
+        token_name: str | None,
+    ) -> dict[str, Any]:
+        if self.onedrive_allowed is None:
+            raise InvalidInputError("OneDrive is not set up on this server")
+        clean = None
+        if file_id:
+            clean = normalize_item_id(file_id)
+            if clean is None:
+                raise InvalidInputError("file_id must be a OneDrive item id")
+            if self.onedrive_allowed(clean):
+                return {
+                    "status": "already_allowed",
+                    "file_id": clean,
+                    "message": "You already have access to this item.",
+                }
+            denied = self.requests.recent_denial(clean, token_name, SOURCE_ONEDRIVE)
+            if denied is not None:
+                return self._denied_payload(denied)
+        try:
+            req, _created = self.requests.create(
+                tool="request_access",
+                token_name=token_name,
+                reason=reason,
+                file_id=clean,
+                description=description,
+                max_pending=self.max_pending,
+                source=SOURCE_ONEDRIVE,
+            )
+        except TooManyPending as exc:
+            refused = self._too_many(exc.limit, clean)
+            return {"status": refused.pop("error"), **refused}
+        return self._waiting(req)
+
     def check_access_request(self, request_id: str) -> dict[str, Any]:
         validate_request_id(request_id)
         req = self.requests.get(request_id)
         if req is None:
             return {"request_id": request_id, "status": "not_found"}
         out: dict[str, Any] = {"request_id": req.id, "status": req.status, "file_id": req.file_id}
+        if req.is_onedrive:
+            out["service"] = SOURCE_ONEDRIVE
         if req.status == APPROVED:
             out["granted_id"] = req.granted_id
             out["granted_name"] = req.granted_name
             if req.granted_id:
                 label = f"\u201c{req.granted_name}\u201d" if req.granted_name else "the item"
+                lister = "onedrive_list_folder" if req.is_onedrive else "list_folder"
                 out["message"] = (
                     f"Approved. The user shared {label} (id {req.granted_id}) with you. "
-                    "Retry your call; if they shared a folder, use list_folder with that id."
+                    f"Retry your call; if they shared a folder, use {lister} with that id."
                 )
             else:
                 out["message"] = "Approved. Retry your call."

@@ -30,7 +30,8 @@
   <details>
     <summary>Technical details</summary>
     <dl>
-      {% if req.file_id %}<dt>File id</dt><dd><code>{{ req.file_id }}</code></dd>{% endif %}
+      {% if req.is_onedrive %}<dt>Service</dt><dd>OneDrive</dd>{% endif %}
+      {% if req.file_id %}<dt>{{ "OneDrive item id" if req.is_onedrive else "File id" }}</dt><dd><code>{{ req.file_id }}</code></dd>{% endif %}
       {% if req.reason and req.tool != "request_access" %}<dt>Reason recorded</dt><dd>{{ req.reason }}</dd>{% endif %}
       {% if req.token_name %}<dt>Connection name</dt><dd>{{ req.token_name }}</dd>{% endif %}
       <dt>Tool</dt><dd>{{ tool_label(req.tool) }} <span class="muted">({{ req.tool }})</span></dd>
@@ -41,7 +42,21 @@
 
 {% if req.status == "pending" %}
 <div class="card">
-  {% if req.file_id %}
+  {% if req.is_onedrive and not onedrive_connected %}
+    <h2 id="onedrive-not-connected">OneDrive isn’t connected</h2>
+    <p>Connect OneDrive in <a href="/settings#services">Settings</a>, then come back to approve this request, or deny it.</p>
+  {% elif req.is_onedrive and not req.file_id %}
+    <p>Find the item the assistant asked for in your OneDrive and allow it.</p>
+    <p><a class="btn primary" href="/files?tab=onedrive&amp;request={{ req.id }}">Pick an item</a></p>
+  {% elif req.is_onedrive and not options %}
+    {% if onedrive_error %}
+    <p>OneDrive didn’t answer just now, so this item couldn’t be checked. Reload the page to try again.</p>
+    {% else %}
+    <h2 id="onedrive-missing">OneDrive can’t find this item</h2>
+    <p>It may have been deleted, be the top of your OneDrive, or be a shortcut to someone else’s file, so it can’t be allowed. Deny the request so the assistant stops waiting.</p>
+    {% endif %}
+    <p>If the assistant meant a different item, <a href="/files?tab=onedrive&amp;request={{ req.id }}">pick it from your OneDrive</a>.</p>
+  {% elif req.file_id %}
     {% if options %}
     <form method="post" action="/requests/{{ req.id }}/approve" id="approve-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">

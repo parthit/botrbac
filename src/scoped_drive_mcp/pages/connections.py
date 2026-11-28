@@ -13,6 +13,7 @@ from itsdangerous import BadSignature
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
+from ..access import PENDING, SOURCE_ONEDRIVE
 from ..audit import audit_owner
 from ..auth import current_actor
 from ..connections import get_connection
@@ -566,9 +567,14 @@ def connection_pages(
         """Files → From OneDrive: what assistants may read, and the person's drive."""
         query = (request.query_params.get("q") or "").strip()[:200]
         folder = (request.query_params.get("folder") or "").strip()[:256]
+        rid = (request.query_params.get("request") or "").strip()[:64]
 
         def gather() -> dict[str, Any]:
             record = ctx.onedrive_record()
+            # Picking the item for an assistant's request: Allow answers that request.
+            picking = ctx.requests.get(rid) if rid else None
+            if picking is not None and not (picking.is_onedrive and picking.status == PENDING):
+                picking = None
             allowed = sorted(
                 ctx.onedrive.allowlist.entries().values(), key=lambda e: e.name.lower()
             )
@@ -579,6 +585,7 @@ def connection_pages(
                 "allowed": allowed,
                 "listing": {"folder": None, "up": None, "items": []},
                 "onedrive_error": None,
+                "picking": picking,
             }
             if record is None:
                 return out
@@ -596,6 +603,7 @@ def connection_pages(
                 "tab": "onedrive",
                 **({"folder": folder} if folder else {}),
                 **({"q": query} if query else {}),
+                **({"request": data["picking"].id} if data["picking"] else {}),
             }
         )
         return render(request, "onedrive.html", query=query, next=here, **data)
@@ -626,6 +634,7 @@ def connection_pages(
                 back,
                 changed=False,
             )
+        await blocking(ctx.requests.clear_denials, entry.id, SOURCE_ONEDRIVE)
         audit_owner("onedrive_allow", file_id=entry.id, name=entry.name)
         return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
 
@@ -636,6 +645,7 @@ def connection_pages(
         back = onedrive_back(form)
         if entry is None:
             return action_done(request, "ok", "That item was not allowed.", back, changed=False)
+        await blocking(ctx.requests.clear_denials, entry.id, SOURCE_ONEDRIVE)
         audit_owner("onedrive_remove", file_id=entry.id, name=entry.name)
         return action_done(
             request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back
