@@ -55,7 +55,6 @@
     <h2 id="onedrive-missing">OneDrive can’t find this item</h2>
     <p>It may have been deleted, be the top of your OneDrive, or be a shortcut to someone else’s file, so it can’t be allowed. Deny the request so the assistant stops waiting.</p>
     {% endif %}
-    <p>If the assistant meant a different item, <a href="/files?tab=onedrive&amp;request={{ req.id }}">pick it from your OneDrive</a>.</p>
   {% elif req.file_id %}
     {% if options %}
     <form method="post" action="/requests/{{ req.id }}/approve" id="approve-form">

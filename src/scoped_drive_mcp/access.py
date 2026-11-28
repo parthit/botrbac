@@ -350,8 +350,9 @@ class AccessService:
         max_pending: int | None = MAX_PENDING_PER_APP,
         onedrive_allowed: Callable[[str], bool] | None = None,
     ):
-        # OneDrive, when offered: whether an item is on the person's OneDrive list. No
-        # OneDrive call is made for a request; the approval page looks the item up.
+        # OneDrive, when offered: whether an item is allowed or inside an allowed folder.
+        # It asks OneDrive, so only request_access with an id calls it; a refused tool call
+        # (onedrive_denial) files its request without any OneDrive call.
         self.onedrive_allowed = onedrive_allowed
         # One app's waiting requests are capped, so it cannot bury the Requests page.
         self.max_pending = max_pending

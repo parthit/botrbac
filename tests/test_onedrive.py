@@ -2,6 +2,7 @@
 tools for every role and write tools for editors and admins."""
 
 import io
+import re
 import time
 import zipfile
 from urllib.parse import parse_qs, urlparse
@@ -1807,3 +1808,88 @@ def test_an_allowed_item_needs_no_request(diary_allowed) -> None:
         service="onedrive",
     )["structuredContent"]
     assert out["status"] == "already_allowed"
+
+
+def test_a_request_naming_an_item_is_not_answered_from_the_onedrive_tab(diary_allowed) -> None:
+    rid = request_of(result(diary_allowed, "onedrive_read_file", file_id="D00D!999"))["request_id"]
+    # The request page offers no pick: only the named item or its folder can approve it.
+    assert f"request={rid}" not in diary_allowed.get(f"/requests/{rid}").text
+    tab = diary_allowed.get(f"/files?tab=onedrive&request={rid}").text
+    assert 'id="onedrive-picking"' not in tab
+    assert f"/requests/{rid}/approve" not in tab
+    assert 'action="/onedrive/allow"' in tab
+
+
+def stored_requests(memstore) -> list[str]:
+    """The keys of every saved access request (`req:<id>`), in any account's store."""
+    return [k for k in memstore._values if re.search(r"(^|:)req:[A-Za-z0-9_-]{22,64}$", k)]
+
+
+def test_request_access_for_an_item_inside_an_allowed_folder_is_already_allowed(
+    allowed, memstore
+) -> None:
+    out = result(
+        allowed,
+        "request_access",
+        description="essay",
+        reason="x",
+        file_id=ESSAY,
+        service="onedrive",
+    )["structuredContent"]
+    assert out["status"] == "already_allowed" and "request_id" not in out
+    assert stored_requests(memstore) == []
+    # Something outside it still files a request.
+    other = result(
+        allowed,
+        "request_access",
+        description="diary",
+        reason="x",
+        file_id=DIARY,
+        service="onedrive",
+    )["structuredContent"]
+    assert other["status"] == "pending"
+    assert len(stored_requests(memstore)) == 1  # the helper does see a saved request
+
+
+def test_a_refused_call_still_makes_no_onedrive_call_to_file_its_request(
+    diary_allowed, drive
+) -> None:
+    drive.calls.clear()
+    request_of(result(diary_allowed, "onedrive_read_file", file_id="D00D!999"))
+    # The tool's own check looks the item up; filing the request adds nothing.
+    assert drive.calls == [("get_item", "D00D!999")]
+
+
+def test_an_id_less_request_can_be_approved_with_an_allowed_item(diary_allowed, memstore) -> None:
+    allow(diary_allowed, SCHOOL)
+    before = stored_allowlist(memstore)
+    rid = result(
+        diary_allowed,
+        "request_access",
+        description="my essay",
+        reason="to read",
+        service="onedrive",
+    )["structuredContent"]["request_id"]
+    tab = diary_allowed.get(f"/files?tab=onedrive&request={rid}").text
+    assert "Approve with this" in tab
+    inside = diary_allowed.get(f"/files?tab=onedrive&folder={SCHOOL}&request={rid}").text
+    assert "Approve with this" in inside  # items covered by School too
+    # An item on the list, and one inside an allowed folder: neither changes the list.
+    approve(diary_allowed, rid, ESSAY)
+    status = result(diary_allowed, "check_access_request", request_id=rid)["structuredContent"]
+    assert status["status"] == "approved"
+    assert status["granted_id"] == ESSAY and status["granted_name"]
+    assert stored_allowlist(memstore) == before
+
+    rid2 = result(
+        diary_allowed,
+        "request_access",
+        description="the school folder",
+        reason="to read",
+        service="onedrive",
+    )["structuredContent"]["request_id"]
+    approve(diary_allowed, rid2, SCHOOL)
+    status = result(diary_allowed, "check_access_request", request_id=rid2)["structuredContent"]
+    assert status["status"] == "approved" and status["granted_id"] == SCHOOL
+    assert status["granted_name"] == "School"
+    assert stored_allowlist(memstore) == before

@@ -974,9 +974,37 @@ class OneDriveService:
 
     # ---- access requests ----------------------------------------------------------
 
-    def is_listed(self, item_id: str) -> bool:
-        """Whether this exact item is on the person's list (no Graph call)."""
-        return self.allowlist.get(item_id) is not None
+    def covered_item(self, item_id: str) -> dict[str, str] | None:
+        """{"id", "name"} when assistants may already use this item: it is on the list, or
+        inside an allowed folder (the same parent-chain check as the tools). None when it
+        isn't, is missing, OneDrive isn't connected, or the lookup failed."""
+        clean = normalize_item_id(item_id)
+        if clean is None or not self._vault().onedrive():
+            return None
+        entries = self.allowlist.entries()
+        if not entries:
+            return None
+        listed = entries.get(clean)
+        if listed is not None:
+            return {"id": listed.id, "name": listed.name or "Untitled"}
+
+        def run(api: OneDriveApi) -> dict[str, str] | None:
+            access = OneDriveAccess(api, set(entries))
+            item = access.fetch(clean)
+            if item is None or access.covering(clean, item) is None:
+                return None
+            return {"id": str(item["id"]), "name": str(item.get("name") or "Untitled")[:300]}
+
+        try:
+            return self._run(run)
+        except (PayloadToolError, OneDriveApiError):
+            logger.warning("OneDrive coverage check failed", exc_info=True)
+            return None
+
+    def is_covered(self, item_id: str) -> bool:
+        """Whether assistants may already use this item (see covered_item). False on a
+        failed lookup, so the caller files a request rather than claiming access."""
+        return self.covered_item(item_id) is not None
 
     def _allowable(self, api: OneDriveApi, item_id: str) -> dict[str, Any] | None:
         """The item, when it exists and could be allowed (not the top, not a shortcut)."""

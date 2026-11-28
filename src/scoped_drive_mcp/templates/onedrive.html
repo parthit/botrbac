@@ -70,6 +70,14 @@
     <td data-label="Action">
       {% if v.allowed %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
       {% elif v.covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed through “{{ v.covered_by }}”</span>
+      {% endif %}
+      {% if picking and (v.allowed or v.covered_by) %}
+      <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="target_id" value="{{ v.id }}">
+        <button type="submit">Approve with this<span class="sr-only"> {{ v.name }}</span></button>
+      </form>
+      {% elif v.allowed or v.covered_by %}
       {% elif picking %}
       <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
         <input type="hidden" name="csrf" value="{{ csrf }}">

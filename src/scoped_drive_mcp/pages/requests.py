@@ -225,16 +225,25 @@ def request_pages(kit: Kit) -> RequestPages:
             allowed = {o["id"] for o in ctx.onedrive.approval_options(req.file_id)}
             if clean not in allowed:
                 raise GrantError("Pick the requested item or its folder.")
-        entry = ctx.onedrive.allow(clean)
-        if entry is None:
-            raise GrantError(
-                "That item can’t be allowed. It may have been deleted, be the top of your "
-                "OneDrive, or be a shortcut to someone else’s file."
-            )
-        ctx.requests.decide(req, APPROVED, granted_id=entry.id, granted_name=entry.name)
-        ctx.requests.clear_denials(entry.id, SOURCE_ONEDRIVE)
-        audit_owner("approve_request", request_id=req.id, file_id=entry.id, connection="onedrive")
-        return f"Approved: allowed \u201c{entry.name}\u201d in your OneDrive for your assistants."
+        # Already allowed, or inside an allowed folder: approve with it as it is. allow()
+        # would rewrite an existing entry, or add a second one under its folder.
+        covered = ctx.onedrive.covered_item(clean)
+        if covered is not None:
+            granted_id, granted_name = covered["id"], covered["name"]
+            done = f"Approved: “{granted_name}” is already allowed for your assistants."
+        else:
+            entry = ctx.onedrive.allow(clean)
+            if entry is None:
+                raise GrantError(
+                    "That item can’t be allowed. It may have been deleted, be the top of your "
+                    "OneDrive, or be a shortcut to someone else’s file."
+                )
+            granted_id, granted_name = entry.id, entry.name
+            done = f"Approved: allowed “{granted_name}” in your OneDrive for your assistants."
+        ctx.requests.decide(req, APPROVED, granted_id=granted_id, granted_name=granted_name)
+        ctx.requests.clear_denials(granted_id, SOURCE_ONEDRIVE)
+        audit_owner("approve_request", request_id=req.id, file_id=granted_id, connection="onedrive")
+        return done
 
     async def request_detail(request: Request) -> Response:
         rid = request.path_params["rid"]

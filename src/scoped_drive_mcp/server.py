@@ -762,7 +762,7 @@ def build_app(
             sharer_of=sharer_of,
             limited_sign_in=limited_sign_in,
             max_pending=settings.max_pending_requests,
-            onedrive_allowed=onedrive.is_listed if onedrive is not None else None,
+            onedrive_allowed=onedrive.is_covered if onedrive is not None else None,
         )
         if settings.app_base_url
         else None

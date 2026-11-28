@@ -571,9 +571,13 @@ def connection_pages(
 
         def gather() -> dict[str, Any]:
             record = ctx.onedrive_record()
-            # Picking the item for an assistant's request: Allow answers that request.
+            # Picking the item for an assistant's request: Allow answers that request. Only
+            # for a request without an id: one that names an item is answered on its own
+            # page, with that item or its folder (pages/requests.py approve_onedrive).
             picking = ctx.requests.get(rid) if rid else None
-            if picking is not None and not (picking.is_onedrive and picking.status == PENDING):
+            if picking is not None and not (
+                picking.is_onedrive and picking.status == PENDING and not picking.file_id
+            ):
                 picking = None
             allowed = sorted(
                 ctx.onedrive.allowlist.entries().values(), key=lambda e: e.name.lower()
