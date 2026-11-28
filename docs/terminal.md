@@ -44,7 +44,8 @@ browser.
   hook (`botrbac hooks install <agent> --user --allow-unguarded`), so the agent's own shell and file edits
   follow the role as well; `--no-hook` leaves it out and `botrbac hooks remove <agent> --user` undoes it.
   A new computer starts as Read-only, so with the hook the agent can read but not edit or run commands
-  until you give it a wider role. It never uses sudo and can be run again. Read it first at the
+  until you give it a wider role. Before installing anything it prints what and from where. If this computer is already logged in to a
+  different site, it logs in again to this one. It never uses sudo and can be run again. Read it first at the
   same address: `https://botrbac.com/terminal/install.sh`.
 - **Paste into your agent:** `Set up Bot RBAC Terminal for me by following https://botrbac.com/terminal/setup.md`.
   The agent follows [terminal-agent-setup.md](terminal-agent-setup.md) (the same text the site serves).
@@ -53,7 +54,7 @@ browser.
   2. `botrbac login`. Open the link it prints, check the code matches, pick a role and approve. It connects
      to `https://botrbac.com` unless you give `--server URL` or set `BOTRBAC_SERVER`; the page shows the
      right command for the site you are on.
-  3. `claude mcp add botrbac -- botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
+  3. `claude mcp add --scope user botrbac -- botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
      (also `codex`, `gemini`), which adds the gateway to that agent's file in your home directory, keeps the
      other servers and a backup, and does nothing when it is already there.
 

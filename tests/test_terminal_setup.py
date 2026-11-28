@@ -91,7 +91,7 @@ _BODIES = {
     "uv": "",
     "botrbac": (
         'case "$1" in\n'
-        '  status) [ -f "$HOME/.logged-in" ] || exit 1 ;;\n'
+        f'  status) [ -f "$HOME/.logged-in" ] || exit 1; echo "Server:   {BASE_URL}" ;;\n'
         '  login) echo "Link: x"; echo "Code: ABCD-EFGH"; touch "$HOME/.logged-in" ;;\n'
         "esac"
     ),
@@ -354,7 +354,7 @@ def test_terminal_page_leads_with_setup(world, memstore, oauth) -> None:
     for agent in ("cursor", "codex", "gemini"):
         assert f"--agent {agent}</code>" in page  # listed without JavaScript too
     assert f"botrbac login --server {BASE_URL}" in page
-    assert "claude mcp add botrbac -- botrbac gateway" in page
+    assert "claude mcp add --scope user botrbac -- botrbac gateway" in page
     assert page.count("data-copy=") >= 6
     # wrap is only an advanced option now.
     main_steps = page.split('id="more-options"', 1)[0]

@@ -46,8 +46,10 @@ uv --version && uv tool install git+https://github.com/parthit/botrbac
 pipx --version && pipx install git+https://github.com/parthit/botrbac
 ```
 
-If neither `uv` nor `pipx` is installed, ask the person whether to install uv
-(`curl -LsSf https://astral.sh/uv/install.sh | sh`), then open a new shell or use `~/.local/bin/uv`.
+If neither `uv` nor `pipx` is installed, ask the person whether to install uv with Astral's installer
+(`curl -LsSf https://astral.sh/uv/install.sh | sh`, into `~/.local/bin`, no sudo), then open a new shell
+or use `~/.local/bin/uv`. (The one-line installer at {{ server }}/terminal/install.sh, which the person
+runs themselves, does this step without asking, after printing what it installs and from where.)
 
 Check it worked: `botrbac --version`. If the command is not found, run `uv tool update-shell` (or
 `pipx ensurepath`) and use the full path, usually `~/.local/bin/botrbac`. Note the full path for step 3:
@@ -84,12 +86,12 @@ for the agent you are, unless the person asks for more.
 ### Claude Code
 
 ```sh
-claude mcp add botrbac -- botrbac gateway
+claude mcp add --scope user botrbac -- botrbac gateway
 ```
 
-To add it for every project rather than this one, check that `claude mcp add --help` lists `--scope`,
-then use `claude mcp add --scope user botrbac -- botrbac gateway`. Check with
-`claude mcp list`.
+`--scope user` adds it for every project, as the install script does. If `claude mcp add --help` does
+not list `--scope` (an old Claude Code), leave it out: `claude mcp add botrbac -- botrbac gateway`.
+Check with `claude mcp list`.
 
 Every agent also gets a hook so its own shell and file edits follow the role. Add it in step 6, last:
 once it is in place and the role is Read-only, your own shell commands are blocked.

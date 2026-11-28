@@ -10,9 +10,9 @@
     {% if r.repo %}<dt>Repository</dt><dd>{{ r.repo }}{% if r.branch %} ({{ r.branch }}){% endif %}{% if r.head %} at commit <code>{{ r.head[:10] }}</code>{% endif %}</dd>{% endif %}
     {% if r.decision != 'deny' and r.reason and r.reason != 'ok' %}<dt>Checked</dt><dd>{{ r.reason }}</dd>{% endif %}
     {% if r.actor %}<dt>On whose behalf</dt><dd><span class="term-chain">{{ delegation(r) }}</span> {% if r.signed %}<span class="pill ok" title="This batch was signed with the computer's own key">signed</span>{% else %}<span class="pill" title="Sent by an older Bot RBAC without a signing key">unsigned</span>{% endif %}</dd>{% endif %}
-    {% if r.session_id or r.prompt_id or r.agent_session_id %}<dt>Links</dt><dd class="term-where">{% if r.session_id %}<a href="/terminal/sessions/{{ r.session_id }}">session …{{ r.session_id[-6:] }}</a> {% endif %}{% if r.prompt_id %}<a href="/terminal/activity?prompt_id={{ r.prompt_id | urlencode }}" title="Everything from this prompt">prompt …{{ r.prompt_id[-6:] }}</a> {% endif %}{% if r.agent_session_id %}<a href="/terminal/activity?agent_session_id={{ r.agent_session_id | urlencode }}" title="Everything in this agent session">{{ r.agent_type or "agent" }} session …{{ r.agent_session_id[-6:] }}</a>{% endif %}</dd>{% endif %}
+    {% if r.session_id or r.prompt_id or r.agent_session_id %}<dt>Links</dt><dd class="term-where">{% if r.session_id %}<a href="/terminal/sessions/{{ r.session_id | urlencode }}">session …{{ r.session_id[-6:] }}</a> {% endif %}{% if r.prompt_id %}<a href="/terminal/activity?prompt_id={{ r.prompt_id | urlencode }}" title="Everything from this prompt">prompt …{{ r.prompt_id[-6:] }}</a> {% endif %}{% if r.agent_session_id %}<a href="/terminal/activity?agent_session_id={{ r.agent_session_id | urlencode }}" title="Everything in this agent session">{{ r.agent_type or "agent" }} session …{{ r.agent_session_id[-6:] }}</a>{% endif %}</dd>{% endif %}
     {% if r.action and r.action.kind == 'file' and r.command %}<dt>Sent to the tool</dt><dd><pre class="term-ran">{{ r.command }}</pre></dd>{% endif %}
-    {% if r.input_digest %}<dt>Fingerprint</dt><dd><code>{{ r.input_digest[:23] }}…</code> ({{ r.input_size }} bytes)</dd>{% endif %}
+    {% if r.input_digest %}<dt>Fingerprint</dt><dd><code>{{ r.input_digest[:23] }}…</code>{% if r.input_size is number %} ({{ r.input_size }} bytes){% endif %}</dd>{% endif %}
     {% if r.chain %}<dt>Record</dt><dd>{{ {"ok": "in order", "gap": "earlier records missing", "fork": "doesn't match the computer's log", "unchained": "older Bot RBAC, not chained"}.get(r.chain, r.chain) }}{% if r.seq %} · #{{ r.seq }}{% endif %}</dd>{% endif %}
     <dt>When</dt><dd>{{ r.ts | epoch | when }}{% if r.received and r.received - r.ts > 300 %} · recorded offline, synced {{ r.received | epoch | when }}{% endif %}</dd>
   </dl>
@@ -78,7 +78,7 @@
       {% set h = s.head %}
       <h2 class="story-title">Started {{ agent_name(h.program) if h.program in ("claude", "codex", "gemini", "cursor") else (h.program or "a program") }} with the role “{{ h.role }}”</h2>
       {% if h.task %}<p class="story-ask">Task: {{ h.task }}</p>{% elif h.task_unreadable %}<p class="small muted">A task was recorded, but can't be opened.</p>{% endif %}
-      <p class="small"><a href="/terminal/sessions/{{ h.session_id }}">See everything in this session</a></p>
+      <p class="small"><a href="/terminal/sessions/{{ h.session_id | urlencode }}">See everything in this session</a></p>
       {% if h.command %}<details class="term-tech"><summary>Command line</summary><pre class="term-ran">{{ h.command }}</pre></details>{% endif %}
     {% elif s.head %}
       {% set h = s.head %}
