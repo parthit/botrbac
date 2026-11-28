@@ -830,6 +830,8 @@ def build_app(
         base_url,
         signed_in=lambda email: settings.sign_in_allowed(email) and directory.is_known_user(email),
         signing_secret=enc_key,
+        activity_days=settings.terminal_activity_days,
+        activity_max_rows=settings.terminal_activity_max_rows,
     )
     ctx = DashboardContext(
         settings=settings,

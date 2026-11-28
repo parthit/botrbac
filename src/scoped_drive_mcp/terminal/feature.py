@@ -14,17 +14,23 @@ from typing import Any
 
 import anyio.to_thread
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.routing import Route
 
-from botrbac_cli import sealing, signing
+from botrbac_cli import chain, sealing, signing
 from botrbac_cli.api import DEFAULT_SERVER
 
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
-from .ingest import IngestError, TerminalActivity
+from .ingest import RETENTION_DAYS, RETENTION_MAX_ROWS, IngestError, TerminalActivity
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -168,6 +174,9 @@ class TerminalFeature:
     # ENCRYPTION_KEY: policies are signed with a key derived from it, and recorded
     # commands are sealed to another. None: unsigned, and commands are never recorded.
     signing_secret: str | None = None
+    # TERMINAL_ACTIVITY_DAYS and TERMINAL_ACTIVITY_MAX_ROWS.
+    activity_days: int = RETENTION_DAYS
+    activity_max_rows: int = RETENTION_MAX_ROWS
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
     activity: TerminalActivity = field(init=False)
@@ -181,7 +190,9 @@ class TerminalFeature:
         )
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
-        self.activity = TerminalActivity(self.store)
+        self.activity = TerminalActivity(
+            self.store, retention_days=self.activity_days, max_rows=self.activity_max_rows
+        )
 
     def site(self, request: Request) -> str:
         return safe_site(self.base_url or str(request.base_url))
@@ -232,6 +243,17 @@ class TerminalFeature:
                 row = {**row, "command": None, "command_unreadable": True}
             out.append(row)
         return out
+
+    def checkpoint_for(self, email: str, terminal_id: str) -> dict[str, Any] | None:
+        """The newest chained row accepted from this terminal, signed with the policy
+        key (integrity.py, botrbac_cli.chain). None before its first chained row."""
+        tip = self.activity.chains.tip(email, terminal_id)
+        if tip is None:
+            return None
+        body = chain.checkpoint_body(terminal_id, tip[0], tip[1], time.time())
+        if self._signing_key is not None:
+            body["signature"] = signing.sign(self._signing_key, body)
+        return body
 
     @property
     def policy_key(self) -> str | None:
@@ -342,7 +364,17 @@ class TerminalFeature:
                     {str(u)[:64] for u in unguarded if isinstance(u, str) and u.strip()}
                 )[:MAX_UNGUARDED]
             await _run(self.terminals.touch, terminal.id, **changes)
+            checkpoint = await _run(self.checkpoint_for, terminal.email, terminal.id)
+            if checkpoint is not None:
+                result = {**result, "checkpoint": checkpoint}
             return JSONResponse(result)
+
+        async def checkpoint(request: Request) -> Response:
+            terminal = await caller(request)
+            if isinstance(terminal, Response):
+                return terminal
+            body = await _run(self.checkpoint_for, terminal.email, terminal.id)
+            return JSONResponse({"checkpoint": body}, headers={"cache-control": "no-store"})
 
         async def setup_md(request: Request) -> Response:
             text = await _run(setup_markdown, self.site(request))
@@ -364,6 +396,7 @@ class TerminalFeature:
             Route("/api/terminal/token", token, methods=["POST"]),
             Route("/api/terminal/policy", policy, methods=["GET"]),
             Route("/api/terminal/audit", audit, methods=["POST"]),
+            Route("/api/terminal/checkpoint", checkpoint, methods=["GET"]),
         ]
 
     def page_routes(self, kit: Kit) -> list[Route]:
@@ -374,6 +407,7 @@ class TerminalFeature:
             terminals = await _run(self.terminals.for_person, email)
             roles = await _run(self.roles.all, email)
             names = {r.id: r.name for r in roles}
+            chains = await _run(self.activity.chains.summary, email)
             site = self.site(request)
             return render(
                 request,
@@ -381,6 +415,7 @@ class TerminalFeature:
                 terminals=terminals,
                 roles=roles,
                 role_names=names,
+                chains=chains,
                 site=site,
                 login_cmd=login_command(site),
                 agents=AGENTS,
@@ -559,15 +594,21 @@ class TerminalFeature:
                 kit.flash(request, "error", "That role cannot be deleted.")
             return RedirectResponse("/terminal/roles", status_code=303)
 
-        def filtered(request: Request, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def wanted(request: Request) -> Callable[[dict[str, Any]], bool]:
             q = request.query_params
-            if q.get("terminal"):
-                rows = [r for r in rows if r.get("terminal_id") == q["terminal"]]
-            if q.get("agent"):
-                rows = [r for r in rows if r.get("agent") == q["agent"]]
-            if q.get("blocked") == "1":
-                rows = [r for r in rows if r.get("decision") == "deny"]
-            return rows
+
+            def keep(r: dict[str, Any]) -> bool:
+                if q.get("terminal") and r.get("terminal_id") != q["terminal"]:
+                    return False
+                if q.get("agent") and r.get("agent") != q["agent"]:
+                    return False
+                return not (q.get("blocked") == "1" and r.get("decision") != "deny")
+
+            return keep
+
+        def filtered(request: Request, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            keep = wanted(request)
+            return [r for r in rows if keep(r)]
 
         async def activity_page(request: Request) -> Response:
             email = _me()
@@ -596,32 +637,77 @@ class TerminalFeature:
             )
 
         async def activity_export(request: Request) -> Response:
-            rows = filtered(request, await _run(self.activity.recent, _me()))
-            rows = self.open_commands(rows)
+            # Everything kept (TERMINAL_ACTIVITY_DAYS), newest received first, read and
+            # sent a chunk at a time: not just the rows the Activity page shows.
+            keep = wanted(request)
+            source = self.activity.everything(_me())
             fields = [
                 "ts", "terminal", "terminal_id", "agent", "tool", "command",
                 "command_error", "decision", "reason", "role", "session_id",
-                "parent_session_id", "via", "event_id", "received",
+                "parent_session_id", "via", "event_id", "received", "seq", "chain",
+                "row_hash",
             ]  # fmt: skip
-            if request.query_params.get("format") == "jsonl":
-                text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
-                kind, ext = "application/x-ndjson", "jsonl"
-            else:
-                out = io.StringIO()
-                writer = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
-                writer.writeheader()
-                for r in rows:
+            jsonl = request.query_params.get("format") == "jsonl"
+
+            def lines() -> Any:
+                if not jsonl:
+                    out = io.StringIO()
+                    csv.DictWriter(out, fieldnames=fields).writeheader()
+                    yield out.getvalue()
+                for r in source:
+                    if not keep(r):
+                        continue
+                    (r,) = self.open_commands([r])
+                    if jsonl:
+                        yield json.dumps(r, separators=(",", ":")) + "\n"
+                        continue
+                    out = io.StringIO()
+                    writer = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
                     # A cell starting with = + - @ would run as a formula in a spreadsheet.
                     writer.writerow(
                         {k: ("'" + v if isinstance(v, str) and v and v[0] in "=+-@\t\r" else v)
                          for k, v in r.items()}
                     )  # fmt: skip
-                text, kind, ext = out.getvalue(), "text/csv", "csv"
-            return PlainTextResponse(
-                text,
+                    yield out.getvalue()
+
+            kind, ext = ("application/x-ndjson", "jsonl") if jsonl else ("text/csv", "csv")
+            return StreamingResponse(
+                lines(),
                 media_type=kind,
                 headers={
                     "content-disposition": f'attachment; filename="terminal-activity.{ext}"',
+                    "cache-control": "no-store",
+                },
+            )
+
+        async def checkpoints_export(request: Request) -> Response:
+            """Each terminal's latest signed checkpoint, and the key to check them with."""
+            email = _me()
+            terminals = await _run(self.terminals.for_person, email)
+            chains = await _run(self.activity.chains.summary, email)
+            out = []
+            for t in terminals:
+                body = await _run(self.checkpoint_for, email, t.id)
+                state = chains.get(t.id) or {}
+                out.append(
+                    {
+                        "terminal": t.name,
+                        "terminal_id": t.id,
+                        "checkpoint": body,
+                        "chain": {
+                            k: state.get(k) for k in ("start", "missing", "forks", "unchained")
+                        },
+                    }
+                )
+            text = json.dumps(
+                {"policy_key": self.policy_key, "generated_at": time.time(), "terminals": out},
+                indent=2,
+            )
+            return PlainTextResponse(
+                text,
+                media_type="application/json",
+                headers={
+                    "content-disposition": 'attachment; filename="terminal-checkpoints.json"',
                     "cache-control": "no-store",
                 },
             )
@@ -674,6 +760,7 @@ class TerminalFeature:
             Route("/terminal/roles", own(roles_page), methods=["GET"]),
             Route("/terminal/activity", own(activity_page), methods=["GET"]),
             Route("/terminal/activity/export", own(activity_export), methods=["GET"]),
+            Route("/terminal/activity/checkpoints", own(checkpoints_export), methods=["GET"]),
             Route("/terminal/activity/record", csrf(record_commands), methods=["POST"]),
             Route("/terminal/sessions/{session_id}", own(session_page), methods=["GET"]),
             Route("/terminal/sessions/{session_id}/revoke", csrf(session_revoke), methods=["POST"]),

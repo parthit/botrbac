@@ -455,6 +455,20 @@ so a hostile agent on the computer can seal whatever it likes onto rows, as it c
 [terminal.md](terminal.md#record-commands) for what this does and does not hide.
 CSV export prefixes cells that would start a spreadsheet formula.
 
+Audit rows are **hash-chained** per computer (`src/botrbac_cli/chain.py`): `seq`, `prev_hash`, and
+`row_hash` = SHA-256 over the row's canonical JSON. The seq is taken under SQLite's write lock, so
+processes sharing `audit.db` never reuse one. The server recomputes each hash over the raw row before
+anything is dropped or capped, compares it with the last `(seq, row_hash)` it accepted from that terminal,
+and marks the stored row `ok`, `gap`, `fork` or `unchained`
+(`src/scoped_drive_mcp/terminal/integrity.py`). It returns a checkpoint `{terminal_id, seq, row_hash, ts}`
+signed with the policy key (a `kind` field keeps it from being taken for a policy), which `botrbac verify`
+checks against the pinned key and the local chain. This makes deletion, reordering and edits of rows
+detectable once the server or a checkpoint has seen them. It does not make rows true: code running as the
+user can write new, well-chained rows before they are sent, and a row deleted from the end of the queue
+before it was ever sent leaves a mark only when a later row arrives. Checkpoints are not yet anchored in a
+public log (Rekor), so they do not protect against the site's operator. Rows are kept for
+`TERMINAL_ACTIVITY_DAYS` (180) and at most `TERMINAL_ACTIVITY_MAX_ROWS` (20,000) per person.
+
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
 owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
 a policy older than the role's offline grace, an unknown session or a revoked session all block every tool.

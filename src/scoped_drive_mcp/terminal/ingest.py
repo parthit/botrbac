@@ -18,11 +18,20 @@ from typing import Any
 from botrbac_cli import sealing
 from botrbac_cli.patterns import is_tool_id
 
+from . import integrity
+
 ACTIVITY_KEY = "term:activity:{email}"
 SEEN_KEY = "term:seen:{email}:{event_id}"
 REVOKED_KEY = "term:revoked:{email}"
 SETTINGS_KEY = "term:settings:{email}"
+# The most rows the Activity page reads at once. Exports read everything kept.
 ACTIVITY_MAX = 2000
+# How long rows are kept (TERMINAL_ACTIVITY_DAYS), and a hard cap on how many
+# (TERMINAL_ACTIVITY_MAX_ROWS), whichever comes first.
+RETENTION_DAYS = 180
+RETENTION_MAX_ROWS = 20_000
+TRIM_KEY = "term:trimmed:{email}"
+TRIM_EVERY = 3600
 BATCH_MAX = 500
 SEEN_TTL = 30 * 24 * 3600
 DECISIONS = frozenset({"allow", "deny", "error", "session"})
@@ -106,6 +115,15 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
 class TerminalActivity:
     store: Any
     clock: Callable[[], float] = field(default=time.time)
+    retention_days: int = RETENTION_DAYS
+    max_rows: int = RETENTION_MAX_ROWS
+    chains: integrity.Chains = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.chains = integrity.Chains(self.store, ttl=self.retention_days * 24 * 3600)
+
+    def cutoff(self) -> float:
+        return self.clock() - self.retention_days * 24 * 3600
 
     def add(
         self,
@@ -124,15 +142,21 @@ class TerminalActivity:
         now = self.clock()
         accepted = duplicates = rejected = 0
         key = ACTIVITY_KEY.format(email=email)
-        for raw in rows:
+        chained = self.chains.batch(email, terminal_id)
+        for raw in integrity.ordered(rows):
+            # The hash covers exactly what the computer sent: work it out before
+            # clean_row drops or cuts anything.
+            link = integrity.link_of(raw)
             row = clean_row(raw, now, command_key)
             if row is None:
+                chained.judge(link)  # refused, but sent: not a gap in the chain
                 rejected += 1
                 continue
             seen = SEEN_KEY.format(email=email, event_id=row["event_id"])
             if not self.store.set_if_absent(seen, "1", ex=SEEN_TTL):
                 duplicates += 1
                 continue
+            row.update(chained.judge(link))
             row.update(terminal_id=terminal_id, terminal=terminal_name[:80], received=now)
             try:
                 self.store.lpush(key, json.dumps(row, separators=(",", ":")))
@@ -142,9 +166,25 @@ class TerminalActivity:
                 self.store.delete(seen)
                 raise
             accepted += 1
+        chained.commit()
         if accepted:
-            self.store.ltrim(key, 0, ACTIVITY_MAX - 1)
+            self.trim(email)
         return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
+
+    def trim(self, email: str, force: bool = False) -> None:
+        """Keep at most max_rows, and (about once an hour) nothing older than
+        retention_days."""
+        key = ACTIVITY_KEY.format(email=email)
+        if force or self.store.set_if_absent(TRIM_KEY.format(email=email), "1", ex=TRIM_EVERY):
+            integrity.trim_by_age(self.store, key, self.cutoff(), self.max_rows)
+        else:
+            self.store.ltrim(key, 0, self.max_rows - 1)
+
+    def everything(self, email: str) -> Any:
+        """Every row kept, newest received first, a chunk at a time (for exports)."""
+        return integrity.read_all(
+            self.store, ACTIVITY_KEY.format(email=email), self.cutoff(), self.max_rows
+        )
 
     def recent(self, email: str, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

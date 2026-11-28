@@ -120,6 +120,10 @@ class Api:
     def send_audit(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._call("POST", "/api/terminal/audit", json=body)
 
+    def checkpoint(self) -> dict[str, Any]:
+        """The website's signed checkpoint of this terminal's chain (chain.py)."""
+        return self._call("GET", "/api/terminal/checkpoint")
+
 
 def _creds() -> dict[str, Any]:
     return state.read_json("credentials.json", {}) or {}
