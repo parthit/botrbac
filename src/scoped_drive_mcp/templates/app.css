@@ -1414,6 +1414,22 @@ textarea:focus-visible, input[type="number"]:focus-visible { outline: 2px solid 
 }
 .stack .term-tick:has(input:checked) { border-color: var(--accent); background: var(--accent-wash); }
 .term-tick input { width: 16px; height: 16px; margin: 0; }
+.stack .term-tick.is-covered { border-style: dashed; border-color: var(--accent); }
+.term-via { font: 400 12px/1.2 var(--font); color: var(--ink2); }
+.term-via:empty { display: none; }
+.term-group-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin: 0 0 8px; }
+.term-group-head .term-server { margin: 0; }
+.term-quick { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.term-quick button { height: 32px; padding: 0 12px; font-size: 13px; }
+.stack .term-later { display: flex; flex-direction: row; align-items: center; gap: 8px; margin: 10px 0 0; font-weight: 400; font-size: 14px; color: var(--ink2); }
+.term-later input { width: 16px; height: 16px; margin: 0; flex: none; }
+.term-tools { padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
+.term-sum { margin: 0 0 12px; font-weight: 600; }
+.term-programs { margin: 0 0 12px; }
+.term-advanced { margin: 0 0 8px; }
+.term-advanced[open] > summary { margin-bottom: 12px; }
+.term-save { position: sticky; bottom: 0; padding: 12px 0; background: var(--paper); border-top: 1px solid var(--line); z-index: 1; }
+.term-unsaved { color: var(--warn); font-weight: 600; }
 .term-help p { margin: 0 0 6px; }
 .term-examples { list-style: none; padding: 0; margin: 0 0 10px; display: grid; gap: 6px; }
 .term-examples li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
@@ -1435,6 +1451,7 @@ button.term-example { font: 500 13px var(--mono); height: 36px; padding: 0 12px;
 .term-role fieldset { margin-bottom: 18px; }
 @media (max-width: 1100px), (pointer: coarse) {
   .stack .term-tick { min-height: 44px; }
+  .term-quick button { height: 44px; }
   button.term-example { height: 44px; }
   input[type="number"] { height: 44px; }
 }

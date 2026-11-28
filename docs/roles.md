@@ -27,8 +27,12 @@ role is still read only.
 The mailbox, pairing, webhooks, access requests and files other people share with you are not part of a role.
 A role-limited agent is not offered those tools.
 
-A role that does not exist answers `403 unknown_role`. It never falls back to the whole list, so deleting a
-role cuts off the agents that use its address.
+A role that does not exist answers `403 unknown_role`. It never falls back to the whole list. Deleting a
+role also disconnects the assistants that signed in through it, so a new role you later give the same name
+starts with no connections: each agent signs in again and you approve it.
+
+These roles choose **files**. Which **tools and shell commands** an agent on your own computer may use is a
+separate thing, also called a role: see [Terminal roles](terminal.md#roles).
 
 ## Use a role from Claude Code
 
@@ -71,7 +75,7 @@ If the main session should not reach the rest of your allowed list either, do no
   address they are narrowed to the role; on plain `/mcp` they work as before.
 - **Role changes take effect on the next call**, or within `ALLOWLIST_CACHE_TTL` seconds (default 2) on another
   server instance.
-- Role names become the address: `Research Reader` is `research-reader`. Saving a role under an existing name
-  replaces it. You can have 20 roles, each with up to 200 items.
+- Role names become the address: `Research Reader` is `research-reader`. A new role whose name gives an
+  address you already use is refused; change the existing role instead. You can have 20 roles, each with up to 200 items.
 - A file you allowed on its own stays protected from rename and trash under a role, even when the role reaches
   it through a folder.

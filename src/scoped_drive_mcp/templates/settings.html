@@ -176,7 +176,7 @@
     <input type="hidden" name="features_shown" value="{{ ((['mailbox'] if mailbox_feature else []) + (['shared'] if shared_feature else [])) | join(',') }}">
     <fieldset>
       <legend class="sr-only">Also allow {{ a.name }} to use</legend>
-      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Mailbox <span class="muted hint">messages with your other assistants</span></span></label>{% endif %}
+      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Message your other assistants <span class="muted hint">the Mailbox; both assistants need this on</span></span></label>{% endif %}
       {% if shared_feature %}<label class="check"><input type="checkbox" name="feature_shared" value="on"{% if a.features.shared %} checked{% endif %}> <span>Shared with me <span class="muted hint">what paired people share with you</span></span></label>{% endif %}
     </fieldset>
     <button type="submit">Save<span class="sr-only"> what else {{ a.name }} can use</span></button>
@@ -264,6 +264,7 @@
 <section id="roles">
 <h2>Roles</h2>
 <p class="muted lead">A role is a named part of your allowed files. An agent that connects to a role’s address reaches only that role’s files, at most at the role’s level, and never more than its own connection allows. Use one address per agent or subagent.</p>
+{% if terminal_tab %}<p class="muted small" id="roles-other">These roles choose <b>files</b>. To choose which <b>tools and shell commands</b> the agents on your computer may use, go to <a href="/terminal/roles">Terminal → Roles</a>.</p>{% endif %}
 {% for r in roles %}
 {% set role = r.role %}
 <article class="card" id="role-{{ role.slug }}">
@@ -274,16 +275,20 @@
     <input id="role-url-{{ role.slug }}" type="text" readonly value="{{ role_url_base }}{{ role.slug }}">
     <button type="button" data-copy="{{ role_url_base }}{{ role.slug }}">Copy role URL</button>
   </div>
-  <details class="disclosure-form" id="edit-role-{{ role.slug }}"><summary>Change level or files</summary>
+  <details class="disclosure-form" id="edit-role-{{ role.slug }}"><summary>Change name, level or files</summary>
     <form class="stack" method="post" action="/roles/save">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="name" value="{{ role.name }}">
+      <input type="hidden" name="slug" value="{{ role.slug }}">
+      <label>Name
+        <input name="name" type="text" required maxlength="40" autocomplete="off" value="{{ role.name }}">
+      </label>
+      <p class="muted small">Renaming changes what the role is called here. Its address stays <code>{{ role.slug }}</code>, so connected agents keep working.</p>
       {{ role_fields(role) }}
       <div class="actions"><button class="primary" type="submit">Save<span class="sr-only"> {{ role.name }}</span></button></div>
     </form>
   </details>
   <div class="actions">
-    <form class="inline" method="post" action="/roles/delete" data-confirm="Delete the role {{ role.name }}? Agents that use its address are refused from then on." data-confirm-action="Delete role">
+    <form class="inline" method="post" action="/roles/delete" data-confirm="Delete the role {{ role.name }}? Assistants connected through it are disconnected, and its address stops working." data-confirm-action="Delete role">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="slug" value="{{ role.slug }}">
       <button class="danger" type="submit">Delete role<span class="sr-only"> {{ role.name }}</span></button>
@@ -296,13 +301,13 @@
   {% if allowed_items %}
   <form class="stack" method="post" action="/roles/save">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="new" value="1">
     <label>Name
       <input name="name" type="text" required maxlength="40" autocomplete="off" placeholder="Researcher">
     </label>
     {{ role_fields() }}
     <div class="actions"><button class="primary" type="submit">Create role</button></div>
   </form>
-  <p class="muted small">Saving a role with the name of an existing one replaces it.</p>
   {% else %}
   <p class="muted">A role is made from files you already allow. <a href="/files">Allow a file or folder</a> first.</p>
   {% endif %}

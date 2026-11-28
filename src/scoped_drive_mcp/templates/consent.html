@@ -66,8 +66,8 @@
       <input type="hidden" name="features_shown" value="{{ ((['mailbox'] if mailbox_on else []) + (['shared'] if shared_on else [])) | join(',') }}">
       {% if mailbox_on %}
       <label class="role"><input type="checkbox" name="feature_mailbox" value="on"{% if mailbox_default %} checked{% endif %}>
-        <span><b>Mailbox</b>
-          <span class="muted">Send and read short messages with your other assistants. You can read every message under Sharing › Mailbox.
+        <span><b>Message your other assistants</b>
+          <span class="muted">Send and read short messages with your other assistants, such as your Claude and your Cursor. Both need this ticked, and you approve each pair first under Sharing. You can read every message under Sharing › Mailbox.
           Another person’s assistant can never message it.</span></span></label>
       {% endif %}
       {% if shared_on %}

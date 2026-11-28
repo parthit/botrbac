@@ -214,6 +214,9 @@ class ActivityRow:
     attention: bool
     polling: bool
     detail: str
+    # Where the person can change what blocked this call, and what the link says.
+    fix_href: str = ""
+    fix_label: str = ""
 
 
 def _item_id(record: Mapping[str, Any]) -> str | None:
@@ -252,7 +255,28 @@ def _item_text(
     return "a file" if item or tool else "an item"
 
 
-def _deny_why(reason: str, guest: bool) -> str:
+def _deny_fix(reason: str, guest: bool, named_role: str) -> tuple[str, str]:
+    """(href, link text) for a refusal the person can lift on the dashboard, or ("", "")."""
+    if guest:
+        return "", ""
+    if reason == "out_of_scope":
+        if named_role:
+            return f"/settings#role-{named_role}", f"Change the files in the role {named_role}"
+        return "/files", "Choose what is allowed"
+    if "switched off for this app" in reason:
+        return "/settings#assistants", "Turn it on for this assistant"
+    if reason.startswith("role ") or "may not call" in reason:
+        return "/settings#assistants", "Change what this assistant can do"
+    return "", ""
+
+
+def _deny_why(reason: str, guest: bool, named_role: str = "") -> str:
+    if reason == "out_of_scope" and named_role:
+        return f"it isn’t in the role {named_role}"
+    if "not available through a named role" in reason:
+        return "that tool can’t be used through a named role"
+    if "switched off for this app" in reason:
+        return "that part is switched off for this assistant"
     if reason in ("out_of_scope",):
         return "it isn’t on your list"
     if reason == "not_shared":
@@ -357,6 +381,7 @@ def _tool_row(
         # On the owner's log: the reader listed what this owner shares with them.
         done, attempt = "listed what you share with them", "list what you share with them"
     polling = tool in POLLING_TOOLS and decision == "allow"
+    fix_href = fix_label = ""
     missing = names.get(_item_id(record) or "") == MISSING
     if tool == "request_access" and decision == "allow":
         text = f"{who} {done.format(item=item)}."
@@ -370,8 +395,11 @@ def _tool_row(
         text = f"{who} tried to {attempt.format(item=item)}."
         badge = _BLOCKED
     elif decision == "deny":
-        text = f"{who} tried to {attempt.format(item=item)}. Blocked: {_deny_why(reason, guest)}."
+        role_slug = named_role if isinstance(named_role, str) else ""
+        why = _deny_why(reason, guest, role_slug)
+        text = f"{who} tried to {attempt.format(item=item)}. Blocked: {why}."
         badge = _BLOCKED
+        fix_href, fix_label = _deny_fix(reason, guest, role_slug)
     else:
         text = f"{who} couldn’t {attempt.format(item=item)}: {_error_why(reason)}."
         badge = _FAILED
@@ -386,6 +414,8 @@ def _tool_row(
         attention=decision in ("deny", "error"),
         polling=polling,
         detail=detail,
+        fix_href=fix_href,
+        fix_label=fix_label,
     )
 
 

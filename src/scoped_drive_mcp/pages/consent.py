@@ -118,11 +118,13 @@ def consent_pages(kit: Kit) -> ConsentPages:
                         message=f"You have no role named “{role_slug}”. Make it in Settings, "
                         "under Roles, then connect again.",
                     )
-            # Mailbox and Shared with me start ticked only when they can do something:
-            # another assistant of theirs to talk to, someone paired who shares with them.
+            # Messaging the person's other assistants starts ticked: the permission is
+            # there when a second assistant connects, and two assistants still exchange
+            # nothing until the person approves their pairing. Shared with me starts ticked
+            # only when someone paired already shares with them.
             mailbox_default = shared_default = False
             if agent_role is None:
-                mailbox_default = bool(await blocking(ctx.mcp_oauth.list_grants, signed_in))
+                mailbox_default = True
                 if ctx.shared_with_me is not None:
                     try:
                         shared_default = bool(

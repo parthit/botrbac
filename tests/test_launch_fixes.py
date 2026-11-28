@@ -29,7 +29,7 @@ def _grant_id(app) -> str:
 # ---- switches on the consent page ---------------------------------------------------
 
 
-def test_first_assistant_gets_mailbox_and_shared_unticked(owner_c) -> None:
+def test_first_assistant_can_message_by_default_and_shared_is_unticked(owner_c) -> None:
     from tests.test_mcp_oauth import auth_params, register
 
     client_id = register(owner_c, GROK).json()["client_id"]
@@ -37,8 +37,9 @@ def test_first_assistant_gets_mailbox_and_shared_unticked(owner_c) -> None:
     page = owner_c.get("/oauth/authorize", params=params).text
     assert 'id="consent-features"' in page
     assert 'name="features_shown" value="mailbox,shared"' in page
-    # Nothing to talk to and no one sharing yet: both boxes start empty.
-    assert 'name="feature_mailbox" value="on" checked' not in page
+    # Messaging other assistants is on unless unticked; no one shares yet, so that is off.
+    assert 'name="feature_mailbox" value="on" checked' in page
+    assert "Message your other assistants" in page
     assert 'name="feature_shared" value="on" checked' not in page
 
 

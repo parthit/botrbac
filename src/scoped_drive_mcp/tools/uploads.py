@@ -7,14 +7,24 @@ from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from ..auth import current_principal
 from ..onedrive import OneDriveService
-from ..policy import PayloadToolError, require
+from ..policy import PayloadToolError, PermissionDeniedError, check_permission, require
 from ..service import DriveService
 from ..uploads import DEFAULT_CHUNK, UploadError, UploadSessions
 from .common import WRITE, Guarded, _run
 from .shared import RunShared
+
+
+def _shared_write_allowed() -> None:
+    """An upload into another person's folder is `upload_shared_file` by another route, so
+    it needs what that tool needs: the level, and the app's "Shared with me" switch."""
+    try:
+        check_permission(current_principal.get(), "upload_shared_file")
+    except PermissionDeniedError as exc:
+        raise ToolError(f"Permission denied: {exc}") from None
 
 
 def register(
@@ -66,6 +76,9 @@ def register(
         name, mime_type = service.check_upload_meta(name, mime_type)
         who = upload_who()
         if owner:
+            # Writing into another person's folder is upload_shared_file by another
+            # route: the same level and the same "Shared with me" switch apply.
+            _shared_write_allowed()
             checked = run_shared("check_upload_parent", owner, parent_id)
             parent = checked["parent_id"]
             owner = checked["owner"]
@@ -142,6 +155,7 @@ def register(
             if meta.get("target") == "onedrive":
                 created = write_onedrive(meta, data)
             elif meta.get("owner"):
+                _shared_write_allowed()
                 created = run_shared(
                     "upload_bytes",
                     meta["owner"],

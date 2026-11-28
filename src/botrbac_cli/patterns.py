@@ -65,12 +65,21 @@ def validate(pattern: str) -> str:
 def validate_all(patterns: list[str]) -> list[str]:
     """Checked, de-duplicated, order kept."""
     out: list[str] = []
+    wrong: list[str] = []
     for raw in patterns:
         if not raw.strip():
             continue
-        value = validate(raw)
+        try:
+            value = validate(raw)
+        except PatternError as exc:
+            # Every bad line in one go, so a long list is not fixed one save at a time.
+            if len(wrong) < 5 and str(exc) not in wrong:
+                wrong.append(str(exc))
+            continue
         if value not in out:
             out.append(value)
+    if wrong:
+        raise PatternError(" ".join(wrong))
     if len(out) > MAX_PATTERNS:
         raise PatternError(f"A role can have at most {MAX_PATTERNS} patterns.")
     return out

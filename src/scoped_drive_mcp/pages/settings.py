@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
-from ..agent_roles import AgentRole, AgentRoleError
+from ..agent_roles import AgentRole, AgentRoleError, slugify
 from ..audit import app_tag, audit_owner
 from ..auth import current_actor
 from ..bridge import MailboxError
@@ -463,8 +463,20 @@ def settings_pages(
         items = [str(v) for v in (await request.form()).getlist("item")]
 
         def save() -> AgentRole:
+            # The New role form must not replace a role: two names can share an address
+            # ("Research Reader" and "research_reader"), and the older one may be in use.
+            taken = form.get("new") and ctx.agent_roles.get(slugify(form.get("name") or ""))
+            if taken:
+                raise AgentRoleError(
+                    f"You already have the role {taken.name}, and this name would get the "
+                    "same address. Change that role instead, or pick another name."
+                )
             return ctx.agent_roles.save(
-                form.get("name") or "", form.get("level") or "", items, ctx.allowlist.entries()
+                form.get("name") or "",
+                form.get("level") or "",
+                items,
+                ctx.allowlist.entries(),
+                slug=form.get("slug") or "",
             )
 
         try:
@@ -482,13 +494,43 @@ def settings_pages(
         back = "/settings#roles"
         slug = form.get("slug") or ""
         role = None if ctx.agent_roles is None else await blocking(ctx.agent_roles.get, slug)
-        if role is None or not await blocking(ctx.agent_roles.delete, slug):
+        if role is None:
+            return action_done(request, "error", "That role was not found.", back)
+        # Connections made through the role end with it, and they end first: a later role
+        # with the same name must not hand them its files and level without anyone
+        # approving that. If one cannot be ended the role stays, so nothing is left bound
+        # to a name that is free again.
+        ended = 0
+        if ctx.mcp_oauth is not None:
+            email = str(request.session.get("owner") or "")
+            try:
+                for grant in await blocking(ctx.mcp_oauth.list_grants, email):
+                    if grant.agent_role == slug and await blocking(
+                        ctx.mcp_oauth.revoke, grant.id, email
+                    ):
+                        ended += 1
+            except Exception:
+                logger.warning("could not end a role's connections", exc_info=True)
+                return action_done(
+                    request,
+                    "error",
+                    "The role was not deleted: an assistant connected through it could not be "
+                    "disconnected. Try again.",
+                    back,
+                )
+        if not await blocking(ctx.agent_roles.delete, slug):
             return action_done(request, "error", "That role was not found.", back)
         ctx.on_allowlist_change()
         audit_owner("role_delete", name=role.name)
-        return action_done(
-            request, "ok", "Deleted the role. Agents using its address are refused.", back
-        )
+        if ended:
+            audit_owner("role_delete_disconnected", name=role.name, count=str(ended))
+        done = "Deleted the role. Agents using its address are refused."
+        if ended:
+            done = (
+                f"Deleted the role and disconnected the {ended} assistant"
+                f"{'' if ended == 1 else 's'} that used it."
+            )
+        return action_done(request, "ok", done, back)
 
     async def oauth_grant_rename(request: Request, form: dict[str, str]) -> Response:
         """The owner gives one of their connected apps a name of their own ("Grok Bot"

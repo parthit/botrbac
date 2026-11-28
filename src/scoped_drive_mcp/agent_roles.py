@@ -144,12 +144,37 @@ class AgentRoles:
         return role if role.slug == slug else None
 
     def save(
-        self, name: str, level: str, items: Iterable[str], allowlisted: Collection[str]
+        self,
+        name: str,
+        level: str,
+        items: Iterable[str],
+        allowlisted: Collection[str],
+        slug: str = "",
     ) -> AgentRole:
         """Create the role, or replace the one with the same slug. `allowlisted` is the
-        owner's allowlist right now: a role can only list items that are on it."""
+        owner's allowlist right now: a role can only list items that are on it.
+
+        With `slug`, that existing role is changed and `name` is only what it is called:
+        the slug is the role's address and what its connections are bound to, so a rename
+        never moves it."""
         name = " ".join(name.split())[:MAX_NAME]
-        slug = slugify(name)
+        if slug:
+            if self.get(slug) is None:
+                raise AgentRoleError("That role no longer exists.")
+            if not slugify(name):
+                raise AgentRoleError("Give the role a name with letters or numbers.")
+            clash = next(
+                (
+                    r
+                    for r in self.all()
+                    if r.slug != slug and slugify(name) in (r.slug, slugify(r.name))
+                ),
+                None,
+            )
+            if clash is not None:
+                raise AgentRoleError(f"You already have a role called {clash.name}.")
+        else:
+            slug = slugify(name)
         if not slug:
             raise AgentRoleError("Give the role a name with letters or numbers.")
         if level not in {r.value for r in _LEVELS}:

@@ -74,7 +74,24 @@ one anyway returns an error that names the role.
 
 ## Roles
 
-**Terminal → Roles** on the website. A role is a list of tool patterns:
+**Terminal → Roles** on the website. Making a role is mostly ticking boxes:
+
+- **Tools.** Claude Code's own tools and every tool your computers have reported are listed by server.
+  Tick the ones the role may use, or use **All**, **Read-only** or **None** for a whole server. "Allow
+  every tool here, including ones added later" is the `server/*` pattern; without it a tool a server adds
+  later stays blocked until you tick it.
+- **Programs the shell may run.** Names such as `git gh npm`. Leave it empty and an allowed shell tool can
+  run any program (the page says so).
+- **Use on.** Tick the computers that should switch to this role when you save.
+- **Templates** (Reviewer, Coding, Coding with a limited shell) fill all of that in for a new role.
+
+A line above the list says what the role comes to, for example "Allows 17 of the 30 tools listed. The shell
+may run only: git, gh." When an agent is blocked, **Activity** shows the call with a "To allow it" link that
+opens the role with that tool or program already added; for a built-in role it starts a new role from it
+with the blocked computer ticked, so one Save does both.
+
+Underneath, a role is a list of tool patterns. You only need them (under "Patterns and offline use") for
+tools that are not listed yet or for wider rules:
 
 | Pattern | Means |
 | --- | --- |
@@ -226,7 +243,10 @@ cmd/gh
 When any role in force has a `cmd/` pattern, a shell call is allowed only if the shell tool itself is
 allowed **and** every program in the command is allowed as `cmd/<program>`. The shell tools are Claude
 Code's `Bash`, Codex's `Bash` (and `shell`), Gemini CLI's `run_shell_command` and Cursor's `Shell`
-(`SHELL_TOOLS` in `src/botrbac_cli/shellcmd.py`). A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
+(`SHELL_TOOLS` in `src/botrbac_cli/shellcmd.py`). Any other tool of the agent's own that is handed a
+`command` (a background or PowerShell runner, say) is checked the same way, so a tool this list does not
+name is not a way around `cmd/`. A tool that takes its command under another name (`script`, `cmd`) is
+not read this way: it is allowed or blocked as a whole, by its own name. A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
 never count as `cmd/` patterns.
 
 The command is read conservatively. It is split on `;`, `&&`, `||`, `|`, `&` and new lines; each part's
@@ -256,8 +276,13 @@ the reason on stderr; any error inside the check also exits 2. `--format json` p
 
 The hook command uses botrbac's full path. If that file is removed, the agent cannot run the hook, and most
 agents (Claude Code included) then let the call go ahead: run `botrbac doctor` after moving or reinstalling
-botrbac. MCP tools named `mcp__botrbac__…` are left to the gateway, which checks them itself; this trusts
-that the server called `botrbac` in the agent's config is the gateway (`botrbac wrap` sets it up that way).
+botrbac. MCP tools named `mcp__botrbac__…` are left to the gateway, which checks them itself. The name
+alone is not enough: the hook reads the agent's MCP config files (the ones `botrbac doctor` reads, plus
+`.mcp.json` in the working folder) and the list of tools the gateway last offered. A call is treated as going
+around the gateway, and checked as `botrbac-upstream/…`, when a server called `botrbac` there runs something
+other than `botrbac gateway`, when the name belongs to another server such as `botrbac__x`, or when the
+gateway never offered a tool with that name. A server the agent gets from somewhere those files do not show
+(a plugin, a command-line flag) is not seen by the first two checks.
 
 ## Offline
 
@@ -495,6 +520,7 @@ for you; anyone who reads the commit sees the site's address and the session id.
 | `botrbac login [--server URL]` | Connect this computer (device code approved on the website; default `https://botrbac.com`) |
 | `botrbac add-gateway --agent A` | Add the gateway to Cursor's, Codex's or Gemini CLI's config (others kept, backed up) |
 | `botrbac status` | Account, role, policy age, rows waiting, current session |
+| `botrbac roles [NAME]` | This computer's role and the roles `--role` can use; with a name, that role's patterns |
 | `botrbac servers add/remove/list [--url U]` | The MCP servers the gateway sits in front of |
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
 | `botrbac wrap <agent> [--user] [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |

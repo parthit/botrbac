@@ -31,6 +31,11 @@ write tools for your own files (`create_folder`, `create_doc`, `upload_file`, `u
 | `list_shared_folder(owner, folder_id?, max_results?)` | ✓ | ✓ | ✓ |
 | `read_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
 | `download_shared_file(owner, file_id)` | ✓ | ✓ | ✓ |
+| `create_shared_doc(owner, title, content?, parent_id?)` (only inside an item its owner marked editable, [sharing.md](sharing.md)) |  | ✓ | ✓ |
+| `create_shared_folder(owner, name, parent_id?)` |  | ✓ | ✓ |
+| `upload_shared_file(owner, name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
+| `update_shared_file(owner, file_id, content)` |  | ✓ | ✓ |
+| `rename_shared_file(owner, file_id, new_name)` |  | ✓ | ✓ |
 | `list_drops(max_results?)` (files paired people sent you, [sharing.md](sharing.md#sending-a-file-to-a-paired-person)) | ✓ | ✓ | ✓ |
 | `read_drop(drop_id)` | ✓ | ✓ | ✓ |
 | `download_drop(drop_id)` | ✓ | ✓ | ✓ |

@@ -121,6 +121,67 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _role_line(patterns: list[str], limit: int = 6) -> str:
+    """A role's patterns on one line: tools first, then the shell's programs."""
+    if not patterns:
+        return "no tools"
+    if "*" in patterns:
+        return "every tool"
+    tools = [p for p in patterns if not p.startswith("cmd/")]
+    programs = [p[4:] for p in patterns if p.startswith("cmd/")]
+    shown = ", ".join(tools[:limit]) + (
+        f", +{len(tools) - limit} more" if len(tools) > limit else ""
+    )
+    if programs:
+        shown += ("; " if shown else "") + "shell runs only " + ", ".join(programs[:limit])
+        if len(programs) > limit:
+            shown += f", +{len(programs) - limit} more"
+    return shown
+
+
+def cmd_roles(args: argparse.Namespace) -> int:
+    """The roles this computer knows: its own, and the ones `--role` can narrow a run to."""
+    if not state.read_json("credentials.json", {}):
+        print("Not logged in. Run: botrbac login")
+        return 1
+    cached = policy.load_cached()
+    policy.refresh(_api(args))  # offline: the last list kept here
+    cached = policy.load_cached() or cached
+    pol = (cached or {}).get("policy") or {}
+    roles = [r for r in pol.get("roles") or [] if isinstance(r, dict)]
+    mine = pol.get("role") or {}
+    if not mine and not roles:
+        print("No roles here yet. Run: botrbac sync")
+        return 1
+    if args.name:
+        wanted = args.name.strip().lower()
+        found = next(
+            (r for r in roles if wanted in (str(r.get("name", "")).lower(), str(r.get("id")))),
+            None,
+        )
+        if found is None:
+            names = ", ".join(str(r.get("name")) for r in roles) or "none"
+            print(f"No role called {args.name!r}. Roles: {names}", file=sys.stderr)
+            return 1
+        print(
+            f"{found.get('name')}"
+            + (" (this computer's role)" if found.get("id") == mine.get("id") else "")
+        )
+        for pattern in found.get("patterns") or ["(no tools)"]:
+            print(f"  {pattern}")
+        return 0
+    print(f"This computer's role: {mine.get('name', '?')}")
+    print("Roles (narrow one run with: botrbac run --role NAME -- claude):")
+    width = max((len(str(r.get("name", ""))) for r in roles), default=0)
+    for role in roles:
+        mark = "*" if role.get("id") == mine.get("id") else " "
+        name = str(role.get("name", "?"))
+        print(f"{mark} {name:<{width}}  {_role_line(list(role.get('patterns') or []))}")
+    print("A run gets only what both its role and this computer's role allow.")
+    print(f"Make or change roles: {policy._site()}/terminal/roles")
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     from .sync import sync
 
@@ -506,6 +567,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="login, role, policy age, rows waiting").set_defaults(
         fn=cmd_status
     )
+    p = sub.add_parser("roles", help="this computer's role and the roles --role can use")
+    p.add_argument("name", nargs="?", help="show every pattern of one role")
+    p.set_defaults(fn=cmd_roles)
     p = sub.add_parser("sync", help="send waiting audit rows and fetch the policy")
     p.add_argument(
         "--retry-rejected", action="store_true", help="send rows the server refused again"

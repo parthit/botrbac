@@ -104,3 +104,62 @@ def note_seen(tools: list[str] | None = None, unguarded: list[str] | None = None
     if unguarded is not None:
         data["unguarded"] = sorted(set(unguarded))[:50]
     write_json("state.json", data)
+
+
+ROUTES_FILE = "routes.json"
+MAX_ROUTES = 5000
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        return True  # os.kill would end the process there; keep every list instead
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # it exists, under another user
+    return True
+
+
+def _route_owners() -> dict[str, list[str]] | None:
+    """gateway pid -> the tool names it offers, or None when the file is not there. A
+    file that is there but cannot be read counts as offering nothing."""
+    try:
+        text = (home() / ROUTES_FILE).read_text()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {}
+    try:
+        owners = json.loads(text).get("gateways")
+    except (ValueError, AttributeError):
+        return {}
+    if not isinstance(owners, dict):
+        return {}
+    return {
+        str(pid): [str(n) for n in names]
+        for pid, names in owners.items()
+        if isinstance(names, list) and str(pid).isdigit()
+    }
+
+
+def note_routes(exposed: list[str]) -> None:
+    """Remember the tool names this gateway offers (`<server>__<tool>`). The hook reads
+    them to tell the gateway's own tools from another server's that only look like them.
+    Each running gateway keeps its own list; one that has exited is dropped, so a tool
+    no gateway offers any more stops counting."""
+    with file_lock("routes.lock"):
+        owners = {pid: names for pid, names in (_route_owners() or {}).items() if _alive(int(pid))}
+        owners[str(os.getpid())] = sorted(set(exposed))[:MAX_ROUTES]
+        write_json(ROUTES_FILE, {"gateways": owners})
+
+
+def routes() -> set[str] | None:
+    """What the running gateways offer, or None when no gateway has ever written the list
+    (one started before botrbac kept it). A damaged file offers nothing: the hook then
+    treats every `mcp__botrbac__` call as going around the gateway."""
+    owners = _route_owners()
+    if owners is None:
+        return None
+    return {name for pid, names in owners.items() if _alive(int(pid)) for name in names}

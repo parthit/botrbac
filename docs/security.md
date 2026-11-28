@@ -102,9 +102,10 @@
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection acts on `/mcp` with the role you choose on the consent page
   (Read only unless you pick more) and still cannot pass the allowlist. The consent page also has a box each
-  for the **Mailbox** and **Shared with me**. Unticked, that part's tools are neither listed nor callable for
-  the app (`policy.FEATURE_TOOLS`); they start ticked only when they can do something (another assistant to
-  talk to, someone who shares with you), and can be changed per app in Settings. Apps approved before the
+  for **Message your other assistants** (the Mailbox) and **Shared with me**. Unticked, that part's tools are
+  neither listed nor callable for the app (`policy.FEATURE_TOOLS`). Messaging starts ticked, and two
+  assistants still exchange nothing until both have it and you approve their pairing; Shared with me starts
+  ticked only when someone already shares with you. Both can be changed per app in Settings. Apps approved before the
   boxes keep both parts. A damaged switch record turns both parts off rather than on.
   Revoke it under **Assistants** in Settings. The owner can read mail between their own assistants on
   Sharing › Mailbox; that view marks nothing as read. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.

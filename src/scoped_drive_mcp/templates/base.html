@@ -32,13 +32,13 @@
       <a href="/requests" {{ current(nav.startswith('/requests')) }}>Requests{% if pending_count %} <span class="count" aria-label="{{ pending_count }} waiting">{{ pending_count }}</span>{% endif %}</a>
       <a href="/sharing" {{ current(nav.startswith('/shar')) }}>Sharing{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
       <a href="/activity" {{ current(nav == '/activity') }}>Activity</a>
+      {% if terminal_tab %}<a href="/terminal" {{ current(nav.startswith('/terminal') or nav.startswith('/device')) }}>Terminal</a>{% endif %}
       {% endif %}
       <details class="account">
         <summary aria-label="Account menu for {{ owner }}"><span class="avatar" aria-hidden="true">{{ owner[:1] | upper }}</span><span class="summary-email">{{ owner }}</span></summary>
         <div class="account-menu">
           <span class="nav-user">{{ owner }}</span>
           <a href="/settings" {{ current(nav.startswith('/connect')) }}>Settings</a>
-          {% if terminal_tab %}<a href="/terminal" {{ current(nav.startswith('/terminal')) }}>Terminal</a>{% endif %}
           {% if is_admin %}
           <a href="/admin" {{ current(nav == '/admin') }}>People <span class="muted">(admin)</span></a>
           {% endif %}
