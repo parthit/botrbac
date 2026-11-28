@@ -3,8 +3,9 @@
 Signing in (step 1) only proves who someone is. Each entry here is a separate,
 explicit step 2: the person chooses **Connect**, Google (or later, another provider)
 shows the wider permission, and the refresh token that comes back is stored for that
-person. Google Drive is the first connection; Notion and OneDrive are optional (each
-offered only when its OAuth client is configured, see notion.py and onedrive.py).
+person. Google Drive is the first connection; Notion, OneDrive and X are optional (each
+offered only when its OAuth client is configured, see notion.py, onedrive.py and
+twitter.py).
 Adding another service means adding an entry here, a token slot for it, and the tools
 that use it; the sign-in step does not change.
 """
@@ -16,6 +17,8 @@ from .drive_client import ACCEPTABLE_SCOPES, DRIVE_FILE_SCOPE
 from .onedrive_client import ALLOWED_SCOPES as ONEDRIVE_ALLOWED_SCOPES
 from .onedrive_client import REQUIRED_SCOPE as ONEDRIVE_REQUIRED_SCOPE
 from .onedrive_client import SCOPES as ONEDRIVE_SCOPES
+from .twitter_client import POST_SCOPES as TWITTER_POST_SCOPES
+from .twitter_client import READ_SCOPES as TWITTER_READ_SCOPES
 
 
 @dataclass(frozen=True)
@@ -25,7 +28,7 @@ class Connection:
     name: str
     """What the person sees, e.g. "Google Drive"."""
     provider: str
-    """Who runs the consent screen: "google", "notion" or "microsoft"."""
+    """Who runs the consent screen: "google", "notion", "microsoft" or "twitter"."""
     scopes: tuple[str, ...]
     """Scopes requested in addition to the sign-in scopes."""
     required_scope: str
@@ -106,7 +109,39 @@ ONEDRIVE = Connection(
     ),
 )
 
-CONNECTIONS: dict[str, Connection] = {c.key: c for c in (GOOGLE_DRIVE, NOTION, ONEDRIVE)}
+TWITTER = Connection(
+    key="twitter",
+    name="X (Twitter)",
+    provider="twitter",
+    scopes=TWITTER_READ_SCOPES,
+    required_scope="tweet.read",
+    allowed_scopes=frozenset(TWITTER_READ_SCOPES),
+    summary="Only the X accounts and lists you allow, and only to read.",
+    disclosure=(
+        "X will ask you to let Bot RBAC read posts, accounts and lists your X account can "
+        "see. X can't limit that to some accounts, so Bot RBAC holds assistants to the "
+        "accounts and lists you allow on Files. Bot RBAC never posts, likes, reposts, "
+        "follows or sends messages."
+    ),
+)
+
+# What X's card says on a deployment that turned posting on (TWITTER_ALLOW_POST). Shown
+# in place of TWITTER; Connect X then also asks X for permission to post.
+TWITTER_WITH_POST = replace(
+    TWITTER,
+    scopes=TWITTER_POST_SCOPES,
+    allowed_scopes=frozenset(TWITTER_POST_SCOPES),
+    summary="Only the X accounts and lists you allow: to read, and to post for you.",
+    disclosure=(
+        "X will ask you to let Bot RBAC read posts, accounts and lists your X account can "
+        "see, and post for you. X can't limit reading to some accounts, so Bot RBAC holds "
+        "assistants to the accounts and lists you allow on Files. Only assistants you let "
+        "edit can post, as you, in public. Bot RBAC never likes, reposts, follows, sends "
+        "messages or deletes posts."
+    ),
+)
+
+CONNECTIONS: dict[str, Connection] = {c.key: c for c in (GOOGLE_DRIVE, NOTION, ONEDRIVE, TWITTER)}
 
 
 def get_connection(key: str | None) -> Connection | None:

@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     # Settings only when both are set. Read-only (Files.Read).
     onedrive_oauth_client_id: SecretStr | None = None
     onedrive_oauth_client_secret: SecretStr | None = None
+    # Optional: X (Twitter), an OAuth 2.0 app in the X developer portal ("Web App",
+    # a confidential client). Offered on Settings only when both are set.
+    twitter_oauth_client_id: SecretStr | None = None
+    twitter_oauth_client_secret: SecretStr | None = None
+    # Off: X is read-only. On: connections that may edit get twitter_create_post, and
+    # Connect X also asks X for permission to post. See docs/twitter.md.
+    twitter_allow_post: bool = False
 
     redis_rest_url: str | None = Field(
         default=None,
@@ -401,6 +408,16 @@ class Settings(BaseSettings):
         return (
             _real_secret(self.onedrive_oauth_client_id)
             and _real_secret(self.onedrive_oauth_client_secret)
+            and bool(self.app_base_url)
+        )
+
+    @property
+    def twitter_configured(self) -> bool:
+        """Both X OAuth values are set (not placeholders) and there is a public address
+        for X to send people back to."""
+        return (
+            _real_secret(self.twitter_oauth_client_id)
+            and _real_secret(self.twitter_oauth_client_secret)
             and bool(self.app_base_url)
         )
 

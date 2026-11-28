@@ -56,7 +56,10 @@ def connection_pages(
     *,
     start_oauth: Callable[..., RedirectResponse],
     login_rate_limited: Callable[[Request], Awaitable[Response | None]],
+    twitter: Any = None,
 ) -> ConnectionPages:
+    """`twitter` is pages.twitter.TwitterPages: connecting and disconnecting X start here
+    like every other service, and the rest of X's pages live in that module."""
     ctx = kit.ctx
     oauth = kit.oauth
     serializer = kit.serializer
@@ -108,6 +111,8 @@ def connection_pages(
             return render(request, "error.html", 404, message="Unknown connection.")
         if connection.provider == "microsoft" and ctx.onedrive is None:
             return render(request, "error.html", 404, message="Unknown connection.")
+        if connection.provider == "twitter" and (ctx.twitter is None or twitter is None):
+            return render(request, "error.html", 404, message="Unknown connection.")
         limited = await login_rate_limited(request)
         if limited is not None:
             return limited
@@ -116,6 +121,8 @@ def connection_pages(
             return start_notion(request)
         if connection.provider == "microsoft":
             return start_onedrive(request, read_only=form.get("access") == "read")
+        if connection.provider == "twitter":
+            return await twitter.start(request)
         if connection.key == "google_drive":
             # An old full-Drive token is revoked before Google's consent screen. Revoking
             # ends this app's whole grant for the account, so doing it after the new
@@ -150,6 +157,10 @@ def connection_pages(
             if ctx.onedrive is None:
                 return render(request, "error.html", 404, message="Unknown connection.")
             return await onedrive_disconnect(request)
+        if connection.provider == "twitter":
+            if ctx.twitter is None or twitter is None:
+                return render(request, "error.html", 404, message="Unknown connection.")
+            return await twitter.disconnect(request)
         email = current_actor.get()
         # An old full-Drive token is kept until Google confirms it is revoked, so a failed
         # revoke can be retried. It is never used meanwhile.

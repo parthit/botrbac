@@ -4,7 +4,7 @@
 {% block title %}Allowed files{% endblock %}
 {% block content %}
 <h1>Files</h1>
-{{ files_tabs('allowed', allow_count, notion_tab, onedrive_tab) }}
+{{ files_tabs('allowed', allow_count, notion_tab, onedrive_tab, twitter_tab) }}
 <p class="muted lead">Every assistant you connected can use these files and folders. An allowed folder includes everything inside it. Remove takes an item off the list. Tick several to remove them together.</p>
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so the assistant cannot reach your files. <a href="/connect">Connect Google Drive</a>.</div>

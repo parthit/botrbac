@@ -17,6 +17,7 @@ from .drive_client import BotNotConnectedError
 from .notion_client import NotionApiError
 from .onedrive_client import OneDriveApiError
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
+from .twitter_client import TwitterApiError
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,19 @@ ONEDRIVE_TOOLS: frozenset[str] = frozenset(
     {"onedrive_list_folder", "onedrive_read_file", "onedrive_download_file", "onedrive_search"}
 )
 
+# Reading the person's own X, limited to the accounts and lists they allowed (twitter.py).
+TWITTER_TOOLS: frozenset[str] = frozenset(
+    {"twitter_list_allowed", "twitter_read_timeline", "twitter_read_post", "twitter_search"}
+)
+# Posting on the person's X account (twitter.py). Never likes, reposts, follows, messages
+# or deletes. Off unless the deployment sets TWITTER_ALLOW_POST: see OPT_IN_TOOLS below.
+TWITTER_WRITE_TOOLS: frozenset[str] = frozenset({"twitter_create_post"})
+
 VIEWER_TOOLS: frozenset[str] = (
     GUEST_TOOLS
     | NOTION_TOOLS
     | ONEDRIVE_TOOLS
+    | TWITTER_TOOLS
     | frozenset(
         {
             "search_files",
@@ -192,8 +202,8 @@ AGENT_ROLE_TOOLS: frozenset[str] = frozenset(
 # to list or call, whatever this says. Like create_doc, they are for connections that may
 # edit.
 OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
-    Role.EDITOR: NOTION_WRITE_TOOLS,
-    Role.ADMIN: NOTION_WRITE_TOOLS,
+    Role.EDITOR: NOTION_WRITE_TOOLS | TWITTER_WRITE_TOOLS,
+    Role.ADMIN: NOTION_WRITE_TOOLS | TWITTER_WRITE_TOOLS,
 }
 _OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
 
@@ -223,6 +233,9 @@ _AUDITED_ID_ARGS = (
     "page_id",
     "parent_page_id",
     "upload_id",
+    "source",
+    "post_id",
+    "reply_to",
 )
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
@@ -410,6 +423,10 @@ def require(
                 audit(tool=tool, decision="error", reason="onedrive_error", **who, **ids)
                 logger.warning("tool %s: %s", tool, exc)
                 raise ToolError("OneDrive request failed. Try again in a moment.") from None
+            except TwitterApiError as exc:
+                audit(tool=tool, decision="error", reason="twitter_error", **who, **ids)
+                logger.warning("tool %s: %s", tool, exc)
+                raise ToolError("X request failed. Try again in a moment.") from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)
@@ -433,6 +450,10 @@ def require(
                 # The new page, next to the parent it was asked for (parent_page_id).
                 pid = result.get("id")
                 ids["page_id"] = pid if isinstance(pid, str) else None
+            if tool == "twitter_create_post" and isinstance(result, dict):
+                # The new post, next to the post it replies to (reply_to).
+                new_post = result.get("id")
+                ids["post_id"] = new_post if isinstance(new_post, str) else None
             audit(tool=tool, decision="allow", reason="ok", **who, **ids)
             return result
 

@@ -76,8 +76,8 @@
   parent folder Google doesn't open to the app ends that walk, so an item reachable only through such a
   folder isn't seen by this check.
 - **Prompt injection:** documents are untrusted input. Every `read_file` result says `content_trust`
-  (`untrusted`, or `untrusted_peer` for a paired person's file), and text from other people, Notion and
-  OneDrive is wrapped in start and end markers. Inside such text, anything a model would read as one of
+  (`untrusted`, or `untrusted_peer` for a paired person's file), and text from other people, Notion,
+  OneDrive and X is wrapped in start and end markers. Inside such text, anything a model would read as one of
   the server's markers becomes `[removed-marker]`, judged after removing invisible characters, folding
   fullwidth and look-alike brackets, spacing and case, with or without closing brackets; any other run of
   three or more `<` reads as `‹‹‹`. So the text cannot close its block early or open a fake one. A file in the folder could contain text like "ignore your
@@ -428,6 +428,33 @@ a connection stores no write scope even if Microsoft lists one, and a refresh ne
 a connection that lacked it. File text is wrapped in
 untrusted-content markers. The tokens are encrypted with `ENCRYPTION_KEY` and name the account they belong to.
 The connect flow uses a signed, expiring `state` bound to the browser session and the signed-in account.
+
+## X (Twitter)
+
+X is an optional connection ([twitter.md](twitter.md)). Like OneDrive there is no outer gate: X's
+`tweet.read`, `users.read` and `list.read` reach everything the person's account can see, so the person's X
+allowlist (signed, like the Drive allowlist) is the only limit on assistants. It holds accounts by numeric id
+(never by handle, which can change hands) and lists by id. A timeline read resolves the `source` (a handle is
+looked up at X and compared by id) and refuses anything not on the list before X is asked for posts. A single
+post is read only when X reports an allowed account as its author. Search wraps the assistant's query in
+parentheses next to `from:<id>` for each allowed account; queries with an unclosed parenthesis or quote, or
+over 200 characters, are refused before X is called, and every result is checked again by author id. Not
+allowed and not found give the same `twitter_not_allowed` answer. Post text is wrapped in untrusted-content
+markers.
+
+The connect flow is X's OAuth 2.0 authorization code flow with PKCE (S256) for a confidential client. The
+verifier is kept in the browser's signed session; the `state` is signed, expires, and is bound to the
+session and the signed-in account. A token missing `tweet.read` or `users.read`, or carrying any scope
+outside what was asked for (for example `tweet.write` when posting is off), is revoked and not stored. The
+granted scopes are stored with the token, a refresh keeps them unchanged, and X's rotating refresh tokens
+are handled like Notion's. The tokens are encrypted with `ENCRYPTION_KEY` and name the account they belong
+to. Connecting a different X account clears the list.
+
+Posting (`twitter_create_post`) exists only with `TWITTER_ALLOW_POST=1`, only for editor and admin
+connections, and only when the stored token was granted `tweet.write`. A reply must target a post that
+passes the read check. One call is one request with no retry. The client has no like, repost, follow,
+message or delete call. A prompt-injected assistant with an editing role could still post something
+unwanted, in public, as the person; each post shows on Activity.
 
 ## Terminal
 

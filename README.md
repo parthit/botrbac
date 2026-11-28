@@ -108,7 +108,9 @@ tunnel. The test suite needs no Google account: `uv run pytest`.
 - **Notion and OneDrive rely on Bot RBAC's list more.** Notion limits the server to the pages you share on
   Notion's own screen, then Bot RBAC's list narrows that. OneDrive has no per-file permission for personal
   accounts, so the server can reach your whole OneDrive and Bot RBAC's list is the only check. See
-  [docs/notion.md](docs/notion.md) and [docs/onedrive.md](docs/onedrive.md).
+  [docs/notion.md](docs/notion.md) and [docs/onedrive.md](docs/onedrive.md). X (Twitter) is the same as
+  OneDrive: X's permission covers the whole account, and Bot RBAC's list of accounts and lists is the only
+  check ([docs/twitter.md](docs/twitter.md)).
 - **Allowed items are reachable by the server.** They are read with an encrypted refresh token held by
   whoever runs the server. **Run your own copy** if you'd rather hold that token yourself (above).
 - **Documents are untrusted input.** A file can contain text written to steer an assistant. Give an app
@@ -126,6 +128,7 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/roles.md](docs/roles.md) | Named roles: give an agent or subagent only part of your allowed list |
 | [docs/notion.md](docs/notion.md) | Optional: let assistants read the Notion pages you allow |
 | [docs/onedrive.md](docs/onedrive.md) | Optional: let assistants read (and, if they may edit, add and change) the OneDrive files and folders you allow |
+| [docs/twitter.md](docs/twitter.md) | Optional: let assistants read posts from the X (Twitter) accounts and lists you allow, and, if you turn it on, post for you |
 | [docs/terminal.md](docs/terminal.md) | Bot RBAC Terminal: the `botrbac` CLI, roles for local agents, `--role` sessions, hooks |
 | [docs/sharing.md](docs/sharing.md) | Pairing assistants, the mailbox between your own assistants, sharing with other people |
 | [docs/security.md](docs/security.md) | Security notes and how the allowlist check works |
@@ -134,7 +137,8 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/architecture.md](docs/architecture.md) | How it is built: the request path, data model, trade-offs, limits and known debt |
 | [docs/development.md](docs/development.md) | Project layout and implementation notes |
 
-Google Drive is the first connection, with Notion and OneDrive as optional ones. More services are planned.
+Google Drive is the first connection, with Notion, OneDrive and X (Twitter) as optional ones. More services
+are planned.
 
 ## Contributing
 

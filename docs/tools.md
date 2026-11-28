@@ -51,6 +51,11 @@ write tools for your own files (`create_folder`, `create_doc`, `upload_file`, `u
 | `onedrive_start_upload(name, size, sha256, parent_id?, chunk_size?)` (then `append_chunk` and `finish_upload`) |  | ✓ | ✓ |
 | `onedrive_update_file(file_id, content_text \| content_base64)` |  | ✓ | ✓ |
 | `onedrive_rename_file(file_id, new_name)` |  | ✓ | ✓ |
+| `twitter_list_allowed()` (only when X is configured, [twitter.md](twitter.md)) | ✓ | ✓ | ✓ |
+| `twitter_read_timeline(source, max_results?)` | ✓ | ✓ | ✓ |
+| `twitter_read_post(post_id)` | ✓ | ✓ | ✓ |
+| `twitter_search(query, max_results?)` | ✓ | ✓ | ✓ |
+| `twitter_create_post(text, reply_to?)` (only with `TWITTER_ALLOW_POST=1`; a public post on the person's X account, [twitter.md](twitter.md#posting)) |  | ✓ | ✓ |
 | `notion_create_page(parent_page_id, title, content?)` (only with `NOTION_ALLOW_CREATE=1`; new page under an allowed Notion page, [notion.md](notion.md#creating-a-page)) |  | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |

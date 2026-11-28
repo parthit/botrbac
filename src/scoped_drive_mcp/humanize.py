@@ -141,6 +141,11 @@ _TOOL_TEXT: dict[str, tuple[str, str]] = {
     "onedrive_upload_file": ("added a file to OneDrive", "add a file to OneDrive"),
     "onedrive_update_file": ("changed a OneDrive file", "change a OneDrive file"),
     "onedrive_rename_file": ("renamed a OneDrive item", "rename a OneDrive item"),
+    "twitter_list_allowed": ("listed your allowed X accounts", "list your X accounts"),
+    "twitter_read_timeline": ("read posts on X", "read posts on X"),
+    "twitter_read_post": ("read a post on X", "read a post on X"),
+    "twitter_search": ("searched your allowed X accounts", "search your X accounts"),
+    "twitter_create_post": ("posted on X for you", "post on X for you"),
     "create_shared_doc": ("created a doc in {item}", "create a doc in {item}"),
     "create_shared_folder": ("created a folder in {item}", "create a folder in {item}"),
     "upload_shared_file": ("uploaded a file to {item}", "upload a file to {item}"),
@@ -332,6 +337,15 @@ _REFUSALS = {
     "onedrive_locked": "the OneDrive file was locked",
     "onedrive_unexpected": "Microsoft put the change somewhere unexpected",
     "name_taken": "that name is already taken",
+    "twitter_not_allowed": "that X account or list isn’t allowed",
+    "twitter_not_connected": "X isn’t connected",
+    "twitter_reconnect": "X needs to be connected again",
+    "twitter_error": "X returned an error",
+    "twitter_rate_limited": "X was limiting calls",
+    "twitter_search_unavailable": "X search isn’t available to this app",
+    "twitter_cannot_post": "the X connection isn’t allowed to post",
+    "twitter_post_refused": "X refused the post",
+    "twitter_unavailable": "X didn’t answer; the post may or may not exist",
 }
 
 
@@ -531,6 +545,16 @@ def _owner_row(
         ),
         "onedrive_remove": (
             f"You removed the OneDrive item {notion_name} from your assistants’ list.",
+            Badge("", "Removed", "–"),
+        ),
+        "twitter_connect": ("You connected X.", Badge("ok", "Connected", "✓")),
+        "twitter_disconnect": ("You disconnected X.", Badge("", "Disconnected", "–")),
+        "twitter_allow": (
+            f"You allowed the X account or list {notion_name} for your assistants.",
+            _ALLOWED,
+        ),
+        "twitter_remove": (
+            f"You removed the X account or list {notion_name} from your assistants’ list.",
             Badge("", "Removed", "–"),
         ),
     }

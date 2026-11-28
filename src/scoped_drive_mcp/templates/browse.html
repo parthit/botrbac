@@ -6,7 +6,7 @@
 {% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{% if peer_picking %}&peer_request={{ peer_picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
 {% block content %}
 <h1>Files</h1>
-{{ files_tabs('all', allow_count, notion_tab, onedrive_tab) }}
+{{ files_tabs('all', allow_count, notion_tab, onedrive_tab, twitter_tab) }}
 <p class="muted lead"><b>Allow</b> lets your own assistants use an item; an allowed folder includes everything inside it.{% if has_pairing %} <b>Share</b> lets paired people’s assistants read it.{% endif %}</p>
 {% if picking %}
 <div class="warn">Choosing an item for this request:

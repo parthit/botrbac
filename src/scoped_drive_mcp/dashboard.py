@@ -45,7 +45,7 @@ from .access import AccessRequests
 from .audit import audit_owner
 from .auth import current_actor
 from .config import Settings
-from .connections import CONNECTIONS, NOTION_WITH_CREATE
+from .connections import CONNECTIONS, NOTION_WITH_CREATE, TWITTER_WITH_POST
 from .drive_client import (
     BotNotConnectedError,
     DriveAccessError,
@@ -88,6 +88,7 @@ from .pages.requests import request_pages
 from .pages.settings import settings_pages
 from .pages.sharing import sharing_pages
 from .pages.signin import signin_pages
+from .pages.twitter import twitter_pages
 from .peer_request_pages import Kit as PeerRequestKit
 from .peer_request_pages import page_routes as peer_request_routes
 from .peer_requests import PeerRequestService
@@ -131,6 +132,8 @@ NOTION_FORM_HOSTS = b"https://api.notion.com https://www.notion.so https://app.n
 # Connect OneDrive does the same with Microsoft's sign-in (personal accounts pass through
 # login.live.com).
 MICROSOFT_FORM_HOSTS = b"https://login.microsoftonline.com https://login.live.com"
+# Connect X does the same with X's consent screen (older links still use twitter.com).
+TWITTER_FORM_HOSTS = b"https://x.com https://twitter.com https://api.x.com"
 
 # Every page: scripts and everything else only from this site. Sign-in forms redirect to
 # Google, which form-action checks along the redirect chain. frame-ancestors stays none
@@ -147,6 +150,8 @@ STRICT_CSP = (
     + NOTION_FORM_HOSTS
     + b" "
     + MICROSOFT_FORM_HOSTS
+    + b" "
+    + TWITTER_FORM_HOSTS
     + b"; "
     b"frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 )
@@ -242,6 +247,11 @@ class DashboardContext:
     notion_create: bool = False
     # OneDrive (onedrive.OneDriveService), when its OAuth client is configured.
     onedrive: Any = None
+    # X (twitter.TwitterService), when its OAuth client is configured. None hides it.
+    twitter: Any = None
+    # TWITTER_ALLOW_POST: assistants that may edit can post. Changes what the pages say
+    # about X and which scopes Connect X asks for; the tool is registered in tools/.
+    twitter_post: bool = False
     # Files paired people send this person (drops.DropBox). None hides sending.
     drops: Any = None
     # Bot RBAC Terminal (terminal.TerminalFeature): roles for agents on people's own
@@ -360,6 +370,12 @@ class DashboardContext:
             return None
         return self.vault.onedrive()
 
+    def twitter_record(self) -> dict[str, str] | None:
+        """This person's stored X connection, when X is offered here."""
+        if self.twitter is None or not self.vault.enabled:
+            return None
+        return self.vault.twitter()
+
     def connection_rows(self) -> list[dict[str, Any]]:
         """Each connection offered here and whether this person has finished it."""
         rows = []
@@ -383,6 +399,16 @@ class DashboardContext:
                 if record and record.get("account"):
                     detail = f"Account: {record['account']}"
                 needs_upgrade = False
+            elif conn.provider == "twitter":
+                if self.twitter is None:
+                    continue
+                record = self.twitter_record()
+                connected = record is not None
+                if record and record.get("username"):
+                    detail = f"Account: @{record['username']}"
+                needs_upgrade = False
+                if self.twitter_post:
+                    conn = TWITTER_WITH_POST
             else:
                 connected = self.drive_connected()
                 # An older full-Drive (or unstamped) token is no longer used: the person
@@ -570,6 +596,8 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
     ctx.setdefault("allow_count", getattr(request.state, "allow_count", None))
     ctx.setdefault("notion_tab", getattr(request.state, "notion_tab", False))
     ctx.setdefault("onedrive_tab", getattr(request.state, "onedrive_tab", False))
+    ctx.setdefault("twitter_tab", getattr(request.state, "twitter_tab", False))
+    ctx.setdefault("twitter_post", getattr(request.app.state, "twitter_post", False))
     ctx.setdefault("terminal_tab", getattr(request.app.state, "terminal_tab", False))
     ctx.setdefault("notion_create", getattr(request.app.state, "notion_create", False))
     html = _env.get_template(template).render(
@@ -605,7 +633,9 @@ async def terms_page(_: Request) -> Response:
 
 async def privacy_page(request: Request) -> Response:
     return render_plain(
-        "privacy.html", notion_create=getattr(request.app.state, "notion_create", False)
+        "privacy.html",
+        notion_create=getattr(request.app.state, "notion_create", False),
+        twitter_post=getattr(request.app.state, "twitter_post", False),
     )
 
 
@@ -967,8 +997,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         refresh_access_token=fresh_access_token,
     )
     signin = signin_pages(kit)
+    x_pages = twitter_pages(kit)
     conn = connection_pages(
-        kit, start_oauth=signin.start_oauth, login_rate_limited=signin.login_rate_limited
+        kit,
+        start_oauth=signin.start_oauth,
+        login_rate_limited=signin.login_rate_limited,
+        twitter=x_pages,
     )
     files = file_pages(kit)
     share = sharing_pages(kit, still_covered=files.still_covered)
@@ -983,6 +1017,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         access=files.access,
         notion_files=conn.notion_files,
         onedrive_files=conn.onedrive_files,
+        twitter_files=x_pages.twitter_files,
         sharing=share.sharing,
         shared_overview=drops.shared_overview,
     )
@@ -1015,6 +1050,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/connect/onedrive/callback", owner_only(conn.onedrive_callback), methods=["GET"]),
         Route("/onedrive/allow", csrf_protected(conn.onedrive_allow), methods=["POST"]),
         Route("/onedrive/remove", csrf_protected(conn.onedrive_remove), methods=["POST"]),
+        Route("/connect/twitter/callback", owner_only(x_pages.twitter_callback), methods=["GET"]),
+        Route("/twitter/allow", csrf_protected(x_pages.twitter_allow), methods=["POST"]),
+        Route("/twitter/remove", csrf_protected(x_pages.twitter_remove), methods=["POST"]),
         Route("/logout", csrf_protected(signin.logout), methods=["POST"]),
         Route("/", safely(files.home), methods=["GET"]),
         Route("/files", owner_only(prefs.files_page), methods=["GET"]),
@@ -1120,6 +1158,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     app.state.owner_email = settings.owner_email
     app.state.terminal_tab = ctx.terminal is not None
     app.state.notion_create = ctx.notion_create
+    app.state.twitter_post = ctx.twitter_post
     # Mount("/") serves this app, so request.app is this app, not the outer one.
     app.state.dashboard = ctx
     return app

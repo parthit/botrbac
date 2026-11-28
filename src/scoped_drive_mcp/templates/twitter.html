@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% from "_tabs.html" import files_tabs %}
+{% block title %}Files from X{% endblock %}
+{% block content %}
+<h1>Files</h1>
+{{ files_tabs('twitter', allow_count, notion_tab, onedrive_tab, twitter_tab) }}
+{% if not twitter_connected %}
+<div class="card empty" id="twitter-connect">
+  <h2>X isn’t connected</h2>
+  <p>Connect X, then come back here and <b>Allow</b> the X accounts and lists your assistants may read. {% if twitter_post %}Only assistants you let edit can post for you. Bot RBAC never likes, reposts, follows or sends messages.{% else %}Bot RBAC never posts, likes, reposts, follows or sends messages.{% endif %}</p>
+  <form method="post" action="/connect/twitter">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="/files?tab=twitter">
+    <button class="primary" type="submit">Connect X</button>
+  </form>
+</div>
+{% else %}
+<p class="muted lead">Your assistants can read recent posts from the X accounts and lists you <b>Allow</b> here, and search posts by the allowed accounts. {% if twitter_can_post %}Assistants you let edit can also post for you, in public.{% elif twitter_post %}They can’t post: X didn’t grant posting. Choose <b>Connect X</b> again on Settings to approve it.{% else %}They can’t post.{% endif %}{% if account %} Account: <b>@{{ account }}</b>.{% endif %}</p>
+
+<h2>Allowed <span class="count neutral">{{ allowed | length }}</span></h2>
+{% if allowed %}
+<table class="cards" data-list>
+  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for e in allowed %}
+  <tr data-row>
+    <td data-label="Name">{{ e.name }}</td>
+    <td data-label="Type">{{ "List" if e.mime_type == "twitter/list" else "Account" }}</td>
+    <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
+    <td data-label="Action">
+      <form class="inline" method="post" action="/twitter/remove" data-confirm="Stop assistants reading this?" data-confirm-action="Remove">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="source" value="{{ e.id }}">
+        <button class="danger" type="submit">Remove<span class="sr-only"> {{ e.name }}</span></button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted" id="twitter-none-allowed">Nothing from X is allowed yet. Add an account or list below.</p>
+{% endif %}
+
+<h2>Allow an account or list</h2>
+<form method="post" action="/twitter/allow" class="actions" id="twitter-allow">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label class="sr-only" for="xs">X account or list</label>
+  <input id="xs" type="text" name="source" required maxlength="300" placeholder="@handle, x.com/handle or x.com/i/lists/…">
+  <button type="submit">Allow</button>
+</form>
+
+<h2>Your lists</h2>
+{% if twitter_error %}
+<div class="warn" role="alert" id="twitter-error">{{ twitter_error }}</div>
+{% elif own_lists %}
+<table class="cards">
+  <thead><tr><th>Name</th><th>Members</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for l in own_lists %}
+  <tr>
+    <td data-label="Name">{{ l.name }}{% if l.private %} <span class="pill">Private</span>{% endif %}</td>
+    <td data-label="Members" class="muted">{{ l.members if l.members is not none else "—" }}</td>
+    <td data-label="Action">
+      {% if l.allowed %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
+      {% else %}
+      <form class="inline" method="post" action="/twitter/allow">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="source" value="{{ l.id }}">
+        <button type="submit">Allow<span class="sr-only"> {{ l.name }}</span></button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted" id="twitter-no-lists">Your X account has no lists of its own. You can still allow any list by its link.</p>
+{% endif %}
+
+<h2>Disconnect</h2>
+<form method="post" action="/connect/twitter/disconnect" data-confirm="Disconnect X? Assistants lose access to it immediately, and your list of allowed X accounts and lists is cleared." data-confirm-action="Disconnect">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button class="danger" type="submit">Disconnect X</button>
+</form>
+{% endif %}
+{% endblock %}

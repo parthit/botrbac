@@ -76,7 +76,14 @@ ONEDRIVE_WRITE_TOOLS = {
     "onedrive_rename_file",
     "onedrive_start_upload",
 }
-OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS | ONEDRIVE_WRITE_TOOLS
+# Read-only, the person's own X, registered only when X is configured.
+TWITTER_READ_TOOLS = {
+    "twitter_list_allowed",
+    "twitter_read_timeline",
+    "twitter_read_post",
+    "twitter_search",
+}
+OPTIONAL_TOOLS = NOTION_READ_TOOLS | ONEDRIVE_READ_TOOLS | ONEDRIVE_WRITE_TOOLS | TWITTER_READ_TOOLS
 UPLOAD_TOOLS = {"start_upload", "append_chunk", "finish_upload", "cancel_upload", "save_export"}
 SHARED_WRITE_TOOLS = {
     "create_shared_doc",
@@ -100,6 +107,7 @@ VIEWER_EXPECTED = (
     | SHARED_TOOLS
     | NOTION_READ_TOOLS
     | ONEDRIVE_READ_TOOLS
+    | TWITTER_READ_TOOLS
     | DROP_READ_TOOLS
 )
 EXPECTED = {
@@ -122,6 +130,7 @@ EXPECTED = {
     | SHARED_WRITE_TOOLS
     | NOTION_READ_TOOLS
     | ONEDRIVE_READ_TOOLS
+    | TWITTER_READ_TOOLS
     | DROP_READ_TOOLS
     | DROP_SEND_TOOLS
     | UPLOAD_TOOLS

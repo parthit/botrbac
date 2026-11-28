@@ -51,6 +51,7 @@ def settings_pages(
     access: Handler,
     notion_files: Handler,
     onedrive_files: Handler,
+    twitter_files: Handler,
     sharing: Handler,
     shared_overview: Handler,
 ) -> SettingsPages:
@@ -201,11 +202,14 @@ def settings_pages(
         request.state.allow_count = len(await blocking(ctx.allowlist.entries))
         request.state.notion_tab = ctx.notion is not None
         request.state.onedrive_tab = ctx.onedrive is not None
+        request.state.twitter_tab = ctx.twitter is not None
         if request.query_params.get("tab") == "notion" and ctx.notion is not None:
             # Notion does not need Google Drive, so this tab works without it.
             return await notion_files(request)
         if request.query_params.get("tab") == "onedrive" and ctx.onedrive is not None:
             return await onedrive_files(request)
+        if request.query_params.get("tab") == "twitter" and ctx.twitter is not None:
+            return await twitter_files(request)
         if request.query_params.get("tab") == "allowed":
             return await access(request)
         return await browse(request)
