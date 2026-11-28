@@ -127,6 +127,7 @@ The full list is in [docs/security.md](docs/security.md). Found a vulnerability?
 | [docs/terminal.md](docs/terminal.md) | Bot RBAC Terminal: the `botrbac` CLI, roles for local agents, `--role` sessions, hooks |
 | [docs/sharing.md](docs/sharing.md) | Pairing assistants, the mailbox between your own assistants, sharing with other people |
 | [docs/security.md](docs/security.md) | Security notes and how the allowlist check works |
+| [docs/incident-response.md](docs/incident-response.md) | What to do when an assistant misbehaves or a key leaks |
 | [docs/google-verification.md](docs/google-verification.md) | Google OAuth verification for a public deployment |
 | [docs/architecture.md](docs/architecture.md) | How it is built: the request path, data model, trade-offs, limits and known debt |
 | [docs/development.md](docs/development.md) | Project layout and implementation notes |

@@ -211,9 +211,21 @@ def test_repeated_guest_calls_and_bad_tokens_do_not_push_a_read_off_the_list() -
     rows = log.recent()
     assert len(rows) == 3
     assert any(r.get("file_id") == "f1" and r["decision"] == "allow" for r in rows)
-    # The owner's own assistant is not folded: each of its calls is a row.
+    # The owner's own assistant: a repeat of the same call on the same file is kept once
+    # an hour, and each different file gets its own row.
     for _ in range(3):
         log({"event": "tool_call", "tool": "read_file", "decision": "allow", "reason": "ok"})
+    assert len(log.recent()) == 4
+    for f in ("a", "b"):
+        log(
+            {
+                "event": "tool_call",
+                "tool": "read_file",
+                "file_id": f,
+                "decision": "allow",
+                "reason": "ok",
+            }
+        )
     assert len(log.recent()) == 6
 
 

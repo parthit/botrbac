@@ -2,6 +2,7 @@
 denying one, and the activity log.
 """
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,7 @@ from ..access import (
     AccessRequests,
     validate_request_id,
 )
+from ..audit import app_tag
 from ..auth import current_actor
 from ..drive_client import DriveNotFoundError
 from ..errors import report_exception
@@ -35,6 +37,9 @@ from ..scope import InvalidInputError, validate_drive_id
 from ..store import EXTERNAL_ALLOWLIST_KEY, Allowlist
 from .common import ACTIVITY_LOOKUPS, ACTIVITY_PAGE, OwnerNotConnectedError, describe_mime
 from .kit import FormHandler, Handler, Kit
+
+# A connection tag on an Activity row (audit.app_tag).
+_APP_TAG = re.compile(r"[0-9a-f]{12}")
 
 
 @dataclass(frozen=True)
@@ -286,6 +291,26 @@ def request_pages(kit: Kit) -> RequestPages:
             limit = ACTIVITY_PAGE
         limit = max(ACTIVITY_PAGE, min(limit, 500))
         records = await blocking(ctx.activity.recent)
+        # One connected app's rows only (?app= is the tag Activity rows carry). The choices
+        # come from the rows themselves, so an app that was disconnected can still be shown;
+        # connected ones are named, others called what they were (their token name).
+        grants = (
+            await blocking(ctx.mcp_oauth.list_grants, current_actor.get())
+            if ctx.mcp_oauth is not None
+            else []
+        )
+        named = {app_tag(g.id): f"{g.client_name} (…{g.id[-5:]})" for g in grants}
+        app_choices: dict[str, str] = {}
+        for r in records:
+            tag = r.get("app")
+            if isinstance(tag, str) and _APP_TAG.fullmatch(tag) and tag not in app_choices:
+                old = str(r.get("token_name") or "").removeprefix("oauth:") or "An app"
+                app_choices[tag] = named.get(tag) or f"{old} (disconnected)"
+        app = request.query_params.get("app") or ""
+        if app not in app_choices:
+            app = ""
+        if app:
+            records = [r for r in records if r.get("app") == app]
         rows = [describe(r) for r in records]
         shown_ids = [i for i, row in enumerate(rows) if matches(row, view, show_checks)]
         page = shown_ids[:limit]
@@ -297,7 +322,7 @@ def request_pages(kit: Kit) -> RequestPages:
         counts = {k: sum(1 for r in rows if matches(r, k, show_checks)) for k in ACTIVITY_FILTERS}
 
         def href(**changes: Any) -> str:
-            params = {"view": view, "checks": "1" if show_checks else "", "show": ""}
+            params = {"view": view, "app": app, "checks": "1" if show_checks else "", "show": ""}
             params.update({k: str(v) for k, v in changes.items()})
             pairs = [(k, v) for k, v in params.items() if v and not (k == "view" and v == "all")]
             return "/activity" + (f"?{urlencode(pairs)}" if pairs else "")
@@ -313,6 +338,9 @@ def request_pages(kit: Kit) -> RequestPages:
             show_checks=show_checks,
             hidden_checks=sum(1 for r in rows if r.polling),
             checks_href=href(checks="" if show_checks else "1"),
+            app=app,
+            apps=[(tag, name, href(app=tag)) for tag, name in app_choices.items()],
+            all_apps_href=href(app=""),
         )
 
     return RequestPages(

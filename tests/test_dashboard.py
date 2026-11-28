@@ -991,9 +991,11 @@ def test_activity_badges_filters_and_polling(owner_c) -> None:
     assert "Denied" in row and "Allowed" not in row and "pill bad" in row
     # The assistant asking "answered yet?" is hidden, with a way to show it.
     assert "checked on an access request" not in page
-    assert "3 routine checks by your assistants are hidden" in page
+    # Asking the same thing again within the hour is kept once (an app cannot flood
+    # Activity with repeats).
+    assert "1 routine check by your assistants is hidden" in page
     shown = owner_c.get("/activity?checks=1").text
-    assert shown.count("checked on an access request") == 3
+    assert shown.count("checked on an access request") == 1
     attention = owner_c.get("/activity?view=attention").text
     assert "tried to read “other.txt”" in attention
     assert "You denied a request" not in attention

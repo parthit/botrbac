@@ -9,6 +9,7 @@ which the dashboard uses with the owner's own credentials.
 """
 
 import io
+import logging
 import re
 import threading
 import time
@@ -16,6 +17,27 @@ from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 
 from .config import Settings
+
+# googleapiclient logs a warning with the full request URL before each retry, and a list
+# request's URL holds the search text (`q=`) and file ids. Keep the warning and the
+# host; drop the rest of the URL.
+_GOOGLE_URL = re.compile(r"https://([A-Za-z0-9.-]+\.googleapis\.com)\S*")
+
+
+class _RedactGoogleUrls(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = _GOOGLE_URL.sub(r"https://\1/…", message)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        return True
+
+
+for _name in ("googleapiclient.http", "googleapiclient.discovery"):
+    logging.getLogger(_name).addFilter(_RedactGoogleUrls())
 
 # Per-file access: Google lets this app open only files the person picked in the Google
 # Picker and files the app created. Google enforces that, so a leaked token or a bug in

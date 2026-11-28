@@ -1063,6 +1063,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/authorize", csrf_protected(consent.oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(consent.oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(prefs.revoke_oauth_grant), methods=["POST"]),
+        Route("/oauth/grants/revoke-all", csrf_protected(prefs.revoke_all), methods=["POST"]),
         *legal_routes(),
         *(
             peer_request_routes(

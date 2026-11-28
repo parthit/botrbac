@@ -393,6 +393,8 @@ def _owner_row(
     role_words = _ROLE_WORDS.get(str(record.get("role")), "its access")
     notion_name = _quoted(str(record.get("name") or "Untitled"))
     person = str(record.get("person") or "Someone you are paired with")
+    terminals = str(record.get("terminals") or "0")
+    terminals_part = f", {terminals} terminals" if terminals != "0" else ""
     texts: dict[str, tuple[str, Badge]] = {
         "login": ("You signed in.", _DONE),
         "logout": ("You signed out.", _DONE),
@@ -432,6 +434,28 @@ def _owner_row(
         "oauth_approve": (f"You connected {client}.", Badge("ok", "Connected", "✓")),
         "oauth_deny": (f"You declined to connect {client}.", Badge("bad", "Declined", "✕")),
         "oauth_revoke": ("You disconnected an app.", Badge("", "Disconnected", "–")),
+        "revoke_all": (
+            f"You disconnected all your assistants ({record.get('apps') or 0} apps"
+            f"{terminals_part}).",
+            Badge("", "Disconnected", "–"),
+        ),
+        "oauth_ended": (
+            {
+                "expired": f"{client}’s connection ended: it was not used for 30 days.",
+                "evicted": f"{client} was disconnected to make room for a newer connection.",
+            }.get(reason, f"{client} was disconnected."),
+            Badge("", "Disconnected", "–"),
+        ),
+        "pairing_approve": ("You approved a pairing.", Badge("ok", "Approved", "✓")),
+        "pairing_deny": ("You declined a pairing.", Badge("bad", "Declined", "✕")),
+        "pairing_revoke": ("You turned off a pairing.", Badge("", "Turned off", "–")),
+        "pairing_cancel": ("You cancelled a pairing invite.", _DONE),
+        "pairing_dismiss": ("You removed an ended pairing from your list.", _DONE),
+        "pairing_purge": ("You deleted the stored messages of a pairing.", _DONE),
+        "webhook_save": ("You saved an assistant’s wake-up.", _DONE),
+        "webhook_remove": ("You removed an assistant’s wake-up.", Badge("", "Removed", "–")),
+        "webhook_move": ("You gave a wake-up to another assistant.", _DONE),
+        "drop_deleted": ("You deleted a file someone sent you.", Badge("", "Deleted", "–")),
         "oauth_role": (f"You changed what {client} can do: {role_words}.", _DONE),
         "oauth_rename": (
             f"You renamed {client} to {str(record.get('label') or client)}.",
@@ -473,6 +497,19 @@ def _owner_row(
                 "Connecting Google Drive was refused: Google returned a different account."
             ),
             "csrf": "A form was refused because it didn’t come from this site.",
+            "oauth_ended": (
+                f"{client} was disconnected: a sign-in token was used twice, which means a "
+                "copy of it may have been taken. Connect it again if it was yours."
+            ),
+            "terminal_refresh_reuse": (
+                "A terminal’s sign-in token was used twice. If that terminal is yours and "
+                "still works, it was a retry; otherwise disconnect it on the Terminal page."
+            ),
+            "activity_limited": (
+                f"An assistant ({record.get('token_name') or 'an app'}) made so many calls "
+                "this hour that only the first ones are listed here. If that is unexpected, "
+                "disconnect it."
+            ),
         }
         text = refused.get(action, f"Refused: {action.replace('_', ' ')}.")
         badge = _BLOCKED
@@ -480,6 +517,10 @@ def _owner_row(
         failed = {
             "grant": f"Allowing {item} failed: Google Drive returned an error.",
             "revoke": f"Removing {item} only partly worked: Google Drive returned an error.",
+            "revoke_all": (
+                f"Disconnecting all your assistants only partly worked: "
+                f"{record.get('failed') or 'some'} could not be disconnected. Try again."
+            ),
         }
         text = failed.get(action, f"Something failed: {action.replace('_', ' ')}.")
         badge = _FAILED

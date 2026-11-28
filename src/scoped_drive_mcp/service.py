@@ -392,6 +392,11 @@ class DriveService:
             from .external import wrap_untrusted  # imports this module
 
             result["content"] = wrap_untrusted(result["content"])
+        if result.get("content") is not None:
+            # Any document can carry text aimed at the assistant ("ignore your
+            # instructions..."), whoever wrote it. Said on every read, not only on
+            # files a paired person wrote, so a client can show or act on it.
+            result.setdefault("content_trust", "untrusted")
         return result
 
     def _read_file(self, file_id: str, *, all_tabs: bool = True) -> dict[str, Any]:

@@ -19,6 +19,8 @@ NOTION_ALLOWLIST_KEY = "notion_allowlist"
 # What this person's assistants may read in OneDrive (chosen on Files, "From OneDrive").
 ONEDRIVE_ALLOWLIST_KEY = "onedrive_allowlist"
 ACTIVITY_KEY = "activity"
+# Changes (writes, dashboard actions, messages): kept apart so reads cannot push them out.
+ACTIVITY_CHANGES_KEY = "activity:changes"
 ACTIVITY_MAX = 500
 # A paired person's repeated call is written to the owner's Activity this often.
 GUEST_ROW_EVERY = 3600
