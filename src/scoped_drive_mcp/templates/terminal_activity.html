@@ -29,7 +29,7 @@
   {% elif r.action.shown %}<p class="small"><code>{{ r.action.shown }}</code></p>
   {% elif r.command_unreadable %}<p class="small muted">What it sent was recorded, but can't be opened (this site's key changed).</p>
   {% elif r.command_error %}<p class="small muted">The computer couldn't record what it sent ({{ r.command_error }}).</p>{% endif %}
-  {% if r.blocked %}<p class="why-blocked small">{{ r.blocked.text }}{% if r.blocked.role_fix %} <a href="/terminal/roles">To allow it, {{ r.blocked.fix }}</a>.{% elif r.blocked.fix %} To fix it, {{ r.blocked.fix }}.{% endif %}</p>
+  {% if r.blocked %}<p class="why-blocked small">{{ r.blocked.text }}{% if r.blocked.role_fix %} <a href="{{ fix_link(r.blocked, r.tool, roles_by_name) }}" class="fix-link">To allow it, {{ r.blocked.fix }}</a>.{% elif r.blocked.fix %} To fix it, {{ r.blocked.fix }}.{% endif %}</p>
   {% elif r.decision == 'error' %}<p class="why-blocked small">Bot RBAC couldn't check this call ({{ r.reason }}), so it was stopped.</p>{% endif %}
   {% if r.outcome %}<p class="small muted step-outcome">{{ r.outcome }}</p>{% endif %}
   {% set warn = trouble(r) %}{% if warn %}<p class="small warn-line">⚠ {{ warn }}</p>{% endif %}
@@ -86,7 +86,9 @@
       {% elif h.command_unreadable %}<h2 class="story-title">A prompt</h2><p class="small muted">It was recorded, but can't be opened (this site's key changed).</p>
       {% else %}<h2 class="story-title">A prompt</h2>{% if can_record and not recording %}<p class="small muted">Turn on Record commands to see what was asked.</p>{% endif %}{% endif %}
     {% elif s.kind == 'prompt' %}
-      <h2 class="story-title">Steps from one prompt</h2>
+      {% set pid = (s.steps[0].prompt_id if s.steps else "") %}
+      <h2 class="story-title">Part of one prompt</h2>
+      {% if pid %}<p class="small"><a href="/terminal/activity?prompt_id={{ pid | urlencode }}">See the prompt and everything it led to</a></p>{% endif %}
     {% endif %}
   </div>
   {% if s.steps %}<ol class="steps">{% for r in s.steps %}{{ step(r) }}{% endfor %}</ol>{% endif %}

@@ -346,12 +346,12 @@ def test_edited_resend_is_counted_as_a_fork() -> None:
 def test_reason_keeps_program_list_and_substitution() -> None:
     reason = "running cmd/curl, cmd/wget is not in role 'dev'"
     row = clean_row(_row(decision="deny", reason=reason), NOW)
-    assert row["reason"] == "running cmd/curl, cmd/wget is not in role dev"
+    assert row["reason"] == "running cmd/curl, cmd/wget is not in role 'dev'"
     why = present.blocked_because(row["reason"])
     assert why["fix"] == "add cmd/curl, cmd/wget to the role"
     assert "programs curl, wget" in why["text"]
     # Rows stored before commas were kept.
-    old = present.blocked_because("running cmd/curl cmd/wget is not in role dev")
+    old = present.blocked_because("running cmd/curl cmd/wget is not in role 'dev'")
     assert old["fix"] == "add cmd/curl, cmd/wget to the role"
     sub = clean_row(
         _row(

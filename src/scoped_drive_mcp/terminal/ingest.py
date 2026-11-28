@@ -60,10 +60,12 @@ NO_TOOL = frozenset({"session", "prompt"})
 CALLS = frozenset({"allow", "deny", "error"})
 # Always used with fullmatch: `$` would also accept a trailing newline.
 _ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
-_WORD = re.compile(r"[^A-Za-z0-9_.:/@ -]+")
+# Commas and apostrophes stay: role names have them ("Coding, limited shell"), and a
+# reason lists programs as "cmd/curl, cmd/wget". The page and exports escape them.
+_WORD = re.compile(r"[^A-Za-z0-9_.:/@ ,'-]+")
 # A reason may also list programs ("running cmd/curl, cmd/wget is not in role ...") and
 # name what botrbac cannot check ("command substitution $(…)", "<(…)").
-_REASON = re.compile(r"[^A-Za-z0-9_.:/@ ,$()\u2026-]+")
+_REASON = re.compile(r"[^A-Za-z0-9_.:/@ ,'$()\u2026-]+")
 _POLICY_VERSION = re.compile(r"[A-Za-z0-9]{1,32}")
 
 

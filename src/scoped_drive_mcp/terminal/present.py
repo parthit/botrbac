@@ -13,6 +13,7 @@ import posixpath
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
+from urllib.parse import quote
 
 AGENTS = {
     "claude-code": "Claude Code",
@@ -161,16 +162,19 @@ def blocked_because(reason: Any, role: Any = "") -> dict[str, Any]:
         listed = ", ".join(programs)
         noun = "program" if len(programs) == 1 else "programs"
         return {
-            "text": f"The role “{m.group(2)}” doesn't allow the {noun} {listed}.",
+            "text": f"The role “{_unquote(m.group(2))}” doesn't allow the {noun} {listed}.",
             "fix": "add " + ", ".join(f"cmd/{p}" for p in programs) + " to the role",
             "role_fix": True,
+            "add": [f"cmd/{p}" for p in programs],
+            "role": _unquote(m.group(2)),
         }
     m = _TOOL.fullmatch(reason)
     if m:
         return {
-            "text": f"The role “{m.group(1)}” doesn't allow this tool.",
+            "text": f"The role “{_unquote(m.group(1))}” doesn't allow this tool.",
             "fix": "add the tool to the role",
             "role_fix": True,
+            "role": _unquote(m.group(1)),
         }
     if reason == "protected file":
         return {
@@ -194,6 +198,61 @@ def blocked_because(reason: Any, role: Any = "") -> dict[str, Any]:
             "role_fix": False,
         }
     return {"text": reason or "Blocked.", "fix": "", "role_fix": False}
+
+
+def _unquote(name: str) -> str:
+    """A role name as the site stored it: older rows had quotes stripped, newer keep them."""
+    name = name.strip()
+    if len(name) >= 2 and name[0] == name[-1] and name[0] in "'\"":
+        return name[1:-1]
+    return name
+
+
+def fix_link(blocked: Mapping[str, Any], tool: str, roles: Mapping[str, Any]) -> str:
+    """Where "To allow it" goes: that role's page with the missing pattern already added,
+    so the fix is one Save. A built-in role can't be edited: a new role starting from it.
+    Without a role we know, the Roles page."""
+    add = list(blocked.get("add") or ([tool] if tool else []))
+    role = roles.get(str(blocked.get("role") or ""))
+    query = "&".join(f"add={quote(a, safe='/*')}" for a in add)
+    if role is None:
+        return "/terminal/roles"
+    if getattr(role, "builtin", False):
+        return f"/terminal/roles/new?from={quote(role.id)}&{query}"
+    return f"/terminal/roles/{quote(role.id)}?{query}"
+
+
+def role_summary(patterns: Iterable[str]) -> list[str]:
+    """A custom role's patterns as short plain lines, for the Roles page."""
+    shell: list[str] = []
+    lines: list[str] = []
+    for p in patterns:
+        server, _, name = p.partition("/")
+        if p == "*":
+            lines.append("Everything")
+        elif server == "cmd":
+            shell.append(name)
+        elif name == "*":
+            who = agent_name(server) if server in AGENTS else f"the {server} server"
+            lines.append(f"All of {who}'s tools" if server in AGENTS else f"Every tool on {who}")
+        elif server == "*":
+            lines.append(f"Any server's tools starting with “{name.rstrip('*')}”")
+        elif server in AGENTS:
+            lines.append(f"{agent_name(server)}: {name}")
+        elif name.endswith("*"):
+            lines.append(f"{server} tools starting with “{name.rstrip('*')}”")
+        else:
+            lines.append(f"{server}: {name}")  # the tool's own name, exactly
+    merged: list[str] = []
+    for line in lines:  # "Claude Code: Read", "Claude Code: Grep" -> one line
+        head, sep, tail = line.partition(": ")
+        if sep and merged and merged[-1].startswith(head + ": "):
+            merged[-1] += f", {tail}"
+        else:
+            merged.append(line)
+    if shell:
+        merged.append("Shell programs: " + ", ".join(shell))
+    return merged
 
 
 def outcome(result: Mapping[str, Any] | None) -> str:
@@ -271,6 +330,23 @@ def stories(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         story["failed"] = sum(1 for r in story["steps"] if r.get("failed"))
         story["steps"].reverse()  # oldest first inside a story: the order it happened
     return order
+
+
+def tools_in(rows: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Tool ids seen in stored rows, and each program a role refused as cmd/<program>,
+    so the role editor can offer them as tick boxes (hooks don't send a tool list)."""
+    found: dict[str, None] = {}
+    for row in rows:
+        tool = str(row.get("tool") or "")
+        if row.get("decision") in ("allow", "deny", "error") and "/" in tool:
+            found[tool] = None
+        m = _PROGRAMS.match(str(row.get("reason") or ""))
+        if row.get("decision") == "deny" and m:
+            for p in m.group(1).split(","):
+                p = p.strip()
+                if p.startswith("cmd/") and len(p) > 4:
+                    found[p] = None
+    return list(found)[:200]
 
 
 def trouble(row: Mapping[str, Any]) -> str:
