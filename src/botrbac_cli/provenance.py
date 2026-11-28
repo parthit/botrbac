@@ -121,6 +121,9 @@ def _find(blocks: list[Any], keys: tuple[str, ...], low: int, high: int) -> int 
     return None
 
 
+_EXIT_TEXT = re.compile(r"^\s*Exit code (-?\d{1,10})\b")
+
+
 def result_fields(payload: Any, failed: bool) -> dict[str, Any]:
     """outcome, exit_code, duration_ms and result_size for a finished call. Sizes only:
     the result's text is never kept."""
@@ -131,6 +134,13 @@ def result_fields(payload: Any, failed: bool) -> dict[str, Any]:
     blocks = [response, payload]
     out: dict[str, Any] = {}
     exit_code = _find(blocks, _EXIT_KEYS, -(2**31), 2**31)
+    if exit_code is None and failed:
+        # Claude Code's PostToolUseFailure gives the shell's status only in its error
+        # text ("Exit code 2\n…"). Keep the number, never the text.
+        error = payload.get("error")
+        match = _EXIT_TEXT.match(error) if isinstance(error, str) else None
+        if match:
+            exit_code = int(match.group(1))
     if exit_code is not None:
         out["exit_code"] = exit_code
     duration = _find(blocks, _DURATION_KEYS, 0, 10**10)

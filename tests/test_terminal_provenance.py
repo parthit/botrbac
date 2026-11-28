@@ -493,3 +493,14 @@ def test_session_task_is_sealed_and_shown(world, memstore, oauth) -> None:
     feature = TerminalFeature(MemoryStore(), signing_secret="test secret")
     tree = feature.open_tree(log.session("a@x.com", started["id"]))
     assert tree["start"]["task"] == f"fix CI with {SECRET}"
+
+
+def test_exit_code_from_claude_failure_text() -> None:
+    from botrbac_cli import provenance
+
+    out = provenance.result_fields(
+        {"error": "Exit code 2\nls: cannot access '/nope': No such file or directory"}, True
+    )
+    assert out["exit_code"] == 2 and out["outcome"] == "error"
+    assert "nope" not in str(out)
+    assert "exit_code" not in provenance.result_fields({"error": "Timed out"}, True)
