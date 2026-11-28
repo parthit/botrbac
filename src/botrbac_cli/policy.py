@@ -339,13 +339,18 @@ class Enforcer:
         return any(has_command_rules(patterns) for patterns in chain)
 
     def shell_programs(self) -> list[str]:
-        """The programs the innermost role with `cmd/` patterns lets the shell run, to
-        tell an agent whose command could not be read."""
+        """The programs every role in force lets the shell run, to tell an agent whose
+        command could not be read. Names listed outright only: a pattern such as
+        `cmd/git*` is left out rather than guessed at."""
         layers, _name, _why = self.layers()
-        for _layer, patterns in reversed(layers):
-            if has_command_rules(patterns):
-                return _programs_of(patterns)
-        return []
+        chain = [patterns for _layer, patterns in layers]
+        named = dict.fromkeys(
+            program
+            for patterns in chain
+            for program in _programs_of(patterns)
+            if "*" not in program
+        )
+        return [program for program in named if chain_allows_command(chain, program)]
 
     def decide_programs(self, programs: list[str]) -> Decision:
         layers, name, why = self.layers()

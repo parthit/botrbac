@@ -174,8 +174,9 @@ def cmd_roles(args: argparse.Namespace) -> int:
     print(f"This computer's role: {mine.get('name', '?')}")
     session = policy.load_session(os.environ.get(policy.SESSION_ENV))
     if session:
-        names = session.get("role_names") or [session.get("role_name")]
-        print(f"This run is narrowed to: {', then '.join(str(n) for n in names)}")
+        names = [n for n in session.get("role_names") or [session.get("role_name")] if n]
+        if names:
+            print(f"This run is narrowed to: {', then '.join(str(n) for n in names)}")
     print("Roles (narrow one run with: botrbac run --role NAME -- claude):")
     width = max((len(str(r.get("name", ""))) for r in roles), default=0)
     for role in roles:

@@ -164,3 +164,22 @@ def test_a_built_in_role_is_not_offered_for_editing(monkeypatch) -> None:
     assert "is not in role 'No tools', a role this run was narrowed to" in text
     assert "wider --role ('No tools' is built in and cannot be changed)." in text
     assert "add claude-code/Read" not in text
+
+
+def test_an_unreadable_command_lists_only_what_every_role_allows(monkeypatch) -> None:
+    """Two roles limit the shell: the list is what both allow, not the inner one's."""
+    wide = {"id": "wide", "name": "Wide", "patterns": ["claude-code/*", "cmd/git", "cmd/npm"]}
+    cache_policy(ROLES[0]["patterns"], name="Dev", role_id="dev", roles=[*ROLES, wide])
+    _enter(monkeypatch, "Wide")
+    text = _call("Bash", "for f in a; do git status; done")
+    assert "The shell here runs only: git." in text  # not ls (Wide) and not npm (Dev)
+    assert "running cmd/npm is not in role 'Dev'" in _call("Bash", "npm test")
+    # A role with no cmd/ patterns in between does not limit the shell.
+    _enter(monkeypatch, "Full access")
+    assert check(
+        "claude-code",
+        json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}}),
+        None,
+        False,
+    )[0]
+    assert "running cmd/ls is not in role 'Wide'" in _call("Bash", "ls")
