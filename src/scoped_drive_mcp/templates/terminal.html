@@ -96,8 +96,10 @@ args = ["gateway", "--agent", "codex"]</pre>
 <p class="muted lead">Control what AI agents on your computers can do. Works with any agent that supports MCP: Claude Code, Codex, Cursor, Gemini CLI and others.</p>
 {{ terminal_tabs('terminals') }}
 
+{% if terminals %}<details class="card term-how term-how-fold" id="how-it-works">
+  <summary><h2 id="how-title">How it works</h2></summary>{% else %}
 <section class="card term-how" id="how-it-works" aria-labelledby="how-title">
-  <h2 id="how-title">How it works</h2>
+  <h2 id="how-title">How it works</h2>{% endif %}
   <p class="small term-flow" aria-hidden="true"><code>your agent</code> → <code>botrbac on your computer</code> → checks the role → runs the tool, or blocks it</p>
   <ol class="term-how-steps">
     <li><b>Connect a computer.</b> <span class="muted">This puts <code>botrbac</code> between the AI agents on it and their tools: MCP servers, and with Claude Code also its shell and file edits.</span></li>
@@ -110,7 +112,7 @@ args = ["gateway", "--agent", "codex"]</pre>
     <li><b>Full access</b>: nothing is blocked; the checks are switched off, but calls are still logged.</li>
     <li><b>No tools</b>: blocks everything, to pause a computer.</li>
   </ul>
-</section>
+{% if terminals %}</details>{% else %}</section>{% endif %}
 
 {% if not terminals %}
 {{ setup_card(true) }}
@@ -119,7 +121,7 @@ args = ["gateway", "--agent", "codex"]</pre>
 {% else %}
 <h2>Your terminals</h2>
 <table class="cards term-table" id="terminals">
-  <thead><tr><th>Name</th><th>Role</th><th>Last seen</th><th>Waiting to sync</th><th><span class="sr-only">Actions</span></th></tr></thead>
+  <thead><tr><th>Name</th><th>Role</th><th>Last seen</th><th>Not sent yet</th><th><span class="sr-only">Actions</span></th></tr></thead>
   <tbody>
   {% for t in terminals %}
   <tr id="terminal-{{ t.id }}">
@@ -142,7 +144,7 @@ args = ["gateway", "--agent", "codex"]</pre>
       {% elif t.role_id == "none" or t.role_id not in role_names %}<p class="muted small term-role-note">Every tool is blocked.</p>{% endif %}
     </td>
     <td data-label="Last seen">{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
-    <td data-label="Waiting">{% if t.queued %}{{ t.queued }} row{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>
+    <td data-label="Not sent yet">{% if t.queued %}{{ t.queued }} record{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>
     <td data-label="Manage">
       <div class="term-manage">
       <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/rename">

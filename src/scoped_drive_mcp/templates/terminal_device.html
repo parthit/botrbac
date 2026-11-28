@@ -34,6 +34,7 @@
 {% else %}
 {% if typed %}<div class="flash error">That code is not valid or has expired. Check your terminal, or run <code>botrbac login</code> again.</div>{% endif %}
 <p>Enter the code shown in your terminal.</p>
+<p class="muted small">No code yet? On the computer you want to connect, run <code>botrbac login</code>. It prints a link and a code like ABCD-EFGH. Don't have botrbac? <a href="/terminal#setup">Set it up first</a>.</p>
 <form class="stack" method="get" action="/device">
   <label>Code <input type="text" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" value="{{ typed }}"></label>
   <div class="actions"><button class="primary" type="submit">Continue</button></div>

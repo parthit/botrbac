@@ -19,13 +19,13 @@
 {% endif %}
 <p><a class="btn primary" href="/terminal/roles/new" id="new-role">New role</a></p>
 <table class="cards term-table" id="roles">
-  <thead><tr><th>Name</th><th>What it allows</th><th>Offline grace</th><th><span class="sr-only">Actions</span></th></tr></thead>
+  <thead><tr><th>Name</th><th>What it allows</th><th>Works offline for</th><th><span class="sr-only">Actions</span></th></tr></thead>
   <tbody>
   {% for r in roles %}
   <tr id="role-{{ r.id }}">
     <td data-label="Name"><div class="term-name"><span class="term-title"><b>{{ r.name }}</b>{% if r.builtin %} <span class="pill">built-in</span>{% endif %}</span>
       <span class="muted small">{% if used.get(r.id) %}{{ used[r.id] }} computer{{ "s" if used[r.id] != 1 }}{% else %}not used{% endif %}</span></div></td>
-    <td data-label="Allows">{% if r.builtin %}<span class="term-desc">{{ r.description }}</span>{% elif r.patterns %}<span class="term-patterns">{% for p in r.patterns[:6] %}<code>{{ p }}</code> {% endfor %}{% if r.patterns|length > 6 %}<span class="muted">and {{ r.patterns|length - 6 }} more</span>{% endif %}</span>{% else %}<span class="muted">No tools</span>{% endif %}</td>
+    <td data-label="Allows">{% if r.builtin %}<span class="term-desc">{{ r.description }}</span>{% elif r.patterns %}{% set lines = summary(r.patterns) %}<ul class="term-allows">{% for line in lines[:5] %}<li>{{ line }}</li>{% endfor %}{% if lines | length > 5 %}<li class="muted">and {{ lines | length - 5 }} more</li>{% endif %}</ul><details class="term-tech"><summary>Patterns</summary><span class="term-patterns">{% for p in r.patterns %}<code>{{ p }}</code> {% endfor %}</span></details>{% else %}<span class="muted">No tools</span>{% endif %}</td>
     <td data-label="Offline">{{ r.offline_days }} day{{ "s" if r.offline_days != 1 }}</td>
     <td data-label="Manage"><div class="term-manage">{% if r.builtin %}<a class="btn" href="/terminal/roles/{{ r.id }}">View<span class="sr-only"> {{ r.name }}</span></a>{% else %}<a class="btn" href="/terminal/roles/{{ r.id }}">Edit<span class="sr-only"> {{ r.name }}</span></a>
       <form class="term-form" method="post" action="/terminal/roles/{{ r.id }}/delete" data-confirm="Delete the role {{ r.name }}? Computers using it get no tools until you give them another role.">

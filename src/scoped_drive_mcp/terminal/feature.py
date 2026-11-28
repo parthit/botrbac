@@ -25,6 +25,7 @@ from starlette.routing import Route
 
 from botrbac_cli import chain, sealing, signing
 from botrbac_cli.api import DEFAULT_SERVER
+from botrbac_cli.patterns import validate as validate_pattern
 
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
@@ -414,8 +415,10 @@ class TerminalFeature:
                 # Best effort, short timeout; never fails the upload (terminal.webhook).
                 await _run(self.webhook.deliver, terminal.email, stored, command_key)
             tools = data.get("tools")
-            if isinstance(tools, list):
-                await _run(self.roles.note_tools, terminal.email, tools[:500])
+            seen = present.tools_in(stored)  # what hooks saw: offered as tick boxes too
+            if isinstance(tools, list) or seen:
+                listed = tools[:500] if isinstance(tools, list) else []
+                await _run(self.roles.note_tools, terminal.email, [*listed, *seen])
             changes: dict[str, Any] = {"last_seen": time.time()}
             queued = data.get("queued")
             if isinstance(queued, int) and queued >= 0:
@@ -583,6 +586,7 @@ class TerminalFeature:
                 request,
                 "terminal_roles.html",
                 roles=roles,
+                summary=present.role_summary,
                 used=used,
                 has_terminals=bool(terminals),
             )
@@ -595,7 +599,38 @@ class TerminalFeature:
                 role = await _run(self.roles.get, email, role_id)
                 if role is None:
                     return render(request, "error.html", 404, message="Page not found.")
-            return await role_form(request, email, role)
+            # "To allow it" on Activity links here with ?add=cmd/curl (and ?from=<built-in>
+            # for a new role starting from one): the form opens with it already added.
+            add = []
+            for value in request.query_params.getlist("add")[:10]:
+                try:
+                    add.append(validate_pattern(value))
+                except ValueError:
+                    continue
+            base = role
+            if role is None and request.query_params.get("from"):
+                base = await _run(self.roles.get, email, request.query_params["from"])
+            if not add or (role is not None and role.builtin):
+                return await role_form(request, email, role)
+            current = list(base.patterns) if base else []
+            new = [p for p in add if p not in current]
+            name = role.name if role else ""
+            if base and not role:
+                # Names are unique; a long list of programs makes a poor one.
+                plus = f"{base.name}, plus {', '.join(new)}"
+                name = plus if len(plus) <= 60 else f"{base.name} (custom)"
+            # What the computers reported shows as tick boxes: tick those, type the rest.
+            seen = await _run(self.roles.seen_tools, email)
+            boxes = {f"{server}/{tool}" for server, tools in seen.items() for tool in tools}
+            wanted = current + new
+            typed = {
+                "name": name[:60],
+                "patterns": "\n".join(p for p in wanted if p not in boxes),
+                "ticked": [p for p in wanted if p in boxes],
+                "offline_days": str(base.offline_days if base else DEFAULT_OFFLINE_DAYS),
+                "field": "",
+            }
+            return await role_form(request, email, role, typed=typed, adding=new)
 
         async def role_form(
             request: Request,
@@ -603,6 +638,7 @@ class TerminalFeature:
             role: Any,
             error: str = "",
             typed: dict[str, Any] | None = None,
+            adding: list[str] | None = None,
         ) -> Response:
             """The role page. After a refused save it shows the error next to the
             patterns and keeps everything the person typed and ticked."""
@@ -616,6 +652,7 @@ class TerminalFeature:
                 default_offline=DEFAULT_OFFLINE_DAYS,
                 error=error,
                 typed=typed,
+                adding=adding or [],
             )
 
         async def role_save(request: Request, _form: Any) -> Response:
@@ -705,6 +742,8 @@ class TerminalFeature:
                 webhook=hook,
                 can_webhook=self.webhook.ready,
                 stories=present.stories(self.open_commands(shown[:limit])),
+                fix_link=present.fix_link,
+                roles_by_name={r.name: r for r in await _run(self.roles.all, email)},
                 trouble=present.trouble,
                 agent_name=present.agent_name,
                 recording=recording,

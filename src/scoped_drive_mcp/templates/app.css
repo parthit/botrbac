@@ -1581,3 +1581,15 @@ details.term-advanced > summary { padding: 0; }
 .term-health li.h-warn { color: var(--warn); }
 .term-health li.h-bad { color: var(--bad); }
 .term-health code { word-break: normal; overflow-wrap: normal; white-space: normal; }
+
+/* Roles page: what a custom role allows, in words. */
+.term-allows { margin: 0; padding-left: 18px; font-size: 14px; }
+.term-allows li { margin: 2px 0; }
+/* "How it works" folds away once a computer is connected. */
+details.term-how-fold { border-top: 1px solid var(--line); }
+details.term-how-fold > summary { list-style: none; cursor: pointer; padding: 0; }
+details.term-how-fold > summary::-webkit-details-marker { display: none; }
+details.term-how-fold > summary h2 { display: inline; margin: 0; }
+details.term-how-fold > summary::before { content: "›"; display: inline-block; margin-right: 8px; transition: transform 0.15s; font-weight: 600; }
+details.term-how-fold[open] > summary::before { transform: rotate(90deg); }
+details.term-how-fold[open] > summary { margin-bottom: 10px; }
