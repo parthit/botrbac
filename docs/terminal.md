@@ -54,7 +54,7 @@ browser.
   2. `botrbac login`. Open the link it prints, check the code matches, pick a role and approve. It connects
      to `https://botrbac.com` unless you give `--server URL` or set `BOTRBAC_SERVER`; the page shows the
      right command for the site you are on.
-  3. `claude mcp add --scope user botrbac -- botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
+  3. `claude mcp add --scope user botrbac -- botrbac --home ~/.config/botrbac gateway` for Claude Code, or `botrbac add-gateway --agent cursor`
      (also `codex`, `gemini`), which adds the gateway to that agent's file in your home directory, keeps the
      other servers and a backup, and does nothing when it is already there.
 

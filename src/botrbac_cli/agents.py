@@ -40,7 +40,7 @@ import json
 import shlex
 import shutil
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -392,12 +392,62 @@ def doctor_report(say: Callable[[str], None], cwd: Path | None = None) -> None:
         if status != "installed":
             say(f"    fix: botrbac hooks install {agent} --user --allow-unguarded")
         if not gateway:
-            fix = (
-                "claude mcp add --scope user botrbac -- botrbac gateway"
-                if agent == "claude-code"
-                else f"botrbac add-gateway --agent {agent}"
-            )
-            say(f"    fix: {fix}")
+            say(f"    fix: {gateway_fix(agent)}")
+    for agent, path in stale_hooks(cwd):
+        say(f"! {agent}: the botrbac hook in {path} is from an older botrbac")
+        user = " --user" if path.parent.parent == Path.home() else ""
+        say(f"    fix: botrbac hooks install {agent}{user} --allow-unguarded")
+    from .coverage import stale_gateways
+
+    for config in stale_gateways(cwd):
+        say(f"! {config.agent}: the botrbac entry in {config.path} is from an older botrbac")
+        say(f"    fix: {gateway_fix(config.agent, update=True)}")
+
+
+def _commands(data: Any) -> Iterator[str]:
+    """Every string under a "command" key, anywhere in a parsed settings file."""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == "command" and isinstance(value, str):
+                yield value
+            else:
+                yield from _commands(value)
+    elif isinstance(data, list):
+        for value in data:
+            yield from _commands(value)
+
+
+def stale_hooks(cwd: Path | None = None) -> list[tuple[str, Path]]:
+    """(agent, file) for each botrbac hook written by a botrbac from before --home: it
+    still works, but follows an inherited BOTRBAC_HOME. `hooks install` again fixes it."""
+    from .hooks import claude_code_settings_files
+
+    here = cwd or Path.cwd()
+    files = [("claude-code", f) for f in claude_code_settings_files(here)]
+    for agent, relative in HOOK_FILES.items():
+        files += [(agent, Path.home() / relative), (agent, here / relative)]
+    out: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for agent, path in files:
+        if path in seen:
+            continue
+        seen.add(path)
+        for command in _commands(_read_json(path)):
+            if runs_check(command) and "--home" not in shlex.split(command):
+                out.append((agent, path))
+                break
+    return out
+
+
+def gateway_fix(agent: str, update: bool = False) -> str:
+    """The command that adds (or brings up to date) the gateway entry for one agent."""
+    if agent != "claude-code":
+        return f"botrbac add-gateway --agent {agent}"
+    from .coverage import installed_command
+
+    add = " ".join(shlex.quote(p) for p in installed_command())
+    command = f"claude mcp add --scope user botrbac -- {add} gateway"
+    return f"claude mcp remove --scope user botrbac && {command}" if update else command
 
 
 # ---- payload adapters ----------------------------------------------------------------

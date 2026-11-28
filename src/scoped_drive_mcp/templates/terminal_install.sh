@@ -94,13 +94,15 @@ main() {
 
   step "Add Bot RBAC to $agent_name"
   if [ "$agent" = claude-code ]; then
+    # Name botrbac's folder, so the gateway never follows a BOTRBAC_HOME set later.
+    home_dir="${BOTRBAC_HOME:-$HOME/.config/botrbac}"
     if ! have claude; then
       say "Claude Code (claude) is not installed here, so this was skipped. Once it is, run:"
-      say "    claude mcp add --scope user botrbac -- $botrbac gateway"
+      say "    claude mcp add --scope user botrbac -- $botrbac --home $home_dir gateway"
     elif claude mcp get botrbac </dev/null >/dev/null 2>&1; then
       say "Claude Code already has a server called botrbac; left as it is."
     else
-      run claude mcp add --scope user botrbac -- "$botrbac" gateway \
+      run claude mcp add --scope user botrbac -- "$botrbac" --home "$home_dir" gateway \
         || fail "claude mcp add did not work"
     fi
   else
