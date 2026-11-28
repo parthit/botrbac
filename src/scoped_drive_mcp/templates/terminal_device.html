@@ -18,7 +18,7 @@
     {% for r in roles %}
     <label class="role"><input type="radio" name="role_id" value="{{ r.id }}"{% if r.id == 'read-only' %} checked{% endif %}>
       <span><b>{{ r.name }}</b>{% if r.id == 'read-only' %} <span class="role-tag">Recommended</span>{% endif %}
-        {% if r.description %}<span class="muted">{{ r.description }}</span>{% endif %}</span></label>
+        {% if r.description %}<span class="muted">{{ r.description }}</span>{% elif not r.builtin %}{% set lines = summary(r.patterns) %}<span class="muted">{% if lines %}{{ lines[:3] | join("; ") }}{% if lines | length > 3 %}; and {{ lines | length - 3 }} more{% endif %}.{% else %}Blocks every tool.{% endif %}</span>{% endif %}</span></label>
     {% endfor %}
     <p class="muted"><a href="/terminal/roles">Manage roles</a></p>
   </fieldset>

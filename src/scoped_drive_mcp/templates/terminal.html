@@ -130,18 +130,21 @@ args = ["gateway", "--agent", "codex"]</pre>
       {% set ch = chains.get(t.id) if chains else none %}
       {{ terminal_health(t, ch, unhooked, agent_name) }}</div></td>
     <td data-label="Role">
-      <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/role">
+      <form class="term-form" method="post" action="/terminal/t/{{ t.id }}/role" data-role-pick>
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="sr-only" for="role-{{ t.id }}">Role for {{ t.name }}</label>
-        <select id="role-{{ t.id }}" name="role_id">
+        <select id="role-{{ t.id }}" name="role_id" data-saved="{{ t.role_id if t.role_id in role_names else '' }}">
           {% for r in roles %}<option value="{{ r.id }}"{% if r.id == t.role_id %} selected{% endif %}>{{ r.name }}</option>{% endfor %}
           {% if t.role_id not in role_names %}<option value="" selected>No tools (its role was deleted)</option>{% endif %}
         </select>
         <button type="submit">Change<span class="sr-only"> role for {{ t.name }}</span></button>
+        <span class="small term-unsaved" data-unsaved hidden>Not changed yet. Press Change.</span>
       </form>
       {% if t.role_id == "full" %}<p class="muted small term-role-note">Nothing is blocked on this computer.</p>
       {% elif t.role_id == "read-only" %}<p class="muted small term-role-note">Agents can read, not edit or run commands.</p>
-      {% elif t.role_id == "none" or t.role_id not in role_names %}<p class="muted small term-role-note">Every tool is blocked.</p>{% endif %}
+      {% elif t.role_id == "none" or t.role_id not in role_names %}<p class="muted small term-role-note">Every tool is blocked.</p>
+      {% else %}{% set mine = roles | selectattr("id", "equalto", t.role_id) | first %}{% set lines = summary(mine.patterns) %}
+      <p class="muted small term-role-note">{% if lines %}{{ lines[:2] | join("; ") }}{% if lines | length > 2 %}; and {{ lines | length - 2 }} more{% endif %}.{% else %}Every tool is blocked.{% endif %} <a href="/terminal/roles/{{ t.role_id }}">See or change what it allows</a></p>{% endif %}
     </td>
     <td data-label="Last seen">{% if t.last_seen %}{{ t.last_seen | epoch | when }}{% else %}<span class="muted">never</span>{% endif %}</td>
     <td data-label="Not sent yet">{% if t.queued %}{{ t.queued }} record{{ "s" if t.queued != 1 }}{% else %}<span class="muted">nothing</span>{% endif %}</td>

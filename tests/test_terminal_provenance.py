@@ -563,7 +563,8 @@ def test_allow_link_opens_the_role_with_the_program_added(world, memstore, oauth
     assert "Coding, limited shell" in page  # the comma survives
     assert f'href="/terminal/roles/{role.id}?add=cmd/curl"' in page
     edit = c.get(f"/terminal/roles/{role.id}?add=cmd/curl").text
-    assert 'id="role-adding"' in edit and "cmd/git" in edit
+    assert 'id="role-adding"' in edit
+    assert 'name="programs" value="git"' in edit  # the role's own program, in plain words
     assert 'value="cmd/curl" checked' in edit  # offered as a tick box, already ticked
     # Hooks report no tool list, but what they saw is offered to tick now.
     assert "curl" in app.state.terminal.roles.seen_tools(OWNER_EMAIL).get("cmd", [])

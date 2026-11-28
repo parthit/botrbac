@@ -15,6 +15,8 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import quote
 
+from botrbac_cli import patterns
+
 AGENTS = {
     "claude-code": "Claude Code",
     "claude": "Claude",
@@ -208,18 +210,99 @@ def _unquote(name: str) -> str:
     return name
 
 
-def fix_link(blocked: Mapping[str, Any], tool: str, roles: Mapping[str, Any]) -> str:
+def fix_link(
+    blocked: Mapping[str, Any], tool: str, roles: Mapping[str, Any], terminal: str = ""
+) -> str:
     """Where "To allow it" goes: that role's page with the missing pattern already added,
-    so the fix is one Save. A built-in role can't be edited: a new role starting from it.
-    Without a role we know, the Roles page."""
+    so the fix is one Save. A built-in role can't be edited: a new role starting from it,
+    with the computer that was blocked (`terminal`, its id) ticked to switch to the new
+    role on the same Save. Without a role we know, the Roles page."""
     add = list(blocked.get("add") or ([tool] if tool else []))
     role = roles.get(str(blocked.get("role") or ""))
     query = "&".join(f"add={quote(a, safe='/*')}" for a in add)
     if role is None:
         return "/terminal/roles"
     if getattr(role, "builtin", False):
-        return f"/terminal/roles/new?from={quote(role.id)}&{query}"
+        to = f"&terminal={quote(terminal)}" if terminal else ""
+        return f"/terminal/roles/new?from={quote(role.id)}&{query}{to}"
     return f"/terminal/roles/{quote(role.id)}?{query}"
+
+
+# Claude Code's own tools, offered as tick boxes before any computer has reported its
+# list, so a first role can be made without typing a pattern.
+KNOWN_TOOLS: dict[str, tuple[str, ...]] = {
+    "claude-code": (
+        "Bash", "Edit", "Glob", "Grep", "LS", "MultiEdit", "NotebookEdit", "Read", "Task",
+        "TodoWrite", "ToolSearch", "WebFetch", "WebSearch", "Write",
+    ),
+}  # fmt: skip
+_PROGRAM_SPLIT = re.compile(r"[,\s]+")
+
+
+def program_patterns(text: str) -> list[str]:
+    """`git gh, npm` (the Shell programs box) as `cmd/` patterns. `cmd/git` is taken too."""
+    names = [n.removeprefix("cmd/") for n in _PROGRAM_SPLIT.split(text.strip()) if n]
+    return [f"cmd/{n}" for n in names if n]
+
+
+def role_editor(
+    seen: Mapping[str, Iterable[str]],
+    ticked: Iterable[str],
+    typed: Iterable[str],
+    read_only: Iterable[str],
+) -> dict[str, Any]:
+    """What the role page shows for a list of patterns: every known tool as a tick box
+    (ticked, or marked as covered by a wider pattern), the shell's programs, and whatever
+    is left for the patterns box. `ticked` and `typed` together are the role's patterns."""
+    read_patterns = list(read_only)
+    servers: dict[str, set[str]] = {s: set(names) for s, names in seen.items()}
+    for server, names in KNOWN_TOOLS.items():
+        servers.setdefault(server, set()).update(names)
+    programs = sorted(servers.pop("cmd", set()))
+    chosen = [p.strip() for p in [*ticked, *typed] if p.strip()]
+    wide = [p for p in chosen if p.endswith("*")]
+
+    def covered_by(tool: str) -> str:
+        return next((p for p in wide if p != tool and patterns.matches(p, tool)), "")
+
+    groups = []
+    boxes: set[str] = {f"cmd/{name}" for name in programs}
+    # An agent's own tools first, then servers by name.
+    for server in sorted(servers, key=lambda s: (s not in AGENTS, s)):
+        tools = []
+        for name in sorted(servers[server]):
+            tid = f"{server}/{name}"
+            boxes.add(tid)
+            tools.append(
+                {
+                    "id": tid,
+                    "name": name,
+                    "checked": tid in chosen,
+                    "covered": covered_by(tid),
+                    "read": patterns.allows(read_patterns, tid),
+                    "shell": name in SHELL,
+                }
+            )
+        boxes.add(f"{server}/*")
+        groups.append(
+            {
+                "server": server,
+                "title": f"{agent_name(server)}'s own tools" if server in AGENTS else server,
+                "all": f"{server}/*",
+                "all_checked": f"{server}/*" in chosen,
+                "tools": tools,
+            }
+        )
+    left = [p for p in dict.fromkeys(chosen) if p not in boxes]
+    return {
+        "groups": groups,
+        "programs": [
+            {"id": f"cmd/{n}", "name": n, "checked": f"cmd/{n}" in chosen} for n in programs
+        ],
+        "more_programs": " ".join(p.removeprefix("cmd/") for p in left if p.startswith("cmd/")),
+        "patterns": "\n".join(p for p in left if not p.startswith("cmd/")),
+        "everything": "*" in chosen,
+    }
 
 
 def role_summary(patterns: Iterable[str]) -> list[str]:

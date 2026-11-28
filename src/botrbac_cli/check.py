@@ -115,11 +115,15 @@ def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) ->
         return False, f"Blocked by Bot RBAC: {tool_id}: {reason}"
     enforcer = policy.Enforcer()
     decision = enforcer.decide(tool_id)
-    by_command = (
-        decision.allowed
-        and is_shell_tool(normalize_server(agent), tool)
-        and enforcer.limits_commands()
+    # A role that lists programs limits every one of the agent's own tools that runs a
+    # command line, not only the shell tools known by name: a tool this version has not
+    # heard of (a background or PowerShell runner) must not be a way around `cmd/`.
+    runs_command = is_shell_tool(normalize_server(agent), tool) or (
+        not tool.startswith("mcp__")
+        and isinstance(tool_input, dict)
+        and isinstance(tool_input.get("command"), str | list)
     )
+    by_command = decision.allowed and runs_command and enforcer.limits_commands()
     if by_command:
         decision = _decide_command(enforcer, payload, decision.role)
     _record(

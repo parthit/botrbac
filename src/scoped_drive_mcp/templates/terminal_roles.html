@@ -3,13 +3,13 @@
 {% block title %}Terminal roles{% endblock %}
 {% block content %}
 <h1>Roles</h1>
-<p class="muted lead">A role is the list of tools an agent may use. Anything not on the list is blocked.</p>
+<p class="muted lead">A role is the list of tools an agent on your computer may use. Anything not on the list is blocked.</p>
 {{ terminal_tabs('roles') }}
 <section class="card term-how" id="roles-how" aria-labelledby="roles-how-title">
   <h2 id="roles-how-title">How roles are used</h2>
   <ol class="term-how-steps">
     <li><b>Make a role here</b> <span class="muted">(or use a built-in one). A starter fills in a sensible list you can edit.</span></li>
-    <li><b>Give it to a computer</b> <span class="muted">on the <a href="/terminal">Terminals</a> tab: pick it in the Role column and press Change. A role does nothing until a computer uses it.</span></li>
+    <li><b>Give it to a computer</b> <span class="muted">by ticking the computer under “Use on” when you save the role, or on the <a href="/terminal">Terminals</a> tab: pick it in the Role column and press Change. A role does nothing until a computer uses it.</span></li>
     <li><b>Optional: narrow one run.</b> <span class="muted"><code>botrbac run --role Reviewer -- claude</code> gets only the tools both the computer's role and Reviewer allow. It can narrow, never widen.</span></li>
   </ol>
   <p class="small term-goal">Think of the computer's role as the most any agent there may do, and <code>--role</code> as a tighter limit for one session. A common setup is one everyday role per computer, such as <b>Coding</b>, plus a <b>Reviewer</b> role for runs that should only read.</p>
@@ -18,6 +18,7 @@
 <p class="warn" id="roles-not-used">A role does nothing until a computer uses it. <a href="/terminal#setup">Connect a computer</a> first, then pick its role here or on the Terminals tab.</p>
 {% endif %}
 <p><a class="btn primary" href="/terminal/roles/new" id="new-role">New role</a></p>
+<p class="muted small" id="roles-other">These roles choose <b>tools</b> for agents on your computers. To limit which <b>Drive files</b> a connected assistant reaches, use <a href="/settings#roles">Settings → Roles</a>.</p>
 <table class="cards term-table" id="roles">
   <thead><tr><th>Name</th><th>What it allows</th><th>Works offline for</th><th><span class="sr-only">Actions</span></th></tr></thead>
   <tbody>

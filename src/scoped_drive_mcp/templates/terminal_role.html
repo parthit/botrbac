@@ -14,33 +14,30 @@
 <p><a class="btn" href="/terminal/roles">Back to roles</a></p>
 {% else %}
 {% set f = typed or {} %}
-{% set ticked_now = f.ticked if typed else (role.patterns if role else []) %}
-{% set picked = [] %}
-{% for server, tools in seen.items() %}{% for t in tools %}{% if (server ~ '/' ~ t) in ticked_now %}{% set _ = picked.append(server ~ '/' ~ t) %}{% endif %}{% endfor %}{% endfor %}
 {% if adding %}<div class="flash ok" role="status" id="role-adding">Adding {% for a in adding %}<code>{{ a }}</code>{{ ", " if not loop.last }}{% endfor %} to {% if role %}“{{ role.name }}”{% else %}a new role{% endif %}. Check the list below, then press <b>Save</b>{% if role %}; every computer with this role can use it from its next check-in{% endif %}.</div>{% endif %}
-{% if error %}<div class="flash error" role="alert" id="role-error">{% if f.field == 'patterns' %}Not saved. <a href="#patterns">Check the patterns</a>: {{ error }}{% else %}Not saved: {{ error }}{% endif %}</div>{% endif %}
-<p class="muted lead">List the tools agents may use; everything else is blocked. A role does nothing on its own: after saving, give it to a computer on the <a href="/terminal">Terminals</a> tab (Role column, then Change), or start an agent with <code>--role NAME</code>.</p>
+{% if error %}<div class="flash error" role="alert" id="role-error">{% if f.field == 'patterns' %}Not saved. <a href="#patterns">Check the patterns</a>: {{ error }}{% elif f.field == 'programs' %}Not saved. <a href="#programs">Check the shell programs</a>: {{ error }}{% else %}Not saved: {{ error }}{% endif %}</div>{% endif %}
+<p class="muted lead">Tick the tools agents may use; everything else is blocked. Then pick the computers that should use this role and save.</p>
 {% set starters = [
   ("Reviewer", "Reads code and looks things up. No edits, no shell.",
    ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/ToolSearch", "*/read*", "*/get*", "*/list*", "*/search*"]),
   ("Coding", "Claude Code can read, edit and run any shell command. MCP servers: read tools only.",
    ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/ToolSearch", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "*/read*", "*/get*", "*/list*", "*/search*"]),
-  ("Coding, limited shell", "Like Coding, but the shell may run only the programs listed with cmd/. Add more as Activity shows them.",
+  ("Coding, limited shell", "Like Coding, but the shell may run only the programs listed below. Add more as Activity shows them.",
    ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/ToolSearch", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "cmd/git", "cmd/gh", "cmd/ls", "cmd/cat", "cmd/grep", "cmd/npm", "cmd/node", "cmd/python3", "cmd/uv", "*/read*", "*/get*", "*/list*", "*/search*"]),
 ] %}
 {% if not role %}
 <section class="card term-starters" id="starters" aria-labelledby="starters-title">
   <h2 id="starters-title">Start from a template</h2>
-  <p class="muted small">Adds its patterns below (and the name, if empty). Edit them before saving.</p>
+  <p class="muted small">Fills in the name and the tools below, replacing what is ticked. Change anything before saving.</p>
   <ul class="term-examples">
     {% for name, what, pats in starters %}
-    <li><button type="button" class="term-example" data-insert="{{ pats | join('\n') }}" data-name="{{ name }}" data-target="patterns">{{ name }}</button> <span class="muted small">{{ what }}</span></li>
+    <li><button type="button" class="term-example" data-starter data-insert="{{ pats | join('\n') }}" data-name="{{ name }}" data-target="patterns">{{ name }}</button> <span class="muted small">{{ what }}</span></li>
     {% endfor %}
   </ul>
-  <p class="muted small">Not sure? Start with <b>Coding</b> on your own computer. When something you want is blocked, <a href="/terminal/activity">Activity</a> shows its exact name to add here.</p>
+  <p class="muted small">Not sure? Start with <b>Coding</b> on your own computer. When something you want is blocked, <a href="/terminal/activity">Activity</a> shows it with a link that adds it here.</p>
 </section>
 {% endif %}
-<form class="stack term-role" method="post" action="/terminal/roles/save" novalidate>
+<form class="stack term-role" method="post" action="/terminal/roles/save" novalidate data-role-editor>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   {% if role %}<input type="hidden" name="role_id" value="{{ role.id }}">{% endif %}
   <label>Name
@@ -48,40 +45,77 @@
   </label>
   <fieldset>
     <legend>Tools this role may use</legend>
-    {% if seen %}
-    <p class="muted small">Tools your computers have reported. Tick the ones this role may use.</p>
-    {% for server, tools in seen.items() %}
-    <div class="term-tools">
-      <p class="term-server">{{ server }}</p>
+    <p class="term-sum" id="role-sum" role="status" hidden></p>
+    {% if editor.everything %}<p class="warn" id="role-everything">This role has the pattern <code>*</code>, so it allows every tool whatever is ticked. Remove it under “Patterns and offline use” to choose tools one by one.</p>{% endif %}
+    {% for g in editor.groups %}
+    <div class="term-tools" data-group>
+      <div class="term-group-head">
+        <p class="term-server">{{ g.title }} <span class="muted small" data-count></span></p>
+        <span class="term-quick" data-quick hidden>
+          <button type="button" data-pick="all">All<span class="sr-only"> of {{ g.title }}</span></button>
+          <button type="button" data-pick="read">Read-only<span class="sr-only"> for {{ g.title }}</span></button>
+          <button type="button" data-pick="none">None<span class="sr-only"> of {{ g.title }}</span></button>
+        </span>
+      </div>
       <div class="term-ticks">
-      {% for t in tools %}{% set tid = server ~ '/' ~ t %}
-      <label class="term-tick"><input type="checkbox" name="tool" value="{{ tid }}"{% if tid in ticked_now %} checked{% endif %}> <span>{{ t }}</span></label>
+      {% for t in g.tools %}
+      <label class="term-tick{{ ' is-covered' if t.covered and not t.checked }}"><input type="checkbox" name="tool" value="{{ t.id }}"{% if t.checked %} checked{% endif %} data-tool{% if t.read %} data-read{% endif %}{% if t.shell %} data-shell{% endif %}> <span>{{ t.name }}</span><small class="term-via" data-via>{% if t.covered and not t.checked %}allowed by {{ t.covered }}{% endif %}</small></label>
       {% endfor %}
       </div>
+      <label class="term-later"><input type="checkbox" name="tool" value="{{ g.all }}" data-all{% if g.all_checked %} checked{% endif %}> <span>Allow every tool here, including ones {{ g.server }} adds later</span></label>
     </div>
     {% endfor %}
-    {% else %}
-    <p class="muted small">No tools reported yet. Once a connected computer syncs, its tools are listed here to tick. Until then, type patterns below.</p>
+    <p class="muted small">These are Claude Code’s own tools and the tools your computers have reported. A tool that is not listed yet can be added from <a href="/terminal/activity">Activity</a> once an agent tries it, or typed as a pattern below.</p>
+  </fieldset>
+  <fieldset id="shell">
+    <legend>Programs the shell may run</legend>
+    <p class="muted small">This applies when the role allows an agent’s shell tool, such as Bash. List programs to limit the shell to them.</p>
+    {% if editor.programs %}
+    <div class="term-ticks term-programs">
+      {% for t in editor.programs %}
+      <label class="term-tick"><input type="checkbox" name="tool" value="{{ t.id }}"{% if t.checked %} checked{% endif %} data-program="{{ t.name }}"> <span>{{ t.name }}</span></label>
+      {% endfor %}
+    </div>
     {% endif %}
+    <label for="programs">{{ "Other programs" if editor.programs else "Programs" }}, separated by spaces</label>
+    {% if f.field == 'programs' %}<p class="term-field-error" id="programs-error">{{ error }}</p>{% endif %}
+    <input type="text" id="programs" name="programs" value="{{ editor.more_programs }}" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="{{ 'programs-error ' if f.field == 'programs' }}programs-help"{% if f.field == 'programs' %} aria-invalid="true" autofocus{% endif %}>
+    <p class="muted small" id="programs-help">For example <code>git gh npm</code>. End a name with <code>*</code> to match its start.</p>
+    <p class="warn small" id="shell-open"{% if editor.more_programs or editor.programs | selectattr('checked') | list %} hidden{% endif %}><b>No programs listed.</b> If this role allows a shell tool, the shell can run any program.</p>
+    <p class="muted small">Programs are checked only on computers with the agent’s hook installed (<code>botrbac doctor</code> says whether it is).</p>
+  </fieldset>
+  {% if terminals %}
+  <fieldset id="use-on">
+    <legend>Use on</legend>
+    <div class="term-ticks">
+      {% for t in terminals %}
+      <label class="term-tick term-computer"><input type="checkbox" name="terminal" value="{{ t.id }}"{% if t.id in using %} checked{% endif %}> <span>{{ t.name }}</span>{% if not role or t.role_id != role.id %}<small class="term-via">now {{ role_names.get(t.role_id, "No tools") }}</small>{% endif %}</label>
+      {% endfor %}
+    </div>
+    <p class="muted small">A ticked computer switches to this role when you save, and its agents follow it from their next check-in. Unticking changes nothing: to move a computer off this role, pick another one for it on <a href="/terminal">Terminals</a>.</p>
+  </fieldset>
+  {% else %}
+  <p class="muted small" id="use-on-none">A role does nothing until a computer uses it. <a href="/terminal#setup">Connect a computer</a>, then come back and tick it here.</p>
+  {% endif %}
+  <details class="term-more term-advanced" id="advanced"{% if editor.patterns or f.field in ('patterns', 'offline_days') %} open{% endif %}>
+    <summary>Patterns and offline use</summary>
     <label for="patterns">Patterns, one per line</label>
     <div class="term-help" id="patterns-help">
-      <p class="small">A pattern is <code>server/tool</code>. End it with <code>*</code> to match the start of a name, or use <code>*</code> alone for everything. Examples:</p>
+      <p class="small">For tools that are not listed above. A pattern is <code>server/tool</code>. End it with <code>*</code> to match the start of a name, or use <code>*</code> alone for everything. Examples:</p>
       <ul class="term-examples">
         <li><button type="button" class="term-example" data-insert="github/*" data-target="patterns">github/*</button> <span class="muted small">every tool on the github server</span></li>
-        <li><button type="button" class="term-example" data-insert="claude-code/Read" data-target="patterns">claude-code/Read</button> <span class="muted small">Claude Code's own Read tool</span></li>
+        <li><button type="button" class="term-example" data-insert="*/get*" data-target="patterns">*/get*</button> <span class="muted small">any server’s tools starting with <code>get</code></span></li>
         <li><button type="button" class="term-example" data-insert="cmd/gh" data-target="patterns">cmd/gh</button> <span class="muted small">the <code>gh</code> program in the agent's shell</span></li>
       </ul>
     </div>
     {% if f.field == 'patterns' %}<p class="term-field-error" id="patterns-error">{{ error }}</p>{% endif %}
-    <textarea id="patterns" name="patterns" rows="{{ [6, ((f.patterns or '').count('\n') + 2) if typed else ((role.patterns | length + 1) if role else 6)] | max }}" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="{{ 'patterns-error ' if f.field == 'patterns' }}patterns-help"{% if f.field == 'patterns' %} aria-invalid="true" autofocus{% endif %}>{% if typed %}{{ f.patterns }}{% elif role %}{% for p in role.patterns if p not in picked %}{{ p }}
-{% endfor %}{% endif %}</textarea>
-    <p class="muted small">Shell programs (<code>cmd/…</code>) are checked only with the agent's hook installed, and only when its shell tool, such as <code>claude-code/Bash</code>, is allowed too. A role without any <code>cmd/</code> pattern lets the shell run anything.</p>
-  </fieldset>
-  <label>Offline grace (days)
-    <input type="number" inputmode="numeric" name="offline_days" min="1" max="30" value="{{ f.offline_days if typed else (role.offline_days if role else default_offline) }}"{% if f.field == 'offline_days' %} aria-invalid="true" aria-describedby="role-error" autofocus{% endif %}>
-  </label>
-  <p class="muted small">Without internet, computers keep this role for this many days, then block every tool until they can check in.</p>
-  <div class="actions"><a class="btn" href="/terminal/roles">Cancel</a><button class="primary" type="submit">Save</button></div>
+    <textarea id="patterns" name="patterns" rows="{{ [4, editor.patterns.count('\n') + 2] | max }}" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="{{ 'patterns-error ' if f.field == 'patterns' }}patterns-help"{% if f.field == 'patterns' %} aria-invalid="true" autofocus{% endif %}>{{ editor.patterns }}</textarea>
+    <label>Offline grace (days)
+      <input type="number" inputmode="numeric" name="offline_days" min="1" max="30" value="{{ f.offline_days if typed else (role.offline_days if role else default_offline) }}"{% if f.field == 'offline_days' %} aria-invalid="true" aria-describedby="role-error" autofocus{% endif %}>
+    </label>
+    <p class="muted small">Without internet, computers keep this role for this many days, then block every tool until they can check in.</p>
+  </details>
+  <div class="actions term-save"><a class="btn" href="/terminal/roles">Cancel</a><button class="primary" type="submit">Save</button></div>
 </form>
 {% endif %}
 {% endblock %}

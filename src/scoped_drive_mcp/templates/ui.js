@@ -90,7 +90,7 @@
   // Example buttons that add a line to a textarea (Terminal role patterns).
   document.addEventListener("click", function (event) {
     var btn = event.target.closest("[data-insert]");
-    if (!btn) return;
+    if (!btn || btn.hasAttribute("data-starter")) return;
     var area = document.getElementById(btn.getAttribute("data-target") || "");
     if (!area) return;
     // One pattern, or several separated by new lines (a starter role).
@@ -105,8 +105,134 @@
     var name = btn.getAttribute("data-name");
     var nameField = name && area.form && area.form.querySelector('input[name="name"]');
     if (nameField && !nameField.value.trim()) nameField.value = name;
+    area.dispatchEvent(new Event("input", { bubbles: true }));
     area.focus();
     announce("ok", adding.length === 1 ? "Added " + adding[0] + "." : "Added " + adding.length + " patterns.");
+  });
+
+  // The Terminal role page: tick boxes, the shell's programs and typed patterns are one
+  // list. This keeps them in step: a tool a wider pattern already allows is marked, each
+  // group counts what it allows, and All / Read-only / None tick a whole group. Without
+  // JavaScript the page still saves; the server works out the same list.
+  var editor = document.querySelector("form[data-role-editor]");
+  if (editor) {
+    var each = function (list, fn) { Array.prototype.forEach.call(list, fn); };
+    var area = editor.querySelector("#patterns");
+    var programs = editor.querySelector("#programs");
+    var sum = editor.querySelector("#role-sum");
+    var shellOpen = editor.querySelector("#shell-open");
+    var toolBoxes = editor.querySelectorAll("input[data-tool]");
+    var lines = function (text) {
+      return (text || "").split(/\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+    };
+    // The same rule as botrbac_cli/patterns.py `matches`.
+    var matches = function (pattern, tool) {
+      if (pattern === "*") return true;
+      var cut = pattern.indexOf("/"), at = tool.indexOf("/");
+      if (cut < 0 || at < 0) return false;
+      var pServer = pattern.slice(0, cut), pTool = pattern.slice(cut + 1);
+      if (pServer !== "*" && pServer !== tool.slice(0, at)) return false;
+      var name = tool.slice(at + 1);
+      if (pTool === "*") return true;
+      if (pTool.slice(-1) === "*") return name.indexOf(pTool.slice(0, -1)) === 0;
+      return name === pTool;
+    };
+    var refresh = function () {
+      var wide = lines(area && area.value).filter(function (p) { return p.slice(-1) === "*"; });
+      each(editor.querySelectorAll("input[data-all]:checked"), function (b) { wide.push(b.value); });
+      var allowed = 0, shell = false;
+      each(editor.querySelectorAll("[data-group]"), function (group) {
+        var mine = group.querySelectorAll("input[data-tool]"), on = 0;
+        each(mine, function (box) {
+          var via = "";
+          for (var i = 0; i < wide.length && !via; i++) if (matches(wide[i], box.value)) via = wide[i];
+          var covered = !!via && !box.checked;
+          box.parentNode.classList.toggle("is-covered", covered);
+          var note = box.parentNode.querySelector("[data-via]");
+          if (note) note.textContent = covered ? "allowed by " + via : "";
+          if (box.checked || via) { on++; if (box.hasAttribute("data-shell")) shell = true; }
+        });
+        allowed += on;
+        var count = group.querySelector("[data-count]");
+        if (count) count.textContent = on + " of " + mine.length + " allowed";
+      });
+      var names = [];
+      each(editor.querySelectorAll("input[data-program]:checked"), function (b) { names.push(b.getAttribute("data-program")); });
+      (programs ? programs.value : "").split(/[,\s]+/).forEach(function (n) { if (n) names.push(n.replace(/^cmd\//, "")); });
+      lines(area && area.value).forEach(function (p) { if (p.indexOf("cmd/") === 0) names.push(p.slice(4)); });
+      if (shellOpen) shellOpen.hidden = names.length > 0;
+      if (sum) {
+        var everything = lines(area && area.value).indexOf("*") !== -1;
+        var text = everything ? "Allows every tool." : "Allows " + allowed + " of the " + toolBoxes.length + " tools listed.";
+        if (everything || shell) {
+          text += names.length ? " The shell may run only: " + names.join(", ") + "." : " The shell may run any program.";
+        } else {
+          text += " No shell.";
+        }
+        sum.textContent = text;
+        sum.hidden = false;
+      }
+    };
+    each(editor.querySelectorAll("[data-quick]"), function (quick) { quick.hidden = false; });
+    editor.addEventListener("change", refresh);
+    editor.addEventListener("input", refresh);
+    editor.addEventListener("click", function (event) {
+      var pick = event.target.closest("[data-pick]");
+      if (!pick) return;
+      var group = pick.closest("[data-group]"), how = pick.getAttribute("data-pick");
+      each(group.querySelectorAll("input[data-tool]"), function (box) {
+        box.checked = how === "all" || (how === "read" && box.hasAttribute("data-read"));
+      });
+      // "All" ticks what is listed today. Tools added later stay a separate, explicit tick.
+      if (how !== "all") each(group.querySelectorAll("input[data-all]"), function (box) { box.checked = false; });
+      refresh();
+      var count = group.querySelector("[data-count]");
+      announce("ok", count ? count.textContent : "Changed.");
+    });
+    // A template replaces what is ticked: its tools become ticks, its shell programs go
+    // to the programs box, and only what has no tick box is left as a pattern.
+    document.addEventListener("click", function (event) {
+      var btn = event.target.closest("[data-starter]");
+      if (!btn) return;
+      var wanted = lines(btn.getAttribute("data-insert"));
+      var known = {}, left = [], progs = [];
+      each(editor.querySelectorAll('input[name="tool"]'), function (box) { box.checked = false; known[box.value] = box; });
+      wanted.forEach(function (p) {
+        if (known[p]) known[p].checked = true;
+        else if (p.indexOf("cmd/") === 0) progs.push(p.slice(4));
+        else left.push(p);
+      });
+      if (programs) programs.value = progs.join(" ");
+      if (area) area.value = left.join("\n") + (left.length ? "\n" : "");
+      var nameField = editor.querySelector('input[name="name"]');
+      var starterNames = [];
+      each(document.querySelectorAll("[data-starter]"), function (b) {
+        starterNames.push(b.getAttribute("data-name"));
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      if (nameField && (!nameField.value.trim() || starterNames.indexOf(nameField.value.trim()) !== -1)) {
+        nameField.value = btn.getAttribute("data-name") || "";
+      }
+      refresh();
+      announce("ok", "Filled in " + btn.getAttribute("data-name") + ". " + (sum ? sum.textContent : ""));
+    });
+    refresh();
+  }
+
+  // A role picker on the Terminals page changes nothing until its button is pressed:
+  // say so while the choice differs from what is saved.
+  Array.prototype.forEach.call(document.querySelectorAll("form[data-role-pick]"), function (form) {
+    var select = form.querySelector("select"), button = form.querySelector("button");
+    var note = form.querySelector("[data-unsaved]");
+    if (!select || !button) return;
+    var saved = select.getAttribute("data-saved");
+    var sync = function () {
+      var changed = select.value !== saved;
+      button.classList.toggle("primary", changed);
+      if (note) note.hidden = !changed;
+    };
+    select.addEventListener("change", sync);
+    sync();  // a browser may restore the select's choice after a reload
   });
 
   // Terminal setup: an agent picker that rewrites one copyable command. Without
@@ -1114,4 +1240,5 @@
     });
     update();
   });
+
 })();

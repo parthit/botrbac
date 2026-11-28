@@ -264,6 +264,7 @@
 <section id="roles">
 <h2>Roles</h2>
 <p class="muted lead">A role is a named part of your allowed files. An agent that connects to a role’s address reaches only that role’s files, at most at the role’s level, and never more than its own connection allows. Use one address per agent or subagent.</p>
+{% if terminal_tab %}<p class="muted small" id="roles-other">These roles choose <b>files</b>. To choose which <b>tools and shell commands</b> the agents on your computer may use, go to <a href="/terminal/roles">Terminal → Roles</a>.</p>{% endif %}
 {% for r in roles %}
 {% set role = r.role %}
 <article class="card" id="role-{{ role.slug }}">
@@ -283,7 +284,7 @@
     </form>
   </details>
   <div class="actions">
-    <form class="inline" method="post" action="/roles/delete" data-confirm="Delete the role {{ role.name }}? Agents that use its address are refused from then on." data-confirm-action="Delete role">
+    <form class="inline" method="post" action="/roles/delete" data-confirm="Delete the role {{ role.name }}? Assistants connected through it are disconnected, and its address stops working." data-confirm-action="Delete role">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="slug" value="{{ role.slug }}">
       <button class="danger" type="submit">Delete role<span class="sr-only"> {{ role.name }}</span></button>
@@ -296,13 +297,13 @@
   {% if allowed_items %}
   <form class="stack" method="post" action="/roles/save">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="new" value="1">
     <label>Name
       <input name="name" type="text" required maxlength="40" autocomplete="off" placeholder="Researcher">
     </label>
     {{ role_fields() }}
     <div class="actions"><button class="primary" type="submit">Create role</button></div>
   </form>
-  <p class="muted small">Saving a role with the name of an existing one replaces it.</p>
   {% else %}
   <p class="muted">A role is made from files you already allow. <a href="/files">Allow a file or folder</a> first.</p>
   {% endif %}

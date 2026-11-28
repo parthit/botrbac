@@ -213,6 +213,18 @@ class ScopeGuard:
             return self.root_id
         return None
 
+    def _root_to_protect(self) -> str | None:
+        """The deployment root when the caller is the admin, whatever partition the call
+        runs in. Under a named role the root is not added to what the role reaches
+        (`_root_for_actor` goes by the partition), but a role only narrows: the admin's
+        root stays protected from rename and trash there too."""
+        if not self.root_id:
+            return None
+        if self.admin_email is None:
+            return self.root_id
+        actor = current_actor.get() or ""
+        return self.root_id if not actor or actor == self.admin_email else None
+
     def allowed(self) -> dict[str, str]:
         """Allowlisted id -> mime type, plus the admin's ROOT_FOLDER_ID, cached."""
         who = self._who()
@@ -369,6 +381,8 @@ class ScopeGuard:
             raise OutOfScopeError(file_id)
         if not allow_root and self._protected is not None and ref.id in self._protected():
             raise ForbiddenError(PROTECTED)
+        if not allow_root and ref.id == self._root_to_protect():
+            raise ForbiddenError(PROTECTED)
         return ref
 
     def assert_not_above_allowed(self, folder_id: str) -> None:
@@ -386,7 +400,7 @@ class ScopeGuard:
         items = set(self.allowed())
         if self._protected is not None:
             items |= set(self._protected())
-        root = self._root_for_actor()
+        root = self._root_to_protect()
         if root:
             items.add(root)
         if folder_id in items:

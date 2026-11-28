@@ -27,6 +27,7 @@ from starlette.routing import Route
 from botrbac_cli import chain, sealing, signing
 from botrbac_cli.api import DEFAULT_SERVER
 from botrbac_cli.patterns import validate as validate_pattern
+from botrbac_cli.patterns import validate_all as validate_patterns
 
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
@@ -47,7 +48,7 @@ from .ingest import (
 )
 from .provenance import DROPPED_FIELDS, SEALED_FIELDS
 from .provenance import FIELDS as PROVENANCE_FIELDS
-from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
+from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, READ_ONLY, RoleError, TerminalRoles
 from .webhook import AuditWebhook, WebhookError
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -187,6 +188,11 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
             return None
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _listed(names: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _oauth_error(code: str, status: int = 400) -> JSONResponse:
@@ -539,6 +545,7 @@ class TerminalFeature:
                 terminals=terminals,
                 roles=roles,
                 role_names=names,
+                summary=present.role_summary,
                 chains=chains,
                 site=site,
                 login_cmd=login_command(site),
@@ -563,6 +570,7 @@ class TerminalFeature:
                 typed=request.query_params.get("code") or "",
                 found=found[1] if found else None,
                 roles=roles,
+                summary=present.role_summary,
             )
 
         async def device_decide(request: Request, form: Any) -> Response:
@@ -668,16 +676,13 @@ class TerminalFeature:
                 # Names are unique; a long list of programs makes a poor one.
                 plus = f"{base.name}, plus {', '.join(new)}"
                 name = plus if len(plus) <= 60 else f"{base.name} (custom)"
-            # What the computers reported shows as tick boxes: tick those, type the rest.
-            seen = await _run(self.roles.seen_tools, email)
-            boxes = {f"{server}/{tool}" for server, tools in seen.items() for tool in tools}
-            wanted = current + new
             typed = {
                 "name": name[:60],
-                "patterns": "\n".join(p for p in wanted if p not in boxes),
-                "ticked": [p for p in wanted if p in boxes],
+                "patterns": current + new,
                 "offline_days": str(base.offline_days if base else DEFAULT_OFFLINE_DAYS),
                 "field": "",
+                # The computer the call was blocked on: ticked, so one Save also moves it.
+                "terminals": request.query_params.getlist("terminal")[:20],
             }
             return await role_form(request, email, role, typed=typed, adding=new)
 
@@ -689,15 +694,27 @@ class TerminalFeature:
             typed: dict[str, Any] | None = None,
             adding: list[str] | None = None,
         ) -> Response:
-            """The role page. After a refused save it shows the error next to the
-            patterns and keeps everything the person typed and ticked."""
+            """The role page. After a refused save it shows the error next to the field
+            and keeps everything the person typed and ticked."""
             seen = await _run(self.roles.seen_tools, email)
+            terminals = await _run(self.terminals.for_person, email)
+            if typed is not None:
+                chosen = [str(p) for p in typed.get("patterns") or []]
+                using = set(typed.get("terminals") or [])
+            else:
+                chosen = list(role.patterns) if role else []
+                using = set()
+            if role is not None:
+                using |= {t.id for t in terminals if t.role_id == role.id}
             return render(
                 request,
                 "terminal_role.html",
                 400 if error else 200,
                 role=role,
-                seen=seen,
+                editor=present.role_editor(seen, chosen, [], BUILTIN[READ_ONLY].patterns),
+                terminals=terminals,
+                using=using,
+                role_names={r.id: r.name for r in await _run(self.roles.all, email)},
                 default_offline=DEFAULT_OFFLINE_DAYS,
                 error=error,
                 typed=typed,
@@ -708,19 +725,25 @@ class TerminalFeature:
             email = _me()
             form = await request.form()
             role_id = str(form.get("role_id") or "") or None
-            typed = str(form.get("patterns") or "").splitlines()
-            ticked = [str(v) for v in form.getlist("tool")]
+            typed = str(form.get("patterns") or "")[:20_000].splitlines()
+            ticked = [str(v) for v in form.getlist("tool")][:1000]
+            programs = present.program_patterns(str(form.get("programs") or "")[:4000])
+            wanted_on = [str(v) for v in form.getlist("terminal")][:50]
             try:
                 days = int(str(form.get("offline_days") or DEFAULT_OFFLINE_DAYS))
             except ValueError:
                 days = 0
             try:
+                try:
+                    validate_patterns(programs)
+                except ValueError as exc:
+                    raise RoleError(str(exc), "programs") from None
                 role = await _run(
                     self.roles.save,
                     email,
                     role_id,
                     str(form.get("name") or ""),
-                    ticked + typed,
+                    ticked + programs + typed,
                     days,
                 )
             except RoleError as exc:
@@ -730,14 +753,33 @@ class TerminalFeature:
                     return RedirectResponse("/terminal/roles", status_code=303)
                 typed_form = {
                     "name": str(form.get("name") or "")[:200],
-                    "patterns": "\n".join(typed)[:20_000],
-                    "ticked": ticked[:500],
+                    "patterns": ticked + programs + typed,
                     "offline_days": str(form.get("offline_days") or "")[:4],
+                    "terminals": wanted_on,
+                    "field": exc.field or "form",
                 }
-                typed_form["field"] = exc.field or "form"
                 return await role_form(request, email, existing, str(exc), typed_form)
             audit_owner("terminal_role_saved", role=role.id)
-            kit.flash(request, "ok", f"Saved {role.name}.")
+            # Computers ticked on the page switch to this role now. Only the person's own
+            # (update checks the owner); one already on the role is left as it is.
+            moved: list[str] = []
+            for tid in dict.fromkeys(wanted_on):
+                terminal = await _run(self.terminals.owned, email, tid)
+                if terminal is None or terminal.role_id == role.id:
+                    continue
+                if await _run(self.terminals.update, email, tid, role_id=role.id):
+                    audit_owner("terminal_role", terminal=tid)
+                    moved.append(terminal.name)
+            message = f"Saved {role.name}."
+            if moved:
+                message += f" {_listed(moved)} now use{'s' if len(moved) == 1 else ''} it."
+            else:
+                in_use = any(
+                    t.role_id == role.id for t in await _run(self.terminals.for_person, email)
+                )
+                if not in_use:
+                    message += " No computer uses it yet: open it and tick one under “Use on”."
+            kit.flash(request, "ok", message)
             return RedirectResponse("/terminal/roles", status_code=303)
 
         async def role_delete(request: Request, _form: Any) -> Response:

@@ -74,7 +74,24 @@ one anyway returns an error that names the role.
 
 ## Roles
 
-**Terminal → Roles** on the website. A role is a list of tool patterns:
+**Terminal → Roles** on the website. Making a role is mostly ticking boxes:
+
+- **Tools.** Claude Code's own tools and every tool your computers have reported are listed by server.
+  Tick the ones the role may use, or use **All**, **Read-only** or **None** for a whole server. "Allow
+  every tool here, including ones added later" is the `server/*` pattern; without it a tool a server adds
+  later stays blocked until you tick it.
+- **Programs the shell may run.** Names such as `git gh npm`. Leave it empty and an allowed shell tool can
+  run any program (the page says so).
+- **Use on.** Tick the computers that should switch to this role when you save.
+- **Templates** (Reviewer, Coding, Coding with a limited shell) fill all of that in for a new role.
+
+A line above the list says what the role comes to, for example "Allows 17 of the 30 tools listed. The shell
+may run only: git, gh." When an agent is blocked, **Activity** shows the call with a "To allow it" link that
+opens the role with that tool or program already added; for a built-in role it starts a new role from it
+with the blocked computer ticked, so one Save does both.
+
+Underneath, a role is a list of tool patterns. You only need them (under "Patterns and offline use") for
+tools that are not listed yet or for wider rules:
 
 | Pattern | Means |
 | --- | --- |
@@ -226,7 +243,9 @@ cmd/gh
 When any role in force has a `cmd/` pattern, a shell call is allowed only if the shell tool itself is
 allowed **and** every program in the command is allowed as `cmd/<program>`. The shell tools are Claude
 Code's `Bash`, Codex's `Bash` (and `shell`), Gemini CLI's `run_shell_command` and Cursor's `Shell`
-(`SHELL_TOOLS` in `src/botrbac_cli/shellcmd.py`). A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
+(`SHELL_TOOLS` in `src/botrbac_cli/shellcmd.py`). Any other tool of the agent's own that is handed a
+`command` (a background or PowerShell runner, say) is checked the same way, so a tool this list does not
+name is not a way around `cmd/`. A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
 never count as `cmd/` patterns.
 
 The command is read conservatively. It is split on `;`, `&&`, `||`, `|`, `&` and new lines; each part's

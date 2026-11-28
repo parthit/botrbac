@@ -372,9 +372,10 @@ def test_a_deleted_role_cuts_off_its_connection(owner_c) -> None:
     token = tokens["access_token"]
     assert status_at(owner_c, "/mcp/role/researcher", token) == (200, "")
     assert post(owner_c, "/roles/delete", slug="researcher").status_code == 303
-    assert status_at(owner_c, "/mcp/role/researcher", token) == (403, "unknown_role")
-    # It never falls back to the whole allowlist.
-    assert status_at(owner_c, "/mcp", token) == (403, "role_mismatch")
+    # Deleting the role ends the connections made through it, so the token is dead at
+    # the role's address and never falls back to the whole allowlist.
+    assert status_at(owner_c, "/mcp/role/researcher", token)[0] == 401
+    assert status_at(owner_c, "/mcp", token)[0] == 401
 
 
 def test_a_role_connection_refreshes_only_for_its_address(owner_c) -> None:
