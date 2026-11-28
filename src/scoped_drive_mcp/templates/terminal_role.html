@@ -21,11 +21,11 @@
 <p class="muted lead">List the tools agents may use; everything else is blocked. A role does nothing on its own: after saving, give it to a computer on the <a href="/terminal">Terminals</a> tab (Role column, then Change), or start an agent with <code>--role NAME</code>.</p>
 {% set starters = [
   ("Reviewer", "Reads code and looks things up. No edits, no shell.",
-   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "*/read*", "*/get*", "*/list*", "*/search*"]),
+   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/ToolSearch", "*/read*", "*/get*", "*/list*", "*/search*"]),
   ("Coding", "Claude Code can read, edit and run any shell command. MCP servers: read tools only.",
-   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "*/read*", "*/get*", "*/list*", "*/search*"]),
+   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/ToolSearch", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "*/read*", "*/get*", "*/list*", "*/search*"]),
   ("Coding, limited shell", "Like Coding, but the shell may run only the programs listed with cmd/. Add more as Activity shows them.",
-   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "cmd/git", "cmd/gh", "cmd/ls", "cmd/cat", "cmd/grep", "cmd/npm", "cmd/node", "cmd/python3", "cmd/uv", "*/read*", "*/get*", "*/list*", "*/search*"]),
+   ["claude-code/Read", "claude-code/Grep", "claude-code/Glob", "claude-code/LS", "claude-code/ToolSearch", "claude-code/Edit", "claude-code/MultiEdit", "claude-code/Write", "claude-code/TodoWrite", "claude-code/Bash", "cmd/git", "cmd/gh", "cmd/ls", "cmd/cat", "cmd/grep", "cmd/npm", "cmd/node", "cmd/python3", "cmd/uv", "*/read*", "*/get*", "*/list*", "*/search*"]),
 ] %}
 {% if not role %}
 <section class="card term-starters" id="starters" aria-labelledby="starters-title">

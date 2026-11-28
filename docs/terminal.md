@@ -95,8 +95,9 @@ tools** until you give it another role. Each role also sets an **offline grace**
 
 Patterns go by tool **names**. Read-only allows tools whose names start with read, get, list or search,
 which is not a promise about what a server's tool really does, so check them. It also allows Claude Code's
-Read, Grep, Glob and LS, which can read any file the computer's user can, including `~/.config/botrbac`.
-Roles limit which tools run, not which files those tools touch.
+Read, Grep, Glob and LS, which can read any file the computer's user can, including `~/.config/botrbac`,
+and ToolSearch, which Claude Code uses to load the MCP tools it holds back until needed (without it, no
+MCP tool can be used). Roles limit which tools run, not which files those tools touch.
 
 ## Narrower roles for one run: `--role`
 
