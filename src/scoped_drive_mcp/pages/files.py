@@ -88,7 +88,8 @@ def file_pages(kit: Kit) -> FilePages:
                 # when the deployment's own bot token (bot.connected) is set.
                 "drive_connected": ctx.drive_connected(),
                 "connections": ctx.connection_rows(),
-                "allow_count": len(entries),
+                "allow_count": ctx.allowed_total(len(entries)),
+                "drive_allow_count": len(entries),
                 "grants": (ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []),
                 "missing_wakeups": (
                     ctx.mailbox.missing_wakeups(str(current_actor.get() or ""))
@@ -731,7 +732,7 @@ def file_pages(kit: Kit) -> FilePages:
         """The new number for the Allowed tab, so ui.js can update it without a reload."""
         if not wants_json(request):
             return None
-        return {"allow_count": len(await blocking(ctx.allowlist.entries))}
+        return {"allow_count": await blocking(ctx.allowed_total)}
 
     async def still_covered(
         grants: GrantService, file_id: str, extra: dict[str, str] | None = None
@@ -755,6 +756,17 @@ def file_pages(kit: Kit) -> FilePages:
                 "entries": ctx.allowlist.entries(),
                 "bot": ctx.bot_status(),
                 "drive_connected": ctx.drive_connected(),
+                # The other sources' lists, so every allowed item is on one tab.
+                "onedrive_allowed": (
+                    sorted(ctx.onedrive.allowlist.entries().values(), key=lambda e: e.name.lower())
+                    if ctx.onedrive is not None
+                    else None
+                ),
+                "notion_allowed": (
+                    sorted(ctx.notion.allowlist.entries().values(), key=lambda e: e.name.lower())
+                    if ctx.notion is not None
+                    else None
+                ),
             }
 
         data = await blocking(gather)
@@ -808,6 +820,8 @@ def file_pages(kit: Kit) -> FilePages:
             describe_mime=describe_mime,
             bot=data["bot"],
             drive_connected=data["drive_connected"],
+            onedrive_allowed=data["onedrive_allowed"],
+            notion_allowed=data["notion_allowed"],
         )
 
     return FilePages(

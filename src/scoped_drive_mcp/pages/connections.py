@@ -51,6 +51,10 @@ class ConnectionPages:
     drive_row_connected: Callable[[list[dict[str, Any]]], bool]
 
 
+# Remove on the Allowed tab returns there; nothing else is accepted as a destination.
+ALLOWED_TAB = "/files?tab=allowed"
+
+
 def connection_pages(
     kit: Kit,
     *,
@@ -361,7 +365,7 @@ def connection_pages(
         if ctx.notion is None:
             return refused(request, 404, "Notion is not set up on this server.")
         entry = await blocking(ctx.notion.remove, form.get("page_id", ""))
-        back = "/files?tab=notion"
+        back = ALLOWED_TAB if form.get("next") == ALLOWED_TAB else "/files?tab=notion"
         if entry is None:
             return action_done(request, "ok", "That page was not allowed.", back, changed=False)
         audit_owner("notion_remove", page_id=entry.id, name=entry.name)
@@ -597,7 +601,9 @@ def connection_pages(
         return render(request, "onedrive.html", query=query, next=here, **data)
 
     def onedrive_back(form: dict[str, str]) -> str:
-        """Where an Allow or Remove returns to: the same OneDrive folder, if any."""
+        """Where an Allow or Remove returns to: the Allowed tab, or the same OneDrive folder."""
+        if form.get("next") == ALLOWED_TAB:
+            return ALLOWED_TAB
         folder = normalize_onedrive_id(form.get("folder") or "")
         return f"/files?tab=onedrive&folder={quote(folder)}" if folder else "/files?tab=onedrive"
 

@@ -15,32 +15,8 @@
   </form>
 </div>
 {% else %}
-<p class="muted lead">Your assistants can read the Notion pages and databases you <b>Allow</b> here, and everything inside them. {% if notion_create %}Assistants you let edit can also add new pages under them. None can change or delete existing pages.{% else %}They can’t edit Notion.{% endif %}{% if workspace %} Workspace: <b>{{ workspace }}</b>.{% endif %}</p>
+<p class="muted lead">Your assistants can read the Notion pages and databases you <b>Allow</b> here, and everything inside them. {% if notion_create %}Assistants you let edit can also add new pages under them. None can change or delete existing pages.{% else %}They can’t edit Notion.{% endif %}{% if workspace %} Workspace: <b>{{ workspace }}</b>.{% endif %} Everything you’ve allowed is listed on the <a href="/files?tab=allowed">Allowed</a> tab.</p>
 
-<h2>Allowed <span class="count neutral">{{ allowed | length }}</span></h2>
-{% if allowed %}
-<table class="cards" data-list>
-  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>Action</th></tr></thead>
-  <tbody>
-  {% for e in allowed %}
-  <tr data-row>
-    <td data-label="Name">{{ e.name or "Untitled" }}</td>
-    <td data-label="Type">{{ "Database" if e.mime_type == "notion/database" else "Page" }}</td>
-    <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
-    <td data-label="Action">
-      <form class="inline" method="post" action="/notion/remove" data-confirm="Stop assistants reading this page and everything inside it?" data-confirm-action="Remove">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="page_id" value="{{ e.id }}">
-        <button class="danger" type="submit">Remove<span class="sr-only"> {{ e.name }}</span></button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="muted" id="notion-none-allowed">Nothing from Notion is allowed yet. Choose <b>Allow</b> on a page below.</p>
-{% endif %}
 
 <h2>What Notion shows Bot RBAC</h2>
 <p class="muted">Only the pages you picked on Notion’s screen, and what is inside them. To add or remove pages there, choose <b>Pick pages in Notion</b>.</p>
@@ -54,7 +30,7 @@
 <form method="post" action="/connect/notion" class="actions">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="next" value="/files?tab=notion">
-  <button type="submit">Pick pages in Notion</button>
+  <button class="primary" type="submit">Pick pages in Notion</button>
 </form>
 {% if notion_error %}
 <div class="warn" role="alert" id="notion-error">{{ notion_error }}</div>

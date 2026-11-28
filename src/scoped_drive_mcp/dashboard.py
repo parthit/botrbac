@@ -360,6 +360,15 @@ class DashboardContext:
             return None
         return self.vault.onedrive()
 
+    def allowed_total(self, drive_count: int | None = None) -> int:
+        """How many items the Allowed tab lists: Drive, plus OneDrive and Notion when offered."""
+        total = len(self.allowlist.entries()) if drive_count is None else drive_count
+        if self.onedrive is not None:
+            total += len(self.onedrive.allowlist.entries())
+        if self.notion is not None:
+            total += len(self.notion.allowlist.entries())
+        return total
+
     def connection_rows(self) -> list[dict[str, Any]]:
         """Each connection offered here and whether this person has finished it."""
         rows = []

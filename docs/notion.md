@@ -16,7 +16,8 @@ There are two gates, both checked on every call:
    Each person connects one workspace at a time; connecting again replaces it.
 2. **Bot RBAC's Notion allowlist.** On **Files → From Notion**, the person chooses **Allow** on the pages
    and databases their assistants may read. Everything inside an allowed page (sub-pages, databases,
-   rows) is included, like a file in an allowed Drive folder.
+   rows) is included, like a file in an allowed Drive folder. Allowed pages are listed, with Drive and OneDrive
+   items, on **Files → Allowed**.
 
 To share more pages with Bot RBAC, use **Pick pages in Notion** on the same tab. That reopens Notion's
 screen.

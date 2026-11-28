@@ -10,7 +10,8 @@ Microsoft has no per-file permission for personal accounts, so Bot RBAC asks for
 lets the server read and change the person's whole OneDrive. What assistants may reach is held to **Bot
 RBAC's OneDrive allowlist**: on **Files → From OneDrive**, the person browses their drive and chooses
 **Allow** on files and folders. Everything inside an allowed folder is included, like a file in an allowed
-Drive folder. Reads and writes pass the same check.
+Drive folder. Reads and writes pass the same check. Everything allowed, from Google Drive, OneDrive and
+Notion, is listed on **Files → Allowed**, where it can be removed.
 
 - The top of the drive can't be allowed, so the whole drive is never shared by one click.
 - Shortcuts to other people's items ("Add to my files") are not listed, followed or written to.

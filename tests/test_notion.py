@@ -428,6 +428,19 @@ def test_files_tab_lists_what_notion_shows_and_allows_one(c, memstore) -> None:
     assert raw[TOP].startswith("s1.")
 
 
+def test_allowed_pages_are_listed_on_the_allowed_tab(c, memstore) -> None:
+    connect_notion(c)
+    allow(c, TOP)
+    assert 'action="/notion/remove"' not in c.get("/files?tab=notion").text
+    page = c.get("/files?tab=allowed").text
+    section = page.split('id="allowed-notion"')[1]
+    assert "Team wiki" in section and 'action="/notion/remove"' in section
+    token = csrf(c, "/files?tab=allowed")
+    r = c.post("/notion/remove", data={"csrf": token, "page_id": TOP, "next": "/files?tab=allowed"})
+    assert r.headers["location"] == "/files?tab=allowed"
+    assert memstore.hgetall(f"{KEY_PREFIX}{NOTION_ALLOWLIST_KEY}") == {}
+
+
 def test_pages_inside_an_allowed_page_say_so(c) -> None:
     connect_notion(c)
     allow(c, TOP)

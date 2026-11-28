@@ -518,6 +518,40 @@ def test_files_tab_browses_and_allows_a_folder(c, memstore) -> None:
     assert inside.count("Allowed through “School”") >= 3  # essay, Biology, report, photo
 
 
+def test_allowed_items_are_listed_on_the_allowed_tab_not_the_onedrive_tab(c, memstore) -> None:
+    connect(c)
+    allow(c, SCHOOL)
+    tab = c.get("/files?tab=onedrive").text
+    # The OneDrive tab is for adding: browsing comes first, the list lives on Allowed.
+    assert 'action="/onedrive/remove"' not in tab
+    assert 'href="/files?tab=allowed"' in tab
+    page = c.get("/files?tab=allowed").text
+    section = page.split('id="allowed-onedrive"')[1]
+    assert "School" in section and 'action="/onedrive/remove"' in section
+    # The tab's number counts OneDrive items too.
+    assert 'Allowed <span class="count neutral">1</span>' in page
+
+    token = csrf(c, "/files?tab=allowed")
+    r = c.post(
+        "/onedrive/remove",
+        data={"csrf": token, "file_id": SCHOOL, "next": "/files?tab=allowed"},
+    )
+    assert r.status_code == 303 and r.headers["location"] == "/files?tab=allowed"
+    assert stored_allowlist(memstore) == {}
+    assert 'id="onedrive-none-allowed"' in c.get("/files?tab=allowed").text
+
+
+def test_remove_goes_nowhere_but_the_allowed_tab_or_onedrive(c) -> None:
+    connect(c)
+    allow(c, SCHOOL)
+    token = csrf(c, "/files?tab=allowed")
+    r = c.post(
+        "/onedrive/remove",
+        data={"csrf": token, "file_id": SCHOOL, "next": "https://evil.example/"},
+    )
+    assert r.headers["location"] == "/files?tab=onedrive"
+
+
 def test_cannot_allow_the_top_of_the_drive_or_a_shortcut(c, memstore) -> None:
     connect(c)
     for bad in (ROOT, SHORTCUT, "D00D!999", "../etc"):
