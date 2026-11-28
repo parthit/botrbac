@@ -425,7 +425,7 @@ def test_blocked_message_names_the_pattern_and_the_page(tmp_path, monkeypatch) -
         "add github/create_issue to this computer's role at https://rbac.example.org/terminal/roles"
         in hint
     )
-    assert "make a new role" in hint  # built-in roles cannot be edited
+    assert "To allow it" in hint  # the Activity link also works for a built-in role
     # A new login (a changed file) is picked up, not served from the cache.
     state.write_json("credentials.json", {"server": "javascript:alert(1)"}, private=True)
     os.utime(tmp_path / "credentials.json", ns=(1, 1))
