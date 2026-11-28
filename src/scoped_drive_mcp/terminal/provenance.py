@@ -24,6 +24,9 @@ ID_FIELDS = (
     "parent_agent_id",
 )
 SEALED_FIELDS = ("task",)
+# Fields older CLIs sent that are no longer kept, and are left out of rows already
+# stored: `description` is the model's own summary of its command, not evidence.
+DROPPED_FIELDS = frozenset({"description"})
 # Every field this module may add, in the order exports list them.
 FIELDS = (
     *ID_FIELDS,

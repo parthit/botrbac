@@ -34,8 +34,8 @@ from . import identity, present
 from .coverage import clean_coverage, unhooked
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
 from .ingest import RETENTION_DAYS, RETENTION_MAX_ROWS, IngestError, TerminalActivity
+from .provenance import DROPPED_FIELDS, SEALED_FIELDS
 from .provenance import FIELDS as PROVENANCE_FIELDS
-from .provenance import SEALED_FIELDS
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
 from .webhook import AuditWebhook, WebhookError
 
@@ -251,8 +251,8 @@ class TerminalFeature:
         own summary of its command, not evidence) is left out of pages and exports."""
         out = []
         for row in rows:
-            if "description" in row:
-                row = {k: v for k, v in row.items() if k != "description"}
+            if not DROPPED_FIELDS.isdisjoint(row):
+                row = {k: v for k, v in row.items() if k not in DROPPED_FIELDS}
             event_id = str(row.get("event_id", ""))
             fields = [("command", event_id)] + [(n, f"{event_id}:{n}") for n in SEALED_FIELDS]
             for name, aad in fields:
