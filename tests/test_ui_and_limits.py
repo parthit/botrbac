@@ -280,6 +280,28 @@ def test_ios_pick_buttons_open_the_full_page_picker() -> None:
     # Every iPhone and iPad browser runs on WebKit and blocks Google's cookies in the
     # picker frame, so the check is the device, not the browser's name.
     assert "/iPhone|iPad|iPod/" in script
-    assert "if (fullPageFirst) { openFullPage(); return; }" in script
+    assert "if (fullPageFirst()) { openFullPage(); return; }" in script
     assert "data-fullpage-failed" in script
     assert 'form.action = "/picker/redirect"' in script
+
+
+def test_ios_remembers_the_in_page_picker_on_this_device() -> None:
+    script = UI_JS.read_text()
+    # Chosen once with "Use the in-page picker instead", kept until the full page is chosen.
+    assert 'savePickerPref("inpage")' in script
+    assert 'savePickerPref("")' in script
+    assert "return ios && !fullPageFailed && !preferInPage;" in script
+    # Storage can be missing or blocked: both helpers guard every access.
+    for helper in ("function readPickerPref()", "function savePickerPref(mode)"):
+        body = script.split(helper, 1)[1].split("\n  }", 1)[0]
+        assert "try {" in body and "catch (e)" in body, helper
+
+
+def test_only_drive_pick_buttons_carry_data_pick() -> None:
+    # ui.js treats every [data-pick] element as a Google Drive pick button. Anything else
+    # carrying it (the role editor's All / Read-only / None did) opens Google's picker.
+    templates = UI_JS.parent
+    for path in templates.glob("*.html"):
+        for tag in re.findall(r"<[^>]*\bdata-pick\b[^>]*>", path.read_text()):
+            assert "data-pick=" not in tag, (path.name, tag)
+    assert 'closest("[data-preset]")' in UI_JS.read_text()
