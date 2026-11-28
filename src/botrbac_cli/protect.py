@@ -12,8 +12,12 @@ a path the agent builds at run time (variables, base64, a script it writes elsew
 It guards against the agent, not the person who owns the computer.
 """
 
+import fnmatch
+import glob
+import itertools
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -94,27 +98,197 @@ def _targets() -> tuple[list[Path], Path]:
     )
 
 
-def _paths(texts: list[str]) -> list[Path]:
-    """The real files that arguments (and the words of a command) point to, through
-    symlinks and `..`, for the ones that exist or could."""
-    short = [t for t in texts if len(t) <= 4096]
-    # Each whole argument (a path with spaces) and each word of it (a command's paths).
-    words = short + [w.strip("'\"<>;|&()") for t in short for w in t.split()]
-    return [p for p in (_resolved(w) for w in words[:200]) if p is not None]
+def _folders() -> tuple[set[Path], set[Path]]:
+    """(folders that hold protected files, and the folders above them, which removing
+    or moving would take the files along; home, the working folder and what is above
+    them, which only `rm`/`mv` of the whole folder counts against)."""
+    home, cwd = Path(os.path.realpath(Path.home())), Path(os.path.realpath(Path.cwd()))
+    agent = {base / name for base in (home, cwd) for name in AGENT_FOLDERS}
+    agent.add(Path(os.path.realpath(state.home())))
+    broad = {home, cwd, *home.parents, *cwd.parents}
+    folders = {
+        p for d in agent for p in (d, *d.parents) if p not in broad
+    }  # e.g. ~/.config for ~/.config/botrbac
+    return folders, broad
 
 
-def _resolved(text: str) -> Path | None:
+# Agent folders under home and under the project.
+AGENT_FOLDERS = (".claude", ".codex", ".gemini", ".cursor")
+# Shell tools whose input is a command line (shellcmd.SHELL_TOOLS, by tool name).
+SHELL_TOOLS = frozenset({"Bash", "shell", "run_shell_command", "exec_command", "local_shell"})
+# Commands that only look. Anything else (or a `>` redirect) counts as a change.
+_LOOK_COMMANDS = frozenset(
+    {"ls", "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "ag",
+     "stat", "file", "wc", "du", "tree", "cd", "pushd", "popd", "pwd", "readlink",
+     "realpath", "diff", "cmp", "md5sum", "sha256sum", "shasum", "jq", "bat", "test",
+     "[", "find", "fd", "echo", "printf", "type", "which", "mkdir", "touch"}
+)  # fmt: skip
+_REMOVE_COMMANDS = frozenset({"rm", "rmdir", "mv", "unlink", "shred", "trash", "trash-put"})
+_COPY_COMMANDS = frozenset({"cp", "rsync", "scp", "ln", "install"})
+_PREFIX_COMMANDS = frozenset(
+    {"sudo", "doas", "command", "builtin", "env", "nice", "nohup", "time", "exec"}
+)  # fmt: skip
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "ash"})
+_FIND_ACTIONS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_GLOB = re.compile(r"[*?\[]")
+_MAX_WORDS = 400
+
+# (word, folder it is relative to, "look" | "remove" | "change")
+Word = tuple[str, Path, str]
+
+
+def _tokens(command: str) -> list[str]:
+    """Shell words, quotes removed (`'sett''ings'` is `settings`), operators apart."""
+    try:
+        lex = shlex.shlex(command.replace("\n", ";"), posix=True, punctuation_chars=";&|()<>")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:  # unbalanced quotes: the raw words
+        return command.split()
+
+
+def _shell_words(command: str, base: Path, depth: int = 0) -> list[Word]:
+    """The words of a command line, each with the folder it resolves against (following
+    `cd DIR` through the line) and what its command does."""
+    segments: list[list[str]] = [[]]
+    for tok in _tokens(command)[: _MAX_WORDS * 4]:
+        if tok and set(tok) <= set(";&|()"):
+            segments.append([])
+        else:
+            segments[-1].append(tok)
+    out: list[Word] = []
+    for seg in segments:
+        args = list(seg)
+        while args and (_ASSIGNMENT.match(args[0]) or args[0] in _PREFIX_COMMANDS):
+            args.pop(0)
+        if not args:
+            continue
+        name = os.path.basename(args[0])
+        rest = args[1:]
+        if name in ("cd", "pushd"):
+            target = next((a for a in rest if not a.startswith("-")), None)
+            if target is None:
+                base = Path.home()
+            else:
+                found = _resolved(target, base)
+                base = found if found is not None else base
+        if depth < 3 and name in _SHELLS and "-c" in rest[:-1]:
+            out += _shell_words(rest[rest.index("-c") + 1], base, depth + 1)
+        elif depth < 3 and name == "eval":
+            out += _shell_words(" ".join(rest), base, depth + 1)
+        if name in _REMOVE_COMMANDS:
+            kind = "remove"
+        elif name in _LOOK_COMMANDS and not any(
+            t in (">", ">>") or t.startswith(_FIND_ACTIONS) for t in args
+        ):
+            kind = "look"
+        else:
+            kind = "change"
+        last = max((i for i, a in enumerate(args) if not a.startswith("-")), default=0)
+        for i, word in enumerate(args):
+            # A commit message names paths without touching them, and a copy changes
+            # only where it goes (`cp -r ~/.claude backup` is fine, `cp x ~/.claude` not).
+            message = name == "git" and i > 0 and args[i - 1] in ("-m", "--message")
+            source = name in _COPY_COMMANDS and i < last
+            out.append((word, base, "look" if message or source else kind))
+        if len(out) > _MAX_WORDS:
+            break
+    return out[:_MAX_WORDS]
+
+
+def _expand(text: str) -> str:
+    """`~`, `$HOME` and `${HOME}` at the start, as the shell would expand them."""
+    for var in ("$HOME", "${HOME}"):
+        if text == var or text.startswith(var + "/"):
+            text = "~" + text[len(var) :]
+    return os.path.expanduser(text)
+
+
+def _resolved(text: str, base: Path | None = None) -> Path | None:
     if not text or "\0" in text or "://" in text or text.startswith("-"):
         return None
     try:
-        path = Path(os.path.expanduser(text))
-        return Path(os.path.realpath(path if path.is_absolute() else Path.cwd() / path))
+        path = Path(_expand(text))
+        return Path(os.path.realpath(path if path.is_absolute() else (base or Path.cwd()) / path))
     except (OSError, ValueError, RuntimeError):
         return None
 
 
 def _within(path: Path, target: Path) -> bool:
     return path == target or target in path.parents
+
+
+def _pattern_parts(word: str, base: Path) -> list[str] | None:
+    """A glob word as absolute parts, the fixed folders before the first glob resolved."""
+    try:
+        path = Path(_expand(word))
+        parts = (path if path.is_absolute() else base / path).parts
+    except (ValueError, RuntimeError):
+        return None
+    fixed = next((i for i, part in enumerate(parts) if _GLOB.search(part)), len(parts))
+    try:
+        head = Path(os.path.realpath(Path(*parts[:fixed]))).parts
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return [*head, *(p for p in parts[fixed:] if p not in ("", "."))]
+
+
+def _glob_matches(parts: list[str], path: Path) -> bool:
+    """Whether a glob (as parts) could name `path`, the way the shell matches."""
+    names = path.parts
+    if len(parts) != len(names):
+        return False
+    for pat, name in zip(parts, names, strict=True):
+        if name.startswith(".") and not pat.startswith("."):
+            return False  # `*` does not match a leading dot
+        if not fnmatch.fnmatchcase(name, pat):
+            return False
+    return True
+
+
+def _candidates(word: str, base: Path) -> tuple[list[Path], list[str] | None]:
+    """(real paths a word names, its glob pattern as parts if it is one)."""
+    one = _resolved(word, base)
+    paths = [one] if one is not None else []
+    if not _GLOB.search(word) or len(word) > 1024 or word.startswith("-"):
+        return paths, None
+    try:
+        pattern = _expand(word)
+        found = glob.iglob(pattern if os.path.isabs(pattern) else str(base / pattern))
+        paths += [Path(os.path.realpath(p)) for p in itertools.islice(found, 50)]
+    except (OSError, ValueError, RuntimeError, re.error):
+        pass
+    return paths, _pattern_parts(word, base)
+
+
+def _words(tool: str, raw: list[str]) -> list[Word]:
+    name = tool.rsplit("/", 1)[-1].rsplit("__", 1)[-1]
+    cwd = Path.cwd()
+    short = [t for t in raw if len(t) <= 100_000]
+    kind = "look" if is_read_only(tool) else "change"
+    # Each whole argument (a path with spaces) and each word of it (a command's paths).
+    # Only whole arguments and shell words count against folders: a word in an edit's
+    # text is not the path being changed.
+    out: list[Word] = [(t, cwd, kind) for t in short if len(t) <= 4096]
+    if name in SHELL_TOOLS:
+        for text in short:
+            out += _shell_words(text, cwd)
+    out += [(w.strip("'\"<>;|&()"), cwd, "look") for t in short for w in t.split()]
+    return out[: _MAX_WORDS * 2]
+
+
+def _normalised(raw: list[str]) -> list[str]:
+    """The text as written, as the shell reads it (quotes taken out, spaces collapsed),
+    and with every quote dropped (`"disableAll""Hooks"`), all lower case."""
+    out = []
+    for text in raw:
+        out.append(text.lower())
+        if len(text) <= 100_000:
+            out.append(" ".join(_tokens(text)).lower())
+            out.append(" ".join(re.sub(r"[\'\"\\]", "", text).split()).lower())
+    return out
 
 
 def _strings(value: Any, depth: int = 0) -> list[str]:
@@ -143,23 +317,43 @@ def is_read_only(tool: str) -> bool:
 def refusal(tool: str, arguments: Any) -> str | None:
     """Why this call must be refused, or None. `arguments` is the tool's input."""
     raw = _strings(arguments)
-    texts = [s.lower() for s in raw]
-    if not texts:
+    if not raw:
         return None
+    texts = _normalised(raw)
     protected, login = markers()
     targets, login_file = _targets()
-    paths = _paths(raw)
-    if any(m in t for t in texts for m in login) or any(p == login_file for p in paths):
+    folders, broad = _folders()
+    read_only = is_read_only(tool)
+    found: str | None = None
+    for word, base, kind in _words(tool, raw):
+        paths, pattern = _candidates(word, base)
+        if login_file in paths or (pattern and _glob_matches(pattern, login_file)):
+            return "it names botrbac's login file, which holds its tokens"
+        if read_only or found is not None:
+            continue
+        hit = next((p for p in paths for t in targets if _within(p, t)), None)
+        if hit is None and kind != "look":
+            hit = next(
+                (p for p in paths if p in folders or (kind == "remove" and p in broad)),
+                None,
+            )
+        if hit is None and pattern:
+            hit = next((t for t in targets if _glob_matches(pattern, t)), None)
+            if hit is None and kind != "look":
+                hit = next((f for f in folders if _glob_matches(pattern, f)), None)
+            if hit is None and kind == "remove":
+                hit = next((b for b in broad if _glob_matches(pattern, b)), None)
+        if hit is not None:
+            found = str(hit)
+    if any(m in t for t in texts for m in login):
         return "it names botrbac's login file, which holds its tokens"
-    if is_read_only(tool):
+    if read_only:
         return None
-    found = next((m for t in texts for m in sorted(protected) if m in t), None)
-    if found is None:
-        found = next((str(p) for p in paths for t in targets if _within(p, t)), None)
+    found = next((m for t in texts for m in sorted(protected) if m in t), None) or found
     if found is not None:
         return (
             f"it mentions {found!r}, which Bot RBAC protects (an agent's hook or MCP "
-            "settings, ~/.claude.json, botrbac's own folder, or switching hooks off). Ask "
-            "the person to make that change"
+            "settings, ~/.claude.json, botrbac's own folder, the folders that hold them, "
+            "or switching hooks off). Ask the person to make that change"
         )
     return None

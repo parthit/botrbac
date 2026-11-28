@@ -283,8 +283,11 @@ cover that, from strongest to weakest:
   files (`.codex/hooks.json`, `.codex/config.toml`, `.gemini/settings.json`, `.cursor/hooks.json`,
   `.cursor/mcp.json`) or botrbac's own folder is refused, as is one that mentions `disableAllHooks` or `botrbac hooks remove`. Paths are followed through
   symlinks and `..`. Reading those files is allowed, except botrbac's login file, which holds its tokens.
-  This reads the call's text, so it is a speed bump: a path built at run time (variables, a script written
-  elsewhere) gets past it.
+  Removing, moving or changing the folders that hold these files (`~/.claude`, `~/.codex`, `~/.gemini`,
+  `~/.cursor`, the project's own, botrbac's folder) is refused too, as is `rm` or `mv` of your home or
+  project folder. Globs, split quotes, `cd DIR && …` and `sh -c` are followed; looking (`ls`, `find`,
+  `grep`) and `mkdir` stay allowed. This reads the call's text, so it is a speed bump: a path built at run
+  time (variables, a script written elsewhere) gets past it.
 - **Noticing.** `botrbac doctor` says when the hook is missing or switched off by `disableAllHooks` (or
   Codex's `[features] hooks = false`, Gemini's `hooksConfig`), and each sync tells the site, which marks the
   computer "hook off" on the Terminal page.
