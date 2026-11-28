@@ -125,6 +125,8 @@ _LOOK_COMMANDS = frozenset(
 )  # fmt: skip
 _REMOVE_COMMANDS = frozenset({"rm", "rmdir", "mv", "unlink", "shred", "trash", "trash-put"})
 _COPY_COMMANDS = frozenset({"cp", "rsync", "scp", "ln", "install"})
+# Copy commands whose -t names the destination folder (rsync's -t keeps times).
+_TARGET_COMMANDS = frozenset({"cp", "ln", "install"})
 _PREFIX_COMMANDS = frozenset(
     {"sudo", "doas", "command", "builtin", "env", "nice", "nohup", "time", "exec"}
 )  # fmt: skip
@@ -187,21 +189,11 @@ def _shell_words(command: str, base: Path, depth: int = 0) -> list[Word]:
         else:
             kind = "change"
         last = max((i for i, a in enumerate(args) if not a.startswith("-")), default=0)
-        # `cp -t DIR src…` (also install, ln, mv, rsync): the destination comes first,
-        # so with a target flag every word may be where the copy goes.
-        targets = [
-            a.split("=", 1)[1] if a.startswith("--target-directory=") else a[2:]
-            for a in args
-            if a.startswith("--target-directory=") or (a.startswith("-t") and len(a) > 2)
-        ]
-        dest: int | None = None
-        if name in _COPY_COMMANDS:
-            flag = next((i for i, a in enumerate(args) if a in ("-t", "--target-directory")), None)
-            if flag is not None:
-                dest = flag + 1  # the word after -t is where the copy goes
-            if flag is not None or targets:
-                last = len(args)  # every other word is a source
-            out += [(t, base, "change") for t in targets if t]
+        # `cp -t DIR src…` (also install and ln): the destination comes first.
+        dest, targets = _target_dir(args) if name in _TARGET_COMMANDS else (None, [])
+        if dest is not None or targets:
+            last = len(args)  # every other word is a source
+        out += [(t, base, "change") for t in targets if t]
         for i, word in enumerate(args):
             # A commit message names paths without touching them, and a copy changes
             # only where it goes (`cp -r ~/.claude backup` is fine, `cp x ~/.claude` not).
@@ -211,6 +203,34 @@ def _shell_words(command: str, base: Path, depth: int = 0) -> list[Word]:
         if len(out) > _MAX_WORDS:
             break
     return out[:_MAX_WORDS]
+
+
+def _target_dir(args: list[str]) -> tuple[int | None, list[str]]:
+    """Where `cp`/`install`/`ln` copy to when the destination is given as an option:
+    (index of the word after a bare `-t`, [values given inline]). Handles `-t DIR`,
+    `-tDIR`, flags run together (`-rt DIR`, `-sftDIR`), `--target-directory DIR`,
+    `--target-directory=DIR` and the abbreviations GNU accepts (`--target=DIR`)."""
+    dest: int | None = None
+    inline: list[str] = []
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, value = a[2:].partition("=")
+            if name and "target-directory".startswith(name):
+                if eq:
+                    inline.append(value)
+                else:
+                    dest = i + 1
+        elif a.startswith("-") and len(a) > 1 and "t" in a[1:]:
+            rest = a[1:]
+            # Options before the t are flags; anything after it is the t's value.
+            value = rest[rest.index("t") + 1 :]
+            if value:
+                inline.append(value)
+            else:
+                dest = i + 1
+    return dest, inline
 
 
 def _expand(text: str) -> str:

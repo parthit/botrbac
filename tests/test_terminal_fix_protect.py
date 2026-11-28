@@ -150,3 +150,24 @@ def test_unbalanced_quotes_still_catch_a_protected_folder() -> None:
     # bash refuses to run these (syntax error), but the check still names the folder.
     assert refusal("Bash", {"command": "rm -rf ~/.claude '"})
     assert refusal("Bash", {"command": 'mv ~/.codex /tmp/x "'})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp -rt ~/.claude /tmp/settings.json",
+        "cp -at ~/.claude /tmp/settings.json",
+        "install -Dt ~/.claude /tmp/settings.json",
+        "ln -sft ~/.codex /tmp/hooks.json",
+        "ln -sft~/.codex /tmp/hooks.json",
+        "cp --target=~/.claude /tmp/settings.json",
+        "cp --t ~/.claude /tmp/settings.json",
+    ],
+)
+def test_target_flags_run_together_or_abbreviated_are_refused(command) -> None:
+    assert refusal("Bash", {"command": command}), command
+
+
+@pytest.mark.parametrize("command", ["cp -rt backup src docs", "rsync -at src/ backup/"])
+def test_target_flags_elsewhere_pass(command) -> None:
+    assert refusal("Bash", {"command": command}) is None, command
