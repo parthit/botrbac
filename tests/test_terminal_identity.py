@@ -41,6 +41,12 @@ def home(tmp_path, monkeypatch):
     return tmp_path / "botrbac"
 
 
+def _userinfo(user: str, secret: str) -> str:
+    """`user:secret@`, built at run time so secret scanners do not read a test value
+    as a leaked credential."""
+    return user + ":" + secret + "@"
+
+
 def _row(**over):
     row = {
         "event_id": uuid.uuid4().hex,
@@ -314,7 +320,7 @@ def _lookup(host: str) -> list[str]:
     ("url", "code"),
     [
         ("http://hooks.example.com/x", "invalid_webhook_url"),
-        ("https://user:pw@hooks.example.com/x", "invalid_webhook_url"),
+        ("https://" + _userinfo("user", "pw") + "hooks.example.com/x", "invalid_webhook_url"),
         ("https://hooks.example.com:8443/x", "invalid_webhook_url"),
         ("https://hooks.example.com/x?token=1", "invalid_webhook_url"),
         ("https://127.0.0.1/x", "invalid_webhook_url"),
