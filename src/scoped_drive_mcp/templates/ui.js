@@ -177,9 +177,10 @@
     editor.addEventListener("change", refresh);
     editor.addEventListener("input", refresh);
     editor.addEventListener("click", function (event) {
-      var pick = event.target.closest("[data-pick]");
-      if (!pick) return;
-      var group = pick.closest("[data-group]"), how = pick.getAttribute("data-pick");
+      // data-preset, not data-pick: [data-pick] marks Google Drive pick buttons below.
+      var preset = event.target.closest("[data-preset]");
+      if (!preset) return;
+      var group = preset.closest("[data-group]"), how = preset.getAttribute("data-preset");
       each(group.querySelectorAll("input[data-tool]"), function (box) {
         box.checked = how === "all" || (how === "read" && box.hasAttribute("data-read"));
       });
@@ -717,25 +718,41 @@
   // The server sets this once Google's full page has failed in this session (it ignored
   // trigger_onepick or refused the request), so the buttons stop sending people there.
   var fullPageFailed = !!document.querySelector("[data-safari-note][data-fullpage-failed]");
-  var fullPageFirst = ios && !fullPageFailed;
-  Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
-    function show(selector) {
-      var el = note.querySelector(selector);
-      if (el) el.hidden = false;
-    }
-    function hide(selector) {
-      var el = note.querySelector(selector);
-      if (el) el.hidden = true;
-    }
-    if (ios) {
-      hide("[data-note-other]");
-      show(fullPageFailed ? "[data-safari-ios-failed]" : "[data-safari-ios]");
-      show("[data-safari-ios-steps]");
-    } else if (webkitOnly) {
-      show("[data-safari-mac]");
-    }
-    note.hidden = false;
-  });
+  // On iPhone and iPad, someone who chose "Use the in-page picker instead" (because they
+  // allowed cross-site tracking) keeps it on this device until they choose the full page.
+  // Only a per-device convenience: storage can be missing or blocked, so every access is
+  // guarded and the default (the full page) applies without it.
+  var PICKER_PREF = "botrbac.pickerMode";
+  function readPickerPref() {
+    try { return window.localStorage.getItem(PICKER_PREF) || ""; } catch (e) { return ""; }
+  }
+  function savePickerPref(mode) {
+    try {
+      if (mode) window.localStorage.setItem(PICKER_PREF, mode);
+      else window.localStorage.removeItem(PICKER_PREF);
+    } catch (e) { /* not remembered; the default still works */ }
+  }
+  var preferInPage = readPickerPref() === "inpage";
+  function fullPageFirst() { return ios && !fullPageFailed && !preferInPage; }
+  function showNotes() {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
+      function toggle(selector, on) {
+        var el = note.querySelector(selector);
+        if (el) el.hidden = !on;
+      }
+      if (ios) {
+        toggle("[data-note-other]", false);
+        toggle("[data-safari-ios]", fullPageFirst());
+        toggle("[data-safari-ios-inpage]", !fullPageFailed && preferInPage);
+        toggle("[data-safari-ios-failed]", fullPageFailed);
+        toggle("[data-safari-ios-steps]", true);
+      } else if (webkitOnly) {
+        toggle("[data-safari-mac]", true);
+      }
+      note.hidden = false;
+    });
+  }
+  showNotes();
 
   function loadPicker() {
     return new Promise(function (resolve, reject) {
@@ -894,7 +911,7 @@
 
   function onPickClick(event) {
     pick = event.currentTarget;
-    if (fullPageFirst) { openFullPage(); return; }
+    if (fullPageFirst()) { openFullPage(); return; }
     openInPage();
   }
   Array.prototype.forEach.call(pickButtons, function (button) {
@@ -902,10 +919,21 @@
   });
   // The note's two buttons act for the pick button used last (the first one, before any).
   Array.prototype.forEach.call(document.querySelectorAll("[data-fullpage-pick]"), function (button) {
-    button.addEventListener("click", openFullPage);
+    button.addEventListener("click", function () {
+      // Back to the default: the pick buttons use the full page again on this device.
+      savePickerPref("");
+      openFullPage();
+    });
   });
   Array.prototype.forEach.call(document.querySelectorAll("[data-inpage-pick]"), function (button) {
-    button.addEventListener("click", openInPage);
+    button.addEventListener("click", function () {
+      if (ios) {
+        savePickerPref("inpage");
+        preferInPage = true;
+        showNotes();
+      }
+      openInPage();
+    });
   });
 })();
 
