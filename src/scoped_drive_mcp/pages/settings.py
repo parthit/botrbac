@@ -422,7 +422,14 @@ def settings_pages(
         back = "/settings#assistants"
         if ctx.mcp_oauth is None:
             return action_done(request, "error", "That app is not connected.", back)
-        features = {name: form.get(f"feature_{name}") == "on" for name in FEATURES}
+        # Only the parts the form showed change; one it didn't show (that part isn't
+        # set up on this server) keeps its saved value, so it isn't switched off unseen.
+        shown = set((form.get("features_shown") or "").split(","))
+        current = await blocking(ctx.mcp_oauth.features_of, grant_id)
+        features = {
+            name: form.get(f"feature_{name}") == "on" if name in shown else current[name]
+            for name in FEATURES
+        }
         if not await blocking(ctx.mcp_oauth.set_features, grant_id, email, features):
             return action_done(request, "error", "That app is not connected.", back)
         names = {g.id: g.client_name for g in ctx.mcp_oauth.list_grants(email)}

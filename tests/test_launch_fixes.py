@@ -57,6 +57,7 @@ def test_unticked_parts_are_neither_listed_nor_callable(owner_c, p2_app) -> None
         owner_c,
         "/oauth/grants/features",
         grant_id=gid,
+        features_shown="mailbox,shared",
         feature_mailbox="on",
         feature_shared="on",
     )
@@ -206,3 +207,38 @@ def test_nav_has_assistants_and_hides_while_connecting_drive(p2_app) -> None:
     nav = page.split('id="site-nav"')[1].split("</nav>")[0]
     assert 'href="/settings#assistants"' in nav
     assert csrf(c, "/")
+
+
+def test_check_permission_refuses_a_switched_off_part() -> None:
+    from scoped_drive_mcp.auth import Principal
+    from scoped_drive_mcp.config import Role
+    from scoped_drive_mcp.policy import (
+        PermissionDeniedError,
+        check_permission,
+        may_call,
+        tools_off,
+    )
+
+    off = tools_off({"mailbox": False, "shared": True})
+    p = Principal(token_name="app", role=Role.VIEWER, grant_id="g" * 16, tools_off=off)
+    assert not may_call(p, "check_messages")
+    with pytest.raises(PermissionDeniedError):
+        check_permission(p, "check_messages")
+    assert may_call(p, "list_shared_with_me") and may_call(p, "read_file")
+    assert tools_off(None) == frozenset() and tools_off({}) == frozenset()
+
+
+def test_settings_form_leaves_a_part_it_did_not_show_alone(owner_c, p2_app) -> None:
+    connect(owner_c)
+    gid = _grant_id(p2_app)
+    oauth = p2_app.state.dashboard.mcp_oauth
+    # The form only showed the Mailbox (as on a server without Shared with me) and it
+    # was unticked: the Mailbox goes off, Shared with me keeps its saved value.
+    r = post(owner_c, "/oauth/grants/features", grant_id=gid, features_shown="mailbox")
+    assert r.status_code == 303
+    assert oauth.features_of(gid) == {"mailbox": False, "shared": True}
+    # A form that showed nothing changes nothing.
+    post(owner_c, "/oauth/grants/features", grant_id=gid)
+    assert oauth.features_of(gid) == {"mailbox": False, "shared": True}
+    # The Settings form says which parts it shows.
+    assert 'name="features_shown" value="mailbox,shared"' in owner_c.get("/settings").text

@@ -173,10 +173,11 @@
   <form class="feature-form" method="post" action="/oauth/grants/features" id="features-{{ a.id }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="grant_id" value="{{ a.id }}">
+    <input type="hidden" name="features_shown" value="{{ ((['mailbox'] if mailbox_feature else []) + (['shared'] if shared_feature else [])) | join(',') }}">
     <fieldset>
       <legend class="sr-only">Also allow {{ a.name }} to use</legend>
-      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Mailbox <span class="muted hint">messages with your other assistants</span></span></label>{% else %}{% if a.features.mailbox %}<input type="hidden" name="feature_mailbox" value="on">{% endif %}{% endif %}
-      {% if shared_feature %}<label class="check"><input type="checkbox" name="feature_shared" value="on"{% if a.features.shared %} checked{% endif %}> <span>Shared with me <span class="muted hint">what paired people share with you</span></span></label>{% else %}{% if a.features.shared %}<input type="hidden" name="feature_shared" value="on">{% endif %}{% endif %}
+      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Mailbox <span class="muted hint">messages with your other assistants</span></span></label>{% endif %}
+      {% if shared_feature %}<label class="check"><input type="checkbox" name="feature_shared" value="on"{% if a.features.shared %} checked{% endif %}> <span>Shared with me <span class="muted hint">what paired people share with you</span></span></label>{% endif %}
     </fieldset>
     <button type="submit">Save<span class="sr-only"> what else {{ a.name }} can use</span></button>
   </form>

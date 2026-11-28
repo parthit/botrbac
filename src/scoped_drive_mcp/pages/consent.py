@@ -4,6 +4,7 @@
 
 import hmac
 import html
+import logging
 import secrets
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
@@ -16,6 +17,8 @@ from ..auth import current_actor
 from ..mcp_oauth import APP_ROLES, DEFAULT_APP_ROLE, SCOPE, AuthorizeError, QueryMapping
 from ..policy import FEATURES
 from .kit import FormHandler, Handler, Kit
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,8 @@ def consent_pages(kit: Kit) -> ConsentPages:
                             await blocking(ctx.shared_with_me.overview, signed_in)
                         )
                     except Exception:
+                        # Only the box's starting state depends on this: leave it unticked.
+                        logger.exception("shared with me lookup failed on the consent page")
                         shared_default = False
             consent_id = secrets.token_urlsafe(16)
             request.session["mcp_auth"] = {**pending.to_dict(), "consent_id": consent_id}
