@@ -629,9 +629,11 @@ def test_audit_fields_are_capped(capsys) -> None:
     from scoped_drive_mcp.audit import audit_auth_failure, audit_owner
 
     audit_auth_failure("bad_token", "/mcp/" + "x" * 10_000)
-    audit_owner("grant", file_id="f" * 10_000, label="n" * 10_000, count=3)
+    audit_owner("grant", file_id="f" * 10_000, client="n" * 10_000, label="x", count=3)
     auth, owner = (json.loads(line) for line in capsys.readouterr().out.splitlines()[-2:])
     assert len(auth["path"]) <= 200 and auth["path"].startswith("/mcp/")
     assert len(owner["file_id"]) <= 200
-    assert len(owner["label"]) <= 200
+    assert len(owner["client"]) <= 200
+    # Names are for the person's own Activity page, never the server log.
+    assert "label" not in owner
     assert owner["count"] == 3

@@ -56,6 +56,7 @@ src/scoped_drive_mcp/
     common.py                   errors, limits, key names and helpers they share
   wake.py                     the HTTPS ping that wakes a paired assistant (host allowlist, pinned address)
   external.py                 what a paired person's assistants may read or edit (the Sharing list)
+  untrusted.py                markers around other people's text that the text cannot forge
   shared_sources.py           "Shared with me" as a browsable tree for the dashboard
   drops.py / drop_storage.py  sending a file to a paired person / where its bytes wait (store or Vercel Blob)
 

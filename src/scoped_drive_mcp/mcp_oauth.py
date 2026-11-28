@@ -33,7 +33,15 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
-from .auth import ROLE_PATH_PARAM, ROLE_SLUG, Principal, hash_token, role_metadata_url
+from .audit import app_tag, audit_owner
+from .auth import (
+    ROLE_PATH_PARAM,
+    ROLE_SLUG,
+    Principal,
+    current_actor,
+    hash_token,
+    role_metadata_url,
+)
 from .config import Role
 from .policy import FEATURES, tools_off
 from .ratelimit import allow, ip_identity
@@ -935,7 +943,7 @@ class McpOAuth:
             )
         )
         for grant in mine[:excess]:
-            self.revoke(grant.id, email)
+            self.revoke(grant.id, email, reason="evicted")
 
     # ---- authorize -------------------------------------------------------
 
@@ -1109,7 +1117,7 @@ class McpOAuth:
             # A code presented twice may have been stolen: end whatever the first use got.
             used = self.store.get(_code_used_key(code_digest))
             if used:
-                self.revoke(used)
+                self.revoke(used, reason="code_reuse")
             raise TokenError("invalid_grant", "code is invalid or expired")
         try:
             saved = json.loads(raw)
@@ -1135,7 +1143,7 @@ class McpOAuth:
                 raise TokenError("invalid_grant", "PKCE verification failed")
         except TokenError:
             # The code is spent, so this grant can never get tokens. Do not leave it listed.
-            self.revoke(grant.id)
+            self.revoke(grant.id, reason="bad_code_exchange")
             raise
         grant.code_hash = None
         self.store.set(_code_used_key(code_digest), grant.id, ex=CODE_TTL)
@@ -1158,7 +1166,8 @@ class McpOAuth:
         if raw is None:
             retired = self.store.get(_retired_key(digest))
             if retired:
-                self.revoke(retired)
+                # A refresh token used twice: one of the two copies was stolen.
+                self.revoke(retired, reason="refresh_reuse")
             raise TokenError("invalid_grant", "refresh token is not valid")
         try:
             saved = json.loads(raw)
@@ -1176,7 +1185,7 @@ class McpOAuth:
         ):
             if grant is not None and grant.refresh_hash is not None:
                 if not _same(grant.refresh_hash, digest):
-                    self.revoke(grant.id)
+                    self.revoke(grant.id, reason="refresh_mismatch")
                 else:
                     # The token itself is current; the request was wrong (another client's
                     # id, or Drive is disconnected right now). Put it back so the grant is
@@ -1187,7 +1196,7 @@ class McpOAuth:
             raise TokenError("invalid_grant", "refresh token is not valid")
         remaining = grant.refresh_until - int(time.time())
         if remaining <= 0:
-            self.revoke(grant.id)
+            self.revoke(grant.id, reason="expired")
             raise TokenError("invalid_grant", "refresh token is expired")
         self.store.set(_retired_key(digest), grant.id, ex=remaining)
         grant.refresh_hash = None
@@ -1200,7 +1209,7 @@ class McpOAuth:
         if remaining is None:
             remaining = grant.refresh_until - now
         if remaining <= 0:
-            self.revoke(grant.id)
+            self.revoke(grant.id, reason="expired")
             raise TokenError("invalid_grant", "refresh token is expired")
         access = secrets.token_urlsafe(32)
         refresh = secrets.token_urlsafe(32)
@@ -1308,7 +1317,40 @@ class McpOAuth:
         views.sort(key=lambda item: item.created_at, reverse=True)
         return views
 
-    def revoke(self, grant_id: str, email: str | None = None) -> bool:
+    def revoke_all(self, email: str) -> tuple[int, int]:
+        """End every connection of `email`, including approvals whose code has not been
+        exchanged yet (list_grants does not show those). Returns (ended, failed): one
+        failure does not stop the rest.
+
+        A full scan of the grants hash, like `_make_room` and `prune`: grants are not
+        indexed by account. It runs only when a person presses Disconnect all. A second
+        pass catches a connection approved while the first one ran (an approval in
+        another tab); one approved after both passes is a new choice the person made."""
+        ended = failed = 0
+        for _ in range(2):
+            found = 0
+            for grant_id, raw in self.store.hgetall(GRANTS_KEY).items():
+                try:
+                    if OAuthGrant.from_json(raw).email != email:
+                        continue
+                except (ValueError, KeyError, TypeError):
+                    continue
+                found += 1
+                try:
+                    if self.revoke(grant_id, email):
+                        ended += 1
+                except Exception:
+                    failed += 1
+                    logging.getLogger(__name__).warning("revoke_all: one connection failed")
+            if found == 0 or failed:
+                break
+        return ended, failed
+
+    def revoke(self, grant_id: str, email: str | None = None, *, reason: str = "") -> bool:
+        """End a connection. `reason` says why when the server ended it on its own
+        (a reused token, expiry, too many connections): that is written to the
+        person's Activity, since otherwise the app would just disappear. A person's own
+        Disconnect (no reason) is audited where they clicked it."""
         if _GRANT_ID.fullmatch(grant_id) is None:
             return False
         grant = self._grant(grant_id)
@@ -1330,12 +1372,31 @@ class McpOAuth:
         self.store.delete(_label_key(grant.id))
         self.store.delete(_features_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
+        if reason:
+            self._audit_ended(grant, reason)
         if self.on_revoke is not None:
             try:
                 self.on_revoke(grant.email, grant.id)
             except Exception:  # noqa: BLE001 - the grant is gone either way
                 logging.getLogger(__name__).exception("oauth_on_revoke_failed")
         return True
+
+    @staticmethod
+    def _audit_ended(grant: "OAuthGrant", reason: str) -> None:
+        theft = reason in ("refresh_reuse", "code_reuse", "refresh_mismatch")
+        token = current_actor.set(grant.email)
+        try:
+            audit_owner(
+                "oauth_ended",
+                "deny" if theft else "allow",
+                reason=reason,
+                app=app_tag(grant.id),
+                client=grant.client_name,
+            )
+        except Exception:  # noqa: BLE001 - the connection is ended either way
+            logging.getLogger(__name__).warning("could not audit an ended connection")
+        finally:
+            current_actor.reset(token)
 
     def role_of(self, grant: "OAuthGrant") -> str:
         """The role this app's calls run with. A side key, like last-use, so changing it

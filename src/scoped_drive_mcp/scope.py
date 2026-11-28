@@ -381,12 +381,19 @@ class ScopeGuard:
         cap refuses (fails closed). A parent the signed-in account cannot see ends that
         chain, as it does in the scope walk: nothing above it can be known."""
         validate_drive_id(folder_id)
-        allowed = self.allowed()
-        if folder_id in allowed:
+        # Under a named role allowed() is only the role's items, but a role only narrows:
+        # an item the owner allowed on its own (or the admin's root) is protected too.
+        items = set(self.allowed())
+        if self._protected is not None:
+            items |= set(self._protected())
+        root = self._root_for_actor()
+        if root:
+            items.add(root)
+        if folder_id in items:
             raise ForbiddenError(PROTECTED)
         # Folders whose whole ancestry is known not to contain folder_id.
         cleared: set[str] = set()
-        for item_id in allowed:
+        for item_id in sorted(items):
             ref = self._fetch(item_id)
             if ref is None or ref.trashed or ref.id != item_id:
                 continue

@@ -448,7 +448,8 @@ def test_sharing_logs_as_sharing_not_as_an_own_assistant_grant(people, memstore)
     _app_, owner, _eve, _token = people
     assert post(owner, "/sharing/add", file_id="loose-doc").status_code == 303
     assert post(owner, "/sharing/remove", file_id="loose-doc").status_code == 303
-    log = [json.loads(r) for r in memstore.lrange(KEY_PREFIX + "activity", 0, -1)]
+    # Dashboard actions are kept on the changes list (store.records.ActivityLog).
+    log = [json.loads(r) for r in memstore.lrange(KEY_PREFIX + "activity:changes", 0, -1)]
     actions = [r.get("action") for r in log if r.get("event") == "owner"]
     assert "share_external" in actions and "unshare_external" in actions
     assert "grant" not in actions and "revoke" not in actions

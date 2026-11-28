@@ -10,7 +10,7 @@ import anyio.to_thread
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
-from .audit import audit
+from .audit import app_tag, audit
 from .auth import Principal, current_principal
 from .config import Role
 from .drive_client import BotNotConnectedError
@@ -198,6 +198,18 @@ OPT_IN_TOOLS: dict[Role, frozenset[str]] = {
 _OPT_IN_NAMES: frozenset[str] = frozenset().union(*OPT_IN_TOOLS.values())
 
 # Tools whose result is a new item: its id goes into the audit record.
+# Calls that change something, or reach someone, for which every allowed call is kept on
+# Activity: they are never folded or counted against the app's hourly row budget, so a
+# bot cannot hide them behind a burst of reads (store.records.ActivityLog).
+SENDING_TOOLS: frozenset[str] = frozenset(
+    {"request_access", "request_link", "send_message", "reply", "set_webhook", "clear_webhook"}
+)
+
+
+def changes_something(tool: str) -> bool:
+    return tool != "append_chunk" and (tool not in VIEWER_TOOLS or tool in SENDING_TOOLS)
+
+
 NEW_ITEM_TOOLS: frozenset[str] = frozenset(
     {"finish_upload", "save_export", "onedrive_create_folder", "onedrive_upload_file"}
 )
@@ -334,6 +346,9 @@ def require(
                 "token_name": principal.token_name if principal else None,
                 "role": str(principal.role) if principal else None,
             }
+            if principal and principal.grant_id:
+                # Which connection made the call: two apps may register the same name.
+                who["app"] = app_tag(principal.grant_id)
             named_role = principal.agent_role if principal else None
             if named_role:
                 who["agent_role"] = named_role

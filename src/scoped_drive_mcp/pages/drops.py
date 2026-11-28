@@ -333,6 +333,7 @@ def drop_pages(kit: Kit) -> DropPages:
                 )
             elif action == "dismiss":
                 await blocking(ctx.drops.dismiss, drop_id)
+                audit_owner("drop_deleted", drop=drop_id)
                 flash(request, "ok", "Deleted.")
             else:
                 return render(request, "error.html", 404, message="That page is not available.")

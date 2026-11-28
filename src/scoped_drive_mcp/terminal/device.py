@@ -8,6 +8,7 @@ accepted only on /api/terminal/*: /mcp never looks them up.
 
 import hashlib
 import json
+import logging
 import secrets
 import time
 from collections.abc import Callable
@@ -225,7 +226,10 @@ class Terminals:
             return None
         digest = _sha(refresh_token)
         terminal_id = self.store.get(f"term:rt:{digest}")
-        terminal = self.get(terminal_id) if terminal_id else None
+        if not terminal_id:
+            self._note_reuse(digest)
+            return None
+        terminal = self.get(terminal_id)
         if terminal is None or not self._live(terminal):
             return None
         if self.store.get(self._rt_key(terminal.id)) != digest:
@@ -233,10 +237,35 @@ class Terminals:
         if not self.signed_in(terminal.email):
             return None
         # Each refresh token works once, even for two requests at the same moment.
-        if not self.store.set_if_absent(f"term:rt:{digest}:used", "1", ex=REFRESH_TTL):
+        if not self.store.set_if_absent(f"term:rt:{digest}:used", terminal.id, ex=REFRESH_TTL):
+            self._note_reuse(digest)
             return None
         self.store.delete(f"term:rt:{digest}")
         return self._issue(terminal)
+
+    def _note_reuse(self, digest: str) -> None:
+        """A refresh token that already worked once came back: either a copy of it was
+        taken, or the program retried. Written to the person's Activity (once an hour
+        per terminal) so they can disconnect the terminal; the token is refused."""
+        terminal_id = self.store.get(f"term:rt:{digest}:used")
+        terminal = self.get(terminal_id) if terminal_id and terminal_id != "1" else None
+        if terminal is None:
+            return
+        from ..audit import audit_owner
+        from ..auth import current_actor
+
+        token = current_actor.set(terminal.email)
+        try:
+            audit_owner(
+                "terminal_refresh_reuse",
+                "deny",
+                reason="refresh_reuse",
+                terminal=terminal.id,
+            )
+        except Exception:  # noqa: BLE001 - the token is refused either way
+            logging.getLogger(__name__).warning("could not audit a reused terminal token")
+        finally:
+            current_actor.reset(token)
 
     def resolve(self, access_token: str) -> Terminal | None:
         if not access_token.startswith("brt_at_"):

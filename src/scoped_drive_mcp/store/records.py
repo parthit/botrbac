@@ -2,6 +2,7 @@
 reads and hidden files."""
 
 import hashlib
+import heapq
 import json
 import logging
 from collections.abc import Callable
@@ -16,6 +17,7 @@ from .backends import (
 from .keys import (
     ACCESS_EDIT,
     ACCESS_READ,
+    ACTIVITY_CHANGES_KEY,
     ACTIVITY_KEY,
     ACTIVITY_MAX,
     ALLOWLIST_KEY,
@@ -368,8 +370,41 @@ class TokenVault:
 # ---- activity log -----------------------------------------------------------
 
 
+# At most this many read or refused rows an hour, and a day, from one connected app or
+# one paired person (see ActivityLog._within_budget).
+APP_ROWS_PER_HOUR = 120
+APP_ROWS_PER_DAY = 300
+_DAY = 24 * 3600
+# The fields that name what a call was about, most specific first.
+_TARGET_FIELDS = (
+    "file_id",
+    "folder_id",
+    "page_id",
+    "item_id",
+    "parent_id",
+    "request_id",
+    "upload_id",
+    "link_id",
+    "msg_id",
+    "drop_id",
+)
+
+
+def _is_change(record: dict[str, Any]) -> bool:
+    """Rows that must outlive any amount of reading: the person's own dashboard actions
+    and every allowed call that changed something or reached someone (policy marks
+    those `kind: change`)."""
+    if record.get("event") == "owner":
+        return True
+    return record.get("kind") == "change" and record.get("decision") == "allow"
+
+
 class ActivityLog:
-    """The last ACTIVITY_MAX audit records, newest first."""
+    """The last ACTIVITY_MAX audit records, newest first.
+
+    Two lists: changes (writes, sends, dashboard actions) and everything else (reads,
+    refusals). Reading and refusals are what a steered bot can produce in bulk, so only
+    they are folded and budgeted, and they can never push a change out."""
 
     def __init__(self, store: KeyValueStore, max_items: int = ACTIVITY_MAX):
         self.store = store
@@ -378,48 +413,62 @@ class ActivityLog:
     def __call__(self, record: dict[str, Any]) -> None:
         if not self._worth_keeping(record):
             return
-        self.store.lpush(ACTIVITY_KEY, json.dumps(record, separators=(",", ":")))
-        self.store.ltrim(ACTIVITY_KEY, 0, self.max_items - 1)
+        self._push(ACTIVITY_CHANGES_KEY if _is_change(record) else ACTIVITY_KEY, record)
+
+    def _push(self, key: str, record: dict[str, Any]) -> None:
+        self.store.lpush(key, json.dumps(record, separators=(",", ":")))
+        self.store.ltrim(key, 0, self.max_items - 1)
 
     def _worth_keeping(self, record: dict[str, Any]) -> bool:
-        """The list holds ACTIVITY_MAX rows, so rows anyone can produce in bulk must not
-        be able to push the others out. Every record still goes to the server log.
+        """Rows anyone can produce in bulk must not be able to push the others out.
+        Every record still goes to the server log.
 
-        A rejected bearer token is kept once an hour per reason. A paired person's call
-        is kept once an hour per tool and outcome (and per file when it was allowed), so
-        repeating a call does not bury the record of an earlier one.
+        A rejected bearer token is kept once an hour per reason. A read or refusal by one
+        of the person's apps, or by a paired person, is kept once an hour per tool,
+        outcome and item, and each of them has an hourly and daily row budget; one row
+        says when it ran out. Changes are always kept.
 
         A chunked upload sends hundreds of pieces. Each accepted piece goes to the server
         log only; its start, its finish and any refused piece are kept here."""
         if record.get("tool") == "append_chunk" and record.get("decision") == "allow":
             return False
-        guest = record.get("guest")
         if record.get("event") == "auth":
-            parts = ["auth", str(record.get("reason"))]
-        elif (
-            record.get("event") == "owner"
-            and record.get("decision") == "deny"
-            and current_actor.get() is None
-        ):
-            # A refusal with nobody signed in (a sign-in by an account that is not let in)
-            # lands in the admin's list, and anyone can cause one: once an hour per kind.
-            parts = [
-                "nobody",
-                str(record.get("action")),
-                str(record.get("decision")),
-                str(record.get("reason")),
-            ]
-        elif guest:
-            allowed = record.get("decision") == "allow"
-            parts = [
-                str(guest),
-                str(record.get("tool")),
-                str(record.get("decision")),
-                str(record.get("reason")),
-                str(record.get("file_id") or record.get("folder_id") or "") if allowed else "",
-            ]
-        else:
+            return self._first_this_hour(["auth", str(record.get("reason"))])
+        if record.get("event") == "owner" and record.get("decision") == "deny":
+            if current_actor.get() is None:
+                # A refusal with nobody signed in (a sign-in by an account that is not let
+                # in) lands in the admin's list, and anyone can cause one.
+                parts = ["nobody", str(record.get("action")), str(record.get("reason"))]
+            else:
+                # Refusals the server noticed for a signed-in person (a reused token, a
+                # form from another site): once an hour per kind and app.
+                parts = [
+                    "refused",
+                    str(record.get("action")),
+                    str(record.get("reason")),
+                    str(record.get("app") or record.get("terminal") or ""),
+                ]
+            return self._first_this_hour(parts)
+        if record.get("event") != "tool_call" or _is_change(record):
             return True
+        who = str(record.get("guest") or record.get("app") or record.get("token_name") or "")
+        target = next(
+            (str(record[k]) for k in _TARGET_FIELDS if isinstance(record.get(k), str)), ""
+        )
+        if record.get("guest") and record.get("decision") != "allow":
+            # A paired person's refused calls on made-up ids fold together.
+            target = ""
+        parts = [
+            "call",
+            who,
+            str(record.get("tool")),
+            str(record.get("decision")),
+            str(record.get("reason")),
+            target,
+        ]
+        return self._first_this_hour(parts) and self._within_budget(who, record)
+
+    def _first_this_hour(self, parts: list[str]) -> bool:
         digest = hashlib.sha256("\x00".join(parts).encode()).hexdigest()[:32]
         try:
             return self.store.set_if_absent(f"activity_seen:{digest}", "1", ex=GUEST_ROW_EVERY)
@@ -428,14 +477,57 @@ class ActivityLog:
             logger.warning("activity repeat check failed; keeping the row", exc_info=True)
             return True
 
-    def recent(self, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
+    def _within_budget(self, who: str, record: dict[str, Any]) -> bool:
+        digest = hashlib.sha256(who.encode()).hexdigest()[:32]
+        try:
+            hour = self.store.incr(f"activity_app:{digest}", ex=GUEST_ROW_EVERY)
+            day = self.store.incr(f"activity_app_day:{digest}", ex=_DAY)
+        except Exception:
+            logger.warning("activity budget check failed; keeping the row", exc_info=True)
+            return True
+        if hour <= APP_ROWS_PER_HOUR and day <= APP_ROWS_PER_DAY:
+            return True
+        first_over = (hour == APP_ROWS_PER_HOUR + 1 and day <= APP_ROWS_PER_DAY) or (
+            day == APP_ROWS_PER_DAY + 1 and hour <= APP_ROWS_PER_HOUR
+        )
+        if first_over:
+            # Said once, on the changes list, so the note itself cannot be pushed out.
+            self._push(
+                ACTIVITY_CHANGES_KEY,
+                {
+                    "ts": record.get("ts"),
+                    "event": "owner",
+                    "action": "activity_limited",
+                    "token_name": record.get("token_name"),
+                    "guest": record.get("guest"),
+                    "app": record.get("app"),
+                    "decision": "deny",
+                    "reason": "too_many_calls",
+                },
+            )
+        return False
+
+    def _read(self, key: str, limit: int) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        for raw in self.store.lrange(ACTIVITY_KEY, 0, limit - 1):
+        for raw in self.store.lrange(key, 0, limit - 1):
             try:
                 out.append(json.loads(raw))
             except ValueError:
                 continue
         return out
+
+    def recent(self, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
+        """Newest first: up to `limit` changes and up to `limit` other rows, so neither
+        kind can crowd the other out of what the page shows."""
+        # Each list is already newest first; merging keeps each one's own order.
+        return list(
+            heapq.merge(
+                self._read(ACTIVITY_CHANGES_KEY, limit),
+                self._read(ACTIVITY_KEY, limit),
+                key=lambda r: str(r.get("ts") or ""),
+                reverse=True,
+            )
+        )
 
 
 FIRST_READS_KEY = "first_reads"
