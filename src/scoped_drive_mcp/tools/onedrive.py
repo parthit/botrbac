@@ -1,15 +1,17 @@
 """OneDrive tools. Registered only when OneDrive is set up."""
 
+from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from ..onedrive import OneDriveService
-from ..policy import require
 from .common import DESTRUCTIVE, READ_ONLY, WRITE, _run
 
 
-def register(mcp: FastMCP, onedrive: OneDriveService | None) -> None:
+def register(mcp: FastMCP, require: Callable[..., Any], onedrive: OneDriveService | None) -> None:
+    """`require` is policy.require with the server's denial handlers: a refused item
+    answers with an approval link (access_required) when access requests are set up."""
     if onedrive is not None:
         onedrive_service = onedrive
 

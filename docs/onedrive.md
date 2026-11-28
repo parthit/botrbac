@@ -10,7 +10,8 @@ Microsoft has no per-file permission for personal accounts, so Bot RBAC asks for
 lets the server read and change the person's whole OneDrive. What assistants may reach is held to **Bot
 RBAC's OneDrive allowlist**: on **Files → From OneDrive**, the person browses their drive and chooses
 **Allow** on files and folders. Everything inside an allowed folder is included, like a file in an allowed
-Drive folder. Reads and writes pass the same check.
+Drive folder. Reads and writes pass the same check. Everything allowed, from Google Drive, OneDrive and
+Notion, is listed on **Files → Allowed**, where it can be removed.
 
 - The top of the drive can't be allowed, so the whole drive is never shared by one click.
 - Shortcuts to other people's items ("Add to my files") are not listed, followed or written to.
@@ -64,7 +65,27 @@ version that was checked (`If-Match`), so a change made meanwhile answers `onedr
 being written over.
 
 The tools are registered only when OneDrive is configured on the server. An item that is not allowed and one
-that does not exist get the same `onedrive_not_allowed` answer.
+that does not exist get the same answer (below).
+
+## Access requests
+
+As with Google Drive, an assistant that is refused an item gets `access_required` with an approval link
+(`"service": "onedrive"`), and `request_access(..., service="onedrive")` asks for an item by id or by
+description. A request that names an item is answered on its approval page: the person allows the item or
+the folder it is in (not the top of the drive, and nothing else), checked against OneDrive again when they
+approve, and the assistant retries. A request without an id is answered on **Files → From OneDrive**, which
+then shows **Allow** buttons that approve that request, and **Approve with this** on items already allowed
+(or inside an allowed folder), which approves it without changing the list. `request_access` for an item
+that is allowed or inside an allowed folder answers `already_allowed` and files nothing; that check asks
+OneDrive. Requests are listed on **Requests** with the Drive ones, and a denial holds for 24 hours for that
+item and assistant, until the person allows or removes it.
+
+No OneDrive call is made when a refused tool call files a request, and a missing item files a request too,
+so the answer still doesn't tell an assistant whether an item exists; `request_access` with an id also
+answers a missing item and a not-allowed one the same way. The approval page looks the item up and offers
+only Deny when it can't be found. A named assistant role gets no request (as for Drive): the plain
+`onedrive_not_allowed` refusal. Without `APP_BASE_URL` there are no requests, and every refusal is
+`onedrive_not_allowed`.
 
 ## Set it up (operator)
 

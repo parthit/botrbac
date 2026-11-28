@@ -24,9 +24,9 @@
 </div>
 {% else %}
 {% if onedrive_can_write %}
-<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder. Assistants that may edit can also add files and folders there, and change or rename what is inside. They can’t delete, move or share anything.{% if account %} Account: <b>{{ account }}</b>.{% endif %}</p>
+<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder. Assistants that may edit can also add files and folders there, and change or rename what is inside. They can’t delete, move or share anything.{% if account %} Account: <b>{{ account }}</b>.{% endif %} Everything you’ve allowed is listed on the <a href="/files?tab=allowed">Allowed</a> tab.</p>
 {% else %}
-<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder.{% if account %} Account: <b>{{ account }}</b>.{% endif %}</p>
+<p class="muted lead">Your assistants can read the OneDrive files and folders you <b>Allow</b> here, and everything inside an allowed folder.{% if account %} Account: <b>{{ account }}</b>.{% endif %} Everything you’ve allowed is listed on the <a href="/files?tab=allowed">Allowed</a> tab.</p>
 <div class="card" id="onedrive-read-only">
   <p>OneDrive is connected for reading only, so no assistant can add or change files. To let assistants that may edit do that inside what you allow, connect OneDrive again and approve editing. Your allowed list is kept. If you chose reading only on purpose, leave it as it is.</p>
   <form method="post" action="/connect/onedrive">
@@ -37,39 +37,22 @@
 </div>
 {% endif %}
 
-<h2>Allowed <span class="count neutral">{{ allowed | length }}</span></h2>
-{% if allowed %}
-<table class="cards" data-list>
-  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>Action</th></tr></thead>
-  <tbody>
-  {% for e in allowed %}
-  <tr data-row>
-    <td data-label="Name">{% if e.mime_type == "onedrive/folder" %}<a href="/files?tab=onedrive&amp;folder={{ e.id | urlencode }}">{{ e.name or "Untitled" }}</a>{% else %}{{ e.name or "Untitled" }}{% endif %}</td>
-    <td data-label="Type">{{ "Folder" if e.mime_type == "onedrive/folder" else "File" }}</td>
-    <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
-    <td data-label="Action">
-      <form class="inline" method="post" action="/onedrive/remove" data-confirm="Stop assistants using this item{% if e.mime_type == 'onedrive/folder' %} and everything inside it{% endif %}?" data-confirm-action="Remove">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="file_id" value="{{ e.id }}">
-        <button class="danger" type="submit">Remove<span class="sr-only"> {{ e.name }}</span></button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="muted" id="onedrive-none-allowed">Nothing from OneDrive is allowed yet. Choose <b>Allow</b> on a file or folder below.</p>
-{% endif %}
 
+{% set rq = ("&request=" ~ (picking.id | urlencode)) if picking else "" %}
+{% if picking %}
+<div class="card" id="onedrive-picking" role="status">
+  <p><b>Answering a request:</b> {{ request_headline(picking, None, None) }} Choose <b>Allow</b> on the item to approve it. <a href="/requests/{{ picking.id }}">Back to the request</a></p>
+</div>
+{% endif %}
 <h2>{% if query %}Search results{% elif listing.folder %}{{ listing.folder.name }}{% else %}Your OneDrive{% endif %}</h2>
 <form method="get" action="/files" class="actions" role="search">
   <input type="hidden" name="tab" value="onedrive">
+  {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
   <label class="sr-only" for="oq">Search OneDrive</label>
   <input id="oq" type="search" name="q" value="{{ query }}" placeholder="Search your OneDrive">
   <button type="submit">Search</button>
-  {% if query or listing.folder %}<a href="/files?tab=onedrive">Back to the top</a>{% endif %}
-  {% if listing.up %}<a href="/files?tab=onedrive&amp;folder={{ listing.up | urlencode }}">Up one folder</a>{% endif %}
+  {% if query or listing.folder %}<a href="/files?tab=onedrive{{ rq }}">Back to the top</a>{% endif %}
+  {% if listing.up %}<a href="/files?tab=onedrive&amp;folder={{ listing.up | urlencode }}{{ rq }}">Up one folder</a>{% endif %}
 </form>
 {% if listing.folder and listing.folder.allowed %}<p class="pill ok" id="onedrive-folder-allowed"><span aria-hidden="true">✓</span> This folder is allowed, with everything inside it.</p>
 {% elif listing.folder and listing.folder.covered_by %}<p class="pill ok"><span aria-hidden="true">✓</span> Allowed through “{{ listing.folder.covered_by }}”</p>{% endif %}
@@ -81,12 +64,26 @@
   <tbody>
   {% for v in listing["items"] %}
   <tr>
-    <td data-label="Name">{% if v.type == "folder" %}<a href="/files?tab=onedrive&amp;folder={{ v.id | urlencode }}">{{ v.name }}</a>{% else %}{{ v.name }}{% endif %}</td>
+    <td data-label="Name">{% if v.type == "folder" %}<a href="/files?tab=onedrive&amp;folder={{ v.id | urlencode }}{{ rq }}">{{ v.name }}</a>{% else %}{{ v.name }}{% endif %}</td>
     <td data-label="Type">{{ "Folder" if v.type == "folder" else ("Notebook" if v.type == "package" else "File") }}</td>
     <td data-label="Modified" class="muted">{{ v.modified | when if v.modified else "—" }}</td>
     <td data-label="Action">
       {% if v.allowed %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed</span>
       {% elif v.covered_by %}<span class="pill ok"><span aria-hidden="true">✓</span> Allowed through “{{ v.covered_by }}”</span>
+      {% endif %}
+      {% if picking and (v.allowed or v.covered_by) %}
+      <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="target_id" value="{{ v.id }}">
+        <button type="submit">Approve with this<span class="sr-only"> {{ v.name }}</span></button>
+      </form>
+      {% elif v.allowed or v.covered_by %}
+      {% elif picking %}
+      <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="target_id" value="{{ v.id }}">
+        <button class="primary" type="submit">Allow<span class="sr-only"> {{ v.name }}</span></button>
+      </form>
       {% else %}
       <form class="inline" method="post" action="/onedrive/allow">
         <input type="hidden" name="csrf" value="{{ csrf }}">

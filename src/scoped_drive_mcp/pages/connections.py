@@ -13,6 +13,7 @@ from itsdangerous import BadSignature
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
+from ..access import PENDING, SOURCE_ONEDRIVE
 from ..audit import audit_owner
 from ..auth import current_actor
 from ..connections import get_connection
@@ -49,6 +50,10 @@ class ConnectionPages:
     onedrive_allow: FormHandler
     onedrive_remove: FormHandler
     drive_row_connected: Callable[[list[dict[str, Any]]], bool]
+
+
+# Remove on the Allowed tab returns there; nothing else is accepted as a destination.
+ALLOWED_TAB = "/files?tab=allowed"
 
 
 def connection_pages(
@@ -361,7 +366,7 @@ def connection_pages(
         if ctx.notion is None:
             return refused(request, 404, "Notion is not set up on this server.")
         entry = await blocking(ctx.notion.remove, form.get("page_id", ""))
-        back = "/files?tab=notion"
+        back = ALLOWED_TAB if form.get("next") == ALLOWED_TAB else "/files?tab=notion"
         if entry is None:
             return action_done(request, "ok", "That page was not allowed.", back, changed=False)
         audit_owner("notion_remove", page_id=entry.id, name=entry.name)
@@ -562,9 +567,18 @@ def connection_pages(
         """Files → From OneDrive: what assistants may read, and the person's drive."""
         query = (request.query_params.get("q") or "").strip()[:200]
         folder = (request.query_params.get("folder") or "").strip()[:256]
+        rid = (request.query_params.get("request") or "").strip()[:64]
 
         def gather() -> dict[str, Any]:
             record = ctx.onedrive_record()
+            # Picking the item for an assistant's request: Allow answers that request. Only
+            # for a request without an id: one that names an item is answered on its own
+            # page, with that item or its folder (pages/requests.py approve_onedrive).
+            picking = ctx.requests.get(rid) if rid else None
+            if picking is not None and not (
+                picking.is_onedrive and picking.status == PENDING and not picking.file_id
+            ):
+                picking = None
             allowed = sorted(
                 ctx.onedrive.allowlist.entries().values(), key=lambda e: e.name.lower()
             )
@@ -575,6 +589,7 @@ def connection_pages(
                 "allowed": allowed,
                 "listing": {"folder": None, "up": None, "items": []},
                 "onedrive_error": None,
+                "picking": picking,
             }
             if record is None:
                 return out
@@ -592,12 +607,15 @@ def connection_pages(
                 "tab": "onedrive",
                 **({"folder": folder} if folder else {}),
                 **({"q": query} if query else {}),
+                **({"request": data["picking"].id} if data["picking"] else {}),
             }
         )
         return render(request, "onedrive.html", query=query, next=here, **data)
 
     def onedrive_back(form: dict[str, str]) -> str:
-        """Where an Allow or Remove returns to: the same OneDrive folder, if any."""
+        """Where an Allow or Remove returns to: the Allowed tab, or the same OneDrive folder."""
+        if form.get("next") == ALLOWED_TAB:
+            return ALLOWED_TAB
         folder = normalize_onedrive_id(form.get("folder") or "")
         return f"/files?tab=onedrive&folder={quote(folder)}" if folder else "/files?tab=onedrive"
 
@@ -620,6 +638,7 @@ def connection_pages(
                 back,
                 changed=False,
             )
+        await blocking(ctx.requests.clear_denials, entry.id, SOURCE_ONEDRIVE)
         audit_owner("onedrive_allow", file_id=entry.id, name=entry.name)
         return action_done(request, "ok", f"Allowed “{entry.name}” for your assistants.", back)
 
@@ -630,6 +649,7 @@ def connection_pages(
         back = onedrive_back(form)
         if entry is None:
             return action_done(request, "ok", "That item was not allowed.", back, changed=False)
+        await blocking(ctx.requests.clear_denials, entry.id, SOURCE_ONEDRIVE)
         audit_owner("onedrive_remove", file_id=entry.id, name=entry.name)
         return action_done(
             request, "ok", f"Removed “{entry.name}”. Assistants can no longer read it.", back

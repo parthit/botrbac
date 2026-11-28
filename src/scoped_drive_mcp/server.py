@@ -201,7 +201,8 @@ def create_mcp(
     )
 
     handler = access.handle_denial if access is not None else None
-    guarded = partial(require, on_scope_denied=handler)
+    onedrive_handler = access.onedrive_denial if access is not None else None
+    guarded = partial(require, on_scope_denied=handler, on_onedrive_denied=onedrive_handler)
     box = mailbox or Mailbox(MemoryStore())
     sessions = uploads or UploadSessions(MemoryStore(), service.max_bytes)
     run_shared = shared_tools.shared_runner(shares)
@@ -214,7 +215,7 @@ def create_mcp(
     upload_tools.register(mcp, guarded, service, sessions, run_shared, onedrive)
     drop_tools.register(mcp, drops)
     notion_tools.register(mcp, notion, notion_create)
-    onedrive_tools.register(mcp, onedrive)
+    onedrive_tools.register(mcp, guarded, onedrive)
 
     return mcp
 
@@ -750,6 +751,7 @@ def build_app(
         # exist, so the approval page offers to pick it.
         return True
 
+    onedrive = _onedrive_service(settings, vault, actor_kv, onedrive_api_factory, onedrive_oauth)
     access = (
         AccessService(
             requests,
@@ -760,12 +762,12 @@ def build_app(
             sharer_of=sharer_of,
             limited_sign_in=limited_sign_in,
             max_pending=settings.max_pending_requests,
+            onedrive_allowed=onedrive.is_covered if onedrive is not None else None,
         )
         if settings.app_base_url
         else None
     )
     notion = _notion_service(settings, vault, actor_kv, notion_api_factory, notion_oauth)
-    onedrive = _onedrive_service(settings, vault, actor_kv, onedrive_api_factory, onedrive_oauth)
     # Upload links (start_upload with direct): the same Blob store and signer as held
     # files, inside the same free-tier budget.
     direct_uploads = (

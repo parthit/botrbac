@@ -392,7 +392,9 @@ gate: Microsoft's `Files.ReadWrite` reaches the person's whole drive, so the per
 call fetches the requested item (or, for a new item, the target folder) fresh from `/me/drive` (so another
 person's drive is never addressed) and walks its `parentReference` chain, capped in depth, until it reaches
 an allowed item or the top of the drive; anything else, including items that do not exist, gets the same
-`onedrive_not_allowed` answer, and no write is sent. The top of the drive can't be allowed, shortcuts to
+answer (`access_required` with an approval link, filed without a further OneDrive call, or
+`onedrive_not_allowed` where requests are off), and no write is sent. Approving a request adds only the
+requested item or its folder, checked again against the drive when the person approves. The top of the drive can't be allowed, shortcuts to
 other people's items (`remoteItem`) are never followed or written to, and a deleted allowed folder does not
 keep its contents reachable. An assistant's search asks Microsoft to look inside each allowed folder only
 (at most 25 allowed items per search), never the whole drive, and matches an allowed single file by its

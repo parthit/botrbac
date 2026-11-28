@@ -198,7 +198,7 @@ def settings_pages(
         )
 
     async def files_page(request: Request) -> Response:
-        request.state.allow_count = len(await blocking(ctx.allowlist.entries))
+        request.state.allow_count = await blocking(ctx.allowed_total)
         request.state.notion_tab = ctx.notion is not None
         request.state.onedrive_tab = ctx.onedrive is not None
         if request.query_params.get("tab") == "notion" and ctx.notion is not None:

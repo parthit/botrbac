@@ -14,7 +14,7 @@ write tools for your own files (`create_folder`, `create_doc`, `upload_file`, `u
 | `read_file(file_id)` | ✓ | ✓ | ✓ |
 | `download_file(file_id)` | ✓ | ✓ | ✓ |
 | `export_file(file_id, format?)` (Google Docs, Sheets, Slides → PDF, Office, …) | ✓ | ✓ | ✓ |
-| `request_access(description, reason, file_id?)` | ✓ | ✓ | ✓ |
+| `request_access(description, reason, file_id?, service?)` | ✓ | ✓ | ✓ |
 | `check_access_request(request_id)` | ✓ | ✓ | ✓ |
 | `request_link(invite_code?, new_invite?)` | ✓ | ✓ | ✓ |
 | `list_links()` | ✓ | ✓ | ✓ |
@@ -89,7 +89,9 @@ When a tool is refused because the item isn't shared (not because of the role), 
  "file_id": "…", "message": "This item is not on the owner's Allowed list. Show the user this approval link …"}
 ```
 
-The assistant shows you the link; after you approve, it retries (or calls `check_access_request`). An app with 50
+The assistant shows you the link; after you approve, it retries (or calls `check_access_request`). A refused
+OneDrive item answers the same way, with `"service": "onedrive"` ([onedrive.md](onedrive.md#access-requests)), and
+`request_access` takes `service="onedrive"` to ask for one. An app with 50
 requests already waiting gets `too_many_requests` instead, with no link, until you answer some.
 
 ## Saving files an assistant made

@@ -227,6 +227,8 @@ _AUDITED_ID_ARGS = (
 
 # (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
 ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]
+# The same for a OneDrive item refused with `onedrive_not_allowed`. None keeps the refusal.
+OneDriveDeniedHandler = Callable[[str, str, str | None], dict[str, Any] | None]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -322,12 +324,16 @@ def access_required_result(payload: dict[str, Any]) -> CallToolResult:
 
 
 def require(
-    tool: str, *, on_scope_denied: ScopeDeniedHandler | None = None
+    tool: str,
+    *,
+    on_scope_denied: ScopeDeniedHandler | None = None,
+    on_onedrive_denied: OneDriveDeniedHandler | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Wrap an async tool: check the caller's role, audit the call, and map errors.
 
     Role denials are plain errors. Scope denials (OutOfScopeError) become an
-    `access_required` tool error with an approval link when `on_scope_denied` is set.
+    `access_required` tool error with an approval link when `on_scope_denied` is set, and
+    so do OneDrive refusals (`onedrive_not_allowed`) when `on_onedrive_denied` is set.
     The wrapper keeps the original signature (via functools.wraps) so FastMCP still
     generates the right input schema.
     """
@@ -388,6 +394,19 @@ def require(
             except PayloadToolError as exc:
                 reason = str(exc.payload.get("error") or "error")
                 audit(tool=tool, decision="error", reason=reason, **who, **ids)
+                if reason == "onedrive_not_allowed":
+                    item_id = exc.payload.get("file_id")
+                    # A named role gets no request, as for Drive above.
+                    if on_onedrive_denied is not None and not named_role and item_id:
+                        try:
+                            payload = await anyio.to_thread.run_sync(
+                                on_onedrive_denied, str(item_id), tool, who["token_name"]
+                            )
+                        except Exception:
+                            logger.exception("could not record a OneDrive access request")
+                            payload = None
+                        if payload is not None:
+                            return access_required_result(payload)  # type: ignore[return-value]
                 return payload_error_result(tool, exc.payload)  # type: ignore[return-value]
             except ToolError as exc:
                 audit(tool=tool, decision="error", reason=str(exc), **who, **ids)

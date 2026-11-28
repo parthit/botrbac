@@ -360,6 +360,15 @@ class DashboardContext:
             return None
         return self.vault.onedrive()
 
+    def allowed_total(self, drive_count: int | None = None) -> int:
+        """How many items the Allowed tab lists: Drive, plus OneDrive and Notion when offered."""
+        total = len(self.allowlist.entries()) if drive_count is None else drive_count
+        if self.onedrive is not None:
+            total += len(self.onedrive.allowlist.entries())
+        if self.notion is not None:
+            total += len(self.notion.allowlist.entries())
+        return total
+
     def connection_rows(self) -> list[dict[str, Any]]:
         """Each connection offered here and whether this person has finished it."""
         rows = []
@@ -1154,13 +1163,21 @@ def request_headline(
         name = str(req.file_name)
     elif getattr(req, "description", None):
         name = str(req.description)
-    item = name or "something in your Drive"
-    tool = str(getattr(req, "tool", "") or "")
+    onedrive = getattr(req, "source", "") == "onedrive"
+    item = name or ("something in your OneDrive" if onedrive else "something in your Drive")
+    if name and onedrive:
+        item = f"{name} in your OneDrive"
+    # OneDrive tools say what they do the way the Drive ones do.
+    tool = str(getattr(req, "tool", "") or "").removeprefix("onedrive_")
+    if tool == "update_file":
+        tool = "update_file_content"
+    elif tool == "search":
+        tool = "search_files"
     actions = {
         "read_file": f"read {item}",
         "get_metadata": f"see the details of {item}",
         "list_folder": f"list {item}",
-        "search_files": "search your Drive",
+        "search_files": "search your OneDrive" if onedrive else "search your Drive",
         "create_folder": f"create a folder in {item}",
         "create_doc": f"create a document in {item}",
         "upload_file": f"upload a file in {item}",
@@ -1211,6 +1228,15 @@ def tool_label(tool: str) -> str:
         "rename_file": "Rename a file",
         "trash_file": "Move to trash",
         "request_access": "Ask for access",
+        "onedrive_list_folder": "List a OneDrive folder",
+        "onedrive_read_file": "Read a OneDrive file",
+        "onedrive_download_file": "Download a OneDrive file",
+        "onedrive_search": "Search OneDrive",
+        "onedrive_create_folder": "Create a OneDrive folder",
+        "onedrive_upload_file": "Upload to OneDrive",
+        "onedrive_start_upload": "Upload to OneDrive",
+        "onedrive_update_file": "Edit a OneDrive file",
+        "onedrive_rename_file": "Rename a OneDrive item",
     }.get(tool, "Use a file")
 
 

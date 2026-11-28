@@ -11,7 +11,7 @@
 {% include "_mode.html" %}
 {% set used = grants | selectattr("last_used") | list %}
 {% set step_drive = drive_connected or root_folder_id %}
-{% set step_allow = allow_count or root_folder_id %}
+{% set step_allow = drive_allow_count or root_folder_id %}
 {% set step_connect = grants | length > 0 %}
 {% set step_try = used | length > 0 %}
 {% if not (step_drive and step_allow and step_connect and step_try) %}

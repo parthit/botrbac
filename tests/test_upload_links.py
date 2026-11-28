@@ -15,7 +15,7 @@ from tests.conftest import OWNER_EMAIL
 from tests.dash import client, login
 from tests.test_drop_direct import FakeSigner
 from tests.test_drop_pieces import FakeBlob
-from tests.test_onedrive import SCHOOL, allow, connect, error_of, write
+from tests.test_onedrive import ONEDRIVE_REFUSED, SCHOOL, allow, connect, error_of, write
 
 ME = {"email": OWNER_EMAIL, "token_name": "editor-tok", "grant_id": None}
 
@@ -333,5 +333,5 @@ def test_a_folder_removed_before_finish_gets_nothing_from_a_link(od_app, blob, s
     token = csrf(c, "/files?tab=onedrive")
     c.post("/onedrive/remove", data={"csrf": token, "file_id": SCHOOL})
     out = write(c, "finish_upload", upload_id=started["upload_id"])
-    assert error_of(out) == "onedrive_not_allowed"
+    assert error_of(out) in ONEDRIVE_REFUSED
     assert drive.writes() == []
