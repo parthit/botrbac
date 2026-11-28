@@ -1736,7 +1736,7 @@ def test_the_owner_approves_the_item_or_its_folder(diary_allowed, memstore) -> N
     status = result(diary_allowed, "check_access_request", request_id=rid)["structuredContent"]
     assert status["status"] == "approved" and status["granted_id"] == SCHOOL
     assert "onedrive_list_folder" in status["message"]
-    # The Requests list names the item now that the owner opened it.
+    # The Requests list names the item once it is decided.
     assert "essay" in diary_allowed.get("/requests").text.lower()
 
 
@@ -1893,3 +1893,12 @@ def test_an_id_less_request_can_be_approved_with_an_allowed_item(diary_allowed, 
     assert status["status"] == "approved" and status["granted_id"] == SCHOOL
     assert status["granted_name"] == "School"
     assert stored_allowlist(memstore) == before
+
+
+def test_opening_a_request_page_never_writes_the_request(diary_allowed, memstore) -> None:
+    rid = request_of(result(diary_allowed, "onedrive_read_file", file_id=ESSAY))["request_id"]
+    keys = [k for k in stored_requests(memstore) if k.endswith(rid)]
+    before = memstore.get(keys[0])
+    assert "Allow just this item" in diary_allowed.get(f"/requests/{rid}").text
+    # A view that saved here could undo a decision made meanwhile in another tab.
+    assert memstore.get(keys[0]) == before

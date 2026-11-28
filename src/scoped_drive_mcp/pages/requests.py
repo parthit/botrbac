@@ -194,11 +194,9 @@ def request_pages(kit: Kit) -> RequestPages:
         error = False
         if req.file_id and req.status == PENDING:
             options, connected, error = await blocking(onedrive_options, req)
+        # Shown only. A page view never writes the request: a save after the OneDrive call
+        # above could put back "pending" over an approval made meanwhile in another tab.
         meta = {"name": options[0]["name"]} if options else None
-        if meta and req.file_name != meta["name"]:
-            # The request was filed without asking OneDrive; keep the name for the list.
-            req.file_name = meta["name"]
-            await blocking(ctx.requests.save, req)
         return render(
             request,
             "request.html",
@@ -222,9 +220,11 @@ def request_pages(kit: Kit) -> RequestPages:
             raise GrantError("Pick the requested item or its folder.")
         if req.file_id:
             # Only the item the assistant named, or its folder, may answer its request.
-            allowed = {o["id"] for o in ctx.onedrive.approval_options(req.file_id)}
-            if clean not in allowed:
+            options = ctx.onedrive.approval_options(req.file_id)
+            if clean not in {o["id"] for o in options}:
                 raise GrantError("Pick the requested item or its folder.")
+            # Filed without asking OneDrive, so the request has no name yet; decide() saves it.
+            req.file_name = options[0]["name"]
         # Already allowed, or inside an allowed folder: approve with it as it is. allow()
         # would rewrite an existing entry, or add a second one under its folder.
         covered = ctx.onedrive.covered_item(clean)

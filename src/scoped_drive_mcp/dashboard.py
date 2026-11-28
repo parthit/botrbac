@@ -1225,6 +1225,7 @@ def tool_label(tool: str) -> str:
         "onedrive_list_folder": "List a OneDrive folder",
         "onedrive_read_file": "Read a OneDrive file",
         "onedrive_download_file": "Download a OneDrive file",
+        "onedrive_search": "Search OneDrive",
         "onedrive_create_folder": "Create a OneDrive folder",
         "onedrive_upload_file": "Upload to OneDrive",
         "onedrive_start_upload": "Upload to OneDrive",
