@@ -176,7 +176,7 @@
     <input type="hidden" name="features_shown" value="{{ ((['mailbox'] if mailbox_feature else []) + (['shared'] if shared_feature else [])) | join(',') }}">
     <fieldset>
       <legend class="sr-only">Also allow {{ a.name }} to use</legend>
-      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Mailbox <span class="muted hint">messages with your other assistants</span></span></label>{% endif %}
+      {% if mailbox_feature %}<label class="check"><input type="checkbox" name="feature_mailbox" value="on"{% if a.features.mailbox %} checked{% endif %}> <span>Message your other assistants <span class="muted hint">the Mailbox; both assistants need this on</span></span></label>{% endif %}
       {% if shared_feature %}<label class="check"><input type="checkbox" name="feature_shared" value="on"{% if a.features.shared %} checked{% endif %}> <span>Shared with me <span class="muted hint">what paired people share with you</span></span></label>{% endif %}
     </fieldset>
     <button type="submit">Save<span class="sr-only"> what else {{ a.name }} can use</span></button>
