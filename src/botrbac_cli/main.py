@@ -138,11 +138,22 @@ def cmd_sync(args: argparse.Namespace) -> int:
 def cmd_log(args: argparse.Namespace) -> int:
     for row in AuditQueue().recent(args.limit):
         when = datetime.fromtimestamp(row["ts"]).strftime("%Y-%m-%d %H:%M:%S")
-        what = row.get("tool") or f"session {row.get('session_id')} as {row.get('role')}"
+        decision = row["decision"]
+        if decision == "prompt":
+            what = f"prompt {str(row.get('prompt_id') or '')[-8:]}".rstrip()
+        elif decision == "result":
+            facts = [str(row.get("outcome") or "")]
+            if row.get("exit_code") is not None:
+                facts.append(f"exit {row['exit_code']}")
+            if row.get("duration_ms") is not None:
+                facts.append(f"{row['duration_ms']} ms")
+            what = f"{row.get('tool')}  {', '.join(f for f in facts if f)}"
+        else:
+            what = row.get("tool") or f"session {row.get('session_id')} as {row.get('role')}"
         mark = {"sent": "", "rejected": "  (refused by the server)"}.get(
             row.get("status", ""), "  (not sent yet)"
         )
-        print(f"{when}  {row['decision']:<7} {what}  {row.get('reason', '')}{mark}")
+        print(f"{when}  {decision:<7} {what}  {row.get('reason', '')}{mark}".rstrip())
     return 0
 
 

@@ -516,3 +516,24 @@ def test_exit_code_from_claude_failure_text() -> None:
     assert out["exit_code"] == 2 and out["outcome"] == "error"
     assert "nope" not in str(out)
     assert "exit_code" not in provenance.result_fields({"error": "Timed out"}, True)
+
+
+def test_log_shows_prompt_and_result_rows(tmp_path, monkeypatch, capsys) -> None:
+    from botrbac_cli.main import main
+    from botrbac_cli.queue import AuditQueue
+
+    monkeypatch.setenv("BOTRBAC_HOME", str(tmp_path))
+    q = AuditQueue()
+    q.add(decision="prompt", tool="", prompt_id="prompt-1234abcd", agent="claude-code")
+    q.add(
+        decision="result",
+        tool="claude-code/Bash",
+        outcome="error",
+        exit_code=2,
+        duration_ms=11,
+        agent="claude-code",
+    )
+    assert main(["log"]) == 0
+    out = capsys.readouterr().out
+    assert "prompt 1234abcd" in out and "as None" not in out
+    assert "claude-code/Bash  error, exit 2, 11 ms" in out
