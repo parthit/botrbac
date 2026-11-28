@@ -63,7 +63,7 @@ class AuditQueue:
         never written to this file as text. With it go `input_digest` and `input_size`
         of the whole command, before sealing cuts it.
 
-        `sealed` holds other text fields ({"description": ..., "task": ...}), sealed
+        `sealed` holds other text fields ({"task": ...}), sealed
         the same way with `event_id:<name>` as associated data, so one cannot be moved
         onto another row or another field. Without the key they are dropped."""
         row = {"event_id": uuid.uuid4().hex, "ts": time.time(), **fields}

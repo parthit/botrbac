@@ -16,8 +16,8 @@ query or fragment, a name rather than an IP address, and every address it resolv
 must be public. It is checked again at each delivery and the connection goes to the
 address that was checked, so a name that later points inside the network gets nothing.
 
-Sealed fields (the command, the agent's description, the session task) are left out
-unless the owner ticks "Include recorded commands"; then they are sent opened, as text.
+Sealed fields (the command, the session task) are left out unless the owner ticks
+"Include recorded commands"; then they are sent opened, as text.
 """
 
 import contextlib
@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 from botrbac_cli import sealing
 
 from .. import wake
+from .provenance import DROPPED_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ MAX_FAILURES = 5
 PAUSE = 15 * 60
 MAX_URL = 512
 # Stored sealed; the AAD is the event id for `command`, `<event id>:<name>` for others.
-SEALED = ("command", "description", "task")
+SEALED = ("command", "task")
 _KEK_CONTEXT = b"botrbac terminal audit webhook v1"
 
 
@@ -95,7 +96,11 @@ def sign(secret: str, ts: str, body: bytes) -> str:
 def outgoing(row: dict[str, Any], command_key: Any, include_commands: bool) -> dict[str, Any]:
     """A row as it is posted: sealed fields dropped, or opened when the owner chose to
     include them (and recording is on, so the key is passed)."""
-    out = {k: v for k, v in row.items() if k not in SEALED and k != "command_unreadable"}
+    out = {
+        k: v
+        for k, v in row.items()
+        if k not in SEALED and k != "command_unreadable" and k not in DROPPED_FIELDS
+    }
     if not include_commands or command_key is None:
         return out
     for name in SEALED:

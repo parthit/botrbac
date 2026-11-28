@@ -6,8 +6,8 @@ OpenTelemetry semantic conventions where one fits, pinned to SEMCONV_VERSION. Th
 attributes used here (`gen_ai.*`) have Development status in that version, so their
 names can still change upstream; Bot RBAC's own fields are under `botrbac.*`.
 
-Sealed fields (the recorded command, the agent's description, the session task) are
-included only as the owner's export already includes them: opened, for the owner.
+Sealed fields (the recorded command, the session task) are included only as the
+owner's export already includes them: opened, for the owner.
 """
 
 import json

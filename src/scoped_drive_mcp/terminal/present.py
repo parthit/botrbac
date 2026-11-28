@@ -107,7 +107,7 @@ def action(row: Mapping[str, Any]) -> dict[str, Any]:
             "kind": "read",
         }
     if name in VERBS:
-        url = data.get("url") or data.get("query") or data.get("description") or ""
+        url = data.get("url") or data.get("query") or ""
         return {"sentence": VERBS[name], "shown": url or None, "kind": "other"}
     if server in AGENTS:
         return {"sentence": f"Used its {name} tool", "shown": None, "kind": "other"}
