@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .coverage import backup_file, is_gateway, servers_in, write_atomic
+from .coverage import GATEWAY_NAME, backup_file, is_gateway, servers_in, write_atomic
 from .patterns import normalize_server
 from .shell import botrbac_command
 
@@ -418,7 +418,12 @@ def normalize(agent: str, payload: Any) -> Any:
 
 
 def _gemini(payload: dict[str, Any]) -> dict[str, Any]:
-    """Gemini names MCP tools `mcp_<server>_<tool>`; check reads `mcp__<server>__<tool>`."""
+    """Gemini names MCP tools `mcp_<server>_<tool>`; check reads `mcp__<server>__<tool>`.
+
+    The server is the one `mcp_context` names. Without it the split is a guess (server
+    `botrbac_x` and the gateway look alike in `mcp_botrbac_x_tool`), so a guess is
+    checked as an ordinary server, never trusted as the gateway: a guess of `botrbac`
+    comes back with no tool name, which check blocks."""
     name = payload.get("tool_name")
     if not isinstance(name, str) or not name.startswith("mcp_") or name.startswith("mcp__"):
         return payload
@@ -427,8 +432,12 @@ def _gemini(payload: dict[str, Any]) -> dict[str, Any]:
     rest = name[len("mcp_") :]
     if isinstance(server, str) and server and rest.startswith(server + "_"):
         tool = rest[len(server) + 1 :]
+        if server != GATEWAY_NAME:
+            server = _not_gateway(server)  # `botrbac__x` must not read as the gateway
     else:
         server, _, tool = rest.partition("_")
+        if server == GATEWAY_NAME:
+            return {k: v for k, v in payload.items() if k != "tool_name"}
     return {**payload, "tool_name": f"mcp__{server}__{tool or 'tool'}"}
 
 
@@ -473,13 +482,13 @@ _LAUNCHERS = frozenset({"npx", "uvx", "bunx", "pnpx", "node", "python", "python3
 
 def _cursor_server(payload: dict[str, Any]) -> str:
     """Cursor's MCP event does not say which server by name; it gives the server's url or
-    command. The botrbac gateway is recognised by its command, as in coverage.is_gateway."""
+    command. Only the gateway's own command (as in coverage.is_gateway) names the gateway."""
     for key in ("server_name", "server", "mcp_server"):
         if isinstance(payload.get(key), str) and payload[key]:
-            return payload[key]
+            return _not_gateway(payload[key])
     url = payload.get("url")
     if isinstance(url, str) and url:
-        return urlsplit(url).hostname or "unknown"
+        return _not_gateway(urlsplit(url).hostname or "unknown")
     command = payload.get("command")
     if isinstance(command, str) and command.strip():
         try:
@@ -487,13 +496,22 @@ def _cursor_server(payload: dict[str, Any]) -> str:
         except ValueError:
             return "unknown"
         if parts and is_gateway({"command": parts[0], "args": parts[1:]}):
-            return "botrbac"
+            return GATEWAY_NAME
         words = [p for p in parts if not p.startswith("-")]
         name = Path(words[0]).name if words else "unknown"
         if name in _LAUNCHERS and len(words) > 1:
             name = Path(words[1]).name
-        return name.split("@")[0] or "unknown"
+        return _not_gateway(name.split("@")[0] or "unknown")
     return "unknown"
+
+
+def _not_gateway(name: str) -> str:
+    """Only the gateway's own command makes a call `mcp__botrbac__…`: a server merely
+    called botrbac (by its label, host or program) is checked as `botrbac-upstream`, the
+    name the gateway would give it (coverage._free_name)."""
+    if normalize_server(name) == GATEWAY_NAME or name.startswith(GATEWAY_NAME + "__"):
+        return f"{GATEWAY_NAME}-upstream"
+    return name
 
 
 # ---- answers ---------------------------------------------------------------------------

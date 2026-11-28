@@ -191,7 +191,8 @@ top of `src/botrbac_cli/agents.py` has the details):
 - **Gemini CLI** ([hooks reference](https://geminicli.com/docs/hooks/reference/)). A `BeforeTool` entry in
   `settings.json` with `matcher` `.*`, `name` `botrbac` and a 60 s `timeout`. MCP tools arrive as
   `mcp_<server>_<tool>` and are checked as `<server>/<tool>` (the name is split at the first `_` after
-  `mcp_`, as Gemini does, so keep `_` out of server names). Exit 2 blocks; **any other non-zero exit only
+  `mcp_`, as Gemini does, so keep `_` out of server names). A call is left to the gateway only when the
+  payload's `mcp_context` names the server exactly `botrbac`; without `mcp_context` such a call is blocked. Exit 2 blocks; **any other non-zero exit only
   warns and lets the tool run**, which is why every error in `botrbac check` exits 2. `hooksConfig.enabled:
   false`, or `botrbac` in `hooksConfig.disabled`, switches it off; doctor reports that. Confident: from
   Gemini's own docs.
@@ -202,8 +203,9 @@ top of `src/botrbac_cli/agents.py` has the details):
   sends `file_path`, checked as `cursor/Read` (the file's content in the payload is never read or kept);
   the MCP event sends `tool_name`, `tool_input` as a JSON string, and the server's `url` or `command` but
   not its name, so the server is named after the url's host or the command's program (`npx -y
-  @modelcontextprotocol/server-github` is `server-github`), and a server whose command is `botrbac gateway`
-  is the gateway. Cursor reads the answer from stdout, `{"permission": "allow"}` or `{"permission": "deny",
+  @modelcontextprotocol/server-github` is `server-github`), and only a server whose command is the gateway's own
+  (`botrbac gateway`) is treated as the gateway; one merely called `botrbac` is checked as
+  `botrbac-upstream/<tool>`. Cursor reads the answer from stdout, `{"permission": "allow"}` or `{"permission": "deny",
   "user_message": …, "agent_message": …}`, so `botrbac check --agent cursor` always prints JSON and exits
   0. Cursor lets an action go ahead when a hook crashes unless the entry has `failClosed`, which the
   installer sets. If your Cursor version ignores `failClosed`, a missing botrbac lets calls through.
@@ -231,8 +233,11 @@ program is its first word after `VAR=value` assignments, and `/usr/bin/gh` count
 program it runs: `sudo gh` needs `cmd/sudo` and `cmd/gh`. The call is **blocked** when the command uses
 `$(…)`, backticks, `<(…)`, `>(…)`, `eval`, `bash -c`/`sh -c`, a `( … )` subshell, shell control flow
 (`if`, `for`, `while`, `case`, `!` …), a variable as the program, or anything else it cannot read; the
-reason says why. Heredocs are read as commands too, so a role with `cmd/`
-patterns blocks most of them. The row's reason names programs only; the command itself is recorded
+reason says why. Also blocked: heredocs (`<<`, `<<-`; `<<<` is fine), ANSI-C and locale quoting (`$'…'`,
+`$"…"`) and quotes inside `${…}`. A `#` at the start of a word starts a comment to the end of the line,
+as in bash, and the lines after it are still checked. A number is a file descriptor only when it touches
+the redirect (`2>f`); in `2 >f`, `2` is the program. An MCP server named `cmd` is checked as
+`cmd-upstream/<tool>`, so it can never match `cmd/` patterns. The row's reason names programs only; the command itself is recorded
 only with [Record commands](#record-commands) on, and then sealed.
 
 This protects against the agent, not the computer's owner, and goes by name: a program that starts others

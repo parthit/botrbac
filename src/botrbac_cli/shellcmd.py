@@ -3,7 +3,8 @@
 An agent runs `gh pr list` through its shell tool (Claude Code's `Bash`), so the hook
 sees one tool call holding a whole command line. `programs()` lists the programs that
 line starts, conservatively: anything it cannot follow (command substitution, `eval`,
-`bash -c '…'`, unbalanced quotes) raises CommandError, and the caller blocks the call.
+`bash -c '…'`, heredocs, $'…' quoting, unbalanced quotes) raises CommandError, and the
+caller blocks the call. A `#` that starts a word is a comment to the end of its line.
 
 It reads names, not binaries: `/tmp/gh` counts as `gh`. And a program that starts other
 programs itself (`make`, `npm run`, `find -exec`, a script) runs whatever it runs. This
@@ -12,7 +13,7 @@ limits what an agent asks the shell to do; it is not a sandbox.
 
 import re
 import shlex
-from typing import Any
+from typing import Any, NamedTuple
 
 # Agent name -> the names of its shell tool. Add an agent here to check its commands.
 SHELL_TOOLS: dict[str, frozenset[str]] = {
@@ -99,7 +100,7 @@ KEYWORDS = frozenset(
 )  # fmt: skip
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "ash"})
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# One shell operator. shlex hands back a run of operator characters as one token
+# One shell operator. _tokens hands back a run of operator characters as one token
 # (`;>` in `gh;>f rm`), so the run is split into these, longest first, as bash does.
 _OPERATOR = re.compile(r"&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||;;&|;;|;&|&&|\|\||\|&|[;&|\n<>()]")
 _SEPARATORS = frozenset({";;&", ";;", ";&", "&&", "||", "|&", ";", "&", "|", "\n"})
@@ -154,25 +155,112 @@ def _is_c_flag(word: str) -> bool:
     return word.startswith("-") and not word.startswith("--") and "c" in word[1:]
 
 
-def _tokens(command: str) -> list[tuple[str, bool]]:
-    """(token, is an operator). Quotes are honoured; `#` is not a comment here, so text
-    after it is still checked."""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
-    lex.whitespace = " \t\r"
-    lex.whitespace_split = True
-    lex.commenters = ""
-    out: list[tuple[str, bool]] = []
-    try:
-        while True:
-            token = lex.get_token()
-            if token is None or token == lex.eof:
-                break
-            # shlex returns operators as runs of punctuation. A quoted ";" alone looks the
-            # same and is read as an operator too, which can only make the check stricter.
-            is_op = bool(token) and all(c in ";&|<>()\n" for c in token)
-            out.append((token, is_op))
-    except ValueError as exc:
-        raise CommandError("botrbac could not read this command (unbalanced quotes)") from exc
+_OPERATOR_CHARS = frozenset(";&|<>()\n")
+_BLANKS = frozenset(" \t")
+
+
+class _Token(NamedTuple):
+    text: str
+    is_op: bool
+    # A word: whether any of it was quoted or escaped. An operator: whether it follows
+    # a word with nothing between them (`2>f`), which is what makes `2` a file descriptor.
+    quoted_or_glued: bool
+
+
+def _parameter(command: str, i: int) -> int:
+    """`${…}` starting at command[i]: the index just past its `}`. Inside one, bash
+    allows nested quotes (`"${x:-"a"}"`), which would throw the quote tracking off, so
+    anything but plain text there is refused."""
+    close = command.find("}", i + 2)
+    if close < 0:
+        raise CommandError("botrbac could not read this command (unclosed ${)")
+    inner = command[i + 2 : close]
+    if any(c in inner for c in "'\"\\$`{\n"):
+        raise CommandError("botrbac does not read quotes or nesting inside ${…}")
+    return close + 1
+
+
+def _tokens(command: str) -> list[_Token]:
+    """The command's words and operator runs, read the way bash reads them: quotes and
+    backslashes, and a `#` that starts a word begins a comment running to the end of the
+    line (the newline after it still separates commands). Quoting botrbac cannot follow
+    exactly ($'…', $"…") raises CommandError."""
+    out: list[_Token] = []
+    word: list[str] = []
+    in_word = False  # a word has started (it may still be empty: `''`)
+    quoted = False
+    i, n = 0, len(command)
+
+    def finish() -> None:
+        nonlocal in_word, quoted
+        if in_word:
+            out.append(_Token("".join(word), False, quoted))
+        word.clear()
+        in_word, quoted = False, False
+
+    while i < n:
+        c = command[i]
+        if c in _BLANKS:
+            finish()
+            i += 1
+        elif c in _OPERATOR_CHARS:
+            glued = in_word
+            finish()
+            j = i
+            while j < n and command[j] in _OPERATOR_CHARS:
+                j += 1
+            out.append(_Token(command[i:j], True, glued))
+            i = j
+        elif c == "#" and not in_word:
+            newline = command.find("\n", i)
+            i = n if newline < 0 else newline  # the newline itself is read next
+        elif c == "\\":
+            if i + 1 >= n:
+                raise CommandError("botrbac could not read this command (trailing backslash)")
+            if command[i + 1] != "\n":  # backslash-newline: the line continues
+                word.append(command[i + 1])
+                in_word, quoted = True, True
+            i += 2
+        elif c == "'":
+            close = command.find("'", i + 1)
+            if close < 0:
+                raise CommandError("botrbac could not read this command (unbalanced quotes)")
+            word.append(command[i + 1 : close])
+            in_word, quoted = True, True
+            i = close + 1
+        elif c == '"':
+            i += 1
+            while True:
+                if i >= n:
+                    raise CommandError("botrbac could not read this command (unbalanced quotes)")
+                d = command[i]
+                if d == '"':
+                    i += 1
+                    break
+                if d == "\\" and i + 1 < n and command[i + 1] in '$`"\\\n':
+                    if command[i + 1] != "\n":
+                        word.append(command[i + 1])
+                    i += 2
+                elif d == "$" and command.startswith("${", i):
+                    end = _parameter(command, i)
+                    word.append(command[i:end])
+                    i = end
+                else:
+                    word.append(d)
+                    i += 1
+            in_word, quoted = True, True
+        elif c == "$" and i + 1 < n and command[i + 1] in "'\"":
+            raise CommandError("botrbac does not read $'…' or $\"…\" quoting: use plain quotes")
+        elif c == "$" and command.startswith("${", i):
+            end = _parameter(command, i)
+            word.append(command[i:end])
+            in_word = True
+            i = end
+        else:
+            word.append(c)
+            in_word = True
+            i += 1
+    finish()
     return out
 
 
@@ -197,18 +285,24 @@ def programs(command: str) -> list[str]:
     wrapper_skip = 0  # option values still to skip
     shell_running: str | None = None
     tokens = _tokens(command)
-    for index, (word, is_op) in enumerate(tokens):
+    for index, (word, is_op, quoted_or_glued) in enumerate(tokens):
         # An option's value (`xargs -n 1 >f rm`) is consumed below, never read as an fd.
-        if not is_op and not wrapper_skip and word.isdigit() and index + 1 < len(tokens):
-            after, after_op = tokens[index + 1]
-            if after_op and after[:1] in "<>":
-                # `2>f rm`: a file descriptor number, not a program. (Read this way even
-                # when spaced, `2 >f rm`, which can only make the check stricter.)
+        if not is_op and not quoted_or_glued and not wrapper_skip and word.isdigit():
+            after = tokens[index + 1] if index + 1 < len(tokens) else None
+            if after and after.is_op and after.quoted_or_glued and after.text[:1] in "<>":
+                # `2>f rm`: a file descriptor number, not a program. Only when the number
+                # touches the operator, as in bash: in `2 >f` (spaced) or `"2">f`
+                # (quoted), 2 is the program.
                 continue
         if is_op:
             for op in _operators(word):
                 if op in ("(", ")"):
                     raise CommandError("botrbac does not check commands in ( … ) subshells")
+                if op in ("<<", "<<-"):
+                    raise CommandError(
+                        "botrbac does not check heredocs (<<): write the text to a file "
+                        "first, or pass it with <<< or a pipe"
+                    )
                 if op in _SEPARATORS:
                     expect_program, in_wrapper, shell_running = True, None, None
                     wrapper_skip = 0

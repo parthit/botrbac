@@ -51,7 +51,12 @@ GEMINI_MCP = {
     "tool_input": {"title": "x"},
     "mcp_context": {"server_name": "github", "tool_name": "create_issue"},
 }
-GEMINI_GATEWAY = {**GEMINI_SHELL, "tool_name": "mcp_botrbac_github__get_issue", "tool_input": {}}
+GEMINI_GATEWAY = {
+    **GEMINI_SHELL,
+    "tool_name": "mcp_botrbac_github__get_issue",
+    "tool_input": {},
+    "mcp_context": {"server_name": "botrbac", "tool_name": "github__get_issue"},
+}
 _CURSOR_BASE = {
     "conversation_id": "c0nv-1",
     "generation_id": "gen-1",
@@ -104,6 +109,8 @@ def home(tmp_path, monkeypatch):
 
 
 def _role(patterns: list[str]) -> None:
+    # Unsigned is accepted only from a self-hosted server that never sent a key.
+    state.write_json("credentials.json", {"server": "https://rbac.self-hosted.test"})
     state.write_json(
         "policy.json",
         {
@@ -331,9 +338,9 @@ def test_cmd_rules_apply_to_each_shell() -> None:
         assert check(agent, json.dumps(ok), None, False)[0], agent
         bad = json.loads(json.dumps(ok))
         if key:
-            bad[key] = "gh pr list; rm -rf /"
+            bad[key] = "gh pr list; rm -rf build"
         else:
-            bad["tool_input"]["command"] = "gh pr list; rm -rf /"
+            bad["tool_input"]["command"] = "gh pr list; rm -rf build"
         allowed, why = check(agent, json.dumps(bad), None, False)
         assert not allowed and "cmd/rm" in why, agent
 
