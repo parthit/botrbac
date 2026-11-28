@@ -280,5 +280,6 @@ def test_ios_pick_buttons_open_the_full_page_picker() -> None:
     # Every iPhone and iPad browser runs on WebKit and blocks Google's cookies in the
     # picker frame, so the check is the device, not the browser's name.
     assert "/iPhone|iPad|iPod/" in script
-    assert "if (ios) { openFullPage(); return; }" in script
+    assert "if (fullPageFirst) { openFullPage(); return; }" in script
+    assert "data-fullpage-failed" in script
     assert 'form.action = "/picker/redirect"' in script

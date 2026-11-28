@@ -711,12 +711,29 @@
   // picker as a full page on Google's site instead (POST /picker/redirect). Elsewhere
   // the note offers the full page to anyone whose browser blocks the frame's cookies.
   var ua = navigator.userAgent;
+  var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg(?!iOS)|OPR|Android/.test(ua);
   // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
   var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  // The server sets this once Google's full page has failed in this session (it ignored
+  // trigger_onepick or refused the request), so the buttons stop sending people there.
+  var fullPageFailed = !!document.querySelector("[data-safari-note][data-fullpage-failed]");
+  var fullPageFirst = ios && !fullPageFailed;
   Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
-    var other = note.querySelector("[data-note-other]");
-    var touch = note.querySelector("[data-safari-ios]");
-    if (ios && other && touch) { other.hidden = true; touch.hidden = false; }
+    function show(selector) {
+      var el = note.querySelector(selector);
+      if (el) el.hidden = false;
+    }
+    function hide(selector) {
+      var el = note.querySelector(selector);
+      if (el) el.hidden = true;
+    }
+    if (ios) {
+      hide("[data-note-other]");
+      show(fullPageFailed ? "[data-safari-ios-failed]" : "[data-safari-ios]");
+      show("[data-safari-ios-steps]");
+    } else if (webkitOnly) {
+      show("[data-safari-mac]");
+    }
     note.hidden = false;
   });
 
@@ -877,7 +894,7 @@
 
   function onPickClick(event) {
     pick = event.currentTarget;
-    if (ios) { openFullPage(); return; }
+    if (fullPageFirst) { openFullPage(); return; }
     openInPage();
   }
   Array.prototype.forEach.call(pickButtons, function (button) {

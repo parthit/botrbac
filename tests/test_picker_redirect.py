@@ -4,6 +4,7 @@ The in-page picker cannot load where the browser blocks Google's cookies inside 
 every iPhone and iPad browser, and Safari by default. The full page needs none.
 """
 
+import re
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from scoped_drive_mcp.oauth import GoogleOAuthClient
 from tests.conftest import OWNER_EMAIL
 from tests.dash import client, csrf, login, mcp_call, start_oauth
+from tests.test_ui_and_limits import with_picker
 
 DRIVE_FILE = "https://www.googleapis.com/auth/drive.file"
 
@@ -170,3 +172,114 @@ def test_signed_out_callback_adds_nothing(p2_app) -> None:
         "/auth/callback", params={"code": "owner-code", "state": state, "picked_file_ids": "proj"}
     )
     assert back.status_code == 400
+
+
+def note(c, path: str = "/files") -> str:
+    return re.search(r"<div[^>]*data-safari-note[^>]*>", c.get(path).text).group(0)
+
+
+def test_an_unknown_account_still_allows_what_the_connection_opens(owner_c, oauth) -> None:
+    # Google did not name the account; the grant check is the backstop and passes here.
+    oauth.drive_account_unknown = True
+    state = start_pick(owner_c)
+    owner_c.get(
+        "/auth/callback", params={"code": "owner-code", "state": state, "picked_file_ids": "proj"}
+    )
+    assert "Allowed “" in owner_c.get("/files").text
+    assert mcp_call(owner_c, "get_metadata", file_id="proj").get("isError") is not True
+
+
+def test_the_account_check_ignores_case(owner_c, oauth) -> None:
+    oauth.accounts["owner-upper"] = (OWNER_EMAIL.upper(), True)
+    state = start_pick(owner_c)
+    owner_c.get(
+        "/auth/callback", params={"code": "owner-upper", "state": state, "picked_file_ids": "proj"}
+    )
+    page = owner_c.get("/files").text
+    assert "different Google account" not in page
+    assert mcp_call(owner_c, "get_metadata", file_id="proj").get("isError") is not True
+
+
+def test_a_request_is_approved_with_the_first_item_that_was_allowed(owner_c) -> None:
+    denied = mcp_call(owner_c, "get_metadata", file_id="proj-notes")
+    request_id = denied["structuredContent"]["request_id"]
+    state = start_pick(owner_c, next=f"/requests/{request_id}", request=request_id)
+    back = owner_c.get(
+        "/auth/callback",
+        params={
+            "code": "owner-code",
+            "state": state,
+            "picked_file_ids": "no-such-item,proj-notes",
+        },
+    )
+    assert back.headers["location"] == f"/requests/{request_id}"
+    page = owner_c.get(f"/requests/{request_id}").text
+    assert "Approved" in page
+    assert "not found in your Drive" in page
+    assert mcp_call(owner_c, "get_metadata", file_id="proj-notes").get("isError") is not True
+
+
+def test_nothing_allowed_means_the_request_is_left_alone(owner_c) -> None:
+    denied = mcp_call(owner_c, "get_metadata", file_id="proj-notes")
+    request_id = denied["structuredContent"]["request_id"]
+    state = start_pick(owner_c, request=request_id)
+    back = owner_c.get(
+        "/auth/callback",
+        params={"code": "owner-code", "state": state, "picked_file_ids": "no-such-item"},
+    )
+    assert back.headers["location"] == "/files"
+    assert "Approved" not in owner_c.get(f"/requests/{request_id}").text
+
+
+def test_cancelling_while_signed_out_acts_for_no_one(p2_app) -> None:
+    c = client(p2_app)
+    login(c)
+    state = start_pick(c)
+    c.post("/logout", data={"csrf": csrf(c, "/settings")})
+    back = c.get("/auth/callback", params={"error": "access_denied", "state": state})
+    assert back.status_code == 400
+    assert "Sign-in cancelled" in back.text
+
+
+@with_picker
+def test_cancelling_does_not_turn_off_the_full_page(owner_c) -> None:
+    state = start_pick(owner_c)
+    owner_c.get("/auth/callback", params={"error": "access_denied", "state": state})
+    assert "data-fullpage-failed" not in note(owner_c)
+
+
+@with_picker
+def test_google_refusing_the_full_page_switches_to_the_in_page_picker(owner_c) -> None:
+    # Google may reject trigger_onepick for a Web application client.
+    assert "data-fullpage-failed" not in note(owner_c)
+    state = start_pick(owner_c, next="/files?tab=allowed")
+    back = owner_c.get("/auth/callback", params={"error": "invalid_request", "state": state})
+    assert back.headers["location"] == "/files?tab=allowed"
+    page = allowed(owner_c)
+    assert "wouldn’t open its file picker as a full page" in page
+    assert "data-fullpage-failed" in note(owner_c)
+
+
+@with_picker
+def test_google_skipping_the_picker_switches_to_the_in_page_picker(owner_c) -> None:
+    # A code without picked_file_ids: Google ignored trigger_onepick.
+    state = start_pick(owner_c)
+    owner_c.get("/auth/callback", params={"code": "owner-code", "state": state})
+    assert "data-fullpage-failed" in note(owner_c)
+    # A pick that works turns the full page back on.
+    state = start_pick(owner_c)
+    owner_c.get(
+        "/auth/callback", params={"code": "owner-code", "state": state, "picked_file_ids": "proj"}
+    )
+    assert "data-fullpage-failed" not in note(owner_c)
+
+
+def test_disconnecting_while_on_googles_page_sends_to_connect(owner_c) -> None:
+    state = start_pick(owner_c, next="/files?tab=allowed")
+    r = owner_c.post("/connect/google_drive/disconnect", data={"csrf": csrf(owner_c, "/settings")})
+    assert r.status_code == 303
+    back = owner_c.get(
+        "/auth/callback", params={"code": "owner-code", "state": state, "picked_file_ids": "proj"}
+    )
+    assert back.status_code == 303
+    assert back.headers["location"].startswith("/connect?")

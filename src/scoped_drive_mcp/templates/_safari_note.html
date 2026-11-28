@@ -4,8 +4,13 @@
     Google then shows "Can't access your Google Account". This page can't see inside that
     frame, so the note is always offered: POST /picker/redirect opens the same picker as
     a full page on Google's own site, which needs no cross-site cookies. On iPhone and
-    iPad ui.js sends the pick buttons there directly. Shown by ui.js (the buttons need it). -#}
-<div class="muted safari-note" data-safari-note hidden>
+    iPad ui.js sends the pick buttons there directly, unless the full page already failed
+    in this session (data-fullpage-failed, set in pages/signin.py): then the buttons use
+    the in-page picker and the note says which setting it needs. Shown by ui.js. -#}
+<div class="muted safari-note" data-safari-note hidden{% if request.session.get("pick_fullpage_failed") %} data-fullpage-failed{% endif %}>
   <p data-note-other>Picker not loading, or showing “Can’t access your Google Account”? <button type="button" data-fullpage-pick>Open Google’s picker as a full page</button></p>
-  <p data-safari-ios hidden>On iPhone and iPad, Google’s file picker opens on Google’s own page and brings you back here when you’re done. <button type="button" data-inpage-pick>Use the in-page picker instead</button> (it needs <b>Allow Cross-Website Tracking</b> turned on for this browser in the Settings app).</p>
+  <p data-safari-mac hidden>Or, in Safari, turn off <b>Prevent cross-site tracking</b> in Safari → Settings → Privacy while you pick, then turn it back on: files you’ve picked stay picked.</p>
+  <p data-safari-ios hidden>On iPhone and iPad, Google’s file picker opens on Google’s own page and brings you back here when you’re done. <button type="button" data-inpage-pick>Use the in-page picker instead</button> (it needs cross-site tracking allowed, see below).</p>
+  <p data-safari-ios-steps hidden>For the in-page picker on iPhone or iPad: in the Settings app, go to Apps → Safari and turn off <b>Prevent Cross-Site Tracking</b> while you pick, then turn it back on: files you’ve picked stay picked. In another browser, turn on <b>Allow Cross-Website Tracking</b> for it instead.</p>
+  <p data-safari-ios-failed hidden>Google’s full-page picker didn’t work here, so the pick buttons use the in-page picker. <button type="button" data-fullpage-pick>Try Google’s full page again</button></p>
 </div>

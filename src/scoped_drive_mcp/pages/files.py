@@ -585,11 +585,12 @@ def file_pages(kit: Kit) -> FilePages:
                 request,
                 "error",
                 "Nothing came back from Google’s file picker, so nothing changed. "
-                "Choose the files on Google’s page, then Select.",
+                "Use the in-page picker instead.",
             )
             return RedirectResponse(next_url, status_code=303)
         skipped = len(ids) - PICK_LIMIT
         names: list[str] = []
+        granted: list[str] = []
         errors: list[str] = []
         for file_id in ids[:PICK_LIMIT]:
             try:
@@ -598,6 +599,7 @@ def file_pages(kit: Kit) -> FilePages:
                 errors.append(str(exc))
                 continue
             await unhide(file_id, entry.id)
+            granted.append(file_id)
             names.append(entry.name or entry.id)
         if len(names) == 1:
             flash(request, "ok", f"Allowed \u201c{names[0]}\u201d for the assistant.")
@@ -607,11 +609,12 @@ def file_pages(kit: Kit) -> FilePages:
             flash(request, "error", errors[0])
         if skipped > 0:
             flash(request, "error", f"Only the first {PICK_LIMIT} items were added. Pick the rest.")
-        if request_id and names:
+        if request_id and granted:
             req = await blocking(ctx.requests.get, request_id)
             if req is not None:
                 try:
-                    entry = await blocking(ctx.grants().approve, req, ids[0])
+                    # The first item that was actually allowed, as ui.js approves docs[0].
+                    entry = await blocking(ctx.grants().approve, req, granted[0])
                     flash(
                         request,
                         "ok",
