@@ -13,14 +13,19 @@
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="code" value="{{ code }}">
   <label>Name <input type="text" name="name" maxlength="80" value="{{ found.hostname }}"></label>
-  <fieldset>
+  <fieldset class="roles">
     <legend>Role</legend>
     {% for r in roles %}
-    <label class="inline"><input type="radio" name="role_id" value="{{ r.id }}"{% if r.id == 'read-only' %} checked{% endif %}> {{ r.name }}</label>
+    <label class="role"><input type="radio" name="role_id" value="{{ r.id }}"{% if r.id == 'read-only' %} checked{% endif %}>
+      <span><b>{{ r.name }}</b>{% if r.id == 'read-only' %} <span class="role-tag">Recommended</span>{% endif %}
+        {% if r.description %}<span class="muted">{{ r.description }}</span>{% endif %}</span></label>
     {% endfor %}
     <p class="muted"><a href="/terminal/roles">Manage roles</a></p>
   </fieldset>
-  <p class="muted">Approve only a code you started on your own computer, just now. If someone sent you this link or this code, do not approve it: approving lets that computer act with this role on your account. It will only run the tools its role allows, and you can change or disconnect it at any time.</p>
+  <div class="consent-check">
+    <p><b>Approve only a code you started on your own computer, just now.</b> If someone sent you this link or this code, do not approve it: approving lets that computer act with this role on your account.</p>
+    <p class="small muted">It will only run the tools its role allows, and you can change or disconnect it at any time.</p>
+  </div>
   <div class="actions">
     <button class="primary" type="submit">Approve</button>
     <button type="submit" formaction="/device/deny">Refuse</button>
