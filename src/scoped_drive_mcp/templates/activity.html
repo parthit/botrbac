@@ -27,7 +27,7 @@
   {% for r, times in rows %}
   <li class="activity-row">
     <span class="activity-when muted">{{ r.ts | when }}</span>
-    <span class="activity-text"{% if r.detail %} title="{{ r.detail }}"{% endif %}>{{ r.text }}{% if times > 1 %} <span class="muted">({{ times }} times, newest shown)</span>{% endif %}</span>
+    <span class="activity-text"{% if r.detail %} title="{{ r.detail }}"{% endif %}>{{ r.text }}{% if r.fix_href %} <a class="fix-link" href="{{ r.fix_href }}">{{ r.fix_label }}</a>{% endif %}{% if times > 1 %} <span class="muted">({{ times }} times, newest shown)</span>{% endif %}</span>
     <span class="pill{{ ' ' ~ r.badge.tone if r.badge.tone }}"><span aria-hidden="true">{{ r.badge.mark }}</span> {{ r.badge.label }}</span>
   </li>
   {% endfor %}

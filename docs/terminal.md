@@ -275,8 +275,13 @@ the reason on stderr; any error inside the check also exits 2. `--format json` p
 
 The hook command uses botrbac's full path. If that file is removed, the agent cannot run the hook, and most
 agents (Claude Code included) then let the call go ahead: run `botrbac doctor` after moving or reinstalling
-botrbac. MCP tools named `mcp__botrbac__…` are left to the gateway, which checks them itself; this trusts
-that the server called `botrbac` in the agent's config is the gateway (`botrbac wrap` sets it up that way).
+botrbac. MCP tools named `mcp__botrbac__…` are left to the gateway, which checks them itself. The name
+alone is not enough: the hook reads the agent's MCP config files (the ones `botrbac doctor` reads, plus
+`.mcp.json` in the working folder) and the list of tools the gateway last offered. A call is treated as going
+around the gateway, and checked as `botrbac-upstream/…`, when a server called `botrbac` there runs something
+other than `botrbac gateway`, when the name belongs to another server such as `botrbac__x`, or when the
+gateway never offered a tool with that name. A server the agent gets from somewhere those files do not show
+(a plugin, a command-line flag) is not seen by the first two checks.
 
 ## Offline
 
@@ -514,6 +519,7 @@ for you; anyone who reads the commit sees the site's address and the session id.
 | `botrbac login [--server URL]` | Connect this computer (device code approved on the website; default `https://botrbac.com`) |
 | `botrbac add-gateway --agent A` | Add the gateway to Cursor's, Codex's or Gemini CLI's config (others kept, backed up) |
 | `botrbac status` | Account, role, policy age, rows waiting, current session |
+| `botrbac roles [NAME]` | This computer's role and the roles `--role` can use; with a name, that role's patterns |
 | `botrbac servers add/remove/list [--url U]` | The MCP servers the gateway sits in front of |
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
 | `botrbac wrap <agent> [--user] [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |

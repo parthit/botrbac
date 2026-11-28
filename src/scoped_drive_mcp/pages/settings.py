@@ -472,7 +472,11 @@ def settings_pages(
                     "same address. Change that role instead, or pick another name."
                 )
             return ctx.agent_roles.save(
-                form.get("name") or "", form.get("level") or "", items, ctx.allowlist.entries()
+                form.get("name") or "",
+                form.get("level") or "",
+                items,
+                ctx.allowlist.entries(),
+                slug=form.get("slug") or "",
             )
 
         try:

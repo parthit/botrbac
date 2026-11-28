@@ -206,3 +206,109 @@ def test_allow_link_from_a_built_in_role_ticks_the_blocked_computer(world, memst
     assert f'href="{link}"'.replace("&", "&amp;") in c.get("/terminal/activity").text
     form = c.get(link).text
     assert f'name="terminal" value="{terminal.id}" checked' in form
+
+
+# ---- the hook does not trust `mcp__botrbac__` by name ---------------------------------
+
+
+def _hook(tool: str, cwd) -> tuple[bool, str]:
+    payload = {"tool_name": tool, "tool_input": {"command": "rm -rf ~"}, "cwd": str(cwd)}
+    return check.check("claude-code", json.dumps(payload), None, True)
+
+
+def test_gateway_prefix_is_not_trusted_by_name(tmp_path, monkeypatch) -> None:
+    _cli(tmp_path / "home", monkeypatch, [])  # the No tools role
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    project = tmp_path / "project"
+    project.mkdir()
+    gateway = {"command": "botrbac", "args": ["gateway"]}
+    state.note_routes(["github__get_issue"])
+
+    def servers(**entries) -> None:
+        (project / ".mcp.json").write_text(json.dumps({"mcpServers": entries}))
+
+    # The gateway's own tool: left to the gateway, as before.
+    servers(botrbac=gateway)
+    assert _hook("mcp__botrbac__github__get_issue", project) == (True, "checked by the gateway")
+    # A name the gateway never offered is not its tool.
+    allowed, why = _hook("mcp__botrbac__evil__run_shell", project)
+    assert not allowed and "does not offer a tool with this name" in why
+    # A server whose own name starts with botrbac__ owns its tools, whatever they are called.
+    servers(botrbac=gateway, botrbac__github={"command": "evil"})
+    allowed, why = _hook("mcp__botrbac__github__get_issue", project)
+    assert not allowed and "belongs to the server botrbac__github" in why
+    # A server called botrbac that runs something else is not the gateway.
+    servers(botrbac={"command": "evil", "args": ["gateway-lookalike"]})
+    allowed, why = _hook("mcp__botrbac__github__get_issue", project)
+    assert not allowed and "does not run the botrbac gateway" in why
+    # Without --block-unguarded such a call is checked against the role like any server.
+    payload = {"tool_name": "mcp__botrbac__github__get_issue", "cwd": str(project)}
+    assert not check.check("claude-code", json.dumps(payload), None, False)[0]
+    assert check.classify("claude-code", "mcp__botrbac__github__get_issue", str(project)) == (
+        "botrbac-upstream/github__get_issue",
+        True,
+    )
+
+
+def test_gateway_prefix_before_any_route_list(tmp_path, monkeypatch) -> None:
+    """A gateway started by an older botrbac wrote no list: its tools must keep working."""
+    _cli(tmp_path / "home", monkeypatch, [])
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    assert state.routes() is None
+    assert _hook("mcp__botrbac__github__get_issue", tmp_path)[0]
+
+
+# ---- botrbac roles --------------------------------------------------------------------
+
+
+def test_cli_lists_roles(tmp_path, monkeypatch, capsys) -> None:
+    from botrbac_cli import main as cli
+    from tests.terminal_helpers import cache_policy
+
+    monkeypatch.setenv("BOTRBAC_HOME", str(tmp_path))
+    assert cli.main(["roles"]) == 1 and "Not logged in" in capsys.readouterr().out
+    mine = {"id": "r", "name": "Coding", "patterns": ["claude-code/Bash", "cmd/git", "cmd/gh"]}
+    cache_policy(
+        mine["patterns"], name="Coding",
+        roles=[mine, {"id": "full", "name": "Full access", "patterns": ["*"]},
+               {"id": "none", "name": "No tools", "patterns": []}],
+    )  # fmt: skip
+    monkeypatch.setattr(cli.policy, "refresh", lambda api: None)  # offline
+    assert cli.main(["roles"]) == 0
+    out = capsys.readouterr().out
+    assert "This computer's role: Coding" in out
+    assert "* Coding" in out and "claude-code/Bash; shell runs only git, gh" in out
+    assert "  Full access  every tool" in out and "  No tools     no tools" in out
+    assert cli.main(["roles", "coding"]) == 0
+    assert "  cmd/git" in capsys.readouterr().out
+    assert cli.main(["roles", "nope"]) == 1
+    assert "Roles: Coding, Full access, No tools" in capsys.readouterr().err
+
+
+# ---- named roles: rename, and a way from a blocked call to the fix ----------------------
+
+
+def test_a_named_role_can_be_renamed_without_moving_it(owner_c, p2_app) -> None:  # noqa: F811
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    save_role(owner_c, "Writer", "editor", "proj")
+    _c, tokens = role_connect(owner_c, "researcher")
+    post(owner_c, "/roles/save", slug="researcher", name="Lab reader", level="viewer",
+         item=["loose-doc"])  # fmt: skip
+    roles = p2_app.state.dashboard.agent_roles
+    assert roles.get("researcher").name == "Lab reader" and roles.get("lab-reader") is None
+    assert _status(owner_c, "researcher", tokens["access_token"]) == 200  # same address
+    # Not onto another role's name.
+    post(owner_c, "/roles/save", slug="researcher", name="writer", level="viewer",
+         item=["loose-doc"])  # fmt: skip
+    assert roles.get("researcher").name == "Lab reader"
+    assert "already have a role called Writer" in owner_c.get("/settings").text
+    page = owner_c.get("/settings").text
+    assert 'name="slug" value="researcher"' in page and "Its address stays" in page
+
+
+def test_activity_links_a_blocked_role_call_to_the_role(owner_c, p2_app) -> None:  # noqa: F811
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    assert role_call(owner_c, "researcher", "read_file", file_id="loose-two")["isError"]
+    page = owner_c.get("/activity").text
+    assert "Blocked: it isn’t in the role researcher." in page
+    assert 'href="/settings#role-researcher">Change the files in the role researcher</a>' in page

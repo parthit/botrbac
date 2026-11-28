@@ -103,6 +103,7 @@ class Gateway:
                 continue
             self.routes[exposed] = Route(upstream, tool, tool_id)
         state.note_seen(tools=[r.tool_id for r in self.routes.values()])
+        state.note_routes(list(self.routes))
 
     # ---- MCP handlers ----------------------------------------------------------
 

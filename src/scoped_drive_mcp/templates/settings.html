@@ -275,10 +275,14 @@
     <input id="role-url-{{ role.slug }}" type="text" readonly value="{{ role_url_base }}{{ role.slug }}">
     <button type="button" data-copy="{{ role_url_base }}{{ role.slug }}">Copy role URL</button>
   </div>
-  <details class="disclosure-form" id="edit-role-{{ role.slug }}"><summary>Change level or files</summary>
+  <details class="disclosure-form" id="edit-role-{{ role.slug }}"><summary>Change name, level or files</summary>
     <form class="stack" method="post" action="/roles/save">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="name" value="{{ role.name }}">
+      <input type="hidden" name="slug" value="{{ role.slug }}">
+      <label>Name
+        <input name="name" type="text" required maxlength="40" autocomplete="off" value="{{ role.name }}">
+      </label>
+      <p class="muted small">Renaming changes what the role is called here. Its address stays <code>{{ role.slug }}</code>, so connected agents keep working.</p>
       {{ role_fields(role) }}
       <div class="actions"><button class="primary" type="submit">Save<span class="sr-only"> {{ role.name }}</span></button></div>
     </form>

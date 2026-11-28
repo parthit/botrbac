@@ -104,3 +104,24 @@ def note_seen(tools: list[str] | None = None, unguarded: list[str] | None = None
     if unguarded is not None:
         data["unguarded"] = sorted(set(unguarded))[:50]
     write_json("state.json", data)
+
+
+ROUTES_FILE = "routes.json"
+MAX_ROUTES = 5000
+
+
+def note_routes(exposed: list[str]) -> None:
+    """Remember the tool names the gateway offers (`<server>__<tool>`). The hook reads
+    them to tell the gateway's own tools from another server's that only look like them."""
+    known = read_json(ROUTES_FILE, {}) or {}
+    names = set(known.get("routes") or []) if isinstance(known, dict) else set()
+    write_json(ROUTES_FILE, {"routes": sorted(names | set(exposed))[:MAX_ROUTES]})
+
+
+def routes() -> set[str] | None:
+    """The names from `note_routes`, or None when no gateway has written them yet (one
+    started before botrbac kept this list)."""
+    known = read_json(ROUTES_FILE)
+    if not isinstance(known, dict) or not isinstance(known.get("routes"), list):
+        return None
+    return {str(name) for name in known["routes"]}

@@ -7,8 +7,9 @@ prints the reason on stderr, which is how Claude Code's PreToolUse hooks block a
 `--format json` prints {"decision": ..., "reason": ...} for agents that read JSON.
 
 MCP tools that come through `botrbac gateway` (`mcp__botrbac__*`) are allowed here: the
-gateway checks and logs them. Other MCP tools are checked as `<server>/<tool>`, or
-blocked outright with `--block-unguarded`, so an agent cannot go around the gateway.
+gateway checks and logs them. The prefix is not taken on trust (see `impostor`). Other
+MCP tools are checked as `<server>/<tool>`, or blocked outright with `--block-unguarded`,
+so an agent cannot go around the gateway.
 
 A shell tool (Claude Code's Bash, Codex's shell, Gemini's run_shell_command; see
 shellcmd.SHELL_TOOLS) is checked twice when the role has `cmd/` patterns: the tool
@@ -26,10 +27,13 @@ Rows also carry the agent's own ids, the cwd and its git checkout (provenance.py
 """
 
 import json
+import re
 import sys
+from pathlib import Path
 from typing import Any
 
-from . import agents, policy, provenance
+from . import agents, policy, provenance, state
+from .coverage import GATEWAY_NAME, is_gateway, known_configs, servers_in
 from .gateway import safe_tool
 from .patterns import COMMAND_SERVER, normalize_server
 from .protect import refusal
@@ -65,10 +69,46 @@ def _server_part(name: str) -> str:
     return f"{server}-upstream" if server == COMMAND_SERVER else server
 
 
-def classify(agent: str, name: str) -> tuple[str, bool]:
+def _as_agents_name_it(server: str) -> str:
+    """A server's name as it appears inside `mcp__<server>__<tool>`."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", server)
+
+
+def impostor(name: str, cwd: str | None = None) -> str:
+    """Why a tool named `mcp__botrbac__…` is not the gateway's, or "" when it is.
+
+    The name alone proves nothing: a server called `botrbac__x`, or one called `botrbac`
+    that runs something else, gets the same prefix. So the name must also fit what is
+    on this computer: no configured server other than the gateway may own the prefix,
+    and the rest must be a tool the gateway itself offered. Anything else is checked
+    like any server that goes around the gateway."""
+    servers: list[tuple[str, Any]] = []
+    try:
+        configs = known_configs(Path(cwd) if cwd else None)
+    except OSError:
+        configs = []
+    for config in configs:
+        servers.extend(servers_in(config).items())
+    for server, spec in servers:
+        shown = _as_agents_name_it(server)
+        if shown == GATEWAY_NAME:
+            if not is_gateway(spec):
+                return "a server called botrbac here does not run the botrbac gateway"
+        elif shown.startswith(GATEWAY_NAME + "__") and name.startswith(f"mcp__{shown}__"):
+            return f"it belongs to the server {server}, not to the botrbac gateway"
+    offered = state.routes()
+    if offered is not None and name[len(GATEWAY_PREFIX) :] not in offered:
+        return "the botrbac gateway does not offer a tool with this name"
+    return ""
+
+
+def classify(agent: str, name: str, cwd: str | None = None) -> tuple[str, bool]:
     """(tool id, is an MCP tool that bypasses the gateway)."""
     if name.startswith(GATEWAY_PREFIX):
-        return "", False
+        if not impostor(name, cwd):
+            return "", False
+        rest = name[len(GATEWAY_PREFIX) :]
+        return f"{GATEWAY_NAME}-upstream/{safe_tool(rest or 'tool')}", True
     if name.startswith("mcp__"):
         _, server, rest = (name.split("__", 2) + ["", ""])[:3]
         return f"{_server_part(server)}/{safe_tool(rest or 'tool')}", True
@@ -92,7 +132,8 @@ def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) ->
         tool = tool_name(payload)
     if not tool:
         return False, "botrbac could not tell which tool this is"
-    tool_id, bypass = classify(agent, tool)
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    tool_id, bypass = classify(agent, tool, cwd if isinstance(cwd, str) else None)
     if not tool_id:
         return True, "checked by the gateway"
     row: dict[str, Any] = {
@@ -111,6 +152,8 @@ def _check(agent: str, payload: Any, tool: str | None, block_unguarded: bool) ->
         return False, f"Blocked by Bot RBAC: {tool_id}: {guarded}."
     if bypass and block_unguarded:
         reason = "MCP servers must go through botrbac gateway (run: botrbac wrap)"
+        if tool.startswith(GATEWAY_PREFIX):
+            reason = impostor(tool, cwd if isinstance(cwd, str) else None) or reason
         _record(decision="deny", reason=reason, role="", **row)
         return False, f"Blocked by Bot RBAC: {tool_id}: {reason}"
     enforcer = policy.Enforcer()
