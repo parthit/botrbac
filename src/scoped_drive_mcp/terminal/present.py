@@ -230,7 +230,7 @@ def role_summary(patterns: Iterable[str]) -> list[str]:
         elif name.endswith("*"):
             lines.append(f"{server} tools starting with “{name.rstrip('*')}”")
         else:
-            lines.append(f"{server}: {name.replace('_', ' ')}")
+            lines.append(f"{server}: {name}")  # the tool's own name, exactly
     merged: list[str] = []
     for line in lines:  # "Claude Code: Read", "Claude Code: Grep" -> one line
         head, sep, tail = line.partition(": ")

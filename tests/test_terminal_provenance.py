@@ -568,3 +568,14 @@ def test_allow_link_opens_the_role_with_the_program_added(world, memstore, oauth
     # Hooks report no tool list, but what they saw is offered to tick now.
     assert "curl" in app.state.terminal.roles.seen_tools(OWNER_EMAIL).get("cmd", [])
     assert c.get(f"/terminal/roles/{role.id}?add=bad pattern!").status_code == 200
+
+
+def test_new_role_from_a_built_in_gets_a_sensible_name(world, memstore, oauth) -> None:
+    app = terminal_app(world, memstore, oauth)
+    c = dash.client(app)
+    dash.login(c)
+    one = c.get("/terminal/roles/new?from=read-only&add=cmd/curl").text
+    assert 'value="Read-only, plus cmd/curl"' in one
+    many = "&".join(f"add=cmd/program{i}" for i in range(8))
+    long = c.get(f"/terminal/roles/new?from=read-only&{many}").text
+    assert 'value="Read-only (custom)"' in long and "cmd/program7" in long

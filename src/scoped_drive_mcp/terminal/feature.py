@@ -614,7 +614,11 @@ class TerminalFeature:
                 return await role_form(request, email, role)
             current = list(base.patterns) if base else []
             new = [p for p in add if p not in current]
-            name = role.name if role else (f"{base.name}, plus {', '.join(new)}" if base else "")
+            name = role.name if role else ""
+            if base and not role:
+                # Names are unique; a long list of programs makes a poor one.
+                plus = f"{base.name}, plus {', '.join(new)}"
+                name = plus if len(plus) <= 60 else f"{base.name} (custom)"
             # What the computers reported shows as tick boxes: tick those, type the rest.
             seen = await _run(self.roles.seen_tools, email)
             boxes = {f"{server}/{tool}" for server, tools in seen.items() for tool in tools}
