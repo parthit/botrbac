@@ -494,20 +494,34 @@ def settings_pages(
         back = "/settings#roles"
         slug = form.get("slug") or ""
         role = None if ctx.agent_roles is None else await blocking(ctx.agent_roles.get, slug)
-        if role is None or not await blocking(ctx.agent_roles.delete, slug):
+        if role is None:
             return action_done(request, "error", "That role was not found.", back)
-        ctx.on_allowlist_change()
-        audit_owner("role_delete", name=role.name)
-        # Connections made through the role end with it. Otherwise a later role with the
-        # same name would hand them its files and level without anyone approving that.
+        # Connections made through the role end with it, and they end first: a later role
+        # with the same name must not hand them its files and level without anyone
+        # approving that. If one cannot be ended the role stays, so nothing is left bound
+        # to a name that is free again.
         ended = 0
         if ctx.mcp_oauth is not None:
             email = str(request.session.get("owner") or "")
-            for grant in await blocking(ctx.mcp_oauth.list_grants, email):
-                if grant.agent_role == slug and await blocking(
-                    ctx.mcp_oauth.revoke, grant.id, email
-                ):
-                    ended += 1
+            try:
+                for grant in await blocking(ctx.mcp_oauth.list_grants, email):
+                    if grant.agent_role == slug and await blocking(
+                        ctx.mcp_oauth.revoke, grant.id, email
+                    ):
+                        ended += 1
+            except Exception:
+                logger.warning("could not end a role's connections", exc_info=True)
+                return action_done(
+                    request,
+                    "error",
+                    "The role was not deleted: an assistant connected through it could not be "
+                    "disconnected. Try again.",
+                    back,
+                )
+        if not await blocking(ctx.agent_roles.delete, slug):
+            return action_done(request, "error", "That role was not found.", back)
+        ctx.on_allowlist_change()
+        audit_owner("role_delete", name=role.name)
         if ended:
             audit_owner("role_delete_disconnected", name=role.name, count=str(ended))
         done = "Deleted the role. Agents using its address are refused."

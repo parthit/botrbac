@@ -312,3 +312,34 @@ def test_activity_links_a_blocked_role_call_to_the_role(owner_c, p2_app) -> None
     page = owner_c.get("/activity").text
     assert "Blocked: it isn’t in the role researcher." in page
     assert 'href="/settings#role-researcher">Change the files in the role researcher</a>' in page
+
+
+def test_route_list_follows_the_running_gateways(tmp_path, monkeypatch) -> None:
+    _cli(tmp_path / "home", monkeypatch, [])
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    # A gateway that has exited no longer vouches for its tools.
+    gone = 2**22 + 12345  # above any pid this machine hands out
+    state.write_json(state.ROUTES_FILE, {"gateways": {str(gone): ["old__tool"]}})
+    assert state.routes() == set()
+    state.note_routes(["github__get_issue"])
+    assert state.routes() == {"github__get_issue"}
+    assert str(gone) not in state.read_json(state.ROUTES_FILE)["gateways"]
+    assert not _hook("mcp__botrbac__old__tool", tmp_path)[0]
+    # A damaged list offers nothing, unlike no list at all (an older gateway's grace).
+    (state.home() / state.ROUTES_FILE).write_text("{not json")
+    assert state.routes() == set()
+    assert not _hook("mcp__botrbac__github__get_issue", tmp_path)[0]
+
+
+def test_a_role_stays_when_its_connections_cannot_be_ended(owner_c, p2_app, monkeypatch) -> None:  # noqa: F811
+    save_role(owner_c, "Researcher", "viewer", "loose-doc")
+    role_connect(owner_c, "researcher")
+    oauth = p2_app.state.dashboard.mcp_oauth
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("store is down")
+
+    monkeypatch.setattr(oauth, "revoke", broken)
+    post(owner_c, "/roles/delete", slug="researcher")
+    assert p2_app.state.dashboard.agent_roles.get("researcher") is not None
+    assert "The role was not deleted" in owner_c.get("/settings").text

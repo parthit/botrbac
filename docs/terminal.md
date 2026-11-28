@@ -245,7 +245,8 @@ allowed **and** every program in the command is allowed as `cmd/<program>`. The 
 Code's `Bash`, Codex's `Bash` (and `shell`), Gemini CLI's `run_shell_command` and Cursor's `Shell`
 (`SHELL_TOOLS` in `src/botrbac_cli/shellcmd.py`). Any other tool of the agent's own that is handed a
 `command` (a background or PowerShell runner, say) is checked the same way, so a tool this list does not
-name is not a way around `cmd/`. A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
+name is not a way around `cmd/`. A tool that takes its command under another name (`script`, `cmd`) is
+not read this way: it is allowed or blocked as a whole, by its own name. A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
 never count as `cmd/` patterns.
 
 The command is read conservatively. It is split on `;`, `&&`, `||`, `|`, `&` and new lines; each part's

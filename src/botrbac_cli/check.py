@@ -86,7 +86,8 @@ def impostor(name: str, cwd: str | None = None) -> str:
     try:
         configs = known_configs(Path(cwd) if cwd else None)
     except OSError:
-        configs = []
+        # No working folder to look in: nothing here can show the call is the gateway's.
+        return "botrbac could not read this folder's MCP servers"
     for config in configs:
         servers.extend(servers_in(config).items())
     for server, spec in servers:
