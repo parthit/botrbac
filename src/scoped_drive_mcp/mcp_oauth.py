@@ -1296,20 +1296,30 @@ class McpOAuth:
     def revoke_all(self, email: str) -> tuple[int, int]:
         """End every connection of `email`, including approvals whose code has not been
         exchanged yet (list_grants does not show those). Returns (ended, failed): one
-        failure does not stop the rest."""
+        failure does not stop the rest.
+
+        A full scan of the grants hash, like `_make_room` and `prune`: grants are not
+        indexed by account. It runs only when a person presses Disconnect all. A second
+        pass catches a connection approved while the first one ran (an approval in
+        another tab); one approved after both passes is a new choice the person made."""
         ended = failed = 0
-        for grant_id, raw in self.store.hgetall(GRANTS_KEY).items():
-            try:
-                if OAuthGrant.from_json(raw).email != email:
+        for _ in range(2):
+            found = 0
+            for grant_id, raw in self.store.hgetall(GRANTS_KEY).items():
+                try:
+                    if OAuthGrant.from_json(raw).email != email:
+                        continue
+                except (ValueError, KeyError, TypeError):
                     continue
-            except (ValueError, KeyError, TypeError):
-                continue
-            try:
-                if self.revoke(grant_id, email):
-                    ended += 1
-            except Exception:
-                failed += 1
-                logging.getLogger(__name__).warning("revoke_all: one connection failed")
+                found += 1
+                try:
+                    if self.revoke(grant_id, email):
+                        ended += 1
+                except Exception:
+                    failed += 1
+                    logging.getLogger(__name__).warning("revoke_all: one connection failed")
+            if found == 0 or failed:
+                break
         return ended, failed
 
     def revoke(self, grant_id: str, email: str | None = None, *, reason: str = "") -> bool:

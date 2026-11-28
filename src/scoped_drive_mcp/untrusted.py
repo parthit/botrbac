@@ -53,6 +53,11 @@ def _words(text: str) -> str:
     return " ".join(plain.strip().strip("<>").split()).upper()
 
 
+def _first_words(count: int) -> re.Pattern[str]:
+    """The first `count` space-separated words (a word may hold invisible characters)."""
+    return re.compile(rf"\s*\S+(?:\s+\S+){{{count - 1}}}")
+
+
 def register(*markers: str) -> None:
     """Markers this server writes around untrusted text."""
     _KNOWN.update(_words(m) for m in markers)
@@ -75,11 +80,19 @@ def defang_markers(text: str, *markers: str) -> str:
         found = text[opening.start() : end]
         out.append(text[pos : opening.start()])
         words = _words(found)
-        # A real marker's words at the start (with or without closing brackets, and
-        # whatever follows on the line) is a forged marker: removed. Anything else
-        # shaped like one keeps its text with its opening brackets swapped.
-        forged = any(words == k or words.startswith(k + " ") for k in known)
-        out.append("[removed-marker]" if forged else found.translate(_SAFE_BRACKETS))
+        if words in known:
+            # A forged marker and nothing else (with or without closing brackets).
+            out.append("[removed-marker]")
+        elif prefix := next((k for k in known if words.startswith(k + " ")), None):
+            # A real marker's words followed by more text on the line: the marker's
+            # words go, the rest of the line stays.
+            after = found[opening.end() - opening.start() :]
+            cut = _first_words(len(prefix.split())).match(after)
+            rest = after[cut.end() :] if cut else ""
+            out.append("[removed-marker]" + rest.translate(_SAFE_BRACKETS))
+        else:
+            # Shaped like a marker but not one: its text stays, opening brackets swapped.
+            out.append(found.translate(_SAFE_BRACKETS))
         pos = end
     out.append(text[pos:])
     return "".join(out)
