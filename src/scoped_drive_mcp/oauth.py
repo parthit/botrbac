@@ -25,6 +25,7 @@ from .drive_client import DRIVE_FILE_SCOPE, TOKEN_URI, scopes_acceptable
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+DRIVE_ABOUT_URL = "https://www.googleapis.com/drive/v3/about"
 # Step 1 only identifies the person. Wider scopes belong to a connection (step 2).
 SIGN_IN_SCOPES: tuple[str, ...] = ("openid", "email")
 
@@ -48,8 +49,10 @@ class OAuthClient(Protocol):
         scopes: tuple[str, ...] = SIGN_IN_SCOPES,
         offline: bool = False,
     ) -> str: ...
+    def picker_url(self, state: str, login_hint: str | None = None) -> str: ...
     def exchange_code(self, code: str) -> OAuthTokens: ...
     def userinfo(self, access_token: str) -> dict[str, Any]: ...
+    def drive_account(self, access_token: str) -> str | None: ...
     def revoke(self, token: str) -> bool: ...
 
 
@@ -90,6 +93,35 @@ class GoogleOAuthClient:
             params["access_type"] = "online"
             params["prompt"] = "select_account"
             params["include_granted_scopes"] = "false"
+        if login_hint:
+            params["login_hint"] = login_hint
+        return f"{AUTH_URL}?{urlencode(params)}"
+
+    def picker_url(self, state: str, login_hint: str | None = None) -> str:
+        """Google's file picker as a full page on Google's own site.
+
+        This is Google's redirect picker (the one it documents for desktop and mobile
+        apps): the consent URL with `trigger_onepick`, which shows the picker after the
+        consent screen and comes back to the redirect URI with `picked_file_ids`. The
+        in-page picker runs in a frame and needs Google's cookies there, which Safari and
+        every iPhone and iPad browser block; a full page on google.com does not. Google
+        allows only `drive.file` here, alone. `access_type=online`: the server already
+        holds this person's refresh token, and each extra one counts against Google's
+        per-account limit, which drops the oldest.
+        """
+        params = {
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "response_type": "code",
+            "scope": DRIVE_FILE_SCOPE,
+            "state": state,
+            "access_type": "online",
+            "prompt": "consent",
+            "include_granted_scopes": "false",
+            "trigger_onepick": "true",
+            "allow_multiple": "true",
+            "allow_folder_selection": "true",
+        }
         if login_hint:
             params["login_hint"] = login_hint
         return f"{AUTH_URL}?{urlencode(params)}"
@@ -139,6 +171,28 @@ class GoogleOAuthClient:
         if not isinstance(info, dict):
             raise OAuthError("Google did not return the account's email")
         return info
+
+    def drive_account(self, access_token: str) -> str | None:
+        """The address of the Google account a Drive token belongs to, or None when
+        Google does not say. A `drive.file` token cannot call userinfo; Drive's own
+        `about` names the account."""
+        try:
+            resp = httpx.get(
+                DRIVE_ABOUT_URL,
+                params={"fields": "user(emailAddress)"},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError:
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            user = resp.json().get("user")
+        except (ValueError, AttributeError):
+            return None
+        email = user.get("emailAddress") if isinstance(user, dict) else None
+        return email.strip().lower() if isinstance(email, str) and email.strip() else None
 
     def revoke(self, token: str) -> bool:
         """Ask Google to end this token's grant. True when Google confirms it is gone:

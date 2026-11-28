@@ -260,8 +260,8 @@ def test_allowed_item_google_has_not_opened_offers_pick_again(owner_c, world) ->
     "p2_settings", [_settings(**PICKER_KEYS), _settings()], ids=["picker", "no-picker"]
 )
 def test_safari_picker_note_only_with_the_picker(owner_c, p2_settings) -> None:
-    # Safari blocks Google's cookies in the picker frame; the note says which setting to
-    # change. It belongs next to a picker button, so it is only there when one is.
+    # Safari blocks Google's cookies in the picker frame; the note offers the picker as a
+    # full page instead. It belongs next to a picker button, so it is only there when one is.
     picker = p2_settings.google_picker_api_key is not None
     denied = mcp_call(owner_c, "get_metadata", file_id="stray-shared")
     request_id = denied["structuredContent"]["request_id"]
@@ -270,11 +270,15 @@ def test_safari_picker_note_only_with_the_picker(owner_c, p2_settings) -> None:
         assert page.status_code == 200
         assert ("data-safari-note" in page.text) is picker, path
         if picker:
-            note = re.search(r"<p[^>]*data-safari-note[^>]*>", page.text).group(0)
-            assert "hidden" in note  # ui.js reveals it in Safari only
+            note = re.search(r"<div[^>]*data-safari-note[^>]*>", page.text).group(0)
+            assert "hidden" in note  # ui.js reveals it: its buttons need the script
+            assert "data-pick-fullpage" in page.text
 
 
-def test_safari_note_check_counts_every_ios_browser() -> None:
+def test_ios_pick_buttons_open_the_full_page_picker() -> None:
     script = UI_JS.read_text()
-    # Edge on iOS (EdgiOS) runs on WebKit and hits the same cookie block as Safari.
-    assert "Edg(?!iOS)" in script
+    # Every iPhone and iPad browser runs on WebKit and blocks Google's cookies in the
+    # picker frame, so the check is the device, not the browser's name.
+    assert "/iPhone|iPad|iPod/" in script
+    assert "if (ios) { openFullPage(); return; }" in script
+    assert 'form.action = "/picker/redirect"' in script

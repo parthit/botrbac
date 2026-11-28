@@ -272,6 +272,7 @@ uv run ruff check . && uv run ruff format --check .
 | No **Add from Google Drive** button | `GOOGLE_PICKER_API_KEY` or `GOOGLE_CLOUD_PROJECT_NUMBER` is missing |
 | Picker opens, then errors | The API key's website restriction doesn't include this site, or the Picker API isn't enabled or allowed on the key |
 | "The API developer key is invalid", only in Safari | The API key's website restriction is missing `https://docs.google.com/*` |
+| "Can't access your Google Account" inside the picker | The browser blocks Google's cookies in the picker's frame (every iPhone and iPad browser, Safari by default, or third-party cookies turned off). Nothing to configure: on iPhone and iPad the pick buttons open Google's picker as a full page instead, and other browsers offer **Open Google's picker as a full page** under the button. It returns through the same `/auth/callback` redirect URI. |
 | A file in an allowed folder is "not found" | Google hasn't opened it to the app. Pick that file too |
 | "Google gave more access than Bot RBAC asks for" | An older full-Drive grant came back. Remove Bot RBAC at myaccount.google.com/permissions and connect again; remove `…/auth/drive` from the consent screen's scopes |
 | Assistant's OAuth fails with a redirect error | Its callback URL isn't in `ALLOWED_REDIRECT_URIS` (see step 6) |
