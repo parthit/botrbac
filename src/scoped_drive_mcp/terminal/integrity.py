@@ -75,6 +75,12 @@ def _empty() -> dict[str, Any]:
     }
 
 
+# A computer keeps at most a few thousand rows waiting (queue.py), so its seq cannot jump
+# by more than this between two rows the site accepts, nor start this high.
+MAX_JUMP = 100_000
+MAX_START = 10_000_000
+
+
 @dataclass
 class ChainBatch:
     """One audit POST's rows from one terminal, judged in seq order."""
@@ -122,14 +128,23 @@ class ChainBatch:
         if last == 0:
             # The first chained row this site gets from the terminal starts its chain
             # here. Above 1 (the computer logged in again, so it is a new terminal
-            # here), the Terminals page says where it starts.
+            # here), the Terminals page says where it starts. A start past MAX_START
+            # is not a real queue: refused as a fork, so it cannot set the tip.
+            if link.seq > MAX_START or (link.seq == 1 and link.prev_hash != chain.GENESIS):
+                return FORK
             self.state.update(seq=link.seq, hash=link.row_hash, start=link.seq)
-            return OK if link.seq > 1 or link.prev_hash == chain.GENESIS else FORK
+            return OK
         if link.seq > last:
-            tip = self.state["hash"]
+            # Only a row that fits moves the tip: a fork, or a jump no real queue makes
+            # (one forged row with seq near 2**53), must not leave every honest row
+            # after it looking like a gap.
+            if link.seq - last > MAX_JUMP:
+                return FORK
+            if link.seq == last + 1 and link.prev_hash != self.state["hash"]:
+                return FORK
             self.state["seq"], self.state["hash"] = link.seq, link.row_hash
             if link.seq == last + 1:
-                return OK if link.prev_hash == tip else FORK
+                return OK
             self.state["missing"] += link.seq - last - 1
             return GAP
         seen = self._known(link.seq)

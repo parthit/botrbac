@@ -165,7 +165,7 @@ class TerminalActivity:
                 rejected += 1
                 continue
             seen = SEEN_KEY.format(email=email, event_id=row["event_id"])
-            if not self.store.set_if_absent(seen, "1", ex=SEEN_TTL):
+            if not self.store.set_if_absent(seen, "1", ex=self.seen_ttl()):
                 duplicates += 1
                 continue
             row.update(chained.judge(link))
@@ -199,6 +199,11 @@ class TerminalActivity:
         return integrity.read_all(
             self.store, ACTIVITY_KEY.format(email=email), self.cutoff(), self.max_rows
         )
+
+    def seen_ttl(self) -> int:
+        """How long a stored row's id is remembered: as long as rows are kept, so a batch
+        sent again (even validly signed) after 30 days is still a duplicate."""
+        return max(SEEN_TTL, int(self.retention_days) * 24 * 3600)
 
     def recent(self, email: str, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

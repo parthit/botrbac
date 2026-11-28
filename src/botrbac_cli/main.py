@@ -201,7 +201,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         else:
             problems += 1
             print(f"✗ row {seq} here is not the row the website signed ({when})")
-    print("Record intact." if not problems else f"{problems} problem(s) found.")
+    if problems:
+        print(f"{problems} problem(s) found.")
+    else:
+        # Intact is not true: code running as you could still have written false rows
+        # before they were sent (docs/terminal.md, record integrity).
+        print("Record intact: no row missing, reordered or changed since it was written.")
     return 1 if problems else 0
 
 

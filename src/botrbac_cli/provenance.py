@@ -98,7 +98,8 @@ def input_digest(text: str) -> dict[str, Any]:
 
 # ---- results ------------------------------------------------------------------------
 
-_EXIT_KEYS = ("exit_code", "exitCode", "returncode", "return_code", "status_code")
+# Not "status_code": a fetch tool's HTTP status is not a process exit code.
+_EXIT_KEYS = ("exit_code", "exitCode", "returncode", "return_code")
 _DURATION_KEYS = ("duration_ms", "durationMs")
 _RESULT_KEYS = ("tool_response", "toolResponse", "tool_output", "output", "result")
 
@@ -257,6 +258,8 @@ def git_context(cwd: str | None) -> dict[str, str]:
         if not os.path.isdir(cwd):
             return {}
         now = time.time()
+        # Read, then written back below without a lock: hooks running at once (subagents)
+        # can drop each other's entries. Accepted: the cost is one more git call.
         cache = state.read_json(GIT_CACHE, {}) or {}
         if not isinstance(cache, dict):
             cache = {}

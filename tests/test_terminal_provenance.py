@@ -540,3 +540,10 @@ def test_log_shows_prompt_and_result_rows(tmp_path, monkeypatch, capsys) -> None
     out = capsys.readouterr().out
     assert "prompt 1234abcd" in out and "as None" not in out
     assert "claude-code/Bash  error, exit 2, 11 ms" in out
+
+
+def test_http_status_is_not_an_exit_code() -> None:
+    from botrbac_cli import provenance
+
+    out = provenance.result_fields({"tool_response": {"status_code": 200, "body": "x"}}, False)
+    assert out["outcome"] == "ok" and "exit_code" not in out

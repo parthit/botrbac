@@ -496,7 +496,12 @@ Registration is first-come: a key registered at a refresh (not at login) is writ
 and shown on the Terminals page, because a stolen refresh token could register one first. The site sets `signed`, `subject`, `actor` and
 `grant` on every row itself and drops whatever the CLI sent under those names. `grant.role` and
 `grant.policy_version` come from the site's own record of the terminal at upload time;
-`grant.reported_role` and `grant.reported_policy_version` are what the CLI wrote, kept as its claim. What a signature proves:
+`grant.reported_role` and `grant.reported_policy_version` are what the CLI wrote, kept as its claim.
+`grant.role` is the role **at upload time**: for rows queued offline, a role changed on the website in
+between shows here, while `reported_role` is the role the computer decided under. In `actor`, only
+`terminal:<id>` (from the token) and `subject` come from the site; the agent and subagent names under
+`act` are what the CLI reported. A row's id is remembered for as long as rows are kept, so a batch sent
+again later is stored once. What a signature proves:
 the batch came from a process that can read that file, as you, on that computer. It does not prove an
 agent there did not write the rows, any more than before.
 

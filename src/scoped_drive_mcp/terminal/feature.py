@@ -726,7 +726,9 @@ class TerminalFeature:
             ]  # fmt: skip
             fmt = request.query_params.get("format")
             if fmt == "otlp":
-                # One OTLP/JSON document: read what is kept, then build it.
+                # One OTLP/JSON document: read what is kept, then build it. Unlike CSV
+                # and JSONL this holds every kept row in memory (at most
+                # TERMINAL_ACTIVITY_MAX_ROWS), accepted for one owner-only download.
                 rows = self.open_commands([r for r in source if keep(r)])
                 body = otlp_export.otlp_logs(rows, self.site(request))
                 return PlainTextResponse(

@@ -326,7 +326,7 @@ def test_sync_keeps_the_checkpoint_and_verify_passes(connected, capsys) -> None:
     queue.add(decision="allow", tool="claude-code/Read")  # not sent yet: still fine
     assert main(["verify"]) == 0
     out = capsys.readouterr().out
-    assert "✓ row 3 matches the website's signed checkpoint" in out and "Record intact." in out
+    assert "✓ row 3 matches the website's signed checkpoint" in out and "Record intact:" in out
 
 
 def _tamper(sql: str, *args) -> None:
@@ -405,3 +405,27 @@ def test_verify_allows_rows_pruned_after_sending(monkeypatch) -> None:
     kept, pruned, tip = queue.chain_rows()
     assert [r["seq"] for r in kept] == [3, 4, 5, 6] and pruned == 2 and tip == 6
     assert chain.walk(kept, pruned, tip)["problems"] == []
+
+
+def test_a_forged_huge_seq_does_not_poison_the_chain() -> None:
+    from scoped_drive_mcp.store import MemoryStore
+    from scoped_drive_mcp.terminal import integrity
+
+    chains = integrity.Chains(MemoryStore())
+    rows = []
+    prev = chain.GENESIS
+    for seq in (1, 2, 3):
+        row = {"event_id": f"e{seq:07d}", "seq": seq, "prev_hash": prev}
+        row["row_hash"] = chain.row_hash(row)
+        prev = row["row_hash"]
+        rows.append(row)
+    forged = {"event_id": "forged01", "seq": 2**52, "prev_hash": "0" * 64}
+    forged["row_hash"] = chain.row_hash(forged)
+
+    batch = chains.batch("me@example.com", "t_1")
+    assert batch.judge(integrity.link_of(rows[0]))["chain"] == "ok"
+    assert batch.judge(integrity.link_of(forged))["chain"] == "fork"
+    assert batch.judge(integrity.link_of(rows[1]))["chain"] == "ok"
+    assert batch.judge(integrity.link_of(rows[2]))["chain"] == "ok"
+    batch.commit()
+    assert chains.state("me@example.com", "t_1")["seq"] == 3
