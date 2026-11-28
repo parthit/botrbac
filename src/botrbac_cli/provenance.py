@@ -9,8 +9,8 @@ metadata, stored in the clear like the hostname; nothing here is user text.
 `git_context()` adds the checkout the agent works in: the remote as host/owner/name
 (no userinfo or token), the branch and the commit. It never fails the check.
 
-Text the agent or the person wrote (the prompt, the model's description of a command,
-a `--task`) is never kept here: the caller seals it (queue.AuditQueue.add).
+Text the person wrote (the prompt, a `--task`) is never kept here: the caller seals it
+(queue.AuditQueue.add). The model's own description of its command is not kept at all.
 """
 
 import hashlib
