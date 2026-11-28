@@ -124,7 +124,10 @@ def test_hooks_command(home, monkeypatch, capsys) -> None:
     command = json.loads((home / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"][0]
     assert "--block-unguarded" not in command["hooks"][0]["command"]
     assert main(["hooks", "install", "codex"]) == 0
-    assert "botrbac check --agent codex" in capsys.readouterr().out
+    codex = json.loads((home / ".codex" / "hooks.json").read_text())["hooks"]["PreToolUse"][0]
+    assert "check --agent codex --block-unguarded" in codex["hooks"][0]["command"]
+    assert main(["hooks", "install", "aider"]) == 0
+    assert "botrbac check --agent aider" in capsys.readouterr().out
 
 
 def test_unexpected_error_blocks(monkeypatch, capsys) -> None:

@@ -40,11 +40,11 @@ browser.
 - **Paste into your terminal:**
   `curl -fsSL https://botrbac.com/terminal/install.sh | sh -s -- --agent claude-code` (or `cursor`, `codex`,
   `gemini`). The script installs botrbac with uv or pipx (installing uv first only when neither is there),
-  runs `botrbac login`, adds the gateway to that agent and runs `botrbac doctor`. For Claude Code it also adds
-  the hook (`botrbac hooks install claude-code --user --allow-unguarded`), so Claude's own shell and file
-  edits follow the role as well; `--no-hook` leaves it out and `botrbac hooks remove claude-code --user`
-  undoes it. A new computer starts as Read-only, so with the hook Claude can read but not edit or run
-  commands until you give it a wider role. It never uses sudo and can be run again. Read it first at the
+  runs `botrbac login`, adds the gateway to that agent and runs `botrbac doctor`. It also adds that agent's
+  hook (`botrbac hooks install <agent> --user --allow-unguarded`), so the agent's own shell and file edits
+  follow the role as well; `--no-hook` leaves it out and `botrbac hooks remove <agent> --user` undoes it.
+  A new computer starts as Read-only, so with the hook the agent can read but not edit or run commands
+  until you give it a wider role. It never uses sudo and can be run again. Read it first at the
   same address: `https://botrbac.com/terminal/install.sh`.
 - **Paste into your agent:** `Set up Bot RBAC Terminal for me by following https://botrbac.com/terminal/setup.md`.
   The agent follows [terminal-agent-setup.md](terminal-agent-setup.md) (the same text the site serves).
@@ -85,7 +85,7 @@ one anyway returns an error that names the role.
 | `cmd/gh` | the `gh` program in an agent's shell (`cmd/git*`, `cmd/*` work the same way) |
 
 Tools are named `<server>/<tool>`. Server names are the names in `botrbac servers list`. An agent's own
-tools (see [hooks](#an-agents-own-tools-hooks)) use the agent's name: `claude-code/Bash`, `codex/shell`.
+tools (see [hooks](#an-agents-own-tools-hooks)) use the agent's name: `claude-code/Bash`, `codex/Bash`, `cursor/Shell`.
 Once a terminal syncs, the tools it saw are offered as tick boxes on the role page. A bare word such as
 `gh` is refused with a hint: to allow the gh command, use `cmd/gh`.
 
@@ -136,6 +136,7 @@ so they are checked by the agent's pre-tool hook calling `botrbac check`:
 ```
 botrbac hooks install claude-code          # this project's .claude/settings.json
 botrbac hooks install claude-code --user   # every project
+botrbac hooks install codex --user         # also gemini, cursor
 ```
 
 This adds a `PreToolUse` hook that runs `botrbac check --agent claude-code --block-unguarded` before every
@@ -144,7 +145,7 @@ tool call. The call is checked as `claude-code/<Tool>`, so give roles the tools 
 come through `botrbac gateway` are blocked; pass `--allow-unguarded` to check them as `<server>/<tool>`
 instead.
 
-It also adds `UserPromptSubmit`, `PostToolUse` and `PostToolUseFailure` hooks running the same command.
+Claude Code also gets `UserPromptSubmit`, `PostToolUse` and `PostToolUseFailure` hooks running the same command.
 `botrbac check` reads `hook_event_name` from the payload: `PreToolUse` (or no event) is the check above;
 the other three only record a row, always exit 0 and print nothing, so they never block or add text to
 the conversation.
@@ -165,6 +166,47 @@ subagents), plus `permission_mode` and `cwd`. Codex's `turn_id` and Cursor's `co
 (the commit). git gets about a second, the answer is cached for a few seconds in `git-cache.json`, and a
 failure just leaves them out; it never changes the decision. `botrbac hooks remove` takes all four out.
 
+Each install keeps the rest of the file, backs it up first (`<file>.botrbac-backup-<time>`), changes
+nothing when run again, and refuses to touch a file it cannot parse. `botrbac hooks remove <agent>` takes
+out only botrbac's entry. Without `--user` the file is the project's (`.codex/`, `.gemini/`, `.cursor/`).
+
+| Agent | File (`--user`) | Event | Tools are checked as | Answer |
+| --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude/settings.json` | `PreToolUse` | `claude-code/Bash`, `claude-code/Edit`, … | exit 2 blocks |
+| Codex CLI | `~/.codex/hooks.json` | `PreToolUse` | `codex/Bash`, `codex/apply_patch`, … | exit 2 blocks |
+| Gemini CLI | `~/.gemini/settings.json` | `BeforeTool` | `gemini/run_shell_command`, `gemini/write_file`, … | exit 2 blocks |
+| Cursor | `~/.cursor/hooks.json` | `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile` | `cursor/Shell`, `cursor/Read`, MCP tools | JSON `permission` |
+
+What each agent sends and needs, and how sure we are (formats checked November 2026; the comment at the
+top of `src/botrbac_cli/agents.py` has the details):
+
+- **Codex CLI** ([hooks docs](https://developers.openai.com/codex/hooks), and the hook engine in
+  `openai/codex` under `codex-rs/hooks`). Same shape as Claude Code: `{"hooks": {"PreToolUse": [{"matcher":
+  ".*", "hooks": [{"type": "command", "command": …}]}]}}`, the payload has `tool_name` (`Bash`,
+  `apply_patch`, `mcp__<server>__<tool>`) and `tool_input`, and exit 2 with the reason on stderr blocks.
+  **Codex skips a new or changed hook until you trust it**: run `/hooks` in Codex after installing.
+  `[features] hooks = false` in `config.toml` switches hooks off; doctor reports that. Confident: read
+  from Codex's source.
+- **Gemini CLI** ([hooks reference](https://geminicli.com/docs/hooks/reference/)). A `BeforeTool` entry in
+  `settings.json` with `matcher` `.*`, `name` `botrbac` and a 60 s `timeout`. MCP tools arrive as
+  `mcp_<server>_<tool>` and are checked as `<server>/<tool>` (the name is split at the first `_` after
+  `mcp_`, as Gemini does, so keep `_` out of server names). Exit 2 blocks; **any other non-zero exit only
+  warns and lets the tool run**, which is why every error in `botrbac check` exits 2. `hooksConfig.enabled:
+  false`, or `botrbac` in `hooksConfig.disabled`, switches it off; doctor reports that. Confident: from
+  Gemini's own docs.
+- **Cursor** ([hooks docs](https://cursor.com/docs/hooks)). Cursor is closed source and its docs could not
+  be fetched while this was written, so this follows its docs as quoted by third-party guides. Less sure.
+  `{"version": 1, "hooks": {"beforeShellExecution": [{"command": …, "failClosed": true}], …}}`. The shell
+  event sends `command` at the top level, checked as `cursor/Shell` (and `cmd/<program>`); the read event
+  sends `file_path`, checked as `cursor/Read` (the file's content in the payload is never read or kept);
+  the MCP event sends `tool_name`, `tool_input` as a JSON string, and the server's `url` or `command` but
+  not its name, so the server is named after the url's host or the command's program (`npx -y
+  @modelcontextprotocol/server-github` is `server-github`), and a server whose command is `botrbac gateway`
+  is the gateway. Cursor reads the answer from stdout, `{"permission": "allow"}` or `{"permission": "deny",
+  "user_message": …, "agent_message": …}`, so `botrbac check --agent cursor` always prints JSON and exits
+  0. Cursor lets an action go ahead when a hook crashes unless the entry has `failClosed`, which the
+  installer sets. If your Cursor version ignores `failClosed`, a missing botrbac lets calls through.
+
 ### Shell commands: `cmd/<program>`
 
 An agent runs `gh pr list` through its shell tool, which the hook sees as one call to `claude-code/Bash`:
@@ -178,8 +220,8 @@ cmd/gh
 
 When any role in force has a `cmd/` pattern, a shell call is allowed only if the shell tool itself is
 allowed **and** every program in the command is allowed as `cmd/<program>`. The shell tools are Claude
-Code's `Bash`, Codex's `shell` and Gemini CLI's `run_shell_command` (`SHELL_TOOLS` in
-`src/botrbac_cli/shellcmd.py`). A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
+Code's `Bash`, Codex's `Bash` (and `shell`), Gemini CLI's `run_shell_command` and Cursor's `Shell`
+(`SHELL_TOOLS` in `src/botrbac_cli/shellcmd.py`). A role with no `cmd/` patterns works exactly as before. `*` and `*/read*`
 never count as `cmd/` patterns.
 
 The command is read conservatively. It is split on `;`, `&&`, `||`, `|`, `&` and new lines; each part's
@@ -196,8 +238,8 @@ This protects against the agent, not the computer's owner, and goes by name: a p
 (`make`, `npm run`, `find -exec`, `timeout`, `nice`, git aliases, scripts) runs whatever it runs, so
 allowing `cmd/timeout` allows anything `timeout` can start.
 
-For another agent with pre-tool hooks, make the hook run `botrbac check --agent <name>` with the tool call
-as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with
+For an agent botrbac does not set up, make its pre-tool hook run `botrbac check --agent <name>` with the
+tool call as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with
 the reason on stderr; any error inside the check also exits 2. `--format json` prints
 `{"decision": "allow"|"deny", "reason": …}` and always exits 0, so a caller using it must read
 `decision`. `--tool NAME` skips stdin.
@@ -234,13 +276,21 @@ cover that, from strongest to weakest:
   not stretch it. (Needs `ENCRYPTION_KEY` on the server; computers logged in before this pick up the key at
   their next token refresh.)
 - **Protected files.** Whatever the role, a tool call that would change Claude Code's settings
-  (`.claude/settings.json`, `.claude/settings.local.json`), `~/.claude.json` or botrbac's own folder is
-  refused, as is one that mentions `disableAllHooks` or `botrbac hooks remove`. Paths are followed through
+  (`.claude/settings.json`, `.claude/settings.local.json`), `~/.claude.json`, the other agents' hook and MCP
+  files (`.codex/hooks.json`, `.codex/config.toml`, `.gemini/settings.json`, `.cursor/hooks.json`,
+  `.cursor/mcp.json`) or botrbac's own folder is refused, as is one that mentions `disableAllHooks` or `botrbac hooks remove`. Paths are followed through
   symlinks and `..`. Reading those files is allowed, except botrbac's login file, which holds its tokens.
   This reads the call's text, so it is a speed bump: a path built at run time (variables, a script written
   elsewhere) gets past it.
-- **Noticing.** `botrbac doctor` says when the hook is missing or switched off by `disableAllHooks`, and each
-  sync tells the site, which marks the computer "hook off" on the Terminal page.
+- **Noticing.** `botrbac doctor` says when the hook is missing or switched off by `disableAllHooks` (or
+  Codex's `[features] hooks = false`, Gemini's `hooksConfig`), and each sync tells the site, which marks the
+  computer "hook off" on the Terminal page.
+- **Coverage.** `botrbac doctor` also lists every agent it finds on the computer (its folder in your home,
+  such as `~/.codex`, or its program on PATH) with whether its hook and gateway are in place, and the fix
+  for each. Each sync sends a summary, `coverage`: `{"agents_detected": [...], "agents_hooked": [...],
+  "hook_off": [...], "unguarded_servers": N}`. The Terminal page shows it per computer, for example
+  "Coverage 2/3 agents hooked, 0 unguarded servers", and names the command that hooks the rest. It is
+  what the computer says about itself: a hint for you, never used to allow anything.
 
 Extras for stricter setups, outside botrbac: put the hook and gateway in Claude Code's **managed settings**
 (an administrator's file the user and agent cannot override, including `disableAllHooks`); add
@@ -403,10 +453,11 @@ for you; anyone who reads the commit sees the site's address and the session id.
 | `botrbac servers add/remove/list` | The MCP servers the gateway sits in front of |
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
 | `botrbac wrap <agent> [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |
-| `botrbac doctor` | Login, policy age, servers that bypass Bot RBAC |
+| `botrbac doctor` | Login, policy age, each agent's hook and gateway, servers that bypass Bot RBAC |
 | `botrbac run --role R [--task T] -- cmd …` | Run a command in a narrower session |
 | `botrbac shell-init` | Shell functions for `<agent> --botrbac --role R` |
-| `botrbac hooks install claude-code` | Check Claude Code's own tools too |
+| `botrbac hooks install A [--user]` | Check the agent's own tools too: `claude-code`, `codex`, `gemini`, `cursor` |
+| `botrbac hooks remove A [--user]` | Take botrbac's hook out of that agent's file (others kept, backed up) |
 | `botrbac check --agent A` | The hook adapter (reads the tool call on stdin) |
 | `botrbac sync` / `botrbac log` | Send waiting rows now / show recent rows |
 | `botrbac verify [--offline]` | Check `audit.db`'s hash chain and the site's signed checkpoint |

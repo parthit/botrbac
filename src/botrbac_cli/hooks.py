@@ -171,4 +171,9 @@ def hook_report(cwd: Path | None = None) -> dict[str, str]:
     for agent in data.get("hooks_expected") or []:
         if agent == "claude-code":
             report[agent] = claude_code_hook_status(cwd)
+        else:
+            from .agents import OTHER_AGENTS, hook_status
+
+            if agent in OTHER_AGENTS:
+                report[agent] = hook_status(agent, cwd)
     return report
