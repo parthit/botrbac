@@ -236,7 +236,9 @@ only with [Record commands](#record-commands) on, and then sealed.
 
 This protects against the agent, not the computer's owner, and goes by name: a program that starts others
 (`make`, `npm run`, `find -exec`, `timeout`, `nice`, git aliases, scripts) runs whatever it runs, so
-allowing `cmd/timeout` allows anything `timeout` can start.
+allowing `cmd/timeout` allows anything `timeout` can start. Environment variables an allowed program
+reads can make it run something else too (`GIT_PAGER=…`, `GIT_SSH_COMMAND=…`, `LD_PRELOAD=…`), so
+`cmd/git` is a limit on names, not a sandbox.
 
 For an agent botrbac does not set up, make its pre-tool hook run `botrbac check --agent <name>` with the
 tool call as JSON on stdin (it reads `tool_name`, `toolName`, `tool` or `name`). Exit code 0 allows and 2 blocks, with
@@ -363,8 +365,9 @@ With it on, rows also carry:
 - `input_digest` (`sha256:<hex>`) and `input_size` (bytes) of the whole command or tool input, taken
   before the 8,000-character cut, so a long input can be matched against a copy you have.
 
-The prompt and the task are sealed like the command, each bound to its row and its field
-name, so none can be moved onto another row or swapped for another field. Without Record commands none of
+The prompt and the task are sealed like the command and bound to their row, so neither can be moved
+onto another row. The prompt travels in its `prompt` row's command field (that row has no other
+command); the task is also bound to its field name. Without Record commands none of
 them is sent.
 
 You can read it; the agents can't. The site's public key travels in the signed policy. The CLI seals each
@@ -461,18 +464,18 @@ for you; anyone who reads the commit sees the site's address and the session id.
 | `botrbac login [--server URL]` | Connect this computer (device code approved on the website; default `https://botrbac.com`) |
 | `botrbac add-gateway --agent A` | Add the gateway to Cursor's, Codex's or Gemini CLI's config (others kept, backed up) |
 | `botrbac status` | Account, role, policy age, rows waiting, current session |
-| `botrbac servers add/remove/list` | The MCP servers the gateway sits in front of |
+| `botrbac servers add/remove/list [--url U]` | The MCP servers the gateway sits in front of |
 | `botrbac gateway [--agent NAME]` | The MCP server your agent starts |
-| `botrbac wrap <agent> [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |
+| `botrbac wrap <agent> [--user] [--file F] [--dry-run]` | Move an agent's MCP servers behind the gateway |
 | `botrbac doctor` | Login, policy age, each agent's hook and gateway, servers that bypass Bot RBAC |
-| `botrbac run --role R [--task T] -- cmd …` | Run a command in a narrower session |
+| `botrbac run --role R [--task T] [--agent A] -- cmd …` | Run a command in a narrower session |
 | `botrbac shell-init` | Shell functions for `<agent> --botrbac --role R` |
-| `botrbac hooks install A [--user]` | Check the agent's own tools too: `claude-code`, `codex`, `gemini`, `cursor` |
+| `botrbac hooks install A [--user] [--allow-unguarded]` | Check the agent's own tools too: `claude-code`, `codex`, `gemini`, `cursor` |
 | `botrbac hooks remove A [--user]` | Take botrbac's hook out of that agent's file (others kept, backed up) |
-| `botrbac check --agent A` | The hook adapter (reads the tool call on stdin) |
-| `botrbac sync` / `botrbac log` | Send waiting rows now / show recent rows |
+| `botrbac check --agent A [--tool T] [--format json] [--block-unguarded]` | The hook adapter (reads the tool call on stdin) |
+| `botrbac sync [--retry-rejected]` / `botrbac log [-n N]` | Send waiting rows now (`--retry-rejected` also resends rows the site refused) / show the last N rows (20) |
 | `botrbac verify [--offline]` | Check `audit.db`'s hash chain and the site's signed checkpoint |
-| `botrbac trailer install [--repo P]` / `remove` | Opt-in git hook: `Botrbac-Session:` trailer on commits made in a session |
+| `botrbac trailer install [--repo P] [--site URL]` / `remove` | Opt-in git hook: `Botrbac-Session:` trailer on commits made in a session |
 | `botrbac logout` | Forget this computer's login and key (disconnect it on the website too) |
 
 Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json` (mode 0600),
