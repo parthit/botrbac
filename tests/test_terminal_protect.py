@@ -139,10 +139,11 @@ def test_missing_hook_shows_on_the_website(world, memstore, oauth) -> None:
            headers=headers)  # fmt: skip
     (terminal,) = app.state.terminal.terminals.for_person(OWNER_EMAIL)
     assert app.state.terminal.terminals.get(terminal.id).hook_missing == ["claude-code"]
-    assert "claude-code hook off" in c.get("/terminal").text
+    page = c.get("/terminal").text
+    assert "Claude Code isn" in page and "being checked" in page
     c.post("/api/terminal/audit", json={"rows": [], "hooks": {"claude-code": "installed"}},
            headers=headers)  # fmt: skip
-    assert "hook off" not in c.get("/terminal").text
+    assert "being checked" not in c.get("/terminal").text
 
 
 def test_sync_reports_hook_status() -> None:

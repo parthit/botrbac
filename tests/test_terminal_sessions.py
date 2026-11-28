@@ -240,7 +240,11 @@ def test_session_page_and_revoke(world, memstore, oauth) -> None:
     c.post("/api/terminal/audit", json={"rows": rows}, headers=headers)
     page = c.get(f"/terminal/sessions/{root}")
     assert page.status_code == 200
-    assert "Reviewer" in page.text and "Reader" in page.text and "github/create_issue" in page.text
+    assert (
+        "Reviewer" in page.text
+        and "Reader" in page.text
+        and "Tried to use create issue on github" in page.text
+    )
     assert c.get(f"/terminal/sessions/{'c' * 32}").status_code == 404
     assert f"/terminal/sessions/{root}" in c.get("/terminal/activity").text
 

@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     # Access requests one connected app may have waiting for the person at once.
     max_pending_requests: int = Field(default=50, ge=1, le=300)
     mcp_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
+    # Terminal activity rows are kept this many days, and at most this many per person
+    # (whichever comes first). The Activity page shows the newest 2,000; exports have all.
+    terminal_activity_days: int = Field(default=180, ge=1, le=3650)
+    terminal_activity_max_rows: int = Field(default=20_000, ge=100, le=1_000_000)
 
     @field_validator(
         "root_folder_id",

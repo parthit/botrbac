@@ -14,18 +14,30 @@ from typing import Any
 
 import anyio.to_thread
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.routing import Route
 
-from botrbac_cli import sealing, signing
+from botrbac_cli import chain, sealing, signing
 from botrbac_cli.api import DEFAULT_SERVER
 
 from ..audit import audit_owner
 from ..auth import current_actor, extract_token
 from ..ratelimit import allow, ip_identity
+from . import export as otlp_export
+from . import identity, present
+from .coverage import clean_coverage, unhooked
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
-from .ingest import IngestError, TerminalActivity
+from .ingest import RETENTION_DAYS, RETENTION_MAX_ROWS, IngestError, TerminalActivity
+from .provenance import FIELDS as PROVENANCE_FIELDS
+from .provenance import SEALED_FIELDS
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
+from .webhook import AuditWebhook, WebhookError
 
 Handler = Callable[[Request], Awaitable[Response]]
 FormHandler = Callable[[Request, Any], Awaitable[Response]]
@@ -87,6 +99,15 @@ AGENTS = (
     ("codex", "Codex"),
     ("gemini", "Gemini CLI"),
 )
+
+
+WEBHOOK_ERRORS = {
+    "invalid_webhook_url": "Use an https address on port 443, with no user, query or fragment.",
+    "webhook_host_unknown": "That host could not be found.",
+    "webhook_host_not_public": "That host is on a private network. Use a public https address.",
+    "webhook_disabled": "This site has no ENCRYPTION_KEY, so it cannot send audit webhooks.",
+    "": "That webhook could not be saved.",
+}
 
 
 def safe_site(base: str) -> str:
@@ -168,9 +189,13 @@ class TerminalFeature:
     # ENCRYPTION_KEY: policies are signed with a key derived from it, and recorded
     # commands are sealed to another. None: unsigned, and commands are never recorded.
     signing_secret: str | None = None
+    # TERMINAL_ACTIVITY_DAYS and TERMINAL_ACTIVITY_MAX_ROWS.
+    activity_days: int = RETENTION_DAYS
+    activity_max_rows: int = RETENTION_MAX_ROWS
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
     activity: TerminalActivity = field(init=False)
+    webhook: AuditWebhook = field(init=False)
 
     def __post_init__(self) -> None:
         self._signing_key = (
@@ -181,7 +206,10 @@ class TerminalFeature:
         )
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
-        self.activity = TerminalActivity(self.store)
+        self.activity = TerminalActivity(
+            self.store, retention_days=self.activity_days, max_rows=self.activity_max_rows
+        )
+        self.webhook = AuditWebhook(self.store, self.signing_secret)
 
     def site(self, request: Request) -> str:
         return safe_site(self.base_url or str(request.base_url))
@@ -217,21 +245,45 @@ class TerminalFeature:
         return self._command_key
 
     def open_commands(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Copies of `rows` with each sealed command opened, for the owner's eyes only.
-        A command that will not open (ENCRYPTION_KEY changed) says so."""
+        """Copies of `rows` with each sealed command, description and task opened, for
+        the owner's eyes only. One that will not open (ENCRYPTION_KEY changed) says so
+        with `<field>_unreadable`."""
         out = []
         for row in rows:
-            sealed = row.get("command")
-            if sealed and self._command_key is not None:
-                try:
-                    text = sealing.open_sealed(self._command_key, row["event_id"], sealed)
-                except sealing.SealError:
-                    text = None
-                row = {**row, "command": text, "command_unreadable": text is None}
-            elif sealed:
-                row = {**row, "command": None, "command_unreadable": True}
+            event_id = str(row.get("event_id", ""))
+            fields = [("command", event_id)] + [(n, f"{event_id}:{n}") for n in SEALED_FIELDS]
+            for name, aad in fields:
+                sealed = row.get(name)
+                if not sealed:
+                    continue
+                text = None
+                if self._command_key is not None:
+                    try:
+                        text = sealing.open_sealed(self._command_key, aad, sealed)
+                    except sealing.SealError:
+                        text = None
+                row = {**row, name: text, f"{name}_unreadable": text is None}
             out.append(row)
         return out
+
+    def open_tree(self, tree: dict[str, Any]) -> dict[str, Any]:
+        """A session tree (TerminalActivity.session) with each start row opened."""
+        return {
+            **tree,
+            "start": self.open_commands([tree["start"]])[0],
+            "children": [self.open_tree(c) for c in tree.get("children") or []],
+        }
+
+    def checkpoint_for(self, email: str, terminal_id: str) -> dict[str, Any] | None:
+        """The newest chained row accepted from this terminal, signed with the policy
+        key (integrity.py, botrbac_cli.chain). None before its first chained row."""
+        tip = self.activity.chains.tip(email, terminal_id)
+        if tip is None:
+            return None
+        body = chain.checkpoint_body(terminal_id, tip[0], tip[1], time.time())
+        if self._signing_key is not None:
+            body["signature"] = signing.sign(self._signing_key, body)
+        return body
 
     @property
     def policy_key(self) -> str | None:
@@ -272,6 +324,20 @@ class TerminalFeature:
                     return _oauth_error("invalid_grant")
             else:
                 return _oauth_error("unsupported_grant_type")
+            if data.get("public_key"):
+                # This terminal's signing key: kept at login, or at the first refresh of
+                # a terminal that has none. Never replaced (terminal.identity).
+                added = await _run(
+                    self.terminals.register_key, issued["terminal_id"], data.get("public_key")
+                )
+                if added:
+                    via = "login" if grant != "refresh_token" else "refresh"
+                    await _run(
+                        self.terminals.touch,
+                        issued["terminal_id"],
+                        key_registered={"at": time.time(), "via": via},
+                    )
+                    audit_owner("terminal_key_registered", terminal=issued["terminal_id"], via=via)
             if self.policy_key:
                 issued["policy_key"] = self.policy_key
             return JSONResponse(issued, headers={"cache-control": "no-store"})
@@ -304,6 +370,19 @@ class TerminalFeature:
             raw = await _read_capped(request, MAX_BODY)
             if raw is None:
                 return JSONResponse({"error": "too_large"}, status_code=413)
+            public_key = await _run(self.terminals.public_key, terminal.id)
+            try:
+                signed = await _run(
+                    identity.verify_batch,
+                    self.store,
+                    public_key,
+                    terminal.id,
+                    request.headers,
+                    raw,
+                    time.time(),
+                )
+            except identity.SignatureRejected as exc:
+                return JSONResponse({"error": exc.code}, status_code=401)
             try:
                 data = json.loads(raw or b"{}")
             except ValueError:
@@ -311,6 +390,11 @@ class TerminalFeature:
             if not isinstance(data, dict):
                 return JSONResponse({"error": "invalid_request"}, status_code=400)
             command_key = await _run(self.command_key_for, terminal.email)
+            # The role and policy the site has for this terminal now: `grant` is built
+            # from these, not from the role names the computer wrote into its rows.
+            policy = await _run(self.policy_for, terminal)
+            assigned = {"role": policy["role"]["name"], "policy_version": policy["version"]}
+            stored: list[dict[str, Any]] = []
             try:
                 result = await _run(
                     self.activity.add,
@@ -319,9 +403,13 @@ class TerminalFeature:
                     terminal.name,
                     data.get("rows"),
                     command_key,
+                    stamp=identity.stamper(terminal, signed, stored, assigned),
                 )
             except IngestError as exc:
                 return JSONResponse({"error": "invalid_request", "message": str(exc)}, 400)
+            if stored:
+                # Best effort, short timeout; never fails the upload (terminal.webhook).
+                await _run(self.webhook.deliver, terminal.email, stored, command_key)
             tools = data.get("tools")
             if isinstance(tools, list):
                 await _run(self.roles.note_tools, terminal.email, tools[:500])
@@ -341,8 +429,21 @@ class TerminalFeature:
                 changes["unguarded"] = sorted(
                     {str(u)[:64] for u in unguarded if isinstance(u, str) and u.strip()}
                 )[:MAX_UNGUARDED]
+            coverage = clean_coverage(data.get("coverage"))
+            if coverage is not None:
+                changes["coverage"] = coverage
             await _run(self.terminals.touch, terminal.id, **changes)
+            checkpoint = await _run(self.checkpoint_for, terminal.email, terminal.id)
+            if checkpoint is not None:
+                result = {**result, "checkpoint": checkpoint}
             return JSONResponse(result)
+
+        async def checkpoint(request: Request) -> Response:
+            terminal = await caller(request)
+            if isinstance(terminal, Response):
+                return terminal
+            body = await _run(self.checkpoint_for, terminal.email, terminal.id)
+            return JSONResponse({"checkpoint": body}, headers={"cache-control": "no-store"})
 
         async def setup_md(request: Request) -> Response:
             text = await _run(setup_markdown, self.site(request))
@@ -364,6 +465,7 @@ class TerminalFeature:
             Route("/api/terminal/token", token, methods=["POST"]),
             Route("/api/terminal/policy", policy, methods=["GET"]),
             Route("/api/terminal/audit", audit, methods=["POST"]),
+            Route("/api/terminal/checkpoint", checkpoint, methods=["GET"]),
         ]
 
     def page_routes(self, kit: Kit) -> list[Route]:
@@ -374,6 +476,7 @@ class TerminalFeature:
             terminals = await _run(self.terminals.for_person, email)
             roles = await _run(self.roles.all, email)
             names = {r.id: r.name for r in roles}
+            chains = await _run(self.activity.chains.summary, email)
             site = self.site(request)
             return render(
                 request,
@@ -381,10 +484,13 @@ class TerminalFeature:
                 terminals=terminals,
                 roles=roles,
                 role_names=names,
+                chains=chains,
                 site=site,
                 login_cmd=login_command(site),
                 agents=AGENTS,
                 install_cmds={a: install_command(site, a) for a, _ in AGENTS},
+                unhooked=unhooked,
+                agent_name=present.agent_name,
             )
 
         async def device_page(request: Request) -> Response:
@@ -559,15 +665,23 @@ class TerminalFeature:
                 kit.flash(request, "error", "That role cannot be deleted.")
             return RedirectResponse("/terminal/roles", status_code=303)
 
-        def filtered(request: Request, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def wanted(request: Request) -> Callable[[dict[str, Any]], bool]:
             q = request.query_params
-            if q.get("terminal"):
-                rows = [r for r in rows if r.get("terminal_id") == q["terminal"]]
-            if q.get("agent"):
-                rows = [r for r in rows if r.get("agent") == q["agent"]]
-            if q.get("blocked") == "1":
-                rows = [r for r in rows if r.get("decision") == "deny"]
-            return rows
+
+            def keep(r: dict[str, Any]) -> bool:
+                if q.get("terminal") and r.get("terminal_id") != q["terminal"]:
+                    return False
+                if q.get("agent") and r.get("agent") != q["agent"]:
+                    return False
+                if q.get("blocked") == "1" and r.get("decision") != "deny":
+                    return False
+                return all(r.get(k) == q[k] for k in ("prompt_id", "agent_session_id") if q.get(k))
+
+            return keep
+
+        def filtered(request: Request, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            keep = wanted(request)
+            return [r for r in rows if keep(r)]
 
         async def activity_page(request: Request) -> Response:
             email = _me()
@@ -580,10 +694,16 @@ class TerminalFeature:
             except ValueError:
                 limit = ACTIVITY_PAGE
             recording = await _run(self.activity.records_commands, email)
+            hook = await _run(self.webhook.get, email)
             return render(
                 request,
                 "terminal_activity.html",
-                rows=self.open_commands(shown[:limit]),
+                delegation=identity.chain_text,
+                webhook=hook,
+                can_webhook=self.webhook.ready,
+                stories=present.stories(self.open_commands(shown[:limit])),
+                trouble=present.trouble,
+                agent_name=present.agent_name,
                 recording=recording,
                 can_record=self._command_key is not None,
                 more=len(shown) > limit,
@@ -596,32 +716,95 @@ class TerminalFeature:
             )
 
         async def activity_export(request: Request) -> Response:
-            rows = filtered(request, await _run(self.activity.recent, _me()))
-            rows = self.open_commands(rows)
+            # Everything kept (TERMINAL_ACTIVITY_DAYS), newest received first, read and
+            # sent a chunk at a time: not just the rows the Activity page shows.
+            keep = wanted(request)
+            source = self.activity.everything(_me())
             fields = [
                 "ts", "terminal", "terminal_id", "agent", "tool", "command",
                 "command_error", "decision", "reason", "role", "session_id",
-                "parent_session_id", "via", "event_id", "received",
+                "parent_session_id", "via", "event_id", "received", "seq", "chain",
+                "row_hash", "signed", "subject", "actor", "grant", "policy_version",
+                *PROVENANCE_FIELDS,
             ]  # fmt: skip
-            if request.query_params.get("format") == "jsonl":
-                text = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
-                kind, ext = "application/x-ndjson", "jsonl"
-            else:
-                out = io.StringIO()
-                writer = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
-                writer.writeheader()
-                for r in rows:
+            fmt = request.query_params.get("format")
+            if fmt == "otlp":
+                # One OTLP/JSON document: read what is kept, then build it. Unlike CSV
+                # and JSONL this holds every kept row in memory (at most
+                # TERMINAL_ACTIVITY_MAX_ROWS), accepted for one owner-only download.
+                rows = self.open_commands([r for r in source if keep(r)])
+                body = otlp_export.otlp_logs(rows, self.site(request))
+                return PlainTextResponse(
+                    json.dumps(body, separators=(",", ":")),
+                    media_type="application/json",
+                    headers={
+                        "content-disposition": 'attachment; filename="terminal-activity.otlp.json"',
+                        "cache-control": "no-store",
+                    },
+                )
+            jsonl = fmt == "jsonl"
+
+            def lines() -> Any:
+                if not jsonl:
+                    out = io.StringIO()
+                    csv.DictWriter(out, fieldnames=fields).writeheader()
+                    yield out.getvalue()
+                for r in source:
+                    if not keep(r):
+                        continue
+                    (r,) = self.open_commands([r])
+                    if jsonl:
+                        yield json.dumps(r, separators=(",", ":")) + "\n"
+                        continue
+                    out = io.StringIO()
+                    writer = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
+                    # The delegation fields are objects: JSON in their cells.
+                    r = {k: json.dumps(v) if isinstance(v, dict) else v for k, v in r.items()}
                     # A cell starting with = + - @ would run as a formula in a spreadsheet.
                     writer.writerow(
                         {k: ("'" + v if isinstance(v, str) and v and v[0] in "=+-@\t\r" else v)
                          for k, v in r.items()}
                     )  # fmt: skip
-                text, kind, ext = out.getvalue(), "text/csv", "csv"
-            return PlainTextResponse(
-                text,
+                    yield out.getvalue()
+
+            kind, ext = ("application/x-ndjson", "jsonl") if jsonl else ("text/csv", "csv")
+            return StreamingResponse(
+                lines(),
                 media_type=kind,
                 headers={
                     "content-disposition": f'attachment; filename="terminal-activity.{ext}"',
+                    "cache-control": "no-store",
+                },
+            )
+
+        async def checkpoints_export(request: Request) -> Response:
+            """Each terminal's latest signed checkpoint, and the key to check them with."""
+            email = _me()
+            terminals = await _run(self.terminals.for_person, email)
+            chains = await _run(self.activity.chains.summary, email)
+            out = []
+            for t in terminals:
+                body = await _run(self.checkpoint_for, email, t.id)
+                state = chains.get(t.id) or {}
+                out.append(
+                    {
+                        "terminal": t.name,
+                        "terminal_id": t.id,
+                        "checkpoint": body,
+                        "chain": {
+                            k: state.get(k) for k in ("start", "missing", "forks", "unchained")
+                        },
+                    }
+                )
+            text = json.dumps(
+                {"policy_key": self.policy_key, "generated_at": time.time(), "terminals": out},
+                indent=2,
+            )
+            return PlainTextResponse(
+                text,
+                media_type="application/json",
+                headers={
+                    "content-disposition": 'attachment; filename="terminal-checkpoints.json"',
                     "cache-control": "no-store",
                 },
             )
@@ -644,11 +827,50 @@ class TerminalFeature:
             )
             return RedirectResponse("/terminal/activity", status_code=303)
 
+        async def webhook_save(request: Request, form: Any) -> Response:
+            email = _me()
+            back = RedirectResponse("/terminal/activity#audit-webhook", status_code=303)
+            if str(form.get("action") or "") == "remove":
+                if await _run(self.webhook.clear, email):
+                    audit_owner("terminal_webhook_removed")
+                    kit.flash(request, "ok", "Audit webhook removed. Nothing more is sent.")
+                return back
+            url = str(form.get("url") or "").strip()
+            include = str(form.get("include_commands") or "") == "1"
+            rotate = str(form.get("rotate") or "") == "1"
+            try:
+                secret = await _run(self.webhook.save, email, url, include, rotate)
+            except WebhookError as exc:
+                kit.flash(request, "error", WEBHOOK_ERRORS.get(str(exc), WEBHOOK_ERRORS[""]))
+                return back
+            audit_owner("terminal_webhook_saved", commands="1" if include else "0")
+            if secret is None:
+                kit.flash(request, "ok", "Audit webhook saved. The secret is unchanged.")
+                return back
+            # Shown on this page only, once: it is stored encrypted and never shown again.
+            page = render(
+                request,
+                "terminal_webhook_secret.html",
+                url=url,
+                secret=secret,
+                include_commands=include,
+            )
+            page.headers["cache-control"] = "no-store"
+            return page
+
         async def session_page(request: Request) -> Response:
             tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
             if tree is None:
                 return render(request, "error.html", 404, message="Session not found.")
-            return render(request, "terminal_session.html", tree=tree)
+            return render(
+                request,
+                "terminal_session.html",
+                tree=self.open_tree(tree),
+                agent_name=present.agent_name,
+                blocked_because=present.blocked_because,
+                describe=present.action,
+                tried=present.tried,
+            )
 
         async def session_revoke(request: Request, _form: Any) -> Response:
             sid = request.path_params["session_id"]
@@ -674,7 +896,9 @@ class TerminalFeature:
             Route("/terminal/roles", own(roles_page), methods=["GET"]),
             Route("/terminal/activity", own(activity_page), methods=["GET"]),
             Route("/terminal/activity/export", own(activity_export), methods=["GET"]),
+            Route("/terminal/activity/checkpoints", own(checkpoints_export), methods=["GET"]),
             Route("/terminal/activity/record", csrf(record_commands), methods=["POST"]),
+            Route("/terminal/activity/webhook", csrf(webhook_save), methods=["POST"]),
             Route("/terminal/sessions/{session_id}", own(session_page), methods=["GET"]),
             Route("/terminal/sessions/{session_id}/revoke", csrf(session_revoke), methods=["POST"]),
             Route("/terminal/roles/new", own(role_edit), methods=["GET"]),

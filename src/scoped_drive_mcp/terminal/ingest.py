@@ -18,16 +18,29 @@ from typing import Any
 from botrbac_cli import sealing
 from botrbac_cli.patterns import is_tool_id
 
+from . import integrity, provenance
+
 ACTIVITY_KEY = "term:activity:{email}"
 SEEN_KEY = "term:seen:{email}:{event_id}"
 REVOKED_KEY = "term:revoked:{email}"
 SETTINGS_KEY = "term:settings:{email}"
+# The most rows the Activity page reads at once. Exports read everything kept.
 ACTIVITY_MAX = 2000
+# How long rows are kept (TERMINAL_ACTIVITY_DAYS), and a hard cap on how many
+# (TERMINAL_ACTIVITY_MAX_ROWS), whichever comes first.
+RETENTION_DAYS = 180
+RETENTION_MAX_ROWS = 20_000
+TRIM_KEY = "term:trimmed:{email}"
+TRIM_EVERY = 3600
 BATCH_MAX = 500
 SEEN_TTL = 30 * 24 * 3600
-DECISIONS = frozenset({"allow", "deny", "error", "session"})
+# `prompt` (UserPromptSubmit, no tool) and `result` (a finished call) come from hooks.
+DECISIONS = frozenset({"allow", "deny", "error", "session", "prompt", "result"})
+NO_TOOL = frozenset({"session", "prompt"})
+CALLS = frozenset({"allow", "deny", "error"})
 _ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _WORD = re.compile(r"[^A-Za-z0-9_.:/@ -]+")
+_POLICY_VERSION = re.compile(r"^[A-Za-z0-9]{1,32}$")
 
 
 class IngestError(ValueError):
@@ -65,13 +78,13 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
     if not _ID.match(event_id) or decision not in DECISIONS:
         return None
     tool = str(raw.get("tool") or "")
-    if decision != "session" and not is_tool_id(tool):
+    if decision not in NO_TOOL and not is_tool_id(tool):
         return None
     row: dict[str, Any] = {
         "event_id": event_id,
         "ts": _ts(raw.get("ts"), now) or now,
         "decision": decision,
-        "tool": tool[:200] if decision != "session" else "",
+        "tool": tool[:200] if decision not in NO_TOOL else "",
         "agent": _word(raw.get("agent"), 40),
         "reason": _word(raw.get("reason"), 300),
         "role": _word(raw.get("role"), 64),
@@ -81,6 +94,10 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
         value = str(raw.get(key) or "")
         if _ID.match(value):
             row[key] = value
+    # Stream C: the version of the policy the CLI decided under (it goes into `grant`).
+    version = str(raw.get("policy_version") or "")
+    if _POLICY_VERSION.match(version):
+        row["policy_version"] = version
     command = raw.get("command")
     if command_key is not None and isinstance(command, str):
         try:
@@ -89,6 +106,7 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
             pass
         else:
             row["command"] = command
+    row.update(provenance.clean_fields(raw, event_id, decision, command_key))
     if command_key is not None and raw.get("command_error") and "command" not in row:
         # The computer could not seal this one: say so, without any of the command.
         row["command_error"] = _word(raw.get("command_error"), 40) or "error"
@@ -106,6 +124,15 @@ def clean_row(raw: Any, now: float, command_key: Any = None) -> dict[str, Any] |
 class TerminalActivity:
     store: Any
     clock: Callable[[], float] = field(default=time.time)
+    retention_days: int = RETENTION_DAYS
+    max_rows: int = RETENTION_MAX_ROWS
+    chains: integrity.Chains = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.chains = integrity.Chains(self.store, ttl=self.retention_days * 24 * 3600)
+
+    def cutoff(self) -> float:
+        return self.clock() - self.retention_days * 24 * 3600
 
     def add(
         self,
@@ -114,9 +141,12 @@ class TerminalActivity:
         terminal_name: str,
         rows: Any,
         command_key: Any = None,
+        stamp: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, int]:
         """`command_key`: the private key that opens sealed commands, passed only while
-        this person has "Record commands" on. Without it, commands are dropped."""
+        this person has "Record commands" on. Without it, commands are dropped.
+        `stamp`: called with each new row just before it is stored, to set the server's
+        own fields (terminal.identity: signed, subject, actor, grant)."""
         if not isinstance(rows, list):
             raise IngestError("rows must be a list")
         if len(rows) > BATCH_MAX:
@@ -124,16 +154,24 @@ class TerminalActivity:
         now = self.clock()
         accepted = duplicates = rejected = 0
         key = ACTIVITY_KEY.format(email=email)
-        for raw in rows:
+        chained = self.chains.batch(email, terminal_id)
+        for raw in integrity.ordered(rows):
+            # The hash covers exactly what the computer sent: work it out before
+            # clean_row drops or cuts anything.
+            link = integrity.link_of(raw)
             row = clean_row(raw, now, command_key)
             if row is None:
+                chained.judge(link)  # refused, but sent: not a gap in the chain
                 rejected += 1
                 continue
             seen = SEEN_KEY.format(email=email, event_id=row["event_id"])
-            if not self.store.set_if_absent(seen, "1", ex=SEEN_TTL):
+            if not self.store.set_if_absent(seen, "1", ex=self.seen_ttl()):
                 duplicates += 1
                 continue
+            row.update(chained.judge(link))
             row.update(terminal_id=terminal_id, terminal=terminal_name[:80], received=now)
+            if stamp is not None:
+                stamp(row)
             try:
                 self.store.lpush(key, json.dumps(row, separators=(",", ":")))
             except Exception:
@@ -142,9 +180,30 @@ class TerminalActivity:
                 self.store.delete(seen)
                 raise
             accepted += 1
+        chained.commit()
         if accepted:
-            self.store.ltrim(key, 0, ACTIVITY_MAX - 1)
+            self.trim(email)
         return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
+
+    def trim(self, email: str, force: bool = False) -> None:
+        """Keep at most max_rows, and (about once an hour) nothing older than
+        retention_days."""
+        key = ACTIVITY_KEY.format(email=email)
+        if force or self.store.set_if_absent(TRIM_KEY.format(email=email), "1", ex=TRIM_EVERY):
+            integrity.trim_by_age(self.store, key, self.cutoff(), self.max_rows)
+        else:
+            self.store.ltrim(key, 0, self.max_rows - 1)
+
+    def everything(self, email: str) -> Any:
+        """Every row kept, newest received first, a chunk at a time (for exports)."""
+        return integrity.read_all(
+            self.store, ACTIVITY_KEY.format(email=email), self.cutoff(), self.max_rows
+        )
+
+    def seen_ttl(self) -> int:
+        """How long a stored row's id is remembered: as long as rows are kept, so a batch
+        sent again (even validly signed) after 30 days is still a duplicate."""
+        return max(SEEN_TTL, int(self.retention_days) * 24 * 3600)
 
     def recent(self, email: str, limit: int = ACTIVITY_MAX) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -190,7 +249,7 @@ class TerminalActivity:
                 children.setdefault(parent, []).append(sid)
 
         def node(sid: str, depth: int) -> dict[str, Any]:
-            calls = [r for r in rows if r.get("session_id") == sid and r["decision"] != "session"]
+            calls = [r for r in rows if r.get("session_id") == sid and r["decision"] in CALLS]
             return {
                 "start": starts[sid],
                 "calls": len(calls),

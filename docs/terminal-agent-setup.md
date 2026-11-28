@@ -91,7 +91,7 @@ To add it for every project rather than this one, check that `claude mcp add --h
 then use `claude mcp add --scope user botrbac -- botrbac gateway`. Check with
 `claude mcp list`.
 
-Claude Code also gets a hook so its own shell and file edits follow the role. Add it in step 6, last:
+Every agent also gets a hook so its own shell and file edits follow the role. Add it in step 6, last:
 once it is in place and the role is Read-only, your own shell commands are blocked.
 
 ### Cursor: `~/.cursor/mcp.json`
@@ -175,18 +175,23 @@ Say this, in your own words, with their real links:
 3. Restart the agent (or open a new session) so it loads the `botrbac` MCP server and the hook.
 4. When something is blocked, https://botrbac.com/terminal/activity shows the exact tool name to add to the role.
 
-## 6. Claude Code only: add the hook (last)
+## 6. Add the hook (last)
 
-So Claude Code's own tools (its shell, file edits, web fetch) follow the role too. Without it, Bot RBAC
-only sees MCP tools, and `cmd/gh`-style rules have no effect:
+So your own tools (your shell, file edits, web fetch) follow the role too. Without it, Bot RBAC only sees
+MCP tools, and `cmd/gh`-style rules have no effect. Use the line for the agent you are:
 
 ```sh
-botrbac hooks install claude-code --user --allow-unguarded
+botrbac hooks install claude-code --user --allow-unguarded   # Claude Code: ~/.claude/settings.json
+botrbac hooks install codex --user --allow-unguarded         # Codex CLI: ~/.codex/hooks.json
+botrbac hooks install gemini --user --allow-unguarded        # Gemini CLI: ~/.gemini/settings.json
+botrbac hooks install cursor --user --allow-unguarded        # Cursor: ~/.cursor/hooks.json
 ```
 
-Run this as your last command: from now on, a role without `claude-code/Bash` blocks your shell, and
-Read-only does. Undo it with `botrbac hooks remove claude-code --user` (the person runs that themselves;
-the hook refuses it from an agent). Skip this step only if the person says so.
+Run this as your last command: from now on, a role without your shell tool (`claude-code/Bash`,
+`codex/Bash`, `gemini/run_shell_command`, `cursor/Shell`) blocks your shell, and Read-only does. Codex
+runs a new hook only after the person trusts it: tell them to run `/hooks` in Codex. Cursor and Gemini
+CLI load it when restarted. Undo it with `botrbac hooks remove <agent> --user` (the person runs that
+themselves; the hook refuses it from an agent). Skip this step only if the person says so.
 
 ## 7. Optional extras: only if the person asks
 

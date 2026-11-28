@@ -161,9 +161,19 @@ def test_install_sh_other_agents_use_add_gateway(tmp_path) -> None:
     env, log = _stubs(tmp_path, ["uv", "botrbac"])
     r = _run(env, "--agent", "cursor")
     assert r.returncode == 0, r.stderr
-    assert "botrbac add-gateway --agent cursor" in log.read_text()
-    assert "hooks install" not in log.read_text()
-    assert "Restart Cursor" in r.stdout
+    calls = log.read_text().splitlines()
+    assert "botrbac add-gateway --agent cursor" in calls
+    assert "botrbac hooks install cursor --user --allow-unguarded" in calls
+    assert calls.index("botrbac add-gateway --agent cursor") < calls.index(
+        "botrbac hooks install cursor --user --allow-unguarded"
+    )
+    assert "Restart Cursor" in r.stdout and "Cursor can read but not" in r.stdout
+    codex = _run(env, "--agent", "codex")
+    assert "botrbac hooks install codex --user --allow-unguarded" in log.read_text()
+    assert "/hooks" in codex.stdout
+    log.write_text("")
+    r = _run(env, "--agent", "gemini", "--no-hook")
+    assert r.returncode == 0 and "hooks install" not in log.read_text()
 
 
 def test_install_sh_skips_claude_when_missing_and_refuses_bad_agents(tmp_path) -> None:
@@ -375,7 +385,7 @@ def test_pages_explain_how_roles_tie_to_computers(world, memstore, oauth) -> Non
     assert 'id="how-it-works"' in page and "Role</b> column" in page
     assert "Agents can read, not edit or run commands." in page  # Read-only, in plain words
     # An unguarded server says what it means and how to fix it.
-    assert "<b>notion</b> talks to the agent directly" in page
+    assert "(notion) goes around Bot RBAC" in page
     assert "<code>botrbac doctor</code>" in page and "botrbac wrap claude-code --user" in page
 
     roles = c.get("/terminal/roles").text

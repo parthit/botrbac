@@ -41,8 +41,14 @@ def find_role(pol: dict[str, Any], wanted: str) -> dict[str, Any] | None:
 
 
 def start(
-    role_name: str, program: str, agent: str | None = None, command: list[str] | None = None
+    role_name: str,
+    program: str,
+    agent: str | None = None,
+    command: list[str] | None = None,
+    task: str | None = None,
 ) -> dict[str, Any]:
+    """`task` (from --task) is what the person says the session is for. Like the
+    command line, it is recorded only sealed, with "Record commands" on."""
     cached = policy.load_cached()
     if cached is None:
         raise SessionError("No policy on this computer yet. Run: botrbac login")
@@ -81,16 +87,22 @@ def start(
     if parent:
         row["parent_session_id"] = parent["id"]
     # The whole command line is recorded only sealed, with "Record commands" on.
-    AuditQueue().add(command=shlex.join(command) if command else None, **row)
+    AuditQueue().add(
+        command=shlex.join(command) if command else None,
+        sealed={"task": task.strip() if task and task.strip() else None},
+        **row,
+    )
     return session
 
 
-def run(role_name: str, command: list[str], agent: str | None, api: Any) -> int:
+def run(
+    role_name: str, command: list[str], agent: str | None, api: Any, task: str | None = None
+) -> int:
     if not command:
         raise SessionError("Give the command to run after --, e.g. botrbac run --role X -- claude")
     if api is not None:
         policy.refresh(api)  # best effort: a fresh role list, or the cached one offline
-    session = start(role_name, command[0], agent, command)
+    session = start(role_name, command[0], agent, command, task)
     terminal_role = (policy.load_cached() or {}).get("policy", {}).get("role", {}).get("name")
     note = f" within this terminal's role {terminal_role!r}" if terminal_role else ""
     print(

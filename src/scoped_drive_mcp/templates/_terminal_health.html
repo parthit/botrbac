@@ -1,0 +1,32 @@
+{#- One computer's health on the Terminals page, in plain words: a single "Protected"
+    line when all is well, otherwise each problem with what to do about it. -#}
+{% macro terminal_health(t, ch, unhooked, agent_name) -%}
+{% set cov = t.coverage or {} %}
+{% set gaps = (unhooked(cov) + (t.hook_missing or [])) | unique | list %}
+{% set loose = 0 if t.unguarded else (cov.unguarded_servers or 0) %}
+{% set problems = gaps or t.unguarded or loose or (ch and (ch.forks or ch.missing)) or (t.key_registered and t.key_registered.via == "refresh") %}
+<ul class="term-health" id="health-{{ t.id }}">
+{% if not problems %}
+  <li class="h-ok"><span class="pill ok">Protected</span> <span class="small muted">{% if cov.agents_detected %}Every agent on it is checked{% else %}No problems reported{% endif %}{% if ch %}, and its activity log is complete{% endif %}.</span>{% if ch %}<span class="sr-only" id="chain-{{ t.id }}">record intact</span>{% endif %}</li>
+{% endif %}
+{% if gaps %}
+  <li class="h-warn" id="coverage-fix-{{ t.id }}"><b>{% for a in gaps %}{{ agent_name(a) }}{{ ", " if not loop.last }}{% endfor %} {{ "isn't" if gaps | length == 1 else "aren't" }} being checked.</b> Its own actions (commands, file edits) run without asking Bot RBAC. To fix it, run this on that computer: {% for a in gaps %}<code>botrbac hooks install {{ a }} --user --allow-unguarded</code>{{ " and " if not loop.last }}{% endfor %}</li>
+{% endif %}
+{% if t.unguarded %}
+  <li class="h-warn" id="unguarded-{{ t.id }}"><b>{{ t.unguarded | length }} tool server{{ "s" if t.unguarded | length != 1 }} ({{ t.unguarded | join(", ") }}) {{ "goes" if t.unguarded | length == 1 else "go" }} around Bot RBAC</b>, so the role doesn't cover {{ "it" if t.unguarded | length == 1 else "them" }}. To fix it, run <code>botrbac doctor</code> on that computer; it prints the command, usually <code>botrbac wrap claude-code --user</code>.</li>
+{% endif %}
+{% if loose %}
+  <li class="h-warn" id="unguarded-{{ t.id }}"><b>{{ loose }} tool server{{ "s" if loose != 1 }} {{ "goes" if loose == 1 else "go" }} around Bot RBAC</b>, so the role doesn't cover {{ "it" if loose == 1 else "them" }}. To fix it, run <code>botrbac doctor</code> on that computer; it prints the command.</li>
+{% endif %}
+{% if ch and ch.forks %}
+  <li class="h-bad" id="chain-{{ t.id }}"><b>{{ ch.forks }} activity record{{ "s" if ch.forks != 1 }} from this computer {{ "doesn't" if ch.forks == 1 else "don't" }} match its log</b>, so {{ "it" if ch.forks == 1 else "they" }} may have been changed on the computer. <a href="/terminal/activity?terminal={{ t.id }}">See its activity</a>.</li>
+{% elif ch and ch.missing %}
+  <li class="h-warn" id="chain-{{ t.id }}"><b>{{ ch.missing }} activity record{{ "s" if ch.missing != 1 }} {{ "hasn't" if ch.missing == 1 else "haven't" }} arrived.</b> {{ "It" if ch.missing == 1 else "They" }} may still be on the way, or {{ "was" if ch.missing == 1 else "were" }} deleted on the computer.</li>
+{% endif %}
+{% if t.key_registered and t.key_registered.via == "refresh" %}
+  <li class="h-warn"><b>Its signing key was added {{ t.key_registered.at | epoch | when }}, later than usual</b> (key added at refresh). If you didn't update Bot RBAC on that computer around then, disconnect it and connect it again.</li>
+{% elif not t.key_registered and t.last_seen %}
+  <li class="note small muted">Runs an older Bot RBAC, so its records are unsigned. Updating it fixes that.</li>
+{% endif %}
+</ul>
+{%- endmacro %}

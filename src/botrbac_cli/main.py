@@ -80,8 +80,11 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 def cmd_logout(_args: argparse.Namespace) -> int:
+    from . import identity
+
     for name in ("credentials.json", "policy.json"):
         state.remove(name)
+    identity.forget()
     print("Logged out on this computer. Disconnect it on the website to end it there too.")
     return 0
 
@@ -135,12 +138,76 @@ def cmd_sync(args: argparse.Namespace) -> int:
 def cmd_log(args: argparse.Namespace) -> int:
     for row in AuditQueue().recent(args.limit):
         when = datetime.fromtimestamp(row["ts"]).strftime("%Y-%m-%d %H:%M:%S")
-        what = row.get("tool") or f"session {row.get('session_id')} as {row.get('role')}"
+        decision = row["decision"]
+        if decision == "prompt":
+            what = f"prompt {str(row.get('prompt_id') or '')[-8:]}".rstrip()
+        elif decision == "result":
+            facts = [str(row.get("outcome") or "")]
+            if row.get("exit_code") is not None:
+                facts.append(f"exit {row['exit_code']}")
+            if row.get("duration_ms") is not None:
+                facts.append(f"{row['duration_ms']} ms")
+            what = f"{row.get('tool')}  {', '.join(f for f in facts if f)}"
+        else:
+            what = row.get("tool") or f"session {row.get('session_id')} as {row.get('role')}"
         mark = {"sent": "", "rejected": "  (refused by the server)"}.get(
             row.get("status", ""), "  (not sent yet)"
         )
-        print(f"{when}  {row['decision']:<7} {what}  {row.get('reason', '')}{mark}")
+        print(f"{when}  {decision:<7} {what}  {row.get('reason', '')}{mark}".rstrip())
     return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Walk audit.db's hash chain and check it against the website's signed checkpoint."""
+    from . import chain
+
+    rows, pruned, tip = AuditQueue().chain_rows()
+    walked = chain.walk(rows, pruned, tip)
+    problems = len(walked["problems"])
+    if walked["count"]:
+        note = f", rows up to {pruned} pruned after sending" if pruned else ""
+        print(f"Local record: rows {walked['first']}-{walked['last']}{note}")
+    else:
+        print("Local record: no chained rows yet")
+    for seq, what in walked["problems"]:
+        print(f"✗ row {seq}: {what}")
+    creds = state.read_json("credentials.json", {}) or {}
+    if creds and not args.offline:
+        try:
+            chain.remember_checkpoint(_api(args).checkpoint())
+        except (ApiError, NotLoggedIn, httpx.HTTPError):
+            print("! could not reach the website; checking the last checkpoint kept here")
+    checkpoint = (state.read_json("state.json", {}) or {}).get("checkpoint")
+    if not checkpoint:
+        print("! no checkpoint from the website yet (botrbac sync gets one)")
+    elif not chain.verify_checkpoint(creds.get("policy_key"), checkpoint):
+        problems += 1
+        print("✗ the checkpoint's signature does not match the website's key pinned at login")
+    else:
+        seq, signed = checkpoint["seq"], checkpoint["row_hash"]
+        local = walked["hashes"].get(seq)
+        when = datetime.fromtimestamp(float(checkpoint.get("ts") or 0)).strftime("%Y-%m-%d %H:%M")
+        if creds.get("terminal_id") and checkpoint.get("terminal_id") != creds["terminal_id"]:
+            print(f"! the checkpoint is from an earlier login ({checkpoint.get('terminal_id')})")
+        if local == signed:
+            print(f"✓ row {seq} matches the website's signed checkpoint ({when})")
+        elif local is None and seq <= pruned:
+            print(f"! row {seq} (the checkpoint) was already pruned here; nothing to compare")
+        elif local is None:
+            problems += 1
+            print(
+                f"✗ the website signed row {seq} ({when}), and it is not in this computer's record"
+            )
+        else:
+            problems += 1
+            print(f"✗ row {seq} here is not the row the website signed ({when})")
+    if problems:
+        print(f"{problems} problem(s) found.")
+    else:
+        # Intact is not true: code running as you could still have written false rows
+        # before they were sent (docs/terminal.md, record integrity).
+        print("Record intact: no row missing, reordered or changed since it was written.")
+    return 1 if problems else 0
 
 
 def cmd_gateway(args: argparse.Namespace) -> int:
@@ -159,7 +226,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     api = _api(args) if state.read_json("credentials.json") else None
     try:
-        return run(args.role, args.command_line, args.agent, api)
+        return run(args.role, args.command_line, args.agent, api, args.task)
     except SessionError as exc:
         print(f"botrbac: {exc}", file=sys.stderr)
         return 2
@@ -288,6 +355,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         what = "switched off (disableAllHooks)" if status == "disabled" else "missing"
         print(f"✗ {agent} hook is {what}: its own tools are not checked")
         print(f"    fix: botrbac hooks install {agent} --user --allow-unguarded")
+    from .agents import doctor_report
+
+    doctor_report(print)
     found = unguarded()
     for config, name in found:
         print(f"✗ {config.agent}: {name} in {config.path} is not behind botrbac")
@@ -308,11 +378,9 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     from .hooks import expect_hook, install_claude_code, remove_claude_code
 
     if args.agent != "claude-code":
-        print(
-            "Automatic hook setup is only for Claude Code. For another agent, make its "
-            f"pre-tool hook run: botrbac check --agent {args.agent} (see docs/terminal.md)."
-        )
-        return 0
+        from .agents import cmd_hooks as other_agent_hooks
+
+        return other_agent_hooks(args)
     base = Path.home() if args.user else Path.cwd()
     settings = base / ".claude" / "settings.json"
     if args.action == "remove":
@@ -333,6 +401,31 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     if result["backup"]:
         print(f"Backup: {result['backup']}")
     print("Give the role claude-code/<Tool> patterns (claude-code/Read, claude-code/*) as needed.")
+    return 0
+
+
+def cmd_trailer(args: argparse.Namespace) -> int:
+    from .trailer import TrailerError, install, remove
+
+    repo = Path(args.repo or ".").expanduser()
+    try:
+        if args.action == "remove":
+            done = remove(repo)
+            if not done["removed"]:
+                print(f"No botrbac trailer hook in {done['hook']}")
+            else:
+                print(f"Removed the botrbac trailer hook: {done['hook']}")
+                if done["restored"]:
+                    print("Put the hook that was there before back in place.")
+            return 0
+        done = install(repo, args.site)
+    except (OSError, TrailerError) as exc:
+        print(f"botrbac: {exc}", file=sys.stderr)
+        return 1
+    print(f"{'Installed' if done['changed'] else 'Already set up'}: {done['hook']}")
+    if done["backup"]:
+        print(f"The hook that was there runs first: {done['backup']}")
+    print("Commits made inside `botrbac run` now name their session (Botrbac-Session: …).")
     return 0
 
 
@@ -405,12 +498,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("log", help="recent tool calls on this computer")
     p.add_argument("-n", "--limit", type=int, default=20)
     p.set_defaults(fn=cmd_log)
+    p = sub.add_parser(
+        "verify", help="check this computer's audit record against the website's checkpoint"
+    )
+    p.add_argument("--offline", action="store_true", help="use the last checkpoint kept here")
+    p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("gateway", help="run the MCP gateway (what your agent starts)")
     p.add_argument("--agent", help="name to record for the agent (default: from the client)")
     p.set_defaults(fn=cmd_gateway)
     p = sub.add_parser("run", help="run an agent with a narrower role: run --role X -- claude")
     p.add_argument("--role", required=True, help="a role's name or id from the website")
     p.add_argument("--agent", help="name to record (default: the program's name)")
+    p.add_argument(
+        "--task", help="what this session is for (recorded sealed, with Record commands on)"
+    )
     p.set_defaults(fn=cmd_run)
     p = sub.add_parser("shell-init", help="shell functions for `claude --botrbac --role X`")
     p.add_argument("--shell", choices=["bash", "zsh", "fish"])
@@ -444,16 +545,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--format", choices=["exit", "json"], default="exit")
     p.set_defaults(fn=cmd_check)
-    p = sub.add_parser("hooks", help="add or remove the pre-tool hook for an agent")
+    p = sub.add_parser(
+        "hooks", help="add or remove the pre-tool hook: claude-code, codex, gemini, cursor"
+    )
     p.add_argument("action", choices=["install", "remove"])
     p.add_argument("agent")
-    p.add_argument("--user", action="store_true", help="all projects (~/.claude/settings.json)")
+    p.add_argument(
+        "--user",
+        action="store_true",
+        help="every project: the agent's file in your home (~/.claude/settings.json, "
+        "~/.codex/hooks.json, ~/.gemini/settings.json, ~/.cursor/hooks.json)",
+    )
     p.add_argument(
         "--allow-unguarded",
         action="store_true",
         help="check MCP tools that bypass the gateway instead of blocking them",
     )
     p.set_defaults(fn=cmd_hooks)
+    p = sub.add_parser(
+        "trailer", help="add a Botrbac-Session trailer to commits made in a session (opt-in)"
+    )
+    p.add_argument("action", choices=["install", "remove"])
+    p.add_argument("--repo", help="the git repository (default: the current directory)")
+    p.add_argument("--site", help="the website's address (default: from botrbac login)")
+    p.set_defaults(fn=cmd_trailer)
     p = sub.add_parser(
         "servers",
         help="MCP servers the gateway sits in front of",

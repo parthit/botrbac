@@ -7,8 +7,8 @@
 # Agents: claude-code (default), cursor, codex, gemini. Never uses sudo. Safe to run
 # again: it upgrades botrbac and skips steps that are already done.
 #
-# For Claude Code it also adds a hook so Claude's own tools (its shell, file edits) follow
-# this computer's role too. --no-hook leaves that out; `botrbac hooks remove claude-code
+# It also adds the agent's pre-tool hook, so the agent's own tools (its shell, file edits)
+# follow this computer's role too. --no-hook leaves that out; `botrbac hooks remove <agent>
 # --user` undoes it later.
 set -eu
 
@@ -86,11 +86,14 @@ main() {
     run "$botrbac" add-gateway --agent "$agent" || fail "could not add the gateway"
   fi
 
-  if [ "$agent" = claude-code ] && [ "$hook" = yes ]; then
-    step "Let the role cover Claude Code's own tools (shell, file edits)"
-    run "$botrbac" hooks install claude-code --user --allow-unguarded \
-      || fail "could not add the Claude Code hook"
-    say "Undo any time: $botrbac hooks remove claude-code --user"
+  if [ "$hook" = yes ]; then
+    step "Let the role cover $agent_name's own tools (shell, file edits)"
+    run "$botrbac" hooks install "$agent" --user --allow-unguarded \
+      || fail "could not add the $agent_name hook"
+    say "Undo any time: $botrbac hooks remove $agent --user"
+    if [ "$agent" = codex ]; then
+      say "Codex runs a new hook only once you trust it: open Codex and run /hooks."
+    fi
   fi
 
   step "Check"
@@ -98,10 +101,10 @@ main() {
 
   say ""
   say "Done. Restart $agent_name to load Bot RBAC."
-  if [ "$agent" = claude-code ] && [ "$hook" = yes ]; then
-    say "This computer's role now decides what Claude may do, including running commands and"
-    say "editing files. A new computer starts as Read-only: Claude can read but not change"
-    say "anything until you give it a wider role at $SERVER/terminal"
+  if [ "$hook" = yes ]; then
+    say "This computer's role now decides what $agent_name may do, including running commands"
+    say "and editing files. A new computer starts as Read-only: $agent_name can read but not"
+    say "change anything until you give it a wider role at $SERVER/terminal"
   else
     say "Your computers and their roles: $SERVER/terminal"
   fi

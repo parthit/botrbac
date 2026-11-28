@@ -453,7 +453,75 @@ and opens it only for its owner's Activity page and exports. Commands are cut at
 recorded command is what the computer reported, not proof of what ran: the public key is enough to seal,
 so a hostile agent on the computer can seal whatever it likes onto rows, as it can already forge rows. See
 [terminal.md](terminal.md#record-commands) for what this does and does not hide.
+The prompt (UserPromptSubmit), the model's description of a shell command and a `botrbac run --task` are
+user or model text, so they follow the same rule: sealed on the computer, sent only with Record commands
+on, kept only if they open for that row, with `<event id>:<field>` as associated data so one cannot be
+moved onto another row or field. The description is the agent's claim, shown as such, not checked.
+`input_digest` (sha256 of the whole input) and `input_size` are kept only while recording is on.
+
+Stored **in the clear**, as metadata like the hostname: the agent's own ids (session, prompt, tool call,
+subagent), the permission mode, the hook's **cwd**, and the git **repo** (the `origin` remote as
+host/owner/name, with userinfo, tokens, scheme and port stripped on the computer and checked again on the
+server), **branch** and **head** commit. Folder and branch names can say something about the work, so
+they are visible to anyone who can read the activity log. Result rows hold the outcome, exit code,
+duration and result size, never result text. The hook runs only `git rev-parse` and `git config --get`
+in the cwd, with fsmonitor off and no prompts, under a one-second limit; a git failure never changes a
+decision. The prompt and result hooks always exit 0, so a fault there never blocks the agent; PreToolUse
+still fails closed.
 CSV export prefixes cells that would start a spreadsheet formula.
+
+Audit rows are **hash-chained** per computer (`src/botrbac_cli/chain.py`): `seq`, `prev_hash`, and
+`row_hash` = SHA-256 over the row's canonical JSON. The seq is taken under SQLite's write lock, so
+processes sharing `audit.db` never reuse one. The server recomputes each hash over the raw row before
+anything is dropped or capped, compares it with the last `(seq, row_hash)` it accepted from that terminal,
+and marks the stored row `ok`, `gap`, `fork` or `unchained`
+(`src/scoped_drive_mcp/terminal/integrity.py`). It returns a checkpoint `{terminal_id, seq, row_hash, ts}`
+signed with the policy key (a `kind` field keeps it from being taken for a policy), which `botrbac verify`
+checks against the pinned key and the local chain. This makes deletion, reordering and edits of rows
+detectable once the server or a checkpoint has seen them. It does not make rows true: code running as the
+user can write new, well-chained rows before they are sent, and a row deleted from the end of the queue
+before it was ever sent leaves a mark only when a later row arrives. Checkpoints are not yet anchored in a
+public log (Rekor), so they do not protect against the site's operator. Rows are kept for
+`TERMINAL_ACTIVITY_DAYS` (180) and at most `TERMINAL_ACTIVITY_MAX_ROWS` (20,000) per person.
+
+**Terminal keys.** Each terminal has its own Ed25519 key, made at `botrbac login`
+(`src/botrbac_cli/identity.py`). The private half stays on the computer in `terminal_key.json` (0600) and
+never leaves it; the public half is registered with the token exchange, or at the first refresh of a
+terminal that has none, and is never replaced afterwards, so a stolen token cannot swap in another key. It
+is stored under `term:terminal:` and signed like the terminal record. Once a terminal has a key, every audit
+batch must carry a signature over the method, path, body hash, timestamp, nonce and key id; the site allows
+5 minutes of clock difference and refuses a nonce it has seen (401). A terminal without a key (an older
+CLI) is still accepted and its rows say `signed: false`. Until a terminal has a key, its token alone is enough to send rows as it.
+Registration is first-come: a key registered at a refresh (not at login) is written to the audit log
+and shown on the Terminals page, because a stolen refresh token could register one first. The site sets `signed`, `subject`, `actor` and
+`grant` on every row itself and drops whatever the CLI sent under those names. `grant.role` and
+`grant.policy_version` come from the site's own record of the terminal at upload time;
+`grant.reported_role` and `grant.reported_policy_version` are what the CLI wrote, kept as its claim.
+`grant.role` is the role **at upload time**: for rows queued offline, a role changed on the website in
+between shows here, while `reported_role` is the role the computer decided under. In `actor`, only
+`terminal:<id>` (from the token) and `subject` come from the site; the agent and subagent names under
+`act` are what the CLI reported. A row's id is remembered for as long as rows are kept, so a batch sent
+again later is stored once. What a signature proves:
+the batch came from a process that can read that file, as you, on that computer. It does not prove an
+agent there did not write the rows, any more than before.
+
+**Audit webhook** (off until the owner sets a URL). The URL must be https on port 443 with no user, query
+or fragment, and not an IP address; every address the name resolves to must be public (no private,
+loopback, link-local, multicast, reserved or carrier-grade NAT ranges), checked at save and again at each
+delivery, and the connection goes to the address that was checked, with the certificate checked against
+the name (`src/scoped_drive_mcp/wake.py`). The form is CSRF-checked and the setting is signed in the store.
+The secret is random, shown once (on a `no-store` page), and stored encrypted with a key derived from
+`ENCRYPTION_KEY`. Each POST is signed with HMAC-SHA256 over `<timestamp>.<body>`. Recorded commands and
+other sealed text are left out unless the owner ticks "Include recorded commands", and then only while
+Record commands is on; with it ticked they leave the site as plain text, to wherever the URL points.
+Delivery is one try with a 2-second timeout and never fails the upload; an undelivered row is never
+resent, and after 5 failures in a row delivery pauses for 15 minutes.
+
+**Commit trailer** (`botrbac trailer install`, opt-in per repository). The hook adds
+`Botrbac-Session: <site>/terminal/sessions/<id>` to commits made inside `botrbac run`. Anyone who can read
+the repository sees the site's address and the session id; the session page itself opens only for its
+owner. The site address is checked against a plain `http(s)://host[:port]` shape before it goes into the
+script, and the session id is used only if it is letters, digits, `-` and `_`, so neither can inject shell.
 
 Enforcement happens on the person's computer, so it protects against the agent, not against the computer's
 owner, who can remove the gateway, the hook or the cached policy. The CLI fails closed: no cached policy,
@@ -466,14 +534,18 @@ until its own grace runs out. A cached policy with a signature but no pinned key
 removing both the pinned key and the signature makes it look unsigned, which only the protected-files
 check below and `botrbac doctor` stand against. Changing `ENCRYPTION_KEY` changes the key: terminals block until their next
 token refresh (at most an hour, when online) brings the new one. Whatever the role, the CLI refuses tool calls that would change Claude Code's settings files,
-`~/.claude.json` or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
+`~/.claude.json`, the hook and MCP files of Codex, Gemini CLI and Cursor, or botrbac's folder, or that mention `disableAllHooks` or `botrbac hooks remove`
 (`src/botrbac_cli/protect.py`; text and resolved paths, so a path built at run time gets past it). A missing
 or disabled hook is reported by `botrbac doctor` and shown on the Terminal page.
 A session can only narrow the terminal's role (the check is the intersection of every role in the chain).
 The CLI trusts the computer's user: session files and `BOTRBAC_SESSION` are not signed, so an agent that can
 run shell commands can drop back to the terminal's own role (never above it) by starting a gateway without
-the variable. The hook adapter fails closed on any error (exit 2), but an agent that cannot find the
-`botrbac` program at all usually lets the call through. Read-only and other name-based patterns limit
+the variable. The hook adapter fails closed on any error (exit 2; for Cursor, a JSON `deny`), and a
+payload it cannot place (an unknown Cursor event, a shell event without a command) has no tool name and is
+blocked. An agent that cannot find the `botrbac` program at all usually lets the call through; Gemini CLI
+also lets it through on any exit code but 2, and Cursor unless the entry has `failClosed`, which botrbac
+sets. The coverage summary a terminal sends (agents found, agents hooked) is its own say-so and is only
+shown, never used to allow anything. Read-only and other name-based patterns limit
 which tools run, not which files a tool such as Claude Code's Read can open.
 
 `cmd/<program>` patterns limit which programs an agent's shell tool runs (`src/botrbac_cli/shellcmd.py`). When a
