@@ -143,6 +143,54 @@ def cmd_log(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Walk audit.db's hash chain and check it against the website's signed checkpoint."""
+    from . import chain
+
+    rows, pruned, tip = AuditQueue().chain_rows()
+    walked = chain.walk(rows, pruned, tip)
+    problems = len(walked["problems"])
+    if walked["count"]:
+        note = f", rows up to {pruned} pruned after sending" if pruned else ""
+        print(f"Local record: rows {walked['first']}-{walked['last']}{note}")
+    else:
+        print("Local record: no chained rows yet")
+    for seq, what in walked["problems"]:
+        print(f"✗ row {seq}: {what}")
+    creds = state.read_json("credentials.json", {}) or {}
+    if creds and not args.offline:
+        try:
+            chain.remember_checkpoint(_api(args).checkpoint())
+        except (ApiError, NotLoggedIn, httpx.HTTPError):
+            print("! could not reach the website; checking the last checkpoint kept here")
+    checkpoint = (state.read_json("state.json", {}) or {}).get("checkpoint")
+    if not checkpoint:
+        print("! no checkpoint from the website yet (botrbac sync gets one)")
+    elif not chain.verify_checkpoint(creds.get("policy_key"), checkpoint):
+        problems += 1
+        print("✗ the checkpoint's signature does not match the website's key pinned at login")
+    else:
+        seq, signed = checkpoint["seq"], checkpoint["row_hash"]
+        local = walked["hashes"].get(seq)
+        when = datetime.fromtimestamp(float(checkpoint.get("ts") or 0)).strftime("%Y-%m-%d %H:%M")
+        if creds.get("terminal_id") and checkpoint.get("terminal_id") != creds["terminal_id"]:
+            print(f"! the checkpoint is from an earlier login ({checkpoint.get('terminal_id')})")
+        if local == signed:
+            print(f"✓ row {seq} matches the website's signed checkpoint ({when})")
+        elif local is None and seq <= pruned:
+            print(f"! row {seq} (the checkpoint) was already pruned here; nothing to compare")
+        elif local is None:
+            problems += 1
+            print(
+                f"✗ the website signed row {seq} ({when}), and it is not in this computer's record"
+            )
+        else:
+            problems += 1
+            print(f"✗ row {seq} here is not the row the website signed ({when})")
+    print("Record intact." if not problems else f"{problems} problem(s) found.")
+    return 1 if problems else 0
+
+
 def cmd_gateway(args: argparse.Namespace) -> int:
     from .gateway import serve
 
@@ -405,6 +453,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("log", help="recent tool calls on this computer")
     p.add_argument("-n", "--limit", type=int, default=20)
     p.set_defaults(fn=cmd_log)
+    p = sub.add_parser(
+        "verify", help="check this computer's audit record against the website's checkpoint"
+    )
+    p.add_argument("--offline", action="store_true", help="use the last checkpoint kept here")
+    p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("gateway", help="run the MCP gateway (what your agent starts)")
     p.add_argument("--agent", help="name to record for the agent (default: from the client)")
     p.set_defaults(fn=cmd_gateway)

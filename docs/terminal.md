@@ -216,7 +216,8 @@ blocked** until the terminal checks in again. A computer with no cached policy b
 Every decision is written to `~/.config/botrbac/audit.db` and sent when the site can be reached: every
 minute from a running gateway, when a gateway or `botrbac run` ends, and on `botrbac sync`. Rows have an id,
 so a batch sent twice is stored once. **Terminal → Activity** marks rows that were recorded offline and
-sent later.
+sent later. Rows are chained as they are written (below), so rows deleted or changed on the computer while
+it was offline show up as missing or altered once it syncs.
 
 ## What it can and cannot guarantee
 
@@ -245,6 +246,46 @@ Extras for stricter setups, outside botrbac: put the hook and gateway in Claude 
 (an administrator's file the user and agent cannot override, including `disableAllHooks`); add
 `permissions.deny` rules for `Edit(~/.claude/**)` and `Edit(~/.config/botrbac/**)`; and run the agent in
 Claude Code's sandbox, which keeps its shell from writing its own settings.
+
+### Record integrity and retention
+
+Each row in `audit.db` carries `seq` (1, 2, 3… per computer), `prev_hash` (the previous row's hash, 64
+zeros for the first) and `row_hash`: SHA-256 over the row's canonical JSON (sorted keys, no whitespace,
+UTF-8, like RFC 8785) without `row_hash`. The hash is taken last, after the sealed command and every other
+field are in the row (`src/botrbac_cli/chain.py`). A queue from before this starts at row 1; its older rows
+are sent as they were.
+
+The site works each hash out again over exactly what the computer sent, and checks it against the last
+row it accepted from that terminal. On **Terminal → Activity** a row that is not `ok` gets a badge:
+
+- **rows missing before**: its seq jumps (`gap`). Rows were deleted on the computer, or have not been sent
+  yet; a row that turns up later and links on both sides fills the gap.
+- **altered record**: its seq was already used by another row, it does not link to the row before it, or
+  its hash does not match its contents (`fork`).
+- **unchained**: sent by an older botrbac.
+
+The Terminals page says "record intact", or how many rows are missing or altered. A row sent twice is a
+duplicate, not an alarm. Exports include `seq`, `chain` and `row_hash`. A computer that logs in again is a
+new terminal on the site, and its chain carries on, so the Terminals page says which row it starts from.
+
+After each batch the site answers with a **checkpoint** for that terminal, `{terminal_id, seq, row_hash,
+ts}`, signed with the same key as the policy. The CLI keeps the newest in `state.json`. `botrbac verify`
+walks the chain in `audit.db`, fetches the latest checkpoint (or uses the kept one with `--offline`),
+checks its signature against the key pinned at login, and says whether the row the site signed is still
+here, unchanged. It exits 1 if anything is wrong. **Terminal → Activity → Checkpoints** downloads every
+terminal's checkpoint, with the site's public key, as JSON.
+
+What this shows and what it doesn't. Deleting, reordering or editing rows on the computer breaks the
+chain, and the site or `botrbac verify` notices. But code running as the computer's user can still write
+new rows that never happened, with a valid chain, as long as it does so before they are sent: the chain
+makes removal and changes detectable, not false rows. Once the site has a row, it is out of reach of the
+computer. Rows deleted from the end of the queue before they were ever sent are noticed only by the next
+row's gap (or not at all, if nothing follows). Anchoring checkpoints in a public transparency log such as
+Sigstore Rekor, so that the site itself could not rewrite history unnoticed, is future work.
+
+The site keeps rows for `TERMINAL_ACTIVITY_DAYS` (default 180) and at most `TERMINAL_ACTIVITY_MAX_ROWS`
+per person (default 20,000), whichever comes first. Old rows are trimmed by when they arrived. The Activity
+page shows the newest 2,000; exports stream everything kept.
 
 Audit rows hold identifiers and decisions: the tool name, agent, role, session, and allow or block. Hook
 rows add the agent's own ids (session, prompt, tool call, subagent), the permission mode, the working
@@ -288,7 +329,7 @@ already write any row. The recorded command is what the computer reported.
 
 Turning it off stops new commands at once on the site (a computer stops sealing them at its next
 check-in). Commands already recorded stay, and keep showing to you, until their rows age out of the log
-(the newest 2,000 rows are kept).
+(see [retention](#record-integrity-and-retention)).
 
 ## Commands
 
@@ -306,6 +347,7 @@ check-in). Commands already recorded stay, and keep showing to you, until their 
 | `botrbac hooks install claude-code` | Check Claude Code's own tools too |
 | `botrbac check --agent A` | The hook adapter (reads the tool call on stdin) |
 | `botrbac sync` / `botrbac log` | Send waiting rows now / show recent rows |
+| `botrbac verify [--offline]` | Check `audit.db`'s hash chain and the site's signed checkpoint |
 | `botrbac logout` | Forget this computer's login (disconnect it on the website too) |
 
 Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json` (mode 0600),
@@ -320,8 +362,11 @@ Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json
 | `POST /api/terminal/device` | none, rate-limited per address | Start a device login (RFC 8628) |
 | `POST /api/terminal/token` | device code or refresh token | Tokens: `brt_at_…` (1 hour), `brt_rt_…` (90 days, rotated) |
 | `GET /api/terminal/policy` | terminal access token | Role, roles, revoked sessions, version |
-| `POST /api/terminal/audit` | terminal access token | Up to 500 rows; tools seen; unguarded servers |
+| `POST /api/terminal/audit` | terminal access token | Up to 500 rows; tools seen; unguarded servers. Answers with the terminal's signed `checkpoint` |
+| `GET /api/terminal/checkpoint` | terminal access token | The terminal's latest signed checkpoint, or `null` |
+| `GET /terminal/activity/checkpoints` | signed-in owner | Every terminal's checkpoint and chain state, as JSON |
 
 Terminal tokens work only on `/api/terminal/*`, and `/mcp` refuses them. Every key this feature writes
-starts with `term:`; roles, terminals, tokens and revocations are signed like OAuth records. Each person
-keeps their last 2000 terminal activity rows.
+starts with `term:`; roles, terminals, tokens and revocations are signed like OAuth records. Each person's
+terminal activity is kept for `TERMINAL_ACTIVITY_DAYS` (180), at most `TERMINAL_ACTIVITY_MAX_ROWS` (20,000)
+rows.

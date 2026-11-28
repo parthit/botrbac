@@ -3,7 +3,7 @@
 import sys
 from typing import Any
 
-from . import policy, state
+from . import chain, policy, state
 from .api import ApiError
 from .hooks import hook_report
 from .queue import SEND_BATCH, AuditQueue
@@ -50,7 +50,8 @@ def _send(
     if not budget.spend():
         return [], []  # not tried this time: these rows stay waiting
     try:
-        api.send_audit({"rows": rows, **meta})
+        answer = api.send_audit({"rows": rows, **meta})
+        chain.remember_checkpoint(answer)  # for botrbac verify
         return ids, []
     except ApiError as exc:
         if exc.status not in PERMANENT:
