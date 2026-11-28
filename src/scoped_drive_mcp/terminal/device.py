@@ -60,6 +60,10 @@ class Terminal:
     hook_missing: list[str] = field(default_factory=list)
     # The computer's coverage report (terminal/coverage.py): agents found, agents hooked.
     coverage: dict[str, Any] = field(default_factory=dict)
+    # When and how its signing key was registered: {"at": ts, "via": "login"|"refresh"}.
+    # A key added at a refresh is shown to the owner: a stolen refresh token could add
+    # one first and lock the real computer out (terminal.identity).
+    key_registered: dict[str, Any] = field(default_factory=dict)
 
 
 class DeviceError(Exception):
@@ -326,7 +330,8 @@ class Terminals:
         allowed = {
             k: v
             for k, v in seen.items()
-            if k in ("last_seen", "queued", "unguarded", "hook_missing", "coverage")
+            if k
+            in ("last_seen", "queued", "unguarded", "hook_missing", "coverage", "key_registered")
         }
         if self.store.get(f"term:terminal:{terminal_id}") is None:
             return  # disconnected meanwhile: write nothing

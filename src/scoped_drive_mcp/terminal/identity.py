@@ -62,16 +62,27 @@ def actor(terminal_id: str, agent: Any = "", agent_id: Any = "") -> dict[str, An
 
 
 def stamper(
-    terminal: Terminal, signed: bool, stored: list[dict[str, Any]] | None = None
+    terminal: Terminal,
+    signed: bool,
+    stored: list[dict[str, Any]] | None = None,
+    assigned: Mapping[str, str] | None = None,
 ) -> Callable[[dict[str, Any]], None]:
     """Sets the server's own fields on each row just before it is stored (overwriting
-    anything the CLI sent under those names), and collects the rows in `stored`."""
+    anything the CLI sent under those names), and collects the rows in `stored`.
+
+    `assigned` is the site's own record at upload time: `{"role": <name>,
+    "policy_version": <version>}` for this terminal. `grant` carries that, and keeps
+    what the computer reported (`reported_role`, `reported_policy_version`) beside it,
+    never in its place: a computer can write any role name into its rows."""
 
     def stamp(row: dict[str, Any]) -> None:
         row["signed"] = signed
         row["subject"] = terminal.email
         row["actor"] = actor(terminal.id, row.get("agent"), row.get("agent_id"))
-        grant = {k: row[k] for k in ("role", "policy_version") if row.get(k)}
+        grant = {k: v for k, v in (assigned or {}).items() if v}
+        for key in ("role", "policy_version"):
+            if row.get(key):
+                grant[f"reported_{key}"] = row[key]
         if grant:
             row["grant"] = grant
         else:

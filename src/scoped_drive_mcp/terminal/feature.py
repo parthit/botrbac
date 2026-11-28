@@ -327,9 +327,17 @@ class TerminalFeature:
             if data.get("public_key"):
                 # This terminal's signing key: kept at login, or at the first refresh of
                 # a terminal that has none. Never replaced (terminal.identity).
-                await _run(
+                added = await _run(
                     self.terminals.register_key, issued["terminal_id"], data.get("public_key")
                 )
+                if added:
+                    via = "login" if grant != "refresh_token" else "refresh"
+                    await _run(
+                        self.terminals.touch,
+                        issued["terminal_id"],
+                        key_registered={"at": time.time(), "via": via},
+                    )
+                    audit_owner("terminal_key_registered", terminal=issued["terminal_id"], via=via)
             if self.policy_key:
                 issued["policy_key"] = self.policy_key
             return JSONResponse(issued, headers={"cache-control": "no-store"})
@@ -382,6 +390,10 @@ class TerminalFeature:
             if not isinstance(data, dict):
                 return JSONResponse({"error": "invalid_request"}, status_code=400)
             command_key = await _run(self.command_key_for, terminal.email)
+            # The role and policy the site has for this terminal now: `grant` is built
+            # from these, not from the role names the computer wrote into its rows.
+            policy = await _run(self.policy_for, terminal)
+            assigned = {"role": policy["role"]["name"], "policy_version": policy["version"]}
             stored: list[dict[str, Any]] = []
             try:
                 result = await _run(
@@ -391,7 +403,7 @@ class TerminalFeature:
                     terminal.name,
                     data.get("rows"),
                     command_key,
-                    stamp=identity.stamper(terminal, signed, stored),
+                    stamp=identity.stamper(terminal, signed, stored, assigned),
                 )
             except IngestError as exc:
                 return JSONResponse({"error": "invalid_request", "message": str(exc)}, 400)

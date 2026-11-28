@@ -491,8 +491,12 @@ terminal that has none, and is never replaced afterwards, so a stolen token cann
 is stored under `term:terminal:` and signed like the terminal record. Once a terminal has a key, every audit
 batch must carry a signature over the method, path, body hash, timestamp, nonce and key id; the site allows
 5 minutes of clock difference and refuses a nonce it has seen (401). A terminal without a key (an older
-CLI) is still accepted and its rows say `signed: false`. The site sets `signed`, `subject`, `actor` and
-`grant` on every row itself and drops whatever the CLI sent under those names. What a signature proves:
+CLI) is still accepted and its rows say `signed: false`. Until a terminal has a key, its token alone is enough to send rows as it.
+Registration is first-come: a key registered at a refresh (not at login) is written to the audit log
+and shown on the Terminals page, because a stolen refresh token could register one first. The site sets `signed`, `subject`, `actor` and
+`grant` on every row itself and drops whatever the CLI sent under those names. `grant.role` and
+`grant.policy_version` come from the site's own record of the terminal at upload time;
+`grant.reported_role` and `grant.reported_policy_version` are what the CLI wrote, kept as its claim. What a signature proves:
 the batch came from a process that can read that file, as you, on that computer. It does not prove an
 agent there did not write the rows, any more than before.
 
@@ -505,7 +509,8 @@ The secret is random, shown once (on a `no-store` page), and stored encrypted wi
 `ENCRYPTION_KEY`. Each POST is signed with HMAC-SHA256 over `<timestamp>.<body>`. Recorded commands and
 other sealed text are left out unless the owner ticks "Include recorded commands", and then only while
 Record commands is on; with it ticked they leave the site as plain text, to wherever the URL points.
-Delivery is one try with a 3-second timeout and never fails the upload.
+Delivery is one try with a 2-second timeout and never fails the upload; an undelivered row is never
+resent, and after 5 failures in a row delivery pauses for 15 minutes.
 
 **Commit trailer** (`botrbac trailer install`, opt-in per repository). The hook adds
 `Botrbac-Session: <site>/terminal/sessions/<id>` to commits made inside `botrbac run`. Anyone who can read

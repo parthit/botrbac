@@ -110,7 +110,12 @@ def test_login_makes_a_key_and_the_server_keeps_it(site, monkeypatch, home) -> N
     (row,) = app.state.terminal.activity.recent(OWNER_EMAIL)
     assert row["signed"] is True and row["subject"] == OWNER_EMAIL
     assert row["actor"] == {"sub": f"terminal:{tid}", "act": {"sub": "agent:claude-code"}}
-    assert row["grant"] == {"role": "Coder"}
+    # The role is the site's record of this terminal; the row's own "Coder" is a claim.
+    assert row["grant"]["reported_role"] == "Coder"
+    assert (
+        row["grant"]["role"]
+        == app.state.terminal.policy_for(app.state.terminal.terminals.get(tid))["role"]["name"]
+    )
 
     # A key is never replaced: a later refresh offering another one changes nothing.
     assert not app.state.terminal.terminals.register_key(tid, identity.new_pending())
@@ -240,7 +245,15 @@ def test_delegation_fields_come_from_the_server(site) -> None:
     (row,) = app.state.terminal.activity.recent(OWNER_EMAIL)
     assert row["signed"] is False and row["subject"] == OWNER_EMAIL
     assert row["actor"]["sub"] == f"terminal:{issued['terminal_id']}"
-    assert row["grant"] == {"role": "Coder", "policy_version": "abc123"}
+    terminal = app.state.terminal.terminals.get(issued["terminal_id"])
+    current = app.state.terminal.policy_for(terminal)["version"]
+    # A computer claiming another role or policy cannot change what the site records.
+    assert row["grant"] == {
+        "role": "Full access",
+        "policy_version": current,
+        "reported_role": "Coder",
+        "reported_policy_version": "abc123",
+    }
 
 
 def test_actor_names_the_subagent() -> None:
@@ -493,3 +506,48 @@ def test_trailer_needs_a_site_and_a_repo(tmp_path, capsys) -> None:
     assert main(["trailer", "install", "--repo", str(tmp_path / "nope")]) == 1
     with pytest.raises(trailer.TrailerError):
         trailer.script("https://x.example.com/$(id)")
+
+
+def test_webhook_pauses_after_repeated_failures() -> None:
+    from scoped_drive_mcp.terminal import webhook as webhook_module
+
+    now = [1_800_000_000.0]
+    calls: list[dict] = []
+
+    def down(request):
+        calls.append(request)
+        raise TimeoutError("receiver down")
+
+    hook = AuditWebhook(MemoryStore(), "secret", lookup=_lookup, poster=down)
+    hook.clock = lambda: now[0]
+    hook.save("me@example.com", "https://hooks.example.com/botrbac", False)
+    for _ in range(webhook_module.MAX_FAILURES):
+        assert hook.deliver("me@example.com", [_row()]) is None
+    assert len(calls) == webhook_module.MAX_FAILURES
+    # Paused: no more attempts, so a dead receiver adds no time to uploads.
+    hook.deliver("me@example.com", [_row()])
+    assert len(calls) == webhook_module.MAX_FAILURES
+    # After the pause it tries again; a success resets the count.
+    now[0] += webhook_module.PAUSE + 1
+    hook.poster = lambda r: calls.append(r) or 204
+    assert hook.deliver("me@example.com", [_row()]) == 204
+    assert hook.get("me@example.com")["last"]["failures"] == 0
+
+
+def test_key_added_at_refresh_is_shown_and_logged(site, home) -> None:
+    app, browser = site
+    issued = connect_terminal(browser)
+    tid = issued["terminal_id"]
+    feature = app.state.terminal
+    assert feature.terminals.public_key(tid) is None  # an older CLI: no key yet
+    r = browser.post(
+        "/api/terminal/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": issued["refresh_token"],
+            "public_key": identity.ensure()["public_key"],
+        },
+    )
+    assert r.status_code == 200
+    assert feature.terminals.get(tid).key_registered["via"] == "refresh"
+    assert "key added at refresh" in browser.get("/terminal").text

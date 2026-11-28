@@ -395,7 +395,11 @@ body, the timestamp, the nonce and the key id (a simplified HTTP Message Signatu
 accepts it for 5 minutes either side of its clock and each nonce once. A terminal with a key must sign: a
 missing, wrong, stale or replayed signature gets 401 and the rows stay waiting on the computer. If
 `terminal_key.json` is lost, uploads keep failing until you run `botrbac login` again. A terminal without
-a key (an older botrbac) is still accepted, and its rows are marked unsigned.
+a key (an older botrbac) is still accepted, and its rows are marked unsigned: until it has a key, anyone
+holding its token can send rows as it. The key is registered once, so whoever offers one first wins. A
+key added at a token refresh rather than at login is marked "key added at refresh" on the Terminals page
+and written to the site's audit log; if that computer was not updated around then, a stolen refresh token
+may have added it, so disconnect the terminal and connect it again.
 
 The site sets these on every row it stores, whatever the computer sent:
 
@@ -403,7 +407,10 @@ The site sets these on every row it stores, whatever the computer sent:
 - `subject`: you, the account's email.
 - `actor`: who acted for you, shaped like RFC 8693's `act` claim:
   `{"sub": "terminal:t_…", "act": {"sub": "agent:claude-code/<agent id>"}}`.
-- `grant`: the role (and `policy_version`) the computer says it decided under.
+- `grant`: the role the site has assigned to the terminal and its current policy version when the batch
+  arrived (`role`, `policy_version`), plus what the computer says it decided under (`reported_role`,
+  `reported_policy_version`). The reported ones are the computer's claim: a session narrowed with `--role`,
+  or a policy cached while offline, legitimately differs; a computer that lies can write anything there.
 
 The Activity page shows the chain on each row, for example "you → terminal vm → claude-code (subagent
 …1a2b3c4d)", with a signed or unsigned mark. The exports carry the same fields as JSON.
@@ -426,8 +433,10 @@ shows a secret once. Each POST is JSON (`{"v": 1, "type": "botrbac.terminal.audi
 `X-Botrbac-Timestamp` and `X-Botrbac-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<body>`
 with the secret. Check it, and refuse timestamps more than a few minutes old. Recorded commands are left
 out unless you tick "Include recorded commands"; then they are sent as text. Delivery is one try with a
-3-second timeout; a failure never fails the upload, is not retried, and shows on the page as the last
-delivery. The address must be https on port 443, with no user, query or fragment, and a name that resolves
+2-second timeout, inside the upload; a failure never fails the upload and shows on the page as the last
+delivery. **A row that is not delivered is never sent again**, so treat the webhook as a live feed and the
+exports as the record. After 5 failures in a row, delivery pauses for 15 minutes (rows in that time are not
+sent), so a dead receiver does not slow every upload; saving the webhook again ends the pause. The address must be https on port 443, with no user, query or fragment, and a name that resolves
 only to public addresses (checked again at every delivery). It needs `ENCRYPTION_KEY` on the server.
 
 ### Commit trailer

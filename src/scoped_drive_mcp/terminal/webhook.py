@@ -7,7 +7,9 @@ signed with HMAC-SHA256 over `<timestamp>.<body>`:
     X-Botrbac-Signature: sha256=<hex>
     X-Botrbac-Timestamp: <unix seconds>
 
-Delivery is best effort: one try, a short timeout, and it never fails the upload.
+Delivery is best effort: one try, a short timeout, and it never fails the upload. A row
+that is not delivered is never resent; after MAX_FAILURES failures in a row, delivery
+pauses for PAUSE seconds.
 
 The URL is checked like a mailbox wake-up URL (wake.py): https on port 443, no user,
 query or fragment, a name rather than an IP address, and every address it resolves to
@@ -38,7 +40,11 @@ logger = logging.getLogger(__name__)
 
 WEBHOOK_KEY = "term:webhook:{email}"
 LAST_KEY = "term:webhooklast:{email}"
-TIMEOUT = 3.0
+TIMEOUT = 2.0
+# After this many failed deliveries in a row, pause for PAUSE seconds: a dead receiver
+# must not add the timeout to every upload. Saving the webhook again resets it.
+MAX_FAILURES = 5
+PAUSE = 15 * 60
 MAX_URL = 512
 # Stored sealed; the AAD is the event id for `command`, `<event id>:<name>` for others.
 SEALED = ("command", "description", "task")
@@ -180,6 +186,10 @@ class AuditWebhook:
         record = self.get(email)
         if not record:
             return None
+        last = record.get("last") if isinstance(record.get("last"), dict) else {}
+        failures = int(last.get("failures") or 0)
+        if failures >= MAX_FAILURES and self.clock() - float(last.get("at") or 0) < PAUSE:
+            return None  # paused: these rows are not sent, now or later
         status: int | None = None
         error = ""
         try:
@@ -218,7 +228,16 @@ class AuditWebhook:
         with contextlib.suppress(Exception):  # only shown on the page
             self.store.set(
                 LAST_KEY.format(email=email),
-                json.dumps({"at": self.clock(), "status": status, "error": error}),
+                json.dumps(
+                    {
+                        "at": self.clock(),
+                        "status": status,
+                        "error": error,
+                        "failures": 0
+                        if status is not None and 200 <= status < 300
+                        else failures + 1,
+                    }
+                ),
                 ex=30 * 24 * 3600,
             )
         return status
