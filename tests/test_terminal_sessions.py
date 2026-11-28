@@ -245,7 +245,9 @@ def test_session_page_and_revoke(world, memstore, oauth) -> None:
         and "Reader" in page.text
         and "Tried to use create issue on github" in page.text
     )
-    assert c.get(f"/terminal/sessions/{'c' * 32}").status_code == 404
+    # A malformed id has no page; a well-formed one with no rows left has a minimal one.
+    assert c.get("/terminal/sessions/short").status_code == 404
+    assert c.get(f"/terminal/sessions/{'c' * 32}").status_code == 200
     assert f"/terminal/sessions/{root}" in c.get("/terminal/activity").text
 
     token = dash.csrf(c, f"/terminal/sessions/{root}")

@@ -104,7 +104,13 @@ def _probe(api: Any, row: dict[str, Any]) -> bool:
 
 def sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
     """Send everything waiting, in batches. Stops quietly at the first temporary failure
-    (offline, server error) and still fetches the policy."""
+    (offline, server error) and still fetches the policy. One sync at a time across
+    processes (several gateways share audit.db), so two never send the same rows."""
+    with state.file_lock(".sync.lock"):
+        return _sync(api, queue)
+
+
+def _sync(api: Any, queue: AuditQueue) -> dict[str, Any]:
     sent = rejected = 0
     extra = state.read_json("state.json", {}) or {}
     first = True

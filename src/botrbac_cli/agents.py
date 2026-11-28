@@ -47,7 +47,6 @@ from urllib.parse import urlsplit
 
 from .coverage import GATEWAY_NAME, backup_file, is_gateway, servers_in, write_atomic
 from .patterns import normalize_server
-from .shell import botrbac_command
 
 # The agents botrbac knows. Their names are what audit rows carry in `agent`.
 AGENTS = ("claude-code", "codex", "gemini", "cursor")
@@ -89,10 +88,11 @@ CURSOR_READ = "Read"
 
 
 def hook_command(agent: str, block_unguarded: bool) -> str:
-    parts = [*botrbac_command(), "check", "--agent", agent]
-    if block_unguarded:
-        parts.append("--block-unguarded")
-    return " ".join(shlex.quote(p) for p in parts)
+    # hooks imports this module, so import it here. It bakes in --home, so a BOTRBAC_HOME
+    # the agent sets for a child process cannot send the check to a folder it wrote.
+    from . import hooks
+
+    return hooks.hook_command(block_unguarded, agent=agent)
 
 
 def runs_check(command: Any) -> bool:

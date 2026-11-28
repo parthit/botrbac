@@ -35,6 +35,8 @@ def home(tmp_path, monkeypatch):
             "fetched_at": time.time(),
         },
     )
+    # Unsigned is accepted only from a self-hosted server that never sent a key.
+    state.write_json("credentials.json", {"server": "https://rbac.self-hosted.test"})
     return tmp_path
 
 

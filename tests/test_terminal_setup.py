@@ -266,7 +266,11 @@ class _LoginApi:
         }
 
     def poll_login(self, device_code):
-        return _LoginApi.polls.pop(0) if _LoginApi.polls else {"access_token": "x"}
+        if _LoginApi.polls:
+            return _LoginApi.polls.pop(0)
+        # As the real Api does; a self-hosted server without a key sends unsigned policies.
+        state.write_json("credentials.json", {"server": "https://rbac.self-hosted.test"})
+        return {"access_token": "x"}
 
     def policy(self):
         return {"email": "me@example.com", "role": {"name": "Read-only"}}

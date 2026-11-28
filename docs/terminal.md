@@ -127,7 +127,8 @@ to wrap.
   [Record commands](#record-commands) on, and shown on the session page.
 - **Terminal → Activity** links each call to its session. The session page shows the tree of sessions
   started under it and lets you **revoke** it, which blocks it and everything under it the next time the
-  terminal checks in (about a minute while online).
+  terminal checks in (about a minute while online). A session can be revoked, and its page opened, even
+  after its rows have aged out of the log.
 
 ## An agent's own tools: hooks
 
@@ -261,11 +262,14 @@ that the server called `botrbac` in the agent's config is the gateway (`botrbac 
 
 The policy (role, roles you may narrow to, revoked sessions) is cached on the computer with the time it was
 fetched, signed by the site (see [below](#what-it-can-and-cannot-guarantee)). Without internet the cached policy is used for the role's offline grace, then **every tool is
-blocked** until the terminal checks in again. A computer with no cached policy blocks everything.
+blocked** until the terminal checks in again. A computer with no cached policy, or no login
+(`credentials.json`), blocks everything.
 
 Every decision is written to `~/.config/botrbac/audit.db` and sent when the site can be reached: every
 minute from a running gateway, when a gateway or `botrbac run` ends, and on `botrbac sync`. Rows have an id,
-so a batch sent twice is stored once. **Terminal → Activity** marks rows that were recorded offline and
+so a batch sent twice is stored once. An upload can be answered 409 (another upload from this terminal is
+under way) or 429 (the terminal's daily row budget, `TERMINAL_ACTIVITY_ROWS_PER_DAY`, is used up); the
+rows wait on the computer and are sent later. Only one sync runs at a time on a computer. **Terminal → Activity** marks rows that were recorded offline and
 sent later. Rows are chained as they are written (below), so rows deleted or changed on the computer while
 it was offline show up as missing or altered once it syncs.
 
@@ -281,8 +285,17 @@ cover that, from strongest to weakest:
 - **Signed role.** The site signs every policy it sends, and botrbac remembers the site's key from login.
   If the cached role on the computer is edited, every tool is blocked until `botrbac sync` fetches a fresh
   one. The offline grace counts from when the site issued the policy, so editing the saved fetch time does
-  not stretch it. (Needs `ENCRYPTION_KEY` on the server; computers logged in before this pick up the key at
-  their next token refresh.)
+  not stretch it. A policy issued for another terminal, or older than the newest one this computer has
+  seen, is refused too, so an old file with a wider role cannot be put back. Once a key has been seen
+  (it is kept in `credentials.json`, `state.json` and `terminal_key.json`, and survives `logout`), or the
+  server is `https://botrbac.com`, an unsigned policy is refused. Unsigned policies are used only from a
+  self-hosted server that has never sent a key. (Needs `ENCRYPTION_KEY` on the server; computers logged in
+  before this pick up the key at their next token refresh. To move a computer to a server without a key
+  afterwards, delete `policy_key` from `state.json` and `terminal_key.json` by hand.)
+- **Pinned folder.** The hooks and the gateway are installed as `botrbac --home <absolute folder> …`, and
+  `--home` wins over `BOTRBAC_HOME`, so an agent that starts a child with `BOTRBAC_HOME` pointing at a
+  folder holding a policy it wrote does not change what the installed hook checks. Run `botrbac hooks
+  install` and `botrbac wrap` again after upgrading so the entries get `--home`.
 - **Protected files.** Whatever the role, a tool call that would change Claude Code's settings
   (`.claude/settings.json`, `.claude/settings.local.json`), `~/.claude.json`, the other agents' hook and MCP
   files (`.codex/hooks.json`, `.codex/config.toml`, `.gemini/settings.json`, `.cursor/hooks.json`,
@@ -333,7 +346,9 @@ After each batch the site answers with a **checkpoint** for that terminal, `{ter
 ts}`, signed with the same key as the policy. The CLI keeps the newest in `state.json`. `botrbac verify`
 walks the chain in `audit.db`, fetches the latest checkpoint (or uses the kept one with `--offline`),
 checks its signature against the key pinned at login, and says whether the row the site signed is still
-here, unchanged. It exits 1 if anything is wrong. **Terminal → Activity → Checkpoints** downloads every
+here, unchanged. It exits 1 if anything is wrong. If the checkpoint's row was already pruned locally, it
+says "Not verified" rather than "Record intact", and exits 1 when fewer sent rows remain than botrbac
+keeps. **Terminal → Activity → Checkpoints** downloads every
 terminal's checkpoint, with the site's public key, as JSON.
 
 What this shows and what it doesn't. Deleting, reordering or editing rows on the computer breaks the
@@ -344,7 +359,9 @@ computer. Rows deleted from the end of the queue before they were ever sent are 
 row's gap (or not at all, if nothing follows). Anchoring checkpoints in a public transparency log such as
 Sigstore Rekor, so that the site itself could not rewrite history unnoticed, is future work.
 
-The site keeps rows for `TERMINAL_ACTIVITY_DAYS` (default 180) and at most `TERMINAL_ACTIVITY_MAX_ROWS`
+Each terminal may store at most `TERMINAL_ACTIVITY_ROWS_PER_DAY` rows (default 10,000) per UTC day, and
+blocked rows are kept in a list of their own with the same limits, so a flood of allowed rows from one
+computer cannot push blocks out of the log. The site keeps rows for `TERMINAL_ACTIVITY_DAYS` (default 180) and at most `TERMINAL_ACTIVITY_MAX_ROWS`
 per person (default 20,000), whichever comes first. Old rows are trimmed by when they arrived. The Activity
 page shows the newest 2,000; exports stream everything kept.
 
@@ -485,6 +502,7 @@ for you; anyone who reads the commit sees the site's address and the session id.
 | `botrbac sync [--retry-rejected]` / `botrbac log [-n N]` | Send waiting rows now (`--retry-rejected` also resends rows the site refused) / show the last N rows (20) |
 | `botrbac verify [--offline]` | Check `audit.db`'s hash chain and the site's signed checkpoint |
 | `botrbac trailer install [--repo P] [--site URL]` / `remove` | Opt-in git hook: `Botrbac-Session:` trailer on commits made in a session |
+| `botrbac --home PATH …` | Use this folder instead of `BOTRBAC_HOME` (installed hooks and the gateway carry it) |
 | `botrbac logout` | Forget this computer's login and key (disconnect it on the website too) |
 
 Files live in `$BOTRBAC_HOME`, by default `~/.config/botrbac`: `credentials.json` (mode 0600),

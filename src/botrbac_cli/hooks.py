@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import state
-from .coverage import backup_file, write_atomic
-from .shell import botrbac_command
+from .coverage import backup_file, installed_command, write_atomic
 
 # Claude Code hook event -> its matcher (None: the event takes none). All run the same
 # `botrbac check`, which reads the event from the payload: PreToolUse checks the call;
@@ -27,8 +26,10 @@ EVENTS: dict[str, str | None] = {
 }
 
 
-def hook_command(block_unguarded: bool) -> str:
-    parts = [*botrbac_command(), "check", "--agent", "claude-code"]
+def hook_command(block_unguarded: bool, agent: str = "claude-code") -> str:
+    """The hook's command line, for any agent (agents.py uses it too). It names botrbac's
+    folder with --home, so an inherited BOTRBAC_HOME cannot redirect the check."""
+    parts = [*installed_command(), "check", "--agent", agent]
     if block_unguarded:
         parts.append("--block-unguarded")
     return " ".join(shlex.quote(p) for p in parts)

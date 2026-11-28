@@ -43,14 +43,15 @@ FIELDS = (
     "duration_ms",
     "result_size",
 )
-_PID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-_MODE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# Used with fullmatch: `$` would also accept a trailing newline.
+_PID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+_MODE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _ABSOLUTE = re.compile(r"^(/|[A-Za-z]:[\\/])")
-_REPO = re.compile(r"^[a-z0-9.-]+(/[A-Za-z0-9._~-]+)+$")
-_BRANCH = re.compile(r"^[A-Za-z0-9._/+@-]{1,200}$")
-_HEAD = re.compile(r"^[0-9a-f]{7,64}$")
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_REPO = re.compile(r"[a-z0-9.-]+(/[A-Za-z0-9._~-]+)+")
+_BRANCH = re.compile(r"[A-Za-z0-9._/+@-]{1,200}")
+_HEAD = re.compile(r"[0-9a-f]{7,64}")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 OUTCOMES = frozenset({"ok", "error"})
 _INTS = {
     "exit_code": (-(2**31), 2**31),
@@ -80,10 +81,10 @@ def clean_fields(raw: dict[str, Any], event_id: str, decision: str, command_key:
     out: dict[str, Any] = {}
     for name in ID_FIELDS:
         value = raw.get(name)
-        if isinstance(value, str) and _PID.match(value):
+        if isinstance(value, str) and _PID.fullmatch(value):
             out[name] = value
     mode = raw.get("permission_mode")
-    if isinstance(mode, str) and _MODE.match(mode):
+    if isinstance(mode, str) and _MODE.fullmatch(mode):
         out["permission_mode"] = mode
     cwd = raw.get("cwd")
     if isinstance(cwd, str):
@@ -91,13 +92,13 @@ def clean_fields(raw: dict[str, Any], event_id: str, decision: str, command_key:
         if _ABSOLUTE.match(cwd):
             out["cwd"] = cwd
     repo = raw.get("repo")
-    if isinstance(repo, str) and len(repo) <= 200 and _REPO.match(repo) and ".." not in repo:
+    if isinstance(repo, str) and len(repo) <= 200 and _REPO.fullmatch(repo) and ".." not in repo:
         out["repo"] = repo
     branch = raw.get("branch")
-    if isinstance(branch, str) and _BRANCH.match(branch):
+    if isinstance(branch, str) and _BRANCH.fullmatch(branch):
         out["branch"] = branch
     head = raw.get("head")
-    if isinstance(head, str) and _HEAD.match(head):
+    if isinstance(head, str) and _HEAD.fullmatch(head):
         out["head"] = head
     if decision == "result":
         outcome = raw.get("outcome")
@@ -114,7 +115,7 @@ def clean_fields(raw: dict[str, Any], event_id: str, decision: str, command_key:
             if isinstance(value, str) and opens(command_key, event_id, name, value):
                 out[name] = value
         digest = raw.get("input_digest")
-        if isinstance(digest, str) and _DIGEST.match(digest):
+        if isinstance(digest, str) and _DIGEST.fullmatch(digest):
             out["input_digest"] = digest
             size = _int(raw.get("input_size"), "input_size")
             if size is not None:

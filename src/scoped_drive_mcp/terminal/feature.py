@@ -33,7 +33,15 @@ from . import export as otlp_export
 from . import identity, present
 from .coverage import clean_coverage, unhooked
 from .device import DeviceError, Terminal, Terminals, normalize_user_code
-from .ingest import RETENTION_DAYS, RETENTION_MAX_ROWS, IngestError, TerminalActivity
+from .ingest import (
+    RETENTION_DAYS,
+    RETENTION_MAX_ROWS,
+    ROWS_PER_DAY,
+    Busy,
+    IngestError,
+    OverBudget,
+    TerminalActivity,
+)
 from .provenance import DROPPED_FIELDS, SEALED_FIELDS
 from .provenance import FIELDS as PROVENANCE_FIELDS
 from .roles import BUILTIN, DEFAULT_OFFLINE_DAYS, RoleError, TerminalRoles
@@ -85,14 +93,22 @@ APPROVE_LIMIT = 30
 LOOKUP_LIMIT = 60
 # Calls by one signed-in terminal (policy checks and audit batches).
 TERMINAL_LIMIT = 240
+# Refreshes by one terminal, per 10 minutes: it refreshes about once an hour, and once
+# per agent process at most when several start together.
+REFRESH_LIMIT = 30
 MAX_BODY = 2 * 1024 * 1024
 MAX_UNGUARDED = 50
 ACTIVITY_PAGE = 100
 _TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 SETUP_MD = _TEMPLATES / "terminal_setup.md"
 INSTALL_SH = _TEMPLATES / "terminal_install.sh"
-# A site address that is safe to bake into a shell script and markdown as is.
-_SAFE_SITE = re.compile(r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+# A site address that is safe to bake into a shell script and markdown as is: https, or
+# http only on this computer (as APP_BASE_URL allows). Used with fullmatch. `[::1]` is
+# left out: brackets are glob characters to the shell and to curl.
+_SAFE_SITE = re.compile(
+    r"(https://[A-Za-z0-9.-]+|http://(localhost|127\.0\.0\.1))"
+    r"(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?"
+)
 AGENTS = (
     ("claude-code", "Claude Code"),
     ("cursor", "Cursor"),
@@ -189,9 +205,10 @@ class TerminalFeature:
     # ENCRYPTION_KEY: policies are signed with a key derived from it, and recorded
     # commands are sealed to another. None: unsigned, and commands are never recorded.
     signing_secret: str | None = None
-    # TERMINAL_ACTIVITY_DAYS and TERMINAL_ACTIVITY_MAX_ROWS.
+    # TERMINAL_ACTIVITY_DAYS, TERMINAL_ACTIVITY_MAX_ROWS, TERMINAL_ACTIVITY_ROWS_PER_DAY.
     activity_days: int = RETENTION_DAYS
     activity_max_rows: int = RETENTION_MAX_ROWS
+    activity_rows_per_day: int = ROWS_PER_DAY
     roles: TerminalRoles = field(init=False)
     terminals: Terminals = field(init=False)
     activity: TerminalActivity = field(init=False)
@@ -207,7 +224,10 @@ class TerminalFeature:
         self.roles = TerminalRoles(self.store)
         self.terminals = Terminals(self.store, self.roles, self.signed_in)
         self.activity = TerminalActivity(
-            self.store, retention_days=self.activity_days, max_rows=self.activity_max_rows
+            self.store,
+            retention_days=self.activity_days,
+            max_rows=self.activity_max_rows,
+            rows_per_day=self.activity_rows_per_day,
         )
         self.webhook = AuditWebhook(self.store, self.signing_secret)
 
@@ -322,7 +342,11 @@ class TerminalFeature:
                 except DeviceError as exc:
                     return _oauth_error(exc.code)
             elif grant == "refresh_token":
-                issued = await _run(self.terminals.refresh, str(data.get("refresh_token") or ""))
+                refresh_token = str(data.get("refresh_token") or "")
+                owner = await _run(self.terminals.refresh_owner, refresh_token)
+                if owner and not allow(self.store, "termrefresh", owner, REFRESH_LIMIT, API_WINDOW):
+                    return _too_many()
+                issued = await _run(self.terminals.refresh, refresh_token)
                 if issued is None:
                     return _oauth_error("invalid_grant")
             else:
@@ -340,7 +364,15 @@ class TerminalFeature:
                         issued["terminal_id"],
                         key_registered={"at": time.time(), "via": via},
                     )
-                    audit_owner("terminal_key_registered", terminal=issued["terminal_id"], via=via)
+                    # In the terminal owner's Activity, not whoever the request runs as.
+                    owner_terminal = await _run(self.terminals.get, issued["terminal_id"])
+                    actor = current_actor.set(owner_terminal.email if owner_terminal else None)
+                    try:
+                        audit_owner(
+                            "terminal_key_registered", terminal=issued["terminal_id"], via=via
+                        )
+                    finally:
+                        current_actor.reset(actor)
             if self.policy_key:
                 issued["policy_key"] = self.policy_key
             return JSONResponse(issued, headers={"cache-control": "no-store"})
@@ -410,6 +442,19 @@ class TerminalFeature:
                 )
             except IngestError as exc:
                 return JSONResponse({"error": "invalid_request", "message": str(exc)}, 400)
+            except Busy:
+                # Another upload from this terminal is being stored. The CLI keeps the
+                # rows and sends them again at its next sync (409 is not permanent).
+                return JSONResponse(
+                    {"error": "busy"}, status_code=409, headers={"retry-after": "5"}
+                )
+            except OverBudget as exc:
+                # This terminal sent its rows for today: they wait on the computer.
+                return JSONResponse(
+                    {"error": "row_budget_exceeded"},
+                    status_code=429,
+                    headers={"retry-after": str(exc.retry_after)},
+                )
             if stored:
                 # Best effort, short timeout; never fails the upload (terminal.webhook).
                 await _run(self.webhook.deliver, terminal.email, stored, command_key)
@@ -698,13 +743,14 @@ class TerminalFeature:
                 limit = ACTIVITY_PAGE
             recording = await _run(self.activity.records_commands, email)
             hook = await _run(self.webhook.get, email)
+            opened = await _run(self.open_commands, shown[:limit])
             return render(
                 request,
                 "terminal_activity.html",
                 delegation=identity.chain_text,
                 webhook=hook,
                 can_webhook=self.webhook.ready,
-                stories=present.stories(self.open_commands(shown[:limit])),
+                stories=present.stories(opened),
                 trouble=present.trouble,
                 agent_name=present.agent_name,
                 recording=recording,
@@ -735,10 +781,14 @@ class TerminalFeature:
                 # One OTLP/JSON document: read what is kept, then build it. Unlike CSV
                 # and JSONL this holds every kept row in memory (at most
                 # TERMINAL_ACTIVITY_MAX_ROWS), accepted for one owner-only download.
-                rows = self.open_commands([r for r in source if keep(r)])
-                body = otlp_export.otlp_logs(rows, self.site(request))
+                site = self.site(request)
+
+                def build() -> str:
+                    rows = self.open_commands([r for r in source if keep(r)])
+                    return json.dumps(otlp_export.otlp_logs(rows, site), separators=(",", ":"))
+
                 return PlainTextResponse(
-                    json.dumps(body, separators=(",", ":")),
+                    await _run(build),
                     media_type="application/json",
                     headers={
                         "content-disposition": 'attachment; filename="terminal-activity.otlp.json"',
@@ -862,13 +912,18 @@ class TerminalFeature:
             return page
 
         async def session_page(request: Request) -> Response:
-            tree = await _run(self.activity.session, _me(), request.path_params["session_id"])
+            # A session whose start row is no longer among the newest rows still has a
+            # (minimal) page, so it can be seen and revoked: `aged_out` is set.
+            tree = await _run(
+                self.activity.session, _me(), request.path_params["session_id"], stub=True
+            )
             if tree is None:
                 return render(request, "error.html", 404, message="Session not found.")
+            opened = await _run(self.open_tree, tree)
             return render(
                 request,
                 "terminal_session.html",
-                tree=self.open_tree(tree),
+                tree=opened,
                 agent_name=present.agent_name,
                 blocked_because=present.blocked_because,
                 describe=present.action,
@@ -877,9 +932,10 @@ class TerminalFeature:
 
         async def session_revoke(request: Request, _form: Any) -> Response:
             sid = request.path_params["session_id"]
-            if await _run(self.activity.session, _me(), sid) is None:
+            # Any well-formed id, even one whose rows aged out: revocations are this
+            # person's own, so revoking an id affects only their terminals.
+            if not await _run(self.activity.revoke_session, _me(), sid):
                 return render(request, "error.html", 404, message="Session not found.")
-            await _run(self.activity.revoke_session, _me(), sid)
             audit_owner("terminal_session_revoked", session=sid)
             kit.flash(
                 request,

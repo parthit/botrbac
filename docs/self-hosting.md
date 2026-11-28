@@ -313,6 +313,7 @@ uv run ruff check . && uv run ruff format --check .
 | `MCP_RATE_LIMIT`, `MCP_RATE_WINDOW_SECONDS` | 300 / 60 | `/mcp` calls per token |
 | `REQUIRE_SIGNED_RECORDS` | on | Unsigned allowlist, app and pairing records are ignored. A deployment from before records were signed sets `0`, runs **Sign existing records** on `/admin`, then removes it. See [security.md](security.md) |
 | `TERMINAL_ACTIVITY_DAYS`, `TERMINAL_ACTIVITY_MAX_ROWS` | 180 / 20000 | how long Terminal activity rows are kept, and at most how many per person. The Activity page shows the newest 2,000; exports have all of them ([terminal.md](terminal.md#record-integrity-and-retention)) |
+| `TERMINAL_ACTIVITY_ROWS_PER_DAY` | 10000 | rows one terminal may add per UTC day; past it uploads get 429 and wait on the computer |
 | `TRUSTED_PROXY_HOPS` | unset | proxies in front of the server that add to `X-Forwarded-For`. Leave unset on Vercel |
 | `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET` | unset | optional Notion connection; both set turns it on ([notion.md](notion.md)) |
 | `NOTION_ALLOW_CREATE` | off | Notion is read-only unless this is `1`. On, `editor` and `admin` connections get `notion_create_page` ([notion.md](notion.md#creating-a-page)) |

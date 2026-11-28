@@ -47,12 +47,28 @@ def known_configs(cwd: Path | None = None) -> list[AgentConfig]:
     ]
 
 
+def installed_command() -> list[str]:
+    """botrbac as written into an agent's settings (hooks, the gateway): with this
+    folder's absolute path, so a BOTRBAC_HOME the agent sets for a child process cannot
+    send the check to a folder holding a policy it wrote itself."""
+    return [*botrbac_command(), "--home", str(state.home_path())]
+
+
+def strip_home(args: list[str]) -> list[str]:
+    """`args` without a leading `--home PATH` (or `--home=PATH`)."""
+    if args[:1] == ["--home"]:
+        return args[2:]
+    if args and args[0].startswith("--home="):
+        return args[1:]
+    return args
+
+
 def is_gateway(spec: Any) -> bool:
     if not isinstance(spec, dict):
         return False
     command = str(spec.get("command") or "")
     args = [str(a) for a in spec.get("args") or []]
-    if Path(command).name == "botrbac" and args[:1] == ["gateway"]:
+    if Path(command).name == "botrbac" and strip_home(args)[:1] == ["gateway"]:
         return True
     return "botrbac_cli" in args and "gateway" in args
 
@@ -107,7 +123,7 @@ def to_upstream(spec: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def gateway_entry(agent: str) -> dict[str, Any]:
-    command = botrbac_command()
+    command = installed_command()
     return {"command": command[0], "args": [*command[1:], "gateway", "--agent", agent]}
 
 

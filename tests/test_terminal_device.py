@@ -83,7 +83,6 @@ def test_refresh_rotates_and_revoke_ends_everything() -> None:
     terminal, first = _connected(t)
     second = t.refresh(first["refresh_token"])
     assert second is not None
-    assert t.refresh(first["refresh_token"]) is None  # rotated
     assert t.resolve(second["access_token"]) is not None
     allowed.clear()
     assert t.resolve(second["access_token"]) is None  # signed-in check applies
@@ -92,6 +91,8 @@ def test_refresh_rotates_and_revoke_ends_everything() -> None:
     assert t.resolve(second["access_token"]) is None
     assert t.refresh(second["refresh_token"]) is None
     assert t.for_person(ME) == []
+    # A used refresh token coming back ends the terminal's tokens (see
+    # test_terminal_fix_server.py): rotation is checked there.
 
 
 def test_signed_out_person_cannot_approve() -> None:

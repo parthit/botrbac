@@ -75,6 +75,9 @@ class FakeApi:
     body (raise ApiError from it to refuse); every body is kept in `bodies`."""
 
     def __init__(self, send=None):
+        # A logged-in terminal whose server sends unsigned policies (as policy() does).
+        if not state.read_json("credentials.json"):
+            state.write_json("credentials.json", SELF_HOSTED, private=True)
         self.send = send
         self.bodies: list[dict] = []
 
@@ -86,10 +89,18 @@ class FakeApi:
         return {"role": {"id": "r", "patterns": ["*"]}, "roles": []}
 
 
+# Logged in to a self-hosted server without ENCRYPTION_KEY: no policy key, unsigned policies.
+SELF_HOSTED = {"server": "https://rbac.self-hosted.test", "refresh_token": "r"}
+
+
 def cache_policy(
     patterns, *, name="Test role", role_id="r", roles=(), revoked=(), age=0.0, **role
 ) -> None:
-    """Write policy.json as if fetched `age` seconds ago."""
+    """Write policy.json as if fetched `age` seconds ago. The policy is unsigned, so
+    unless the test logged in already this also writes the credentials of a self-hosted
+    server that has never sent a policy key (the only case unsigned policies are used)."""
+    if not state.read_json("credentials.json"):
+        state.write_json("credentials.json", SELF_HOSTED, private=True)
     state.write_json(
         "policy.json",
         {

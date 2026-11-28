@@ -17,7 +17,7 @@ import httpx
 from . import __version__, policy, state
 from .api import DEFAULT_SERVER, Api, ApiError, NotLoggedIn
 from .patterns import COMMAND_SERVER, normalize_server
-from .queue import AuditQueue
+from .queue import KEEP_SENT, AuditQueue
 
 
 def _api(args: argparse.Namespace) -> Api:
@@ -161,7 +161,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     """Walk audit.db's hash chain and check it against the website's signed checkpoint."""
     from . import chain
 
-    rows, pruned, tip = AuditQueue().chain_rows()
+    queue = AuditQueue()
+    rows, pruned, tip = queue.chain_rows()
+    unverified = ""
     walked = chain.walk(rows, pruned, tip)
     problems = len(walked["problems"])
     if walked["count"]:
@@ -193,6 +195,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(f"✓ row {seq} matches the website's signed checkpoint ({when})")
         elif local is None and seq <= pruned:
             print(f"! row {seq} (the checkpoint) was already pruned here; nothing to compare")
+            unverified = f"row {seq} was pruned here, so the website's checkpoint was not checked"
+            if queue.sent_kept() < KEEP_SENT:
+                # Pruning keeps the newest KEEP_SENT sent rows: fewer means rows that
+                # should still be here are gone (or the prune mark was raised by hand).
+                problems += 1
+                print("✗ fewer sent rows are kept here than pruning leaves: rows are missing")
         elif local is None:
             problems += 1
             print(
@@ -203,6 +211,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(f"✗ row {seq} here is not the row the website signed ({when})")
     if problems:
         print(f"{problems} problem(s) found.")
+    elif unverified:
+        print(f"Not verified: {unverified}. Run botrbac sync for a newer checkpoint.")
     else:
         # Intact is not true: code running as you could still have written false rows
         # before they were sent (docs/terminal.md, record integrity).
@@ -478,6 +488,12 @@ def cmd_servers(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="botrbac", description=__doc__)
     parser.add_argument("--version", action="version", version=f"botrbac {__version__}")
+    parser.add_argument(
+        "--home",
+        metavar="PATH",
+        help="botrbac's folder (default: BOTRBAC_HOME, else ~/.config/botrbac); "
+        "hooks and the gateway are installed with it",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("login", help="connect this computer to your Bot RBAC account")
@@ -590,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
         argv, tail = argv[:cut], argv[cut + 1 :]
     args = build_parser().parse_args(argv)
     args.command_line = tail
+    if args.home:
+        # Wins over BOTRBAC_HOME; children (an agent under `botrbac run`) get it too.
+        state.set_home(args.home)
+        os.environ["BOTRBAC_HOME"] = str(state.home_path())
     try:
         return int(args.fn(args) or 0)
     except NotLoggedIn as exc:

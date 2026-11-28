@@ -3,6 +3,14 @@
 The server's policy is cached with the time it was fetched. Without internet the cache
 is used for the role's offline grace (days), then every tool is blocked until the
 terminal can check in again. No cache at all also blocks everything.
+
+The policy must carry the server's signature whenever a key is known on this computer
+(credentials.json, terminal_key.json or state.json: removing it from one file does not
+switch checking off), or the server is the default site, or nobody is logged in here
+(no credentials.json blocks everything). Only a self-hosted server that has never sent
+a key (one without ENCRYPTION_KEY) may hand out unsigned policies. A signed policy must
+also be for this terminal and no older than the newest one this computer has accepted,
+so an old, wider policy cannot be put back.
 """
 
 import os
@@ -11,7 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import signing, state
+from . import identity, signing, state
+from .api import DEFAULT_SERVER
 from .patterns import chain_allows, chain_allows_command, has_command_rules
 
 SESSION_ENV = "BOTRBAC_SESSION"
@@ -65,15 +74,94 @@ def load_cached() -> dict[str, Any] | None:
     return data if isinstance(data, dict) and "policy" in data else None
 
 
+NEWEST = "policy_issued_at"  # in state.json: the newest signed policy accepted here
+
+
+def pinned_keys(creds: dict[str, Any] | None = None) -> set[str]:
+    """Every policy key this computer has been given, from any of the files that keep
+    one. A signed policy must check out against all of them."""
+    if creds is None:
+        creds = state.read_json("credentials.json", {}) or {}
+    found = [creds.get("policy_key") if isinstance(creds, dict) else None]
+    for name in ("state.json", identity.KEY_FILE):
+        data = state.read_json(name, {})
+        found.append(data.get("policy_key") if isinstance(data, dict) else None)
+    return {k for k in found if isinstance(k, str) and k}
+
+
+def _default_server(creds: dict[str, Any]) -> bool:
+    server = str(creds.get("server") or "").rstrip("/")
+    return not server or server == DEFAULT_SERVER.rstrip("/")
+
+
+def _issued(policy: dict[str, Any]) -> float:
+    try:
+        return float(policy.get("issued_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def check_policy(policy: Any, creds: Any = None) -> str:
+    """ "" when `policy` may be used here, else why not."""
+    if creds is None:
+        creds = state.read_json("credentials.json")
+    if not isinstance(creds, dict):
+        return "not logged in: run botrbac login"
+    if not isinstance(policy, dict):
+        return "no policy yet: run botrbac login"
+    keys = pinned_keys(creds)
+    if not (keys or policy.get("signature") or _default_server(creds)):
+        return ""  # a self-hosted server without a signing key, never seen with one
+    tampered = (
+        "botrbac's saved role was changed on this computer, so every tool is "
+        "blocked: run botrbac sync"
+    )
+    # A signed policy with no key to check it against means the key was removed.
+    if not keys or not all(signing.verify(k, policy) for k in keys):
+        return tampered
+    terminal = policy.get("terminal")
+    tid = creds.get("terminal_id")
+    if tid and (not isinstance(terminal, dict) or terminal.get("id") != tid):
+        return (
+            "botrbac's saved role is for another terminal, so every tool is blocked: "
+            "run botrbac sync"
+        )
+    newest = (state.read_json("state.json", {}) or {}).get(NEWEST)
+    try:
+        newest = float(newest or 0)
+    except (TypeError, ValueError):
+        return tampered
+    if _issued(policy) < newest:
+        return (
+            "botrbac's saved role is older than one this computer already had, so every "
+            "tool is blocked: run botrbac sync"
+        )
+    return ""
+
+
 def save(policy: dict[str, Any]) -> None:
-    state.write_json("policy.json", {"policy": policy, "fetched_at": time.time()})
+    """Cache a policy from the server. One that does not check out is not cached (the
+    one already here stays), and a good signed one moves the newest-seen mark."""
+    with state.file_lock(".policy.lock"):
+        if check_policy(policy):
+            return
+        state.write_json("policy.json", {"policy": policy, "fetched_at": time.time()})
+        if policy.get("signature"):
+            data = state.read_json("state.json", {}) or {}
+            issued = _issued(policy)
+            if issued > float(data.get(NEWEST) or 0):
+                data[NEWEST] = issued
+                state.write_json("state.json", data)
 
 
 def refresh(api: Any) -> dict[str, Any] | None:
-    """Fetch and cache the policy; None when the server cannot be reached."""
+    """Fetch and cache the policy; None when the server cannot be reached. A policy
+    that does not check out here is returned but not cached (save)."""
     try:
         policy = api.policy()
     except Exception:  # noqa: BLE001 - offline, server down, or logged out
+        return None
+    if not isinstance(policy, dict):
         return None
     save(policy)
     return policy
@@ -96,17 +184,17 @@ class Enforcer:
     clock: Any = time.time
 
     def _state(self) -> tuple[dict[str, Any] | None, str]:
+        creds = state.read_json("credentials.json")
+        if not isinstance(creds, dict):
+            return None, "not logged in: run botrbac login"
         cached = load_cached()
         if cached is None:
             return None, "no policy yet: run botrbac login"
         policy = cached["policy"]
-        pinned = (state.read_json("credentials.json", {}) or {}).get("policy_key")
-        # A signed policy with no key to check it against means the key was removed.
-        if (pinned or policy.get("signature")) and not signing.verify(pinned or "", policy):
-            return None, (
-                "botrbac's saved role was changed on this computer, so every tool is "
-                "blocked: run botrbac sync"
-            )
+        why = check_policy(policy, creds)
+        if why:
+            return None, why
+        pinned = bool(policy.get("signature"))
         days = int(policy.get("role", {}).get("offline_days") or 7)
         age = self.clock() - float(cached.get("fetched_at") or 0)
         if pinned:

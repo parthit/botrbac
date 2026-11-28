@@ -222,7 +222,7 @@ def test_role_without_cmd_patterns_is_unchanged() -> None:
     assert not check("claude-code", "", "Bash", False)[0]
     # ...without them, the shell tool is all or nothing.
     _role(["claude-code/Bash"])
-    assert check("claude-code", _bash("sudo rm -rf /"), None, False)[0]
+    assert check("claude-code", _bash("sudo rm -rf build"), None, False)[0]
     assert check("claude-code", _bash("echo $(whoami)"), None, False)[0]
     assert check("claude-code", "", "Bash", False)[0]
     _role(["claude-code/Read"])

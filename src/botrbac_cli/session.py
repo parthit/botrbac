@@ -53,6 +53,10 @@ def start(
     if cached is None:
         raise SessionError("No policy on this computer yet. Run: botrbac login")
     pol = cached["policy"]
+    why = policy.check_policy(pol)
+    if why:
+        # Roles to narrow to come only from a policy this computer trusts.
+        raise SessionError(why)
     role = find_role(pol, role_name)
     if role is None:
         names = ", ".join(str(r.get("name")) for r in pol.get("roles") or [])
