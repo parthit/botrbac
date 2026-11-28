@@ -5,7 +5,7 @@ the Google Picker session, and allow/remove for one item or a batch.
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
@@ -47,7 +47,12 @@ class FilePages:
     grant: FormHandler
     revoke: FormHandler
     files_batch: FormHandler
+    picked: Callable[[Request, str, str, str], Awaitable[Response]]
     still_covered: Callable[..., Awaitable[str | None]]
+
+
+# Items taken from one visit to Google's full-page picker.
+PICK_LIMIT = 100
 
 
 def file_pages(kit: Kit) -> FilePages:
@@ -59,6 +64,7 @@ def file_pages(kit: Kit) -> FilePages:
     remember_pending = kit.remember_pending
     render = kit.render
     render_plain = kit.render_plain
+    flash = kit.flash
     action_done = kit.action_done
     wants_json = kit.wants_json
     blocking = kit.blocking
@@ -559,6 +565,66 @@ def file_pages(kit: Kit) -> FilePages:
             for fid in set(file_ids):
                 await blocking(ctx.hidden.unhide, fid)
 
+    async def picked(request: Request, picked_ids: str, next_url: str, request_id: str) -> Response:
+        """Allow what came back from Google's full-page picker (pages/signin.py), the same
+        way ui.js does after the in-page picker: each item through GrantService.grant,
+        then the request it was picked for, if any. `current_actor` is already set."""
+        try:
+            ids = list(
+                dict.fromkeys(
+                    validate_drive_id(part.strip())
+                    for part in picked_ids.split(",")
+                    if part.strip()
+                )
+            )
+        except InvalidInputError:
+            flash(request, "error", "Google returned something that is not a Drive item.")
+            return RedirectResponse(next_url, status_code=303)
+        if not ids:
+            flash(
+                request,
+                "error",
+                "Nothing came back from Google’s file picker, so nothing changed. "
+                "Use the in-page picker instead.",
+            )
+            return RedirectResponse(next_url, status_code=303)
+        skipped = len(ids) - PICK_LIMIT
+        names: list[str] = []
+        granted: list[str] = []
+        errors: list[str] = []
+        for file_id in ids[:PICK_LIMIT]:
+            try:
+                entry = await blocking(ctx.grants().grant, file_id)
+            except GrantError as exc:
+                errors.append(str(exc))
+                continue
+            await unhide(file_id, entry.id)
+            granted.append(file_id)
+            names.append(entry.name or entry.id)
+        if len(names) == 1:
+            flash(request, "ok", f"Allowed \u201c{names[0]}\u201d for the assistant.")
+        elif names:
+            flash(request, "ok", f"Allowed {len(names)} items for the assistant.")
+        if errors:
+            flash(request, "error", errors[0])
+        if skipped > 0:
+            flash(request, "error", f"Only the first {PICK_LIMIT} items were added. Pick the rest.")
+        if request_id and granted:
+            req = await blocking(ctx.requests.get, request_id)
+            if req is not None:
+                try:
+                    # The first item that was actually allowed, as ui.js approves docs[0].
+                    entry = await blocking(ctx.grants().approve, req, granted[0])
+                    flash(
+                        request,
+                        "ok",
+                        f"Approved: shared \u201c{entry.name}\u201d with the assistant.",
+                    )
+                except GrantError as exc:
+                    flash(request, "error", str(exc))
+                return RedirectResponse(f"/requests/{quote(req.id)}", status_code=303)
+        return RedirectResponse(next_url, status_code=303)
+
     def plural(n: int, one: str = "item", many: str = "items") -> str:
         return f"{n} {one if n == 1 else many}"
 
@@ -818,5 +884,6 @@ def file_pages(kit: Kit) -> FilePages:
         grant=grant,
         revoke=revoke,
         files_batch=files_batch,
+        picked=picked,
         still_covered=still_covered,
     )

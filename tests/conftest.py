@@ -192,6 +192,16 @@ class FakeOAuth:
         self.requested.append((tuple(scopes), offline))
         return f"https://accounts.google.com/o/oauth2/v2/auth?state={state}"
 
+    def picker_url(self, state: str, login_hint: str | None = None) -> str:
+        self.hints.append(login_hint)
+        self.requested.append((("https://www.googleapis.com/auth/drive.file",), False))
+        return f"https://accounts.google.com/o/oauth2/v2/auth?trigger_onepick=true&state={state}"
+
+    def drive_account(self, access_token: str) -> str | None:
+        if getattr(self, "drive_account_unknown", False):
+            return None
+        return self.accounts[access_token.removeprefix("at:")][0]
+
     def exchange_code(self, code: str):
         from scoped_drive_mcp.oauth import OAuthError, OAuthTokens
 

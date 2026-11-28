@@ -705,20 +705,37 @@
   if (!pickButtons.length) return;
   var pick = pickButtons[0];
 
-  // Safari (desktop, and every iOS browser since they all use WebKit) blocks Google's
-  // cookies in the picker's frame while cross-site tracking prevention is on.
+  // Google's in-page picker runs in a frame and needs Google's cookies there. Every
+  // iPhone and iPad browser (they all use WebKit) blocks those by default, and Google
+  // then shows "Can't access your Google Account". There the pick buttons open the
+  // picker as a full page on Google's site instead (POST /picker/redirect). Elsewhere
+  // the note offers the full page to anyone whose browser blocks the frame's cookies.
   var ua = navigator.userAgent;
   var webkitOnly = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg(?!iOS)|OPR|Android/.test(ua);
   // An iPad asks for desktop sites with a Mac user agent; only touch tells it apart.
   var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
-  if (webkitOnly) {
-    Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
-      var mac = note.querySelector("[data-safari-mac]");
-      var touch = note.querySelector("[data-safari-ios]");
-      if (ios && mac && touch) { mac.hidden = true; touch.hidden = false; }
-      note.hidden = false;
-    });
-  }
+  // The server sets this once Google's full page has failed in this session (it ignored
+  // trigger_onepick or refused the request), so the buttons stop sending people there.
+  var fullPageFailed = !!document.querySelector("[data-safari-note][data-fullpage-failed]");
+  var fullPageFirst = ios && !fullPageFailed;
+  Array.prototype.forEach.call(document.querySelectorAll("[data-safari-note]"), function (note) {
+    function show(selector) {
+      var el = note.querySelector(selector);
+      if (el) el.hidden = false;
+    }
+    function hide(selector) {
+      var el = note.querySelector(selector);
+      if (el) el.hidden = true;
+    }
+    if (ios) {
+      hide("[data-note-other]");
+      show(fullPageFailed ? "[data-safari-ios-failed]" : "[data-safari-ios]");
+      show("[data-safari-ios-steps]");
+    } else if (webkitOnly) {
+      show("[data-safari-mac]");
+    }
+    note.hidden = false;
+  });
 
   function loadPicker() {
     return new Promise(function (resolve, reject) {
@@ -831,11 +848,39 @@
     builder.build().setVisible(true);
   }
 
-  function onPickClick(event) {
-    pick = event.currentTarget;
+  function pickRequestId() {
+    var requestId = pick.getAttribute("data-request") || "";
+    return /^[A-Za-z0-9_-]{22,64}$/.test(requestId) ? requestId : "";
+  }
+
+  function openFullPage() {
+    // A real form post, so the browser follows the server's redirect to Google.
+    var csrf = document.querySelector('meta[name="csrf"]');
+    var fields = {
+      csrf: csrf ? csrf.getAttribute("content") || "" : "",
+      next: safeBrowsePath(pick.getAttribute("data-next")),
+      request: pickRequestId()
+    };
+    var form = document.createElement("form");
+    form.method = "post";
+    form.action = "/picker/redirect";
+    form.hidden = true;
+    Object.keys(fields).forEach(function (key) {
+      var input = document.createElement("input");
+      input.type = "hidden";
+      input.name = key;
+      input.value = fields[key];
+      form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  }
+
+  function openInPage() {
     var note = document.getElementById("pick-error");
     if (note) note.hidden = true;
-    pick.disabled = true;
+    var button = pick;
+    button.disabled = true;
     fetch("/picker/session", { headers: { Accept: "application/json" }, credentials: "same-origin" })
       .then(function (response) {
         if (!response.ok) throw new Error("session");
@@ -844,10 +889,23 @@
       .then(function (cfg) { return loadPicker().then(function () { return cfg; }); })
       .then(openPicker)
       .catch(function () { if (note) note.hidden = false; })
-      .then(function () { pick.disabled = false; });
+      .then(function () { button.disabled = false; });
+  }
+
+  function onPickClick(event) {
+    pick = event.currentTarget;
+    if (fullPageFirst) { openFullPage(); return; }
+    openInPage();
   }
   Array.prototype.forEach.call(pickButtons, function (button) {
     button.addEventListener("click", onPickClick);
+  });
+  // The note's two buttons act for the pick button used last (the first one, before any).
+  Array.prototype.forEach.call(document.querySelectorAll("[data-fullpage-pick]"), function (button) {
+    button.addEventListener("click", openFullPage);
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-inpage-pick]"), function (button) {
+    button.addEventListener("click", openInPage);
   });
 })();
 

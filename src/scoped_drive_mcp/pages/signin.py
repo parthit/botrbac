@@ -1,8 +1,10 @@
 """Sign-in pages: /login, the Google OAuth round trip (step 1, and the callback that
-also finishes step 2, connecting Google Drive), and /logout.
+also finishes step 2, connecting Google Drive, and Google's full-page file picker),
+and /logout.
 """
 
 import hmac
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ from ..connections import Connection, get_connection
 from ..oauth import SIGN_IN_SCOPES, OAuthError
 from ..ratelimit import allow, ip_identity
 from ..store import usable_email
-from .common import _LOGIN_HINT, SESSION_MAX_AGE, STATE_MAX_AGE
+from .common import _LOGIN_HINT, SESSION_MAX_AGE, STATE_MAX_AGE, OwnerNotConnectedError
 from .kit import FormHandler, Handler, Kit
 
 
@@ -32,11 +34,20 @@ class SigninPages:
     auth_login: Handler
     auth_callback: Handler
     logout: FormHandler
+    pick_start: FormHandler
     start_oauth: Callable[..., RedirectResponse]
     login_rate_limited: Callable[[Request], Awaitable[Response | None]]
 
 
-def signin_pages(kit: Kit) -> SigninPages:
+# What the picker returns to the callback, handled by the Files pages:
+# (request, picked_file_ids, next_url, request_id).
+PickedHandler = Callable[[Request, str, str, str], Awaitable[Response]]
+_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{22,64}")
+# Session flag: Google's full-page picker failed in this browser (see fullpage_failed).
+FULLPAGE_FAILED = "pick_fullpage_failed"
+
+
+def signin_pages(kit: Kit, picked: PickedHandler) -> SigninPages:
     ctx = kit.ctx
     settings = kit.settings
     oauth = kit.oauth
@@ -151,11 +162,13 @@ def signin_pages(kit: Kit) -> SigninPages:
         ):
             return render(request, "error.html", 400, message="Sign-in expired. Try again.")
         flow = data.get("flow")
-        if flow not in ("signin", "connect"):
+        if flow not in ("signin", "connect", "pick"):
             return render(request, "error.html", 400, message="Invalid sign-in state.")
         code = params.get("code")
         if not code:
             return render(request, "error.html", 400, message="Google did not return a code.")
+        if flow == "pick":
+            return await finish_pick(request, data, code, params.get("picked_file_ids") or "")
 
         try:
             tokens = await blocking(oauth.exchange_code, code)
@@ -193,6 +206,25 @@ def signin_pages(kit: Kit) -> SigninPages:
             flow = data.get("flow")
             connection = get_connection(str(data.get("connection") or ""))
         request.session.pop("oauth_nonce", None)
+        if flow == "pick" and isinstance(data, dict) and session_user(request):
+            # Back to the page the picker was opened from; nothing was picked or changed.
+            if params.get("error") == "access_denied":
+                flash(
+                    request,
+                    "error",
+                    "You left Google’s file picker without choosing anything, so nothing changed.",
+                )
+            else:
+                # Google refused the full-page picker itself. Say so, and let ui.js offer
+                # the in-page picker next time instead of sending the person back here.
+                fullpage_failed(request, "google_error")
+                flash(
+                    request,
+                    "error",
+                    "Google wouldn’t open its file picker as a full page, so nothing changed. "
+                    "Use the in-page picker instead.",
+                )
+            return RedirectResponse(pick_return(data), status_code=303)
         next_url = safe_next(request.session.get("oauth_next"))
         cancelled = params.get("error") == "access_denied"
         if flow == "connect" and session_user(request):
@@ -230,6 +262,92 @@ def signin_pages(kit: Kit) -> SigninPages:
                 {"label": "Back to home", "href": "/"},
             ],
         )
+
+    # ---- Google's file picker as a full page ---------------------------
+
+    def pick_request_id(value: Any) -> str:
+        return value if isinstance(value, str) and _REQUEST_ID.fullmatch(value) else ""
+
+    def pick_return(data: dict[str, Any]) -> str:
+        return safe_next(str(data.get("next") or "/files"))
+
+    def fullpage_failed(request: Request, reason: str) -> None:
+        """Remember, for this browser session, that Google's full-page picker did not
+        work, so _safari_note.html tells ui.js to offer the in-page picker instead of
+        sending the person round the same loop again."""
+        request.session[FULLPAGE_FAILED] = True
+        audit_owner("pick", "deny", reason=reason)
+
+    async def pick_start(request: Request, form: dict[str, str]) -> Response:
+        """Send the signed-in person to Google's picker on Google's own site. The in-page
+        picker cannot load where the browser blocks Google's cookies inside a frame
+        (Safari, and every browser on iPhone and iPad); a full page is not affected."""
+        if not await blocking(ctx.drive_connected):
+            return RedirectResponse("/connect", status_code=303)
+        nonce = secrets.token_urlsafe(24)
+        request.session["oauth_nonce"] = nonce
+        state = serializer.dumps(
+            {
+                "flow": "pick",
+                "nonce": nonce,
+                "next": safe_next(form.get("next") or "/files"),
+                "request": pick_request_id(form.get("request")),
+            }
+        )
+        return RedirectResponse(
+            oauth.picker_url(state, current_actor.get() or None), status_code=303
+        )
+
+    async def finish_pick(
+        request: Request, data: dict[str, Any], code: str, picked_ids: str
+    ) -> Response:
+        """Back from Google's picker. Nothing from Google is stored: the connection this
+        person already has opens what they picked. The code is exchanged only to learn
+        which Google account did the picking, so a pick made with another account gets a
+        clear answer."""
+        signed_in = await signed_in_user(request)
+        if not signed_in:
+            return render(request, "error.html", 400, message="Sign in first, then pick.")
+        next_url = pick_return(data)
+        # The callback runs outside owner_only, so name the actor here (see finish_connect).
+        reset = current_actor.set(signed_in)
+        try:
+            try:
+                tokens = await blocking(oauth.exchange_code, code)
+            except OAuthError as exc:
+                audit_owner("pick", "deny", reason="exchange_failed")
+                flash(request, "error", f"Google didn’t finish the pick ({exc}). Nothing changed.")
+                return RedirectResponse(next_url, status_code=303)
+            account = await blocking(oauth.drive_account, tokens.access_token)
+            if account and account.strip().lower() != signed_in.strip().lower():
+                audit_owner("pick", "deny", reason="different_account")
+                flash(
+                    request,
+                    "error",
+                    f"You picked with a different Google account. Nothing was added. Pick "
+                    f"again with {signed_in}, the account you are signed in with here.",
+                )
+                return RedirectResponse(next_url, status_code=303)
+            if not picked_ids.strip():
+                # A code but no picked_file_ids: Google showed its consent screen and
+                # skipped the picker (it ignored trigger_onepick).
+                fullpage_failed(request, "no_picker")
+            else:
+                request.session.pop(FULLPAGE_FAILED, None)
+                # Unknown account: the grant check below still refuses anything the
+                # stored connection can't open. Recorded so it can be told apart.
+                audit_owner("pick", account=None if account else "unknown")
+            try:
+                return await picked(
+                    request, picked_ids, next_url, pick_request_id(data.get("request"))
+                )
+            except OwnerNotConnectedError:
+                # Drive was disconnected while the person was on Google's page.
+                return RedirectResponse(
+                    f"/connect?{urlencode({'next': next_url})}", status_code=303
+                )
+        finally:
+            current_actor.reset(reset)
 
     async def finish_sign_in(request: Request, email: str) -> Response:
         """Step 1 done. Nothing from Google is stored except that this address signed in."""
@@ -387,6 +505,7 @@ def signin_pages(kit: Kit) -> SigninPages:
         auth_login=auth_login,
         auth_callback=auth_callback,
         logout=logout,
+        pick_start=pick_start,
         start_oauth=start_oauth,
         login_rate_limited=login_rate_limited,
     )

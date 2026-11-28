@@ -966,7 +966,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         shared_search_limit=lambda: SHARED_SEARCH_LIMIT,
         refresh_access_token=fresh_access_token,
     )
-    signin = signin_pages(kit)
+
+    async def picked(request: Request, ids: str, next_url: str, request_id: str) -> Response:
+        # The Files pages are built after the sign-in pages, which own the OAuth callback.
+        return await files.picked(request, ids, next_url, request_id)
+
+    signin = signin_pages(kit, picked)
     conn = connection_pages(
         kit, start_oauth=signin.start_oauth, login_rate_limited=signin.login_rate_limited
     )
@@ -1020,6 +1025,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/files", owner_only(prefs.files_page), methods=["GET"]),
         Route("/browse", prefs.moved("/files"), methods=["GET"]),
         Route("/picker/session", owner_only(files.picker_session), methods=["GET"]),
+        Route("/picker/redirect", csrf_protected(signin.pick_start), methods=["POST"]),
         Route("/grant", csrf_protected(files.grant), methods=["POST"]),
         Route("/revoke", csrf_protected(files.revoke), methods=["POST"]),
         Route("/files/batch", csrf_protected(files.files_batch), methods=["POST"]),
