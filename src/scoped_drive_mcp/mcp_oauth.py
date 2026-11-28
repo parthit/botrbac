@@ -43,6 +43,7 @@ from .auth import (
     role_metadata_url,
 )
 from .config import Role
+from .policy import FEATURES, tools_off
 from .ratelimit import allow, ip_identity
 from .store import KeyValueStore, purpose_fernet, utc_now
 
@@ -283,6 +284,8 @@ class GrantView:
     renamed: bool = False
     # The named role this connection is limited to, if it signed in through one.
     agent_role: str | None = None
+    # policy.FEATURES the owner left on for this app.
+    features: dict[str, bool] = field(default_factory=dict)
 
 
 # What a connected app may do, chosen by the owner on the consent page and changeable
@@ -475,6 +478,16 @@ def _chosen_key(grant_id: str) -> str:
 def _pinned_key(grant_id: str) -> str:
     """Set when the role of an app from before roles existed was written down for it."""
     return f"oauth:rolepinned:{grant_id}"
+
+
+def _features_key(grant_id: str) -> str:
+    """Parts of the connection the owner switched on or off for this app (policy.FEATURES).
+    Missing means everything stays on, as for every app connected before the switches."""
+    return f"oauth:features:{grant_id}"
+
+
+def _features_json(features: dict[str, bool]) -> str:
+    return json.dumps({name: bool(features.get(name, True)) for name in FEATURES}, sort_keys=True)
 
 
 def _label_key(grant_id: str) -> str:
@@ -1020,7 +1033,13 @@ class McpOAuth:
             params["state"] = exc.state
         return _with_query(exc.redirect_uri, params)
 
-    def approve(self, email: str, pending: AuthorizeRequest, role: str = DEFAULT_APP_ROLE) -> str:
+    def approve(
+        self,
+        email: str,
+        pending: AuthorizeRequest,
+        role: str = DEFAULT_APP_ROLE,
+        features: dict[str, bool] | None = None,
+    ) -> str:
         if not self._may_act(email):
             raise AuthorizeError("access_denied", "This account cannot approve connections.")
         if role not in APP_ROLES:
@@ -1051,8 +1070,11 @@ class McpOAuth:
         )
         grant.code_hash = digest
         self._make_room(email)
-        # The role first, so the grant is never visible without it.
+        # The role first, so the grant is never visible without it. The same for the parts
+        # the owner switched off: a grant is never usable before they apply.
         self.store.set(_role_key(grant.id), role)
+        if features is not None:
+            self.store.set(_features_key(grant.id), _features_json(features))
         self._save_grant(grant)
         self.store.set(_code_key(digest), payload, ex=CODE_TTL)
         # Approvals whose app never came back for its code are cleared here.
@@ -1263,6 +1285,7 @@ class McpOAuth:
             grant_id=grant.id,
             client_name=self.display_name(grant),
             bound_role=grant.agent_role,
+            tools_off=tools_off(self.features_of(grant.id)),
         )
 
     def list_grants(self, email: str | None) -> list[GrantView]:
@@ -1288,6 +1311,7 @@ class McpOAuth:
                         app_name=grant.client_name,
                         renamed=label is not None,
                         agent_role=grant.agent_role,
+                        features=self.features_of(grant.id),
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -1346,6 +1370,7 @@ class McpOAuth:
         self.store.delete(_role_key(grant.id))
         self.store.delete(_chosen_key(grant.id))
         self.store.delete(_label_key(grant.id))
+        self.store.delete(_features_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
         if reason:
             self._audit_ended(grant, reason)
@@ -1452,6 +1477,31 @@ class McpOAuth:
             # Best effort: also say so on the grant itself, which is signed, so deleting
             # the two side keys cannot bring full access back.
             self._mark_roles(grant)
+        return True
+
+    def features_of(self, grant_id: str) -> dict[str, bool]:
+        """Which switchable parts (policy.FEATURES) this app may use. A part with no saved
+        choice is on, as it was before the switches existed. An unreadable record turns
+        every part off, so a damaged key never widens what an app can do."""
+        raw = self.store.get(_features_key(grant_id))
+        if raw is None:
+            return {name: True for name in FEATURES}
+        try:
+            saved = json.loads(raw)
+        except (TypeError, ValueError):
+            saved = None
+        if not isinstance(saved, dict):
+            return {name: False for name in FEATURES}
+        return {name: saved.get(name) is not False for name in FEATURES}
+
+    def set_features(self, grant_id: str, email: str, features: dict[str, bool]) -> bool:
+        """The owner switches parts of one of their apps on or off. Applies on its next call."""
+        if _GRANT_ID.fullmatch(grant_id) is None:
+            return False
+        grant = self._grant(grant_id)
+        if grant is None or grant.email != email:
+            return False
+        self.store.set(_features_key(grant.id), _features_json(features))
         return True
 
     def display_name(self, grant: "OAuthGrant") -> str:

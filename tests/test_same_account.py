@@ -154,7 +154,7 @@ def test_my_drive_root_cannot_be_granted(c, same_app) -> None:
 def test_pages_describe_the_allowlist(c) -> None:
     # The explainer lives on Overview only; Files no longer repeats it.
     html = c.get("/").text
-    assert 'id="mode-note"' in html and "your Google account" in html
+    assert 'id="mode-note"' in html and "sign in to Google as you" in html
     assert "files and folders you allow" in html and "allowlist" not in html
     assert "connect-bot" not in html and "BOT_EMAIL" not in html
 

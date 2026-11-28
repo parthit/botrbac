@@ -17,7 +17,7 @@
 {% else %}
 <p class="muted lead">Your assistants can read the Notion pages and databases you <b>Allow</b> here, and everything inside them. {% if notion_create %}Assistants you let edit can also add new pages under them. None can change or delete existing pages.{% else %}They can’t edit Notion.{% endif %}{% if workspace %} Workspace: <b>{{ workspace }}</b>.{% endif %}</p>
 
-<h2>Allowed <span class="count">{{ allowed | length }}</span></h2>
+<h2>Allowed <span class="count neutral">{{ allowed | length }}</span></h2>
 {% if allowed %}
 <table class="cards" data-list>
   <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>Action</th></tr></thead>

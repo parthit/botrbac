@@ -131,6 +131,42 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
+# Parts of a connection the owner can switch off for one app (consent page, Settings).
+# "mailbox": messages and pairings between the owner's own assistants, and wake-ups.
+# "shared": what paired people share with the owner, and files they send.
+FEATURE_TOOLS: dict[str, frozenset[str]] = {
+    "mailbox": frozenset(
+        {
+            "request_link",
+            "list_links",
+            "send_message",
+            "list_inbox",
+            "check_messages",
+            "reply",
+            "mark_read",
+            "get_webhook",
+            "set_webhook",
+            "clear_webhook",
+        }
+    ),
+    "shared": GUEST_TOOLS
+    | GUEST_WRITE_TOOLS
+    | frozenset({"list_drops", "read_drop", "download_drop", "send_file", "save_drop"}),
+}
+FEATURES: tuple[str, ...] = tuple(FEATURE_TOOLS)
+
+
+def tools_off(features: dict[str, bool] | None) -> frozenset[str]:
+    """The tools a connection may not call because its owner switched that part off."""
+    if not features:
+        return frozenset()
+    off: frozenset[str] = frozenset()
+    for name, tools in FEATURE_TOOLS.items():
+        if features.get(name) is False:
+            off |= tools
+    return off
+
+
 # What a call made through a named role (agent_roles.py) may use: the tools for this
 # person's own Drive files, which the role cuts down to its own items. Everything else
 # (the mailbox, pairing, webhooks, access requests, other people's shared files) is not
@@ -233,6 +269,8 @@ def may_call(principal: Principal | None, tool: str) -> bool:
         return False
     if principal.agent_role is not None and tool not in AGENT_ROLE_TOOLS:
         return False
+    if tool in principal.tools_off:
+        return False
     return is_allowed(principal.role, tool)
 
 
@@ -243,6 +281,10 @@ def check_permission(principal: Principal | None, tool: str) -> Principal:
         raise PermissionDeniedError("this connection only works through its named role")
     if principal.agent_role is not None and tool not in AGENT_ROLE_TOOLS:
         raise PermissionDeniedError(f"'{tool}' is not available through a named role")
+    if tool in principal.tools_off:
+        raise PermissionDeniedError(
+            f"'{tool}' is switched off for this app; its owner can turn it on in Settings"
+        )
     if not is_allowed(principal.role, tool):
         raise PermissionDeniedError(f"role '{principal.role}' may not call '{tool}'")
     return principal

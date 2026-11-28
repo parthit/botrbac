@@ -694,7 +694,7 @@
       .setOAuthToken(cfg.access_token)
       .setDeveloperKey(cfg.api_key)
       .setAppId(String(cfg.app_id))
-      .setTitle("Choose files and folders to share")
+      .setTitle("Choose files and folders your assistants can use")
       .setCallback(function (data) {
         if (!data || data.action !== google.picker.Action.PICKED) return;
         grantPicked(data.docs || []);

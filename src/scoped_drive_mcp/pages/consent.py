@@ -4,6 +4,7 @@
 
 import hmac
 import html
+import logging
 import secrets
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
@@ -14,7 +15,10 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from ..audit import audit_owner
 from ..auth import current_actor
 from ..mcp_oauth import APP_ROLES, DEFAULT_APP_ROLE, SCOPE, AuthorizeError, QueryMapping
+from ..policy import FEATURES
 from .kit import FormHandler, Handler, Kit
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,20 @@ def consent_pages(kit: Kit) -> ConsentPages:
                         message=f"You have no role named “{role_slug}”. Make it in Settings, "
                         "under Roles, then connect again.",
                     )
+            # Mailbox and Shared with me start ticked only when they can do something:
+            # another assistant of theirs to talk to, someone paired who shares with them.
+            mailbox_default = shared_default = False
+            if agent_role is None:
+                mailbox_default = bool(await blocking(ctx.mcp_oauth.list_grants, signed_in))
+                if ctx.shared_with_me is not None:
+                    try:
+                        shared_default = bool(
+                            await blocking(ctx.shared_with_me.overview, signed_in)
+                        )
+                    except Exception:
+                        # Only the box's starting state depends on this: leave it unticked.
+                        logger.exception("shared with me lookup failed on the consent page")
+                        shared_default = False
             consent_id = secrets.token_urlsafe(16)
             request.session["mcp_auth"] = {**pending.to_dict(), "consent_id": consent_id}
             await remember_pending(request)
@@ -134,6 +152,8 @@ def consent_pages(kit: Kit) -> ConsentPages:
                 agent_role=agent_role,
                 mailbox_on=ctx.mailbox is not None and agent_role is None,
                 shared_on=ctx.shared_with_me is not None and agent_role is None,
+                mailbox_default=mailbox_default,
+                shared_default=shared_default,
             )
         finally:
             current_actor.reset(reset)
@@ -180,8 +200,23 @@ def consent_pages(kit: Kit) -> ConsentPages:
                 role = form.get("role") or DEFAULT_APP_ROLE
                 if role not in APP_ROLES:
                     raise AuthorizeError("invalid_request", "Choose what this app may do.")
-                audit_owner("oauth_approve", client=pending.client_name, role=role)
-                target = ctx.mcp_oauth.approve(str(request.session.get("owner")), pending, role)
+                # An unticked box is absent from the form: that part is off for this app.
+                # Only a page that showed the boxes says so (features_shown); a page loaded
+                # before they existed leaves every part on, as it promised.
+                shown = set((form.get("features_shown") or "").split(","))
+                features = {
+                    name: form.get(f"feature_{name}") == "on" if name in shown else True
+                    for name in FEATURES
+                }
+                audit_owner(
+                    "oauth_approve",
+                    client=pending.client_name,
+                    role=role,
+                    off=",".join(n for n, on in features.items() if not on) or "-",
+                )
+                target = ctx.mcp_oauth.approve(
+                    str(request.session.get("owner")), pending, role, features
+                )
         except AuthorizeError as exc:
             return _oauth_error(request, exc, from_form=True)
         return _parked_redirect(request, target)

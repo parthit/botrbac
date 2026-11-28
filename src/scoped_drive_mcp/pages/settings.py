@@ -16,6 +16,7 @@ from ..audit import app_tag, audit_owner
 from ..auth import current_actor
 from ..bridge import MailboxError
 from ..mcp_oauth import APP_ROLES
+from ..policy import FEATURES
 from .common import ROLE_LABELS, WAKE_HOME, describe_mime
 from .kit import FormHandler, Handler, Kit
 
@@ -34,6 +35,7 @@ class SettingsPages:
     bridge_webhook: FormHandler
     bridge_decide: FormHandler
     oauth_grant_role: FormHandler
+    oauth_grant_features: FormHandler
     role_save: FormHandler
     role_delete: FormHandler
     oauth_grant_rename: FormHandler
@@ -86,6 +88,16 @@ def settings_pages(
                         "pending": status == "pending_approval",
                     }
                 )
+        entries = ctx.allowlist.entries()
+        role_items: dict[str, int] = {}
+        if ctx.agent_roles is not None:
+            role_items = {
+                r.slug: sum(1 for i in r.items if i in entries) for r in ctx.agent_roles.all()
+            }
+
+        def reach(slug: str | None) -> int:
+            return role_items.get(slug, 0) if slug else len(entries)
+
         wake_on = box is not None and bool(box.get_webhook(email, "").get("available"))
         # One row per (pairing, assistant): an assistant in two pairings has two senders.
         missing_rows = box.missing_wakeups(email) if wake_on else []
@@ -106,6 +118,10 @@ def settings_pages(
                     "hook": box.get_webhook(email, g.id) if wake_on else None,
                     "role": g.role,
                     "legacy_full": g.legacy_full,
+                    "features": g.features,
+                    # How many allowed items it reaches: the whole Allowed list, or only
+                    # its named role's part of it.
+                    "reach": reach(g.agent_role),
                 }
             )
         return {
@@ -154,6 +170,8 @@ def settings_pages(
                 "rows": ctx.connection_rows(),
                 **assistant_rows(email),
                 "roles_on": ctx.agent_roles is not None,
+                "mailbox_feature": ctx.mailbox is not None,
+                "shared_feature": ctx.shared_with_me is not None,
                 # Each role with the items it still reaches: one taken off the allowlist
                 # stays on the record but no longer counts.
                 "roles": [{"role": r, "live": [i for i in r.items if i in entries]} for r in roles],
@@ -198,7 +216,17 @@ def settings_pages(
             return await sharing(request)
         if tab == "with-me":
             return await shared_overview(request)
+        if tab == "mailbox":
+            return await mailbox_page(request)
         return await bridge_page(request)
+
+    async def mailbox_page(request: Request) -> Response:
+        """What your own assistants sent each other. Read-only: nothing is marked read."""
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="The Mailbox is not set up.")
+        email = str(request.session.get("owner") or "")
+        messages = await blocking(ctx.mailbox.owner_messages, email)
+        return render(request, "mailbox.html", tab="mailbox", messages=messages)
 
     def moved(path: str, **extra: str) -> Handler:
         """An old address. Keep its query string so bookmarks and links still land."""
@@ -401,6 +429,32 @@ def settings_pages(
             request, "ok", f"Saved. Its next call runs as {ROLE_LABELS[role]}.", back
         )
 
+    async def oauth_grant_features(request: Request, form: dict[str, str]) -> Response:
+        """The owner switches the Mailbox or Shared with me on or off for one app."""
+        email = str(request.session.get("owner") or "")
+        grant_id = form.get("grant_id") or ""
+        back = "/settings#assistants"
+        if ctx.mcp_oauth is None:
+            return action_done(request, "error", "That app is not connected.", back)
+        # Only the parts the form showed change; one it didn't show (that part isn't
+        # set up on this server) keeps its saved value, so it isn't switched off unseen.
+        shown = set((form.get("features_shown") or "").split(","))
+        current = await blocking(ctx.mcp_oauth.features_of, grant_id)
+        features = {
+            name: form.get(f"feature_{name}") == "on" if name in shown else current[name]
+            for name in FEATURES
+        }
+        if not await blocking(ctx.mcp_oauth.set_features, grant_id, email, features):
+            return action_done(request, "error", "That app is not connected.", back)
+        names = {g.id: g.client_name for g in ctx.mcp_oauth.list_grants(email)}
+        audit_owner(
+            "oauth_features",
+            grant=grant_id[-5:],
+            client=names.get(grant_id, "an app"),
+            off=",".join(n for n, on in features.items() if not on) or "-",
+        )
+        return action_done(request, "ok", "Saved. Its next call uses these settings.", back)
+
     async def role_save(request: Request, form: dict[str, str]) -> Response:
         """The owner creates a named role, or replaces the one with the same name."""
         back = "/settings#roles"
@@ -532,6 +586,7 @@ def settings_pages(
         bridge_webhook=bridge_webhook,
         bridge_decide=bridge_decide,
         oauth_grant_role=oauth_grant_role,
+        oauth_grant_features=oauth_grant_features,
         role_save=role_save,
         role_delete=role_delete,
         oauth_grant_rename=oauth_grant_rename,

@@ -4,7 +4,7 @@
   <a href="/files" {% if active == 'all' %}aria-current="true"{% endif %}>From Google Drive</a>
   {% if notion_tab %}<a href="/files?tab=notion" {% if active == 'notion' %}aria-current="true"{% endif %}>From Notion</a>{% endif %}
   {% if onedrive_tab %}<a href="/files?tab=onedrive" {% if active == 'onedrive' %}aria-current="true"{% endif %}>From OneDrive</a>{% endif %}
-  <a href="/files?tab=allowed" {% if active == 'allowed' %}aria-current="true"{% endif %}>Allowed{% if allow_count is not none %} <span class="count">{{ allow_count }}</span>{% endif %}</a>
+  <a href="/files?tab=allowed" {% if active == 'allowed' %}aria-current="true"{% endif %}>Allowed{% if allow_count is not none %} <span class="count neutral">{{ allow_count }}</span>{% endif %}</a>
 </nav>
 {%- endmacro %}
 {% macro sharing_tabs(active) -%}
@@ -12,6 +12,7 @@
   <a href="/sharing?tab=people" {% if active == 'people' %}aria-current="true"{% endif %}>People{% if mailbox_count %} <span class="count" aria-label="{{ mailbox_count }} waiting for your approval">{{ mailbox_count }}</span>{% endif %}</a>
   <a href="/sharing?tab=by-me" {% if active == 'by-me' %}aria-current="true"{% endif %}>Shared by me</a>
   <a href="/sharing?tab=with-me" {% if active == 'with-me' %}aria-current="true"{% endif %}>Shared with me</a>
+  <a href="/sharing?tab=mailbox" {% if active == 'mailbox' %}aria-current="true"{% endif %}>Mailbox</a>
 </nav>
-<p class="muted lead">Sharing is for other people: pair with someone, then <b>Share</b> files on Files so their assistant can read them. To let your own assistants use a file, <b>Allow</b> it on Files instead.</p>
+<p class="muted lead"><b>Pair with a person</b> to <b>Share</b> files with their assistants (read-only unless you say otherwise). <b>Pair two of your own assistants</b> so they can message each other; you can read every message on the Mailbox tab. To let your own assistants use a file, <b>Allow</b> it on Files.</p>
 {%- endmacro %}

@@ -127,7 +127,7 @@ def test_approve_item_then_retry_then_revoke(c, p2_app, world) -> None:
     page = c.get(path)
     assert page.status_code == 200
     assert "payroll.txt" in page.text and "viewer-tok" in page.text and "read_file" in page.text
-    assert "Share just this item" in page.text and "Share its whole parent folder" in page.text
+    assert "Allow just this item" in page.text and "Allow its whole folder" in page.text
 
     r = post(c, f"{path}/approve", target_id="priv-secret")
     assert r.status_code == 303
@@ -186,7 +186,7 @@ def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(
     path = f"/requests/{req.id}"
     page = c.get(path).text
     assert "Bot RBAC can\u2019t open this file yet" in page
-    assert "pick it from Files" in page and "Share just this item" not in page
+    assert "pick it from Files" in page and "Allow just this item" not in page
     assert "Deny" in page
     # No picker on this server: the page says so instead of showing a dead button.
     assert "Sign in again" not in page and 'id="pick-drive"' not in page
@@ -206,8 +206,8 @@ def test_my_drive_root_itself_cannot_be_approved(c, world, p2_app) -> None:
     payload = mcp_call(c, "read_file", file_id="owner-root")["structuredContent"]
     path = payload["approval_url"].removeprefix(BASE_URL)
     page = c.get(path).text
-    assert "Share just this item" not in page and "pick a different item" in page
-    assert "whole My Drive can't be shared" in page
+    assert "Allow just this item" not in page and "pick a different item" in page
+    assert "whole My Drive can't be allowed" in page
     assert "isn't in your Drive" not in page
     post(c, f"{path}/approve", target_id="owner-root")
     assert p2_app.state.dashboard.allowlist.entries() == {}
@@ -220,7 +220,7 @@ def test_my_drive_root_itself_cannot_be_approved(c, world, p2_app) -> None:
 def test_my_drive_root_is_not_offered(c) -> None:
     payload = mcp_call(c, "read_file", file_id="loose-doc")["structuredContent"]
     page = c.get(payload["approval_url"].removeprefix(BASE_URL)).text
-    assert "Share just this item" in page and "parent folder" not in page
+    assert "Allow just this item" in page and "its whole folder" not in page
 
 
 def test_deny_flow(c, world, p2_app) -> None:

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "_tabs.html" import sharing_tabs %}
+{% block title %}Mailbox{% endblock %}
+{% block content %}
+<h1>Sharing</h1>
+{{ sharing_tabs('mailbox') }}
+<p class="muted">Messages between your own assistants, newest first. Only your own assistants can send them; another person’s assistant can never message yours. Messages expire after 14 days. Reading them here doesn’t mark them read for your assistants.</p>
+{% if messages %}
+<ol class="mail-list" id="mail">
+  {% for m in messages %}
+  <li class="card mail" id="msg-{{ m.msg_id }}">
+    <p class="mail-head"><b>{{ m.from }}</b> <span aria-hidden="true">→</span><span class="sr-only">to</span> <b>{{ m.to }}</b>
+      <span class="muted">· {{ m.created_at | when }}{% if not m.read_at %} · <span class="pill pending">Unread by {{ m.to }}</span>{% endif %}{% if m.link_status != "active" %} · pairing off{% endif %}</span></p>
+    <pre class="mail-body">{{ m.body }}</pre>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<div class="card empty" id="mail-empty">
+  <h2>No messages</h2>
+  <p>When two of your assistants are paired and one sends the other a message, it shows up here. To pair them, ask one assistant to start a pairing and join it from the other, then approve on <a href="/sharing?tab=people">People</a>.</p>
+</div>
+{% endif %}
+{% endblock %}

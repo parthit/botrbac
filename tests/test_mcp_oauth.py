@@ -584,7 +584,8 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     assert "Cursor" in page.text
     assert "Drive trash" in page.text
     # Sign-in is identity only now; the Drive connection is what can see the Drive.
-    assert "your connected Drive is visible" in page.text
+    assert "your connected Drive is visible" not in page.text
+    assert "Everything\n      else is refused" in page.text
     assert "can still reach the rest of your Drive" not in page.text
     assert "trash_file" not in page.text
     assert "something-else" in page.text

@@ -154,6 +154,7 @@ def file_pages(kit: Kit) -> FilePages:
         next_token: str | None = None
         more_matches = False
         current: dict[str, Any] | None = None
+        at_top = not q and folder == "root"
         if q:
             term = clean_search_text(q)
             query = f"trashed=false and name contains '{term}'"
@@ -200,7 +201,6 @@ def file_pages(kit: Kit) -> FilePages:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            at_top = folder == "root"
             if at_top:
                 # Google opens a file to this app only once it is picked (drive.file), and
                 # picked files can sit anywhere in the Drive, not just in My Drive's top
@@ -292,16 +292,22 @@ def file_pages(kit: Kit) -> FilePages:
             is_shortcut = mime == SHORTCUT_MIME
             path: str | None = None
             unsure = False
-            if q:
+            if q or at_top:
+                # Search results, and the top of Files (every picked item, wherever it
+                # sits in the Drive), come from anywhere: each row works out its own
+                # folders, so an item inside an allowed folder shows as allowed here too.
                 chain = lineage(item)
                 if chain is None:
                     # Too many folders to look up on one page: don't guess the status.
                     unsure, cover, share, parent_id = True, None, None, None
                 else:
-                    cover = nearest(chain, entries)
-                    share = nearest(chain, shared)
-                    path = " / ".join(["My Drive", *(name for _, name in reversed(chain))])
-                    parent_id = chain[0][0] if chain else "root"
+                    cover = nearest(chain, entries) or folder_cover
+                    share = nearest(chain, shared) or folder_share
+                    if q:
+                        path = " / ".join(["My Drive", *(name for _, name in reversed(chain))])
+                        parent_id = chain[0][0] if chain else "root"
+                    else:
+                        parent_id = None
             else:
                 cover, share = folder_cover, folder_share
                 parent_id = None

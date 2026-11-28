@@ -1,18 +1,34 @@
 {% extends "base.html" %}
-{% block title %}Give AI agents only what you allow{% endblock %}
+{% block title %}Give your AI assistant only the folders you choose{% endblock %}
+{% block meta %}
+{%- set desc = "Connect Claude, ChatGPT, Grok or Cursor to Google Drive without handing over the whole Drive. You pick the folders; your assistant can open those and nothing else." %}
+<meta name="description" content="{{ desc }}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Bot RBAC">
+<meta property="og:title" content="Bot RBAC: your AI assistant sees only the folders you choose">
+<meta property="og:description" content="{{ desc }}">
+{% if site.base_url %}<meta property="og:url" content="{{ site.base_url }}/">{% endif %}
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Bot RBAC: your AI assistant sees only the folders you choose">
+<meta name="twitter:description" content="{{ desc }}">
+{% endblock %}
 {% block content %}
 <section class="hero">
   <h1>Pick what agents see.<br>Refuse the rest.</h1>
+  <p class="sub">Connect Claude, ChatGPT, Grok or Cursor to your Google Drive without handing over the whole Drive. You pick the folders. Your assistant can open those and nothing else, and you can take access back with one click.</p>
   <ul class="trust">
-    <li><i class="sq" aria-hidden="true"></i><span><b>Sign in, then connect.</b> Signing in shares only your email. Each service is a separate permission.</span></li>
-    <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every call.</b> Anything else is refused.</span></li>
+    <li><i class="sq" aria-hidden="true"></i><span><b>You choose the folders.</b> Bot RBAC can only see files you pick in Google’s own file picker.</span></li>
+    <li><i class="sq ok" aria-hidden="true"></i><span><b>Checked on every request.</b> Anything you didn’t allow is refused.</span></li>
   </ul>
-  <p class="sub">Bot RBAC is an access-control gateway that sits between AI agents, like Grok and Muse, and your accounts. You sign in, connect Google Drive and, if you like, Notion or OneDrive, then pick the files, folders and pages an assistant may use. This server refuses the rest.</p>
-  <p class="disclosure">Signing in asks Google only for your email. Connecting Google Drive is a second, separate step that asks for access to only the files you pick in Google’s file picker. Google keeps the rest of your Drive closed to Bot RBAC. Notion and OneDrive are optional, each with its own permission screen and its own list. In every service, this server lets an assistant use only the items you allow. Contents of those items go only to an assistant you connect. They are not sold, used for advertising, or used to train a model.</p>
+  <p class="disclosure short">Signing in shares only your email. Google Drive access is a separate step, limited to the files you pick.</p>
   <div class="ctas">
     {% with href="/login" %}{% include "_google_button.html" %}{% endwith %}
   </div>
-  <p class="legal-links"><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
+  <details class="disclosure exact" id="exactly">
+    <summary>Exactly what Bot RBAC can see</summary>
+    <p>Signing in asks Google only for your email. Connecting Google Drive is a separate step: Google then lets Bot RBAC open only the files and folders you pick in Google’s file picker, plus files it creates for you. The rest of your Drive stays closed to it. Of the files you pick, your assistant can open only the ones on your Allowed list. Notion and OneDrive are optional, each with its own permission screen and its own list. File contents go only to the assistants you connect. They are not stored here, sold, used for advertising, or used to train a model.</p>
+  </details>
+  <p class="legal-links"><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a>{% if site.contact %} · Questions? <a href="mailto:{{ site.contact }}">{{ site.contact }}</a>{% endif %}</p>
 </section>
 
 <section class="diagram" aria-label="How a call is checked">
@@ -25,7 +41,7 @@
     </article>
     <span class="arrow" aria-hidden="true"></span>
     <article class="sticker gate">
-      <p class="eye">This server</p>
+      <p class="eye">Bot RBAC</p>
       <p class="ask kept">Q3 memo · on your list</p>
       <p class="ask dim">everything else · refused</p>
     </article>
@@ -41,7 +57,7 @@
 <section class="products" aria-label="What you do">
   <article class="card product" id="signin">
     <h2>Sign in</h2>
-    <p>Your own Google account, email only. Another person’s settings stay theirs.</p>
+    <p>With your Google account. Signing in shares only your email address.</p>
     <p class="proof">One account per person</p>
   </article>
   <article class="card product" id="connect">
@@ -56,7 +72,7 @@
   </article>
   <article class="card product" id="revoke">
     <h2>Revoke</h2>
-    <p>Untick an item or disconnect an app. The next call stops.</p>
+    <p>Remove an item or disconnect an assistant. Its next request is refused.</p>
     <p class="proof">Anytime</p>
   </article>
 </section>
@@ -66,7 +82,7 @@
     <h2>The boundary is the product.</h2>
     <p class="lead">Three checks. No extra Google products.</p>
     <ul class="pts">
-      <li><b>Only what you allow.</b> A connected Drive is visible to this server. An assistant cannot see it until you allow a file or folder. This server checks every call against that list.</li>
+      <li><b>Only what you allow.</b> Bot RBAC can only open the files you pick in Google’s file picker. Your assistant can only open the ones on your Allowed list. Every request is checked against that list.</li>
       <li><b>Encrypted tokens.</b> The Google refresh token is encrypted before it is stored. File contents are not kept on this server.</li>
       <li><b>Revoke anytime.</b> Untick an item, disconnect an app, disconnect a service, or remove Bot RBAC from your Google Account. New calls stop. Anything already sent is not recalled.</li>
     </ul>

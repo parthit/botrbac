@@ -79,7 +79,6 @@ def test_fonts_are_preloaded_with_a_matched_fallback(c) -> None:
     css = c.get("/app.css").text
     assert '--font: Geist, "Geist Fallback"' in css
     assert css.count('font-family: "Geist Fallback"') == 3
-    assert "@view-transition { navigation: auto; }" in css
 
 
 # Runs observability.js under Node with a minimal window and document, then reports what

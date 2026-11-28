@@ -81,7 +81,7 @@ When a tool is refused because the item isn't shared (not because of the role), 
 
 ```json
 {"error": "access_required", "request_id": "…", "approval_url": "https://<project>.vercel.app/requests/…",
- "file_id": "…", "message": "This item has not been shared with you. Show the user this approval link …"}
+ "file_id": "…", "message": "This item is not on the owner's Allowed list. Show the user this approval link …"}
 ```
 
 The assistant shows you the link; after you approve, it retries (or calls `check_access_request`). An app with 50

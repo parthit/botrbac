@@ -518,6 +518,54 @@ class MailMixin:
                 retry_after_seconds=retry,
             )
 
+    def owner_messages(self, email: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Mail between this person's own assistants that has not expired, newest first,
+        for the dashboard's Mailbox page. Reading it here marks nothing as read, so an
+        assistant still sees its unread mail. Bodies are untrusted text: the page shows
+        them escaped, never as markup."""
+        you = _email(email)
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        statuses: dict[str, str | None] = {}
+        peer_links: set[str] = set()
+        names: dict[str, str] = {}
+        for link_id in self._user_link_ids(you):
+            link = self._link(link_id)
+            if link is None or not link.get("same_account"):
+                continue
+            for side in ("a", "b"):
+                grant = link.get(f"grant_{side}")
+                if not grant:
+                    continue
+                address = _self_addr(you, str(grant))
+                names[address] = str(link.get(f"label_{side}") or "Assistant")
+                self._read_inbox(
+                    f"bridge:inbox:{address}", link_id, False, rows, seen, statuses, peer_links
+                )
+        rows.sort(key=lambda row: row["created"], reverse=True)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if len(out) >= limit:
+                break
+            message = self._message(row["msg_id"])
+            if message is None:
+                continue
+            out.append(
+                {
+                    "msg_id": message["msg_id"],
+                    "link_id": message["link_id"],
+                    "thread_id": message.get("thread_id"),
+                    "from": message.get("from_assistant")
+                    or names.get(message["from"], "Assistant"),
+                    "to": names.get(message["to"], "Assistant"),
+                    "body": str(message["body"]),
+                    "created_at": message["created_at"],
+                    "read_at": message.get("read_at"),
+                    "link_status": row["link_status"],
+                }
+            )
+        return out
+
     def _public_message(self, message: dict[str, Any]) -> dict[str, Any]:
         return {
             "msg_id": message["msg_id"],

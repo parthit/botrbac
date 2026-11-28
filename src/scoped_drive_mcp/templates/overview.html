@@ -2,15 +2,39 @@
 {% block title %}Overview{% endblock %}
 {% block content %}
 <h1>Overview</h1>
-{% include "_mode.html" %}
-{% if not drive_connected %}
-<div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so an assistant has nothing to reach. <a href="/connect">Connect Google Drive</a>.</div>
-{% elif not allow_count and not root_folder_id %}
-<div class="card" id="next-step">
-  <h2>Next: choose files your assistant can use</h2>
-  <p>Google Drive is connected, but nothing is allowed yet. Your assistant can’t open anything until you allow a file or folder.</p>
-  <p><a class="btn primary" href="/files">Choose files</a></p>
+{% if pending_count %}
+<div class="warn action-banner" role="status" id="pending-banner">
+  <p><b>{{ pending_count }} request{{ "" if pending_count == 1 else "s" }} waiting for you.</b> An assistant is blocked until you approve or deny {{ "it" if pending_count == 1 else "them" }}.</p>
+  <a class="btn primary" href="/requests">Review</a>
 </div>
+{% endif %}
+{% include "_mode.html" %}
+{% set used = grants | selectattr("last_used") | list %}
+{% set step_drive = drive_connected or root_folder_id %}
+{% set step_allow = allow_count or root_folder_id %}
+{% set step_connect = grants | length > 0 %}
+{% set step_try = used | length > 0 %}
+{% if not (step_drive and step_allow and step_connect and step_try) %}
+<section class="card" id="next-step" aria-labelledby="setup-title">
+  <h2 id="setup-title">Get your assistant reading one folder</h2>
+  <ol class="setup-steps">
+    <li class="{{ 'done' if step_drive }}"{% if not step_drive %} id="connect-drive"{% endif %}><span class="tick" aria-hidden="true">{{ "✓" if step_drive else "1" }}</span>
+      <div><b>Connect Google Drive</b>{% if step_drive %} <span class="sr-only">(done)</span>{% else %}
+        <p class="muted">Google asks once. Bot RBAC only ever sees files you pick.</p>
+        <p><a class="btn primary" href="/connect">Connect Google Drive</a></p>{% endif %}</div></li>
+    <li class="{{ 'done' if step_allow }}"><span class="tick" aria-hidden="true">{{ "✓" if step_allow else "2" }}</span>
+      <div><b>Pick the folders your assistant can read</b>{% if step_allow %} <span class="sr-only">(done)</span>{% elif step_drive %}
+        <p class="muted">Anything you pick in Google’s file picker is allowed straight away. Everything else stays refused.</p>
+        <p><a class="btn primary" href="/files">Pick files and folders</a></p>{% endif %}</div></li>
+    <li class="{{ 'done' if step_connect }}"><span class="tick" aria-hidden="true">{{ "✓" if step_connect else "3" }}</span>
+      <div><b>Connect your assistant</b>{% if step_connect %} <span class="sr-only">(done)</span>{% elif step_allow %}
+        <p class="muted">Copy the server address below into Claude, ChatGPT, Grok or Cursor, then choose Allow when this site asks.</p>
+        <p><a class="btn primary" href="#mcp-address">Show me how</a></p>{% endif %}</div></li>
+    <li class="{{ 'done' if step_try }}"><span class="tick" aria-hidden="true">{{ "✓" if step_try else "4" }}</span>
+      <div><b>Try it</b>{% if step_try %} <span class="sr-only">(done)</span>{% elif step_connect %}
+        <p class="muted">Ask your assistant: “List the files I allowed in Bot RBAC.” Each call it makes shows up in <a href="/activity">Activity</a>.</p>{% endif %}</div></li>
+  </ol>
+</section>
 {% endif %}
 {% if missing_wakeups %}
 <div class="warn" role="status" id="missing-wakeups">
@@ -65,7 +89,7 @@
 
 <h2>Connect an assistant</h2>
 <div class="card" id="mcp-address">
-  <p>Every assistant uses the same server address. Add it as a custom connector or MCP server, sign in when the browser opens, and choose Allow. Leave any client id and secret empty.</p>
+  <p>Every assistant uses the same server address. Add it as a custom connector (in some apps it’s called an MCP server), sign in when the browser opens, and choose Allow. Leave any client id and secret empty.</p>
   <div class="copy-row">
     <label class="sr-only" for="mcp-url">Server address</label>
     <input id="mcp-url" type="text" readonly value="{{ mcp_url }}">
@@ -74,11 +98,11 @@
   <h3>Works with</h3>
   <ul class="clients">
     <li><b>Claude</b> <span class="muted">Settings → Connectors → Add custom connector. Works on web, desktop and mobile.</span></li>
-    <li><b>ChatGPT</b> <span class="muted">Turn on developer mode, then Settings → Apps → Create, with OAuth.</span></li>
-    <li><b>Dots</b> <span class="muted">Add the connector in ChatGPT first. Your dots can then use it.</span></li>
+    <li><b>ChatGPT</b> <span class="muted">Needs developer mode: Settings → Apps → Create, with OAuth.</span></li>
     <li><b>Grok</b> <span class="muted">Connectors → New connector → Custom, or tell Grok Bot to add this server.</span></li>
-    <li><b>Muse</b> <span class="muted">Add a custom connector with this address.</span></li>
     <li><b>Cursor</b> <span class="muted">Add an MCP server with this address.</span></li>
+    <li><b>Dots</b> <span class="muted">(dots inside ChatGPT) Add the connector in ChatGPT first. Your dots can then use it.</span></li>
+    <li><b>Muse</b> <span class="muted">Add a custom connector with this address.</span></li>
   </ul>
   <p class="muted">Connected assistants, their wake-ups and Disconnect are in <a href="/settings#assistants">Settings</a>.</p>
 </div>

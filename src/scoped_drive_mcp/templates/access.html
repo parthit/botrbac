@@ -5,13 +5,13 @@
 {% block content %}
 <h1>Files</h1>
 {{ files_tabs('allowed', allow_count, notion_tab, onedrive_tab) }}
-<p class="muted lead">Your assistants can use these files and folders. An allowed folder includes everything inside it. Remove takes an item off the list. Tick several to remove them together.</p>
+<p class="muted lead">Every assistant you connected can use these files and folders. An allowed folder includes everything inside it. Remove takes an item off the list. Tick several to remove them together.</p>
 {% if not drive_connected %}
 <div class="warn" role="status" id="connect-drive">Google Drive is not connected yet, so the assistant cannot reach your files. <a href="/connect">Connect Google Drive</a>.</div>
 {% endif %}
 {% if needs_pick %}
 <div class="warn" role="status" id="needs-pick">Google hasn’t opened {{ needs_pick | length }} of these {{ "item" if needs_pick | length == 1 else "items" }} to Bot RBAC yet, so assistants can’t use {{ "it" if needs_pick | length == 1 else "them" }}. Bot RBAC only gets the files you pick in Google’s file picker. Choose <b>Pick again</b> on each one marked below.</div>
-<p id="pick-error" class="flash error" hidden role="alert">Could not open the Google file picker. Reload the page, or try later.</p>
+<p id="pick-error" class="flash error" hidden role="alert">Google’s file picker didn’t open. Allow pop-ups for this site and try again. If it still fails, reload the page or reconnect Google Drive in <a href="/settings#services">Settings</a>.</p>
 {% if picker_ready %}{% include "_safari_note.html" %}{% endif %}
 {% endif %}
 {% if rows %}
@@ -48,7 +48,7 @@
     <td data-label="Added" class="muted">{{ e.granted_at | when }}</td>
     <td data-label="How">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">Approved request</a>{% else %}You allowed{% endif %}</td>
     <td data-label="Action">
-      <form class="inline" method="post" action="/revoke" data-async data-on-success="remove-row" data-confirm="Remove this from the assistant?">
+      <form class="inline" method="post" action="/revoke" data-async data-on-success="remove-row" data-confirm="{% set is_folder = e.mime_type == 'application/vnd.google-apps.folder' %}Remove “{{ e.name or e.id }}”{% if is_folder %} and everything inside it{% endif %}? None of your assistants can open {{ 'them' if is_folder else 'it' }} from their next request. Anything already read is not recalled." data-confirm-action="Remove">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <input type="hidden" name="next" value="/files?tab=allowed">
@@ -61,8 +61,8 @@
 </table>
 {% endif %}
 <div class="card empty" data-empty{% if rows or root_folder_id %} hidden{% endif %}>
-  <h2>Nothing is allowed yet</h2>
-  <p>Choose <b>Add from Google Drive</b> on Files and pick a file or folder. The assistant can’t use anything until you do.</p>
+  <h2>Nothing is allowed</h2>
+  <p>Choose <b>Add from Google Drive</b> on Files and pick a file or folder. Your assistants can’t open anything until you do.</p>
   <p><a class="btn primary" href="/files">Choose files</a></p>
 </div>
 {% endblock %}

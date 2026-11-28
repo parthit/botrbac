@@ -335,7 +335,7 @@ class GrantService:
                         id=str(target["id"]),
                         name=str(target.get("name", "")),
                         mime_type=str(target.get("mimeType", "")),
-                        label="Share what this shortcut points to",
+                        label="Allow what this shortcut points to",
                     )
                 )
         elif item_id != root_id:
@@ -344,7 +344,7 @@ class GrantService:
                     id=item_id,
                     name=str(meta.get("name", "")),
                     mime_type=str(meta.get("mimeType", "")),
-                    label="Share just this item",
+                    label="Allow just this item",
                 )
             )
         for parent_id in meta.get("parents") or []:
@@ -358,7 +358,7 @@ class GrantService:
                     id=str(parent["id"]),
                     name=str(parent.get("name", "")),
                     mime_type=FOLDER_MIME,
-                    label="Share its whole parent folder",
+                    label="Allow its whole folder",
                 )
             )
             break

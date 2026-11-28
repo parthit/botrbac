@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     # Optional. When set, only these addresses (plus OWNER_EMAIL) can sign in.
     allowed_emails: Annotated[frozenset[str], NoDecode] = frozenset()
     app_base_url: str | None = None
+    # Optional. Shown on the home page and in the footer as who to write to about this
+    # site. Leave unset to show nothing.
+    contact_email: str | None = None
     session_secret: SecretStr | None = None
     encryption_key: SecretStr | None = None
     # Local testing only: also accept this server's own /oauth/done as an OAuth redirect.
@@ -193,6 +196,7 @@ class Settings(BaseSettings):
         "owner_email",
         "bot_email",
         "app_base_url",
+        "contact_email",
         "redis_rest_url",
         "google_picker_api_key",
         "google_cloud_project_number",
@@ -209,6 +213,16 @@ class Settings(BaseSettings):
     def _blank_is_unset(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("contact_email")
+    @classmethod
+    def _plain_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not re.fullmatch(r"[^@\s<>\"']+@[^@\s<>\"']+\.[^@\s<>\"']+", value):
+            raise ValueError("CONTACT_EMAIL must be one plain email address")
         return value
 
     @field_validator("root_folder_id")
